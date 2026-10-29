@@ -516,6 +516,29 @@ fn a_stdout_write_error_other_than_a_closed_pipe_exits_2() {
     assert_eq!(st.code(), Some(2));
 }
 
+/// A hung-up terminal fails every write, as `/dev/full` does here.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_error_that_cannot_reach_stderr_keeps_its_exit_code_and_its_event() {
+    let dir = TempDir::new().unwrap();
+    let full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .unwrap();
+    let st = std::process::Command::new(env!("CARGO_BIN_EXE_ignorarium"))
+        .env("IGNORARIUM_HOME", dir.path())
+        .args(["status", "nope"])
+        .stdout(std::process::Stdio::null())
+        .stderr(full)
+        .status()
+        .unwrap();
+    assert_eq!(st.code(), Some(1));
+    let ev = events(dir.path());
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0]["name"], "status");
+    assert_eq!(ev[0]["attrs"]["exit"], 1);
+}
+
 fn events(home: &Path) -> Vec<Value> {
     std::fs::read_to_string(home.join("events.jsonl"))
         .unwrap()

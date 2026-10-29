@@ -259,12 +259,16 @@ where
     let ctx = Ctx {
         home: Home::open().map_err(|e| e.to_string()),
     };
+    // A hung-up terminal fails these writes; the exit code and the event still stand.
     let done = cli.verb.run(&ctx).unwrap_or_else(|e| {
-        eprintln!("error: {}", e.msg);
+        let _ = writeln!(std::io::stderr(), "error: {}", e.msg);
         Done::exit(e.code)
     });
     if let Err(e) = emit(&ctx, name, &done) {
-        eprintln!("warning: cannot write the event log: {e}");
+        let _ = writeln!(
+            std::io::stderr(),
+            "warning: cannot write the event log: {e}"
+        );
     }
     done.code
 }
