@@ -5,7 +5,7 @@ use ignorarium_guest::pack;
 use ignorarium_guest::proto::{End, Job, Report, SelfTest, ToHost, read_frame, write_frame};
 use ignorarium_guest::tree::tree_hash;
 use std::fs;
-use std::io::{Seek, Write};
+use std::io::{Read, Seek, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::thread::{self, JoinHandle};
@@ -618,5 +618,62 @@ fn a_comma_in_a_path_is_refused_before_boot() {
         refused_before_boot(&rig, &rig.work);
         (rig.vm.kernel, rig.vm.initramfs, rig.vm.rootfs) = saved;
         rig.vm.serial_log = None;
+    }
+}
+
+#[test]
+fn a_zero_report_budget_is_a_timeout() {
+    let mut rig = Rig::sleeper();
+    rig.job.wall_timeout = Duration::ZERO;
+    rig.vm.report_slack = Duration::ZERO;
+    let h = rig.guest(|s, _| {
+        hello(s);
+        thread::sleep(ms(300));
+    });
+    let res = rig.run();
+    h.join().unwrap();
+    assert!(matches!(res, Err(VmError::Timeout(_))), "{:?}", res);
+}
+
+#[test]
+fn a_slow_drain_cannot_stretch_the_job_write() {
+    let mut rig = Rig::sleeper();
+    rig.job.argv = vec!["a".repeat(900_000)];
+    rig.job.wall_timeout = ms(100);
+    rig.vm.report_slack = ms(100);
+    let h = rig.guest(|s, _| {
+        hello(s);
+        // Takes a little often, so no single wait for buffer space runs out.
+        let mut buf = [0u8; 8192];
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_secs(4) && matches!(s.read(&mut buf), Ok(n) if n > 0) {
+            thread::sleep(ms(20));
+        }
+    });
+    let t = Instant::now();
+    let res = rig.run();
+    assert!(t.elapsed() < ms(1000), "{:?}", t.elapsed());
+    h.join().unwrap();
+    assert!(matches!(res, Err(VmError::Timeout(_))), "{:?}", res);
+}
+
+#[test]
+fn channel_errors_hold_no_raw_guest_bytes() {
+    let rig = Rig::sleeper();
+    let h = rig.guest(|s, _| {
+        // Valid JSON text, but the tag names no variant, so the parser quotes it back.
+        let body = format!("{{\"type\":\"{}\"}}", r"\u0007".repeat(5000));
+        s.write_all(&(body.len() as u32).to_be_bytes()).unwrap();
+        s.write_all(body.as_bytes()).unwrap();
+    });
+    let res = rig.run();
+    h.join().unwrap();
+    match res {
+        Err(VmError::Guest(m)) => {
+            assert!(m.contains("control channel failed"), "{m}");
+            assert!(!m.contains('\u{7}'), "raw control byte in {m:?}");
+            assert!(m.len() < 3000, "{} bytes", m.len());
+        }
+        other => panic!("{:?}", other),
     }
 }

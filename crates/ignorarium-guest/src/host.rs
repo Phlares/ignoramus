@@ -8,7 +8,7 @@ use crate::proto::{
 use crate::tree::tree_hash;
 use std::ffi::OsString;
 use std::fs::{self, File};
-use std::io::{self, BufReader, Read};
+use std::io::{self, BufReader, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -232,21 +232,42 @@ fn accept(
     }
 }
 
-/// Reads from a stream until an absolute deadline. A guest that trickles bytes cannot
-/// stretch the wait: each read gets only the time that is left.
+/// Reads from and writes to a stream until an absolute deadline. A guest that trickles
+/// bytes or drains slowly cannot stretch the wait: each call gets only the time that is left.
 struct Until<'a> {
     stream: &'a mut UnixStream,
     at: Instant,
 }
 
-impl Read for Until<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+/// Linux applies a send timeout to each socket buffer a write waits for, not to the whole
+/// call. A write this small fills one buffer, so it waits at most once.
+const WRITE_CHUNK: usize = 2048;
+
+impl Until<'_> {
+    fn left(&self) -> io::Result<Duration> {
         let left = self.at.saturating_duration_since(Instant::now());
         if left.is_zero() {
             return Err(io::ErrorKind::TimedOut.into());
         }
-        self.stream.set_read_timeout(Some(left))?;
+        Ok(left)
+    }
+}
+
+impl Read for Until<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.stream.set_read_timeout(Some(self.left()?))?;
         self.stream.read(buf)
+    }
+}
+
+impl Write for Until<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.stream.set_write_timeout(Some(self.left()?))?;
+        self.stream.write(&buf[..buf.len().min(WRITE_CHUNK)])
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.stream.flush()
     }
 }
 
@@ -267,8 +288,12 @@ fn recv(
         io::ErrorKind::UnexpectedEof => {
             guest_err(format!("control channel closed before the {what}"), work)
         }
+        // Parser errors can quote guest bytes.
         _ => guest_err(
-            format!("control channel failed before the {what}: {e}"),
+            format!(
+                "control channel failed before the {what}: {}",
+                shown(&e.to_string())
+            ),
             work,
         ),
     })
@@ -367,8 +392,11 @@ pub fn run_row(vm: &Vm, job: &HostJob, work: &Path) -> Result<VmOutcome, VmError
         timeout_ms: job.wall_timeout.as_millis() as u64,
     };
     let report_by = sent + job.wall_timeout + vm.report_slack;
-    chan.set_write_timeout(Some(report_by - sent))?;
-    write_frame(&mut chan, &wire).map_err(|e| match e.kind() {
+    let mut until = Until {
+        stream: &mut chan,
+        at: report_by,
+    };
+    write_frame(&mut until, &wire).map_err(|e| match e.kind() {
         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
             VmError::Timeout(with_log("the guest did not take the job".into(), work))
         }
