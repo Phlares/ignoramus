@@ -70,15 +70,15 @@ struct ManifestEntry {
 /// after. A crash leaves a temp folder beside the result, never a partial tree at it.
 pub fn from_store(store: &Store, store_digest: &str) -> Result<PathBuf, RootfsError> {
     let blob = store.path(store_digest)?;
-    if !store.has(store_digest) {
-        return Err(RootfsError::Missing(store_digest.into()));
-    }
     let parent = store.root.join("rootfs");
     make_private_dir(&parent, true, false)
         .map_err(|e| RootfsError::Io(io::Error::other(e.to_string())))?;
     let done = parent.join(store_digest);
     if is_real_dir(&done) {
         return Ok(done);
+    }
+    if !store.has(store_digest) {
+        return Err(RootfsError::Missing(store_digest.into()));
     }
     let tmp = temp_beside(&done)?;
     fs::create_dir(&tmp)?;
@@ -171,7 +171,8 @@ fn listing(layer: &Path, verbose: bool) -> Result<Vec<String>, RootfsError> {
     let mut cmd = Command::new("tar");
     cmd.arg(if verbose { "-tvf" } else { "-tf" })
         .arg(layer)
-        .arg("--quoting-style=literal");
+        .arg("--quoting-style=escape")
+        .env("LC_ALL", "C.UTF-8");
     let out = run(&mut cmd)?;
     Ok(String::from_utf8_lossy(&out)
         .lines()
@@ -204,11 +205,33 @@ fn apply_layer(layer: &Path, root: &Path) -> Result<(), RootfsError> {
         .map(|(_, path, _)| path.to_string())
         .collect();
     let mut keep: Vec<u8> = Vec::new();
-    for (name, path, kind) in members {
-        if !kept(path)? || matches!(kind, 'c' | 'b' | 'p') {
+    for ((name, path, kind), detail) in members.into_iter().zip(&details) {
+        if !kept(path)? || matches!(kind, 'c' | 'b' | 'p' | 's') {
             continue;
         }
+        // Setuid and setgid bits never survive (no -p); they grant nothing anyway: files belong
+        // to the box user and the sandbox sets no_new_privs. tar escapes a newline in a name.
+        if name.contains('\\') || detail.contains('\\') {
+            return Err(RootfsError::Unsafe(format!(
+                "{path} has a newline or backslash in its name or link target"
+            )));
+        }
         through_link(root, &links, path)?;
+        if kind == 'h' {
+            let target = clean(hard_link_target(name, detail)?);
+            if !kept(target)? {
+                return Err(RootfsError::Unsafe(format!(
+                    "{path} is a hard link to {target}, outside the kept folders"
+                )));
+            }
+            through_link(root, &links, target)?;
+            let on_disk = fs::symlink_metadata(root.join(target)).is_ok_and(|m| m.is_symlink());
+            if on_disk || links.contains(target) {
+                return Err(RootfsError::Unsafe(format!(
+                    "{path} is a hard link to the link {target}"
+                )));
+            }
+        }
         keep.extend_from_slice(name.as_bytes());
         keep.push(0);
     }
@@ -226,6 +249,22 @@ fn apply_layer(layer: &Path, root: &Path) -> Result<(), RootfsError> {
         .args(["--null", "-T"])
         .arg(&list);
     run(&mut cmd).map(|_| ())
+}
+
+/// The target of a hard link member, from its `tar -tv` line:
+/// `<mode> <owner> <size> <date> <time> <name> link to <target>`.
+fn hard_link_target<'a>(name: &str, detail: &'a str) -> Result<&'a str, RootfsError> {
+    let mut rest = detail;
+    for _ in 0..5 {
+        rest = rest
+            .trim_start()
+            .split_once(char::is_whitespace)
+            .map_or("", |(_, r)| r);
+    }
+    rest.trim_start()
+        .strip_prefix(name)
+        .and_then(|r| r.strip_prefix(" link to "))
+        .ok_or_else(|| RootfsError::Format(format!("cannot read the target of {name}")))
 }
 
 /// True when the member lies in a kept folder and is not a whiteout marker. A path with
@@ -260,11 +299,17 @@ fn through_link(root: &Path, links: &BTreeSet<String>, path: &str) -> Result<(),
 /// Apply the whiteout `path` names, if it is one: `.wh.<name>` deletes `<name>` beside it;
 /// `.wh..wh..opq` empties its folder.
 fn whiteout(root: &Path, path: &str) -> Result<(), RootfsError> {
-    let Some((dir, base)) = path.rsplit_once('/') else {
+    let (dir, base) = path.rsplit_once('/').unwrap_or(("", path));
+    let Some(named) = base.strip_prefix(WHITEOUT) else {
         return Ok(());
     };
-    let first = dir.split('/').next().unwrap_or_default();
-    if !base.starts_with(WHITEOUT) || !KEPT.contains(&first) {
+    // At the root, only a whole kept folder can go; the root itself stays.
+    let first = if dir.is_empty() {
+        named
+    } else {
+        dir.split('/').next().unwrap_or_default()
+    };
+    if !KEPT.contains(&first) || (dir.is_empty() && base == OPAQUE) {
         return Ok(());
     }
     if !plain_path(path) {
@@ -281,7 +326,7 @@ fn whiteout(root: &Path, path: &str) -> Result<(), RootfsError> {
         }
         Ok(())
     } else {
-        remove(&folder.join(&base[WHITEOUT.len()..]))
+        remove(&folder.join(named))
     }
 }
 

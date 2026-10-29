@@ -86,6 +86,8 @@ pub enum RunError {
     NoPayload(String),
     /// `pins.environment` names an image that is not in the store.
     EnvironmentMissing(String),
+    /// `pins.environment` is not a store digest (64 lowercase hex characters).
+    EnvironmentPin(String),
     /// The environment cannot be built or extracted.
     Environment(String),
     NoKey,
@@ -118,6 +120,9 @@ impl fmt::Display for RunError {
             RunError::NoPayload(e) => write!(f, "cannot read the payload: {e}"),
             RunError::EnvironmentMissing(d) => {
                 write!(f, "the pinned environment {d} is not in the store")
+            }
+            RunError::EnvironmentPin(p) => {
+                write!(f, "pins.environment {p:?} is not a store digest")
             }
             RunError::Environment(e) => write!(f, "environment: {e}"),
             RunError::NoKey => write!(f, "the box key does not exist"),
@@ -308,6 +313,9 @@ pub fn environment(
 ) -> Result<Environment, RunError> {
     let pin = pin.strip_prefix("sha256:").unwrap_or(pin);
     let (digest, built) = if !pin.is_empty() {
+        if store.path(pin).is_err() {
+            return Err(RunError::EnvironmentPin(pin.into()));
+        }
         if !store.has(pin) {
             return Err(RunError::EnvironmentMissing(pin.into()));
         }

@@ -49,13 +49,24 @@ fn archive(store: &Store, layers: &[&Path], manifest: Option<&str>) -> String {
 /// `archive` with extra `tar` options for each layer.
 fn archive_as(store: &Store, layers: &[&Path], manifest: Option<&str>, extra: &[&str]) -> String {
     let d = TempDir::new().unwrap();
-    let mut names = Vec::new();
+    let mut tars = Vec::new();
     for (i, l) in layers.iter().enumerate() {
-        let name = format!("l{i}/layer.tar");
-        fs::create_dir(d.path().join(format!("l{i}"))).unwrap();
-        let out = d.path().join(&name);
+        let out = d.path().join(format!("t{i}.tar"));
         let head = ["-cf", out.to_str().unwrap(), "-C", l.to_str().unwrap()];
         tar(&[&head[..], extra, &["."]].concat(), d.path());
+        tars.push(out);
+    }
+    image(store, &tars, manifest)
+}
+
+/// A docker-archive in the store whose layers are the given tar files.
+fn image(store: &Store, tars: &[PathBuf], manifest: Option<&str>) -> String {
+    let d = TempDir::new().unwrap();
+    let mut names = Vec::new();
+    for (i, t) in tars.iter().enumerate() {
+        let name = format!("l{i}/layer.tar");
+        fs::create_dir(d.path().join(format!("l{i}"))).unwrap();
+        fs::copy(t, d.path().join(&name)).unwrap();
         names.push(format!("\"{name}\""));
     }
     let text = manifest.map(String::from).unwrap_or_else(|| {
@@ -65,15 +76,15 @@ fn archive_as(store: &Store, layers: &[&Path], manifest: Option<&str>, extra: &[
         )
     });
     fs::write(d.path().join("manifest.json"), text).unwrap();
-    let image = d.path().join("image.tar");
+    let out = d.path().join("image.tar");
     let mut members = vec!["manifest.json".to_string()];
-    members.extend((0..layers.len()).map(|i| format!("l{i}")));
+    members.extend((0..tars.len()).map(|i| format!("l{i}")));
     let members: Vec<&str> = members.iter().map(String::as_str).collect();
     tar(
-        &[&["-cf", image.to_str().unwrap()][..], &members].concat(),
+        &[&["-cf", out.to_str().unwrap()][..], &members].concat(),
         d.path(),
     );
-    store.put(&fs::read(image).unwrap()).unwrap()
+    store.put(&fs::read(out).unwrap()).unwrap()
 }
 
 fn store() -> (TempDir, Store) {
@@ -174,6 +185,9 @@ fn from_store_runs_once_per_digest() {
         .unwrap();
     // A file the image does not hold survives only if the second call leaves the tree alone.
     fs::write(first.join("usr/mark"), "m").unwrap();
+    // With the image gone, only the extracted tree can answer.
+    let blob = store.path(&digest).unwrap();
+    fs::rename(&blob, blob.with_extension("away")).unwrap();
     let second = from_store(&store, &digest).unwrap();
     assert_eq!(first, second);
     assert_eq!(fs::read_to_string(second.join("usr/mark")).unwrap(), "m");
@@ -564,11 +578,16 @@ fn a_built_environment_runs_at_level1() {
     if skip_level1() {
         return;
     }
-    let payload = "#!/bin/sh\ncat /etc/os-release > \"$IGNORARIUM_OUT/os\"\n";
+    // Only the image holds /bin/busybox; its first passwd line ends in /bin/sh.
+    let payload = concat!(
+        "#!/bin/sh\n",
+        "head -n1 /etc/passwd > \"$IGNORARIUM_OUT/os\"\n",
+        "[ -e /bin/busybox ] && echo busybox >> \"$IGNORARIUM_OUT/os\"\n",
+    );
     let dir = edited(&lab, "built", |t| t, payload);
     let env = dir.join("env");
     fs::create_dir(&env).unwrap();
-    // Set BUSYBOX_DIGEST to a real digest of a public busybox image.
+    // BUSYBOX_DIGEST is the 64 hex digits of a public busybox image digest.
     let base = std::env::var("BUSYBOX_DIGEST").expect("BUSYBOX_DIGEST names the base image");
     fs::write(
         env.join("Dockerfile"),
@@ -579,7 +598,185 @@ fn a_built_environment_runs_at_level1() {
     let plan = prepare_with(&lab.home, "built", vec![Box::new(level1)]).unwrap();
     assert_eq!(runner::run(&plan).unwrap(), RunStatus::Done);
     let out = fs::read_to_string(dir.join("run/rows/0/out/os")).unwrap();
-    assert!(out.contains("Buildroot"), "{out}");
+    assert_eq!(out, "root:x:0:0:root:/root:/bin/sh\nbusybox\n");
     let events = common::events_of(&dir);
     assert_eq!(named(&events, "env.build").len(), 1);
+}
+
+// -- review fixes ---------------------------------------------------------------------------
+
+/// A layer tar from `members` (paths under `dir`, in this order) with extra `tar` options.
+fn layer(dir: &Path, out: &Path, extra: &[&str], members: &[&str]) {
+    let head = ["-cf", out.to_str().unwrap(), "-C", dir.to_str().unwrap()];
+    tar(&[&head[..], extra, members].concat(), dir);
+}
+
+#[test]
+fn a_hard_link_cannot_pull_a_host_file_through_a_planted_link() {
+    let (_h, store) = store();
+    let host = TempDir::new().unwrap();
+    fs::write(host.path().join("secret"), "host data").unwrap();
+    let (a, b, t) = (
+        TempDir::new().unwrap(),
+        TempDir::new().unwrap(),
+        TempDir::new().unwrap(),
+    );
+    put(a.path(), "etc/x", "", Some(host.path().to_str().unwrap()));
+    // Layer 2: `usr/pull` is a hard link to `etc/x/secret`; the target member is cut out.
+    fs::write(b.path().join("real"), "r").unwrap();
+    fs::create_dir(b.path().join("usr")).unwrap();
+    fs::hard_link(b.path().join("real"), b.path().join("usr/pull")).unwrap();
+    let (t1, t2) = (t.path().join("1.tar"), t.path().join("2.tar"));
+    layer(a.path(), &t1, &[], &["."]);
+    layer(
+        b.path(),
+        &t2,
+        &["--transform=s,^real$,etc/x/secret,"],
+        &["real", "usr/pull"],
+    );
+    tar(
+        &["-f", t2.to_str().unwrap(), "--delete", "etc/x/secret"],
+        t.path(),
+    );
+    let digest = image(&store, &[t1, t2], None);
+    let err = from_store(&store, &digest).unwrap_err();
+    assert!(matches!(err, RootfsError::Unsafe(_)), "{err}");
+    assert!(!store.root.join("rootfs").join(&digest).exists());
+    assert_eq!(
+        fs::read_to_string(host.path().join("secret")).unwrap(),
+        "host data"
+    );
+}
+
+#[test]
+fn a_hard_link_to_a_link_or_outside_the_kept_folders_is_refused() {
+    let (_h, store) = store();
+    let t = TempDir::new().unwrap();
+    for (case, target) in [("link", "usr/lnk"), ("outside", "var/x")] {
+        let d = TempDir::new().unwrap();
+        put(d.path(), "usr/real", "r", None);
+        put(d.path(), "usr/lnk", "", Some("real"));
+        put(d.path(), "var/x", "x", None);
+        fs::hard_link(d.path().join(target), d.path().join("etc-pull")).unwrap();
+        let tarf = t.path().join(format!("{case}.tar"));
+        layer(
+            d.path(),
+            &tarf,
+            &["--transform=s,^etc-pull$,etc/pull,"],
+            &[target, "etc-pull"],
+        );
+        let digest = image(&store, &[tarf], None);
+        let err = from_store(&store, &digest).unwrap_err();
+        assert!(matches!(err, RootfsError::Unsafe(_)), "{case}: {err}");
+    }
+}
+
+#[test]
+fn a_busybox_style_hard_link_inside_a_kept_folder_extracts() {
+    use std::os::unix::fs::MetadataExt;
+    let (_h, store) = store();
+    let a = TempDir::new().unwrap();
+    put(a.path(), "usr/bin/busybox", "b", None);
+    fs::hard_link(
+        a.path().join("usr/bin/busybox"),
+        a.path().join("usr/bin/sh"),
+    )
+    .unwrap();
+    let digest = archive(&store, &[a.path()], None);
+    let root = from_store(&store, &digest).unwrap();
+    let x = fs::metadata(root.join("usr/bin/busybox")).unwrap();
+    let y = fs::metadata(root.join("usr/bin/sh")).unwrap();
+    assert_eq!(x.ino(), y.ino());
+    assert_eq!(fs::read_to_string(root.join("usr/bin/sh")).unwrap(), "b");
+}
+
+#[test]
+fn setuid_and_setgid_bits_do_not_survive_extraction() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_h, store) = store();
+    let a = TempDir::new().unwrap();
+    put(a.path(), "usr/bin/su", "s", None);
+    put(a.path(), "usr/bin/wall", "w", None);
+    let mode = |f: &str, m| {
+        let p = a.path().join("usr/bin").join(f);
+        fs::set_permissions(p, fs::Permissions::from_mode(m)).unwrap();
+    };
+    mode("su", 0o4755);
+    mode("wall", 0o2755);
+    let digest = archive(&store, &[a.path()], None);
+    let root = from_store(&store, &digest).unwrap();
+    for f in ["su", "wall"] {
+        let got = fs::metadata(root.join("usr/bin").join(f))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(got & 0o7000, 0, "{f}: {got:o}");
+        assert_eq!(got & 0o777, 0o755, "{f}: {got:o}");
+    }
+}
+
+#[test]
+fn a_root_level_whiteout_removes_a_whole_kept_folder() {
+    let (_h, store) = store();
+    let (a, b) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    put(a.path(), "etc/x/1", "1", None);
+    put(a.path(), "usr/y", "y", None);
+    put(a.path(), "lib64", "", Some("usr/lib64"));
+    put(b.path(), ".wh.etc", "", None);
+    put(b.path(), ".wh.lib64", "", None);
+    let digest = archive(&store, &[a.path(), b.path()], None);
+    let root = from_store(&store, &digest).unwrap();
+    assert_eq!(files_under(&root), ["usr", "usr/y"]);
+}
+
+#[test]
+fn a_name_with_a_newline_is_refused() {
+    let (_h, store) = store();
+    let a = TempDir::new().unwrap();
+    put(a.path(), "etc/ok", "k", None);
+    put(a.path(), "etc/a\nb", "x", None);
+    let digest = archive(&store, &[a.path()], None);
+    let err = from_store(&store, &digest).unwrap_err();
+    assert!(
+        matches!(&err, RootfsError::Unsafe(m) if m.contains("newline")),
+        "{err}"
+    );
+    // A newline in a link target is refused too.
+    let c = TempDir::new().unwrap();
+    put(c.path(), "etc/l", "", Some("a\nb"));
+    let digest = archive(&store, &[c.path()], None);
+    let err = from_store(&store, &digest).unwrap_err();
+    assert!(
+        matches!(&err, RootfsError::Unsafe(m) if m.contains("newline")),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_name_outside_the_kept_folders_may_hold_a_newline() {
+    let (_h, store) = store();
+    let a = TempDir::new().unwrap();
+    put(a.path(), "etc/ok", "k", None);
+    put(a.path(), "var/a\nb", "x", None);
+    let digest = archive(&store, &[a.path()], None);
+    let root = from_store(&store, &digest).unwrap();
+    assert_eq!(files_under(&root), ["etc", "etc/ok"]);
+}
+
+#[test]
+fn a_pin_that_is_not_a_digest_is_not_reported_as_absent() {
+    let lab = lab();
+    let dir = common::plain(&lab, "badpin");
+    let store = store_of(&lab);
+    for pin in ["busybox:latest", "ABCDEF", &ABSENT[..63]] {
+        let err = environment(&store, &dir, pin, None).err().unwrap();
+        assert!(
+            matches!(&err, RunError::EnvironmentPin(p) if p == pin),
+            "{err}"
+        );
+        assert_eq!(
+            err.to_string(),
+            format!("pins.environment {pin:?} is not a store digest")
+        );
+    }
 }
