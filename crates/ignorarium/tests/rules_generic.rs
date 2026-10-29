@@ -888,6 +888,8 @@ fn bad_targets_are_rejected_with_the_code_and_path() {
         "path = \"a\"\ncheck = \"enum\"\nvalues = [\"x\"]\npattern = \"x\"",
         "path = \"a\"\ncheck = \"finite\"\ninterval = \"[0, 1]\"",
         "path = \"a\"\ncheck = \"named:x\"\nkind = \"int\"",
+        "path = \"a\"\ncheck = \"required\"\nkey = \"id\"",
+        "path = \"a\"\ncheck = \"unique\"\nvalues = [\"x\"]",
     ];
     for t in bad {
         let e = load_text(&rule_text(t)).unwrap_err().to_string();
