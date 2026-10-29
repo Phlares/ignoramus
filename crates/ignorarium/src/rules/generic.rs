@@ -17,21 +17,25 @@ pub fn check_generic(spec: &Value, rules: &[Rule]) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for rule in rules.iter().filter(|r| applies(r, spec)) {
         for path in violations(rule, spec, &known) {
-            out.push(Diagnostic {
-                code: rule.code.clone(),
-                severity: rule.severity,
-                path,
-                problem: rule.problem.clone(),
-                instruction: rule.instruction.clone(),
-                doc: format!("docs/rules/{}.md", rule.code),
-                sources: rule.sources.clone(),
-            });
+            out.push(diagnostic(rule, path, rule.problem.clone()));
         }
     }
     out
 }
 
-fn applies(rule: &Rule, spec: &Value) -> bool {
+pub(super) fn diagnostic(rule: &Rule, path: String, problem: String) -> Diagnostic {
+    Diagnostic {
+        code: rule.code.clone(),
+        severity: rule.severity,
+        path,
+        problem,
+        instruction: rule.instruction.clone(),
+        doc: format!("docs/rules/{}.md", rule.code),
+        sources: rule.sources.clone(),
+    }
+}
+
+pub(super) fn applies(rule: &Rule, spec: &Value) -> bool {
     let is = |key: &str, want: &Option<String>| {
         want.as_ref()
             .is_none_or(|w| spec["study"][key].as_str() == Some(w))

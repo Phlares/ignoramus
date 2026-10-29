@@ -1,11 +1,13 @@
-//! Typed rules, loaded from data. `generic` runs the data-driven checks.
+//! Typed rules, loaded from data. `generic` runs the data-driven checks; `named` the cross-field ones.
 use crate::diag::Severity;
 use regex::Regex;
 use serde::Deserialize;
 use std::path::Path;
 
 mod generic;
+mod named;
 pub use generic::check_generic;
+pub use named::{CheckCtx, check_named};
 
 #[derive(Debug, Clone)]
 pub struct Rule {
@@ -204,7 +206,8 @@ fn parse_check(t: &Target) -> Result<Check, String> {
             (Check::Format(regex), Some("pattern"))
         }
         other => match other.strip_prefix("named:") {
-            Some(n) if !n.is_empty() => (Check::Named(n.to_string()), None),
+            Some(n) if named::is_known(n) => (Check::Named(n.to_string()), None),
+            Some(n) => return Err(format!("unknown named check \"{n}\"")),
             _ => return Err(format!("unknown check \"{other}\"")),
         },
     };

@@ -151,10 +151,10 @@ fn each_fault_row_yields_its_code_and_path_alone() {
     for row in faults() {
         let (code, _, _, path) = &row;
         let d = rules::check_generic(&faulted(std::slice::from_ref(&row)), &rules);
-        // The template itself carries W-LIC-001; drop it unless the row is about it.
+        // The template itself carries both warnings; drop them unless the row is about them.
         let d: Vec<_> = d
             .into_iter()
-            .filter(|x| x.code != "W-LIC-001" || *code == "W-LIC-001")
+            .filter(|x| !x.code.starts_with("W-") || x.code == *code)
             .collect();
         assert_eq!(codes_paths(&d), [(*code, *path)], "{row:?}");
     }
@@ -165,8 +165,14 @@ fn templates_have_no_generic_errors_and_no_unknown_keys() {
     let rules = v0();
     for t in ["numeric-ablation", "planted-spawn"] {
         let d = rules::check_generic(&spec_at(&format!("../../templates/{t}.toml")), &rules);
-        assert_eq!(codes_paths(&d), [("W-LIC-001", "inputs[0].licence.spdx")]);
-        assert_eq!(d[0].severity, Severity::Warning);
+        assert_eq!(
+            codes_paths(&d),
+            [
+                ("W-LIC-001", "inputs[0].licence.spdx"),
+                ("W-HSH-001", "inputs[0].sha256"),
+            ]
+        );
+        assert!(d.iter().all(|x| x.severity == Severity::Warning));
     }
 }
 
@@ -187,6 +193,7 @@ fn all_faults_reported_at_once_in_rule_file_order() {
             ("E-RNG-001", "design.alpha"),
             ("E-FMT-001", "study.id"),
             ("W-LIC-001", "inputs[0].licence.spdx"),
+            ("W-HSH-001", "inputs[0].sha256"),
         ]
     );
 }
@@ -233,6 +240,7 @@ fn missing_licence_id_gives_the_schema_error_then_the_warning() {
         [
             ("E-REQ-001", "inputs[0].licence.spdx"),
             ("W-LIC-001", "inputs[0].licence.spdx"),
+            ("W-HSH-001", "inputs[0].sha256"),
         ]
     );
 }
@@ -364,6 +372,7 @@ fn indexed_paths_cover_second_elements() {
             ("E-FMT-001", "design.conditions[1].id"),
             ("E-OUT-001", "outcomes[1].unit"),
             ("W-LIC-001", "inputs[0].licence.spdx"),
+            ("W-HSH-001", "inputs[0].sha256"),
         ]
     );
 }
@@ -590,6 +599,7 @@ fn array_elements_are_checked_individually() {
             ("E-OUT-001", "outcomes[1].unit"),
             ("E-OUT-002", "outcomes[2].direction"),
             ("W-LIC-001", "inputs[0].licence.spdx"),
+            ("W-HSH-001", "inputs[0].sha256"),
         ]
     );
 }
@@ -649,8 +659,8 @@ fn warning_severity_is_kept() {
 
 #[test]
 fn named_checks_are_skipped_by_the_generic_checker() {
-    let r = one_rule("", "path = \"study.id\"\ncheck = \"named:anything\"");
-    assert!(matches!(&r[0].check, Check::Named(n) if n == "anything"));
+    let r = one_rule("", "path = \"study.id\"\ncheck = \"named:power-met\"");
+    assert!(matches!(&r[0].check, Check::Named(n) if n == "power-met"));
     assert!(rules::check_generic(&json!({}), &r).is_empty());
 }
 

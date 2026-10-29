@@ -312,3 +312,197 @@ sources = ["https://spdx.org/licenses/"]
 target = [
   { path = "inputs[*].licence.spdx", check = "non-empty" },
 ]
+
+[[rule]]
+code = "W-HSH-001"
+severity = "warning"
+problem = "An input has no SHA-256 pin."
+instruction = "Pin the input: add its SHA-256, 64 lowercase hex characters."
+why = "Without a pin the run cannot tell if the file changed after the plan was approved. The run itself still starts."
+sources = []
+target = [
+  { path = "inputs[*].sha256", check = "non-empty" },
+]
+
+[[rule]]
+code = "E-LBL-001"
+severity = "error"
+problem = "An exploratory study carries a label above signal."
+instruction = "Set label to signal, or change the mode to confirmatory."
+why = "Only a confirmatory study with a registered test can earn a stronger label. Exploratory results are leads."
+sources = []
+when = { mode = "exploratory" }
+target = [
+  { path = "study.label", check = "named:label-allowed-for-mode" },
+]
+
+[[rule]]
+code = "E-CNF-001"
+severity = "error"
+problem = "A confirmatory study has no smallest effect of interest above zero."
+instruction = "Set design.sesoi to the smallest effect, in outcome units, that you would act on. It must be above 0."
+why = "The sample size depends on the effect you care about. Without it the power gate has nothing to size."
+sources = ["https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "design.sesoi", check = "named:sesoi-required" },
+]
+
+[[rule]]
+code = "E-CNF-002"
+severity = "error"
+problem = "The confirmation sample is too small."
+instruction = "Add confirmation clusters or units per cluster until the count reaches the number the power gate needs."
+why = "A test with too few units misses real effects and exaggerates the ones it finds. The gate uses alpha, power, the variance, the smallest effect, and the cluster correlation."
+sources = ["https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "design.confirmation.clusters", check = "named:power-met" },
+]
+
+[[rule]]
+code = "E-CNF-003"
+severity = "error"
+problem = "The variance is not taken from a record."
+instruction = "Measure the variance in an earlier run and set design.variance.source to record:<sha256> of that record."
+why = "A variance guessed by hand can be too small, which makes the power gate pass a study that is too small."
+sources = ["https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "design.variance.source", check = "named:variance-from-record" },
+]
+
+[[rule]]
+code = "E-CNF-004"
+severity = "error"
+problem = "The confirmation clusters are empty or overlap the selection clusters."
+instruction = "List confirmation clusters that do not appear in the selection clusters."
+why = "A winner picked on some data looks better on that same data. Only fresh clusters give an honest test."
+sources = ["https://doi.org/10.1038/s41562-016-0021"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "design.confirmation.clusters", check = "named:selection-confirmation-disjoint" },
+]
+
+[[rule]]
+code = "E-CNF-005"
+severity = "error"
+problem = "Selection or confirmation data was used by an earlier study."
+instruction = "Use data no earlier plan used for selection or confirmation, or change the role of this input."
+why = "Reused data has already shaped a decision. A test on it is not independent."
+sources = ["https://doi.org/10.1038/s41562-016-0021"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "inputs[*].path", check = "named:data-fresh" },
+]
+
+[[rule]]
+code = "E-CNF-006"
+severity = "error"
+problem = "A confirmatory study uses a test the checker does not allow."
+instruction = "Set design.test to paired-mean."
+why = "v0 confirms only with the paired-mean test. Other tests have no power gate yet."
+sources = []
+when = { mode = "confirmatory" }
+target = [
+  { path = "design.test", check = "named:confirmatory-test-allowed" },
+]
+
+[[rule]]
+code = "E-BUD-001"
+severity = "error"
+problem = "The budget is empty."
+instruction = "Set at least one of cpu_hours, wall_hours or money_usd above 0."
+why = "A run with no budget has no stop. The budget is the cap the run enforces."
+sources = []
+target = [
+  { path = "scope.budget", check = "named:budget-present" },
+]
+
+[[rule]]
+code = "E-END-001"
+severity = "error"
+problem = "The end-of-run route is not valid."
+instruction = "For route follow-on, list at least one follow_on entry. Write each when as <hypothesis id>.pass or <hypothesis id>.fail, using an id from question.hypotheses."
+why = "A follow-on that names no hypothesis can never run. The route must say what happens, before the data come in."
+sources = []
+target = [
+  { path = "scope.end_of_run.follow_on", check = "named:route-valid" },
+]
+
+[[rule]]
+code = "E-END-002"
+severity = "error"
+problem = "A follow-on spec file is missing."
+instruction = "Create the file under the study folder, or fix the spec path."
+why = "The run would reach the follow-on step and find nothing to run."
+sources = []
+target = [
+  { path = "scope.end_of_run.follow_on[*].spec", check = "named:follow-on-exists" },
+]
+
+[[rule]]
+code = "E-MUT-001"
+severity = "error"
+problem = "The spawn depth cap is above 2."
+instruction = "Set mutations.depth_cap to 2 or less."
+why = "Each spawn level multiplies the number of runs and the chances of a chance finding. The cap is 2."
+sources = []
+target = [
+  { path = "mutations.depth_cap", check = "named:depth-cap" },
+]
+
+[[rule]]
+code = "E-MUT-002"
+severity = "error"
+problem = "The spawn and report seed sets overlap."
+instruction = "Give spawn and report seed prefixes where neither is a prefix of the other, for example spawn/ and report/."
+why = "Overlapping seeds would let spawned runs reuse the draws that the report runs use."
+sources = []
+target = [
+  { path = "mutations.seeds", check = "named:seed-sets-disjoint" },
+]
+
+[[rule]]
+code = "E-MUT-003"
+severity = "error"
+problem = "A trigger names a metric that is not an outcome."
+instruction = "Set the trigger metric to the id of an outcome."
+why = "A trigger on an unregistered metric would let the run pick its own signal after the fact."
+sources = []
+target = [
+  { path = "mutations.triggers[*].metric", check = "named:trigger-declared" },
+]
+
+[[rule]]
+code = "E-ISO-001"
+severity = "error"
+problem = "This machine cannot give the isolation level the plan asks for."
+instruction = "Lower scope.min_isolation, or run the plan on a machine that offers the level."
+why = "Running at a lower level than the plan asks for would break the plan's own safety terms."
+sources = []
+target = [
+  { path = "scope.min_isolation", check = "named:isolation-reachable" },
+]
+
+[[rule]]
+code = "E-PTH-001"
+severity = "error"
+problem = "A file path is absolute, contains .. or a backslash, starts with a drive, or passes through a symbolic link."
+instruction = "Use a relative path with forward slashes that stays inside the study folder."
+why = "The checker reads only files inside the study folder. It never follows links, so a spec cannot point it at other files."
+sources = []
+target = [
+  { path = "inputs[*].path", check = "named:input-path-safe" },
+]
+
+[[rule]]
+code = "E-HSH-001"
+severity = "error"
+problem = "An input file is missing or its SHA-256 differs from the pin."
+instruction = "Fix the path, or update the sha256 if the file was changed on purpose."
+why = "The pin says which bytes the plan was approved on. A different file is a different study."
+sources = []
+target = [
+  { path = "inputs[*].sha256", check = "named:input-hash-matches" },
+]
