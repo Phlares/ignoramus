@@ -77,10 +77,10 @@ pub fn load(home: &Path) -> Result<Machine, MachineError> {
 }
 
 /// Fill a profile from this host. `rate_usd_per_hour`, `experiment_mode` and
-/// `long_job_minutes` come from an existing `machine.toml`; an unreadable file
-/// gives the defaults (the probe never writes).
-pub fn probe(home: &Path, backends: &[Box<dyn Backend>]) -> Machine {
-    let kept = load(home).unwrap_or_default();
+/// `long_job_minutes` come from an existing `machine.toml`. A file that fails
+/// to load is an error; the probe never writes.
+pub fn probe(home: &Path, backends: &[Box<dyn Backend>]) -> Result<Machine, MachineError> {
+    let kept = load(home)?;
     let name = std::fs::read_to_string("/proc/sys/kernel/hostname")
         .map(|s| s.trim().to_string())
         .ok()
@@ -99,13 +99,13 @@ pub fn probe(home: &Path, backends: &[Box<dyn Backend>]) -> Machine {
         .map(|b| b.level())
         .max()
         .unwrap_or(0);
-    Machine {
+    Ok(Machine {
         name,
         cpus,
         mem_gib,
         max_level,
         ..kept
-    }
+    })
 }
 
 /// Whole GiB (at least 1) from the `MemTotal` line of `/proc/meminfo` text.

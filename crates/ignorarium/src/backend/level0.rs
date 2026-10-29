@@ -3,8 +3,11 @@ use super::{Backend, Exit, Probe, RowJob, RowOutcome};
 use crate::canon::{sha256_hex, to_canonical};
 use crate::sys::{self, Ended};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Read};
+use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -28,12 +31,22 @@ impl Backend for Level0 {
 
     fn run_row(&self, job: &RowJob) -> io::Result<RowOutcome> {
         let start = Instant::now();
-        let (exit, cpu_seconds) = run_child(job, start);
+        let (mut exit, cpu_seconds) = run_child(job, start);
+        let wall_seconds = start.elapsed().as_secs_f64();
+        let output_hash = match output_hash(&job.output_dir) {
+            Ok(h) => h,
+            Err(e) => {
+                if !matches!(exit, Exit::Infra(_)) {
+                    exit = Exit::Infra(format!("cannot hash output: {e}"));
+                }
+                String::new()
+            }
+        };
         Ok(RowOutcome {
             exit,
             cpu_seconds,
-            wall_seconds: start.elapsed().as_secs_f64(),
-            output_hash: output_hash(&job.output_dir)?,
+            wall_seconds,
+            output_hash,
             selftest_ok: true,
         })
     }
@@ -48,29 +61,56 @@ fn run_child(job: &RowJob, start: Instant) -> (Exit, f64) {
         .env_clear()
         .envs(job.env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .process_group(0)
         .spawn();
-    let child = match child {
+    let mut child = match child {
         Ok(c) => c,
         Err(e) => return (Exit::Infra(format!("cannot start {prog}: {e}")), 0.0),
     };
     let pid = child.id();
     let mut timed_out = false;
+    let mut fault: Option<String> = None;
     let reaped = loop {
         match sys::wait4(pid, timed_out) {
-            Ok(Some(r)) => break r,
+            Ok(Some(r)) => break Some(r),
             Ok(None) => {}
-            Err(e) => return (Exit::Infra(format!("wait failed: {e}")), 0.0),
+            Err(e) => {
+                fault = Some(format!("wait failed: {e}"));
+                break None;
+            }
         }
-        if start.elapsed() >= job.wall_timeout {
+        if start.elapsed() < job.wall_timeout {
+            std::thread::sleep(POLL);
+        } else if !timed_out {
+            // One more look: the row may have finished just now.
+            match sys::wait4(pid, false) {
+                Ok(Some(r)) => break Some(r),
+                Ok(None) => {}
+                Err(e) => {
+                    fault = Some(format!("wait failed: {e}"));
+                    break None;
+                }
+            }
             timed_out = true;
             if let Err(e) = sys::kill_group(pid) {
-                return (Exit::Infra(format!("kill failed: {e}")), 0.0);
+                fault = Some(format!("kill failed: {e}"));
+                // Kill the leader alone, then reap it in the next pass.
+                let _ = child.kill();
             }
-        } else {
-            std::thread::sleep(POLL);
         }
     };
+    let Some(reaped) = reaped else {
+        return (Exit::Infra(fault.unwrap_or_default()), 0.0);
+    };
+    // The leader is gone. Nothing else of the row may outlive it or touch the output.
+    if let Err(e) = sys::kill_group(pid) {
+        fault.get_or_insert(format!("kill failed: {e}"));
+    }
+    if let Some(f) = fault {
+        return (Exit::Infra(f), reaped.cpu_seconds);
+    }
     let exit = if timed_out {
         Exit::Payload(TIMEOUT_CODE)
     } else {
@@ -84,14 +124,25 @@ fn run_child(job: &RowJob, start: Instant) -> (Exit, f64) {
 }
 
 /// Hash of the sorted `[relpath, kind, digest]` rows under `dir`.
-/// Links are recorded, never followed.
+/// Links are recorded, never followed. A symlinked `dir` is refused.
 pub fn output_hash(dir: &Path) -> io::Result<String> {
+    if fs::symlink_metadata(dir)?.file_type().is_symlink() {
+        return Err(io::Error::other("output dir is a symbolic link"));
+    }
     let mut rows: Vec<(String, &'static str, String)> = Vec::new();
     walk(dir, "", &mut rows)?;
     rows.sort();
     let v = Value::Array(rows.into_iter().map(|(p, k, d)| json!([p, k, d])).collect());
     let bytes = to_canonical(&v).map_err(io::Error::other)?;
     Ok(sha256_hex(&bytes))
+}
+
+/// A name as text; bytes that are not UTF-8 become `!bytes:<hex>`.
+fn name_of(n: &OsStr) -> String {
+    match n.to_str() {
+        Some(s) => s.to_string(),
+        None => format!("!bytes:{}", hex::encode(n.as_bytes())),
+    }
 }
 
 fn walk(
@@ -101,23 +152,40 @@ fn walk(
 ) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
-        let rel = format!("{prefix}{}", entry.file_name().to_string_lossy());
+        let rel = format!("{prefix}{}", name_of(&entry.file_name()));
         let ft = entry.file_type()?;
         if ft.is_dir() {
             walk(&entry.path(), &format!("{rel}/"), rows)?;
         } else if ft.is_symlink() {
             rows.push((rel, "link", String::new()));
         } else if ft.is_file() {
-            let mut f = OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(entry.path())?;
-            let mut bytes = Vec::new();
-            f.read_to_end(&mut bytes)?;
-            rows.push((rel, "file", sha256_hex(&bytes)));
+            rows.push(match file_digest(&entry.path())? {
+                Some(d) => (rel, "file", d),
+                None => (rel, "other", String::new()),
+            });
         } else {
             rows.push((rel, "other", String::new()));
         }
     }
     Ok(())
+}
+
+/// SHA-256 of a regular file, streamed. `None` when the path is no longer a
+/// regular file by the time it is open (swapped for a FIFO or a link).
+fn file_digest(path: &Path) -> io::Result<Option<String>> {
+    let opened = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path);
+    let mut f = match opened {
+        Ok(f) => f,
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if !f.metadata()?.is_file() {
+        return Ok(None);
+    }
+    let mut h = Sha256::new();
+    io::copy(&mut f, &mut h)?;
+    Ok(Some(hex::encode(h.finalize())))
 }

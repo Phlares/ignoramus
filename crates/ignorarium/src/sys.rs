@@ -26,11 +26,17 @@ pub fn wait4(pid: u32, block: bool) -> io::Result<Option<Reaped>> {
     // SAFETY: an all-zero `rusage` is a valid value for this plain C struct.
     let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
     let flags = if block { 0 } else { libc::WNOHANG };
-    // SAFETY: `status` and `ru` are live, writable locals of the types wait4 expects.
-    let r = unsafe { libc::wait4(pid as libc::pid_t, &mut status, flags, &mut ru) };
-    if r < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    let r = loop {
+        // SAFETY: `status` and `ru` are live, writable locals of the types wait4 expects.
+        let r = unsafe { libc::wait4(pid as libc::pid_t, &mut status, flags, &mut ru) };
+        if r >= 0 {
+            break r;
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    };
     if r == 0 {
         return Ok(None);
     }

@@ -215,8 +215,13 @@ pub fn replace_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     let out = stage(&tmp, bytes, mode).and_then(|()| fs::rename(&tmp, path));
     if out.is_err() {
         let _ = fs::remove_file(&tmp);
+        return out;
     }
-    out
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::File::open(dir)?.sync_all()
 }
 
 fn stage(tmp: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {

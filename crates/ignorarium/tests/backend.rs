@@ -65,11 +65,7 @@ fn level0_clears_the_environment() {
     let seen = std::fs::read_to_string(d.path().join("out/env")).unwrap();
     assert_eq!(
         seen,
-        format!(
-            "OUT={}/out
-",
-            d.path().display()
-        )
+        format!("OUT={}/out{}", d.path().display(), char::from(10))
     );
 }
 
@@ -153,4 +149,112 @@ fn output_hash_records_links_and_nested_files_without_following() {
 #[test]
 fn registered_starts_with_level0() {
     assert_eq!(ignorarium::backend::registered()[0].level(), 0);
+}
+
+#[test]
+fn level0_kills_a_background_grandchild_when_the_leader_exits() {
+    let d = tempfile::tempdir().unwrap();
+    let pidfile = d.path().join("out/pid");
+    let script = format!(
+        "(sleep 0.3; printf late > \"$OUT/late\") & echo $! > {}",
+        pidfile.display()
+    );
+    let o = Level0
+        .run_row(&job(d.path(), &script, Duration::from_secs(30)))
+        .unwrap();
+    assert_eq!(o.exit, Exit::Ok);
+    std::thread::sleep(Duration::from_millis(800));
+    assert!(!d.path().join("out/late").exists());
+    let pid = std::fs::read_to_string(&pidfile).unwrap();
+    // A killed orphan may linger as a zombie until its new parent reaps it.
+    let status =
+        std::fs::read_to_string(format!("/proc/{}/status", pid.trim())).unwrap_or_default();
+    assert!(
+        status.is_empty() || status.contains("State:\tZ"),
+        "{status}"
+    );
+    // The hash holds only the pid file: no late write.
+    let m = format!("[[\"pid\",\"file\",\"{}\"]]", sha(pid.as_bytes()));
+    assert_eq!(o.output_hash, sha(m.as_bytes()));
+}
+
+#[test]
+fn a_fifo_in_the_output_is_kind_other_and_does_not_block() {
+    let d = tempfile::tempdir().unwrap();
+    let st = std::process::Command::new("mkfifo")
+        .arg(d.path().join("p"))
+        .status()
+        .unwrap();
+    assert!(st.success());
+    let m = "[[\"p\",\"other\",\"\"]]";
+    assert_eq!(output_hash(d.path()).unwrap(), sha(m.as_bytes()));
+}
+
+#[test]
+fn a_non_utf8_name_is_recorded_as_hex_bytes() {
+    use std::os::unix::ffi::OsStrExt;
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(
+        d.path()
+            .join(std::ffi::OsStr::from_bytes(&[b'a', 0xff, b'b'])),
+        b"x",
+    )
+    .unwrap();
+    std::fs::write(d.path().join("a?b"), b"x").unwrap();
+    let m = format!(
+        "[[\"!bytes:61ff62\",\"file\",\"{0}\"],[\"a?b\",\"file\",\"{0}\"]]",
+        sha(b"x")
+    );
+    assert_eq!(output_hash(d.path()).unwrap(), sha(m.as_bytes()));
+}
+
+#[test]
+fn a_symlinked_output_dir_is_refused() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::create_dir(d.path().join("real")).unwrap();
+    let ln = d.path().join("out");
+    std::os::unix::fs::symlink(d.path().join("real"), &ln).unwrap();
+    assert!(output_hash(&ln).is_err());
+    let mut j = job(d.path(), "true", Duration::from_secs(5));
+    j.output_dir = ln;
+    let o = Level0.run_row(&j).unwrap();
+    assert!(matches!(o.exit, Exit::Infra(_)));
+    assert_eq!(o.output_hash, "");
+}
+
+#[test]
+fn payload_stdout_does_not_reach_the_box_stdout() {
+    if std::env::var_os("LEVEL0_STDOUT_CHILD").is_some() {
+        let d = tempfile::tempdir().unwrap();
+        let o = Level0
+            .run_row(&job(
+                d.path(),
+                "echo LEAKED; echo LEAKED >&2",
+                Duration::from_secs(30),
+            ))
+            .unwrap();
+        assert_eq!(o.exit, Exit::Ok);
+        return;
+    }
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "payload_stdout_does_not_reach_the_box_stdout",
+            "--nocapture",
+        ])
+        .env("LEVEL0_STDOUT_CHILD", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("LEAKED"));
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("LEAKED"));
+}
+
+#[test]
+fn a_row_that_finishes_in_time_is_not_a_timeout() {
+    let d = tempfile::tempdir().unwrap();
+    let o = Level0
+        .run_row(&job(d.path(), "exit 0", Duration::from_secs(30)))
+        .unwrap();
+    assert_eq!(o.exit, Exit::Ok);
 }

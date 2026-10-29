@@ -29,18 +29,18 @@ impl Backend for Fake {
 fn probe_reports_the_highest_available_level() {
     let d = tempfile::tempdir().unwrap();
     let down: Vec<Box<dyn Backend>> = vec![Box::new(Level0), Box::new(Fake(1, false))];
-    assert_eq!(machine::probe(d.path(), &down).max_level, 0);
+    assert_eq!(machine::probe(d.path(), &down).unwrap().max_level, 0);
     let up: Vec<Box<dyn Backend>> = vec![Box::new(Level0), Box::new(Fake(1, true))];
-    assert_eq!(machine::probe(d.path(), &up).max_level, 1);
+    assert_eq!(machine::probe(d.path(), &up).unwrap().max_level, 1);
     let skip: Vec<Box<dyn Backend>> = vec![Box::new(Fake(2, false)), Box::new(Fake(1, true))];
-    assert_eq!(machine::probe(d.path(), &skip).max_level, 1);
+    assert_eq!(machine::probe(d.path(), &skip).unwrap().max_level, 1);
 }
 
 #[test]
 fn probe_fills_host_facts() {
     let d = tempfile::tempdir().unwrap();
     let b: Vec<Box<dyn Backend>> = vec![Box::new(Level0)];
-    let m = machine::probe(d.path(), &b);
+    let m = machine::probe(d.path(), &b).unwrap();
     let host = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap();
     assert_eq!(m.name, host.trim());
     assert_eq!(
@@ -63,7 +63,7 @@ fn probe_keeps_a_configured_rate() {
     )
     .unwrap();
     let b: Vec<Box<dyn Backend>> = vec![Box::new(Level0), Box::new(Fake(1, true))];
-    let m = machine::probe(d.path(), &b);
+    let m = machine::probe(d.path(), &b).unwrap();
     assert_eq!(m.max_level, 1);
     assert_eq!(m.rate_usd_per_hour, 0.5);
     assert!(m.experiment_mode);
@@ -139,4 +139,31 @@ fn replace_atomic_leaves_no_temp_on_failure() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     assert_eq!(names, vec!["sub".to_string()]);
+}
+
+#[test]
+fn probe_with_no_backends_gives_level_zero() {
+    let d = tempfile::tempdir().unwrap();
+    let none: Vec<Box<dyn Backend>> = vec![];
+    assert_eq!(machine::probe(d.path(), &none).unwrap().max_level, 0);
+}
+
+#[test]
+fn probe_refuses_a_bad_machine_file_and_leaves_it_alone() {
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("machine.toml");
+    let bad = "rate_usd_per_hour = -1.0
+";
+    std::fs::write(&f, bad).unwrap();
+    let b: Vec<Box<dyn Backend>> = vec![Box::new(Level0)];
+    let e = machine::probe(d.path(), &b).unwrap_err();
+    assert!(e.to_string().contains("rate_usd_per_hour"), "{e}");
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), bad);
+    std::fs::write(
+        &f,
+        "no_such_field = 1
+",
+    )
+    .unwrap();
+    assert!(machine::probe(d.path(), &b).is_err());
 }
