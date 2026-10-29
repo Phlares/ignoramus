@@ -1,6 +1,6 @@
 //! Builds a study's bundle folder from the study folder, the run facts and the release facts.
 use crate::citation::{self, Release, Tool};
-use crate::licence::Licensing;
+use crate::licence::{HEADER_BYTES, Licensing};
 use crate::manifest::{self, Entry, sha256_bytes, sha256_copy};
 use crate::profile::{self, Level, Profile};
 use crate::rocrate::{self, Artifact, Crate, Run};
@@ -8,7 +8,7 @@ use crate::tree::{self, Found, name_is_safe, shown};
 use crate::{Error, Problem, yaml};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 /// Files the build writes. A file of such a name in the study is not copied.
@@ -191,6 +191,23 @@ fn missing_files(names: &[&str]) -> Vec<Problem> {
     out
 }
 
+/// A sink that keeps the first `keep` bytes written to it.
+struct Prefix {
+    bytes: Vec<u8>,
+    keep: usize,
+}
+
+impl Write for Prefix {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = buf.len().min(self.keep - self.bytes.len());
+        self.bytes.extend_from_slice(&buf[..n]);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Writes `src` to the new file `out/path` and returns its manifest entry.
 fn put(out: &Path, path: &str, src: &mut impl Read) -> io::Result<Entry> {
     let dest = out.join(path);
@@ -240,8 +257,18 @@ pub fn build(study: &Path, out: &Path, facts: &Facts, release: &Release) -> Resu
     }
 
     let mut files = Vec::with_capacity(found.len());
+    let mut heads = BTreeMap::new();
     for f in &found {
-        let (sha256, size) = sha256_copy(&mut tree::open(study, f)?, &mut io::sink())?;
+        let mut head = Prefix {
+            bytes: Vec::new(),
+            keep: if f.path.starts_with("src/") {
+                HEADER_BYTES
+            } else {
+                0
+            },
+        };
+        let (sha256, size) = sha256_copy(&mut tree::open(study, f)?, &mut head)?;
+        heads.insert(f.path.as_str(), head.bytes);
         files.push(Entry {
             path: f.path.clone(),
             sha256,
@@ -264,7 +291,9 @@ pub fn build(study: &Path, out: &Path, facts: &Facts, release: &Release) -> Resu
     all.sort_by(|a, b| a.path.cmp(&b.path));
     let mut names: Vec<&str> = all.iter().map(|e| e.path.as_str()).collect();
     problems.extend(missing_files(&names));
-    let (licence_problems, warnings) = facts.licensing.check(study, &all);
+    let (licence_problems, warnings) = facts
+        .licensing
+        .check(&all, &|p| heads.get(p).map(Vec::as_slice));
     problems.extend(licence_problems);
     names.extend(GENERATED);
     problems.extend(rocrate::missing(&facts.runs, &names));

@@ -397,6 +397,30 @@ fn an_existing_out_is_never_touched() {
 }
 
 #[test]
+fn spdx_headers_are_read_from_the_first_64_kib() {
+    let tmp = tempfile::tempdir().unwrap();
+    let study = study_copy(tmp.path());
+    let long = format!(
+        "# {}\n# SPDX-License-Identifier: Apache-2.0\n",
+        "x".repeat(2000)
+    );
+    fs::write(study.join("src/long"), long).unwrap();
+    // The 64 KiB cut falls inside `é`. The byte after it is not UTF-8, so a longer
+    // read would skip the file as binary and give no warning.
+    let mut cut = vec![b'a'; 65_535];
+    cut.extend_from_slice("\u{e9}\n".as_bytes());
+    cut.push(0xFF);
+    fs::write(study.join("src/cut"), cut).unwrap();
+    let built = build(&study, &tmp.path().join("out"), &facts(), &release()).unwrap();
+    let got: Vec<(&str, &str)> = built
+        .warnings
+        .iter()
+        .map(|w| (w.code, w.path.as_str()))
+        .collect();
+    assert_eq!(got, [("W-PUB-002", "src/cut")]);
+}
+
+#[test]
 fn licence_warnings_ride_along() {
     let tmp = tempfile::tempdir().unwrap();
     let mut f = facts();

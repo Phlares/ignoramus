@@ -2,11 +2,9 @@
 use crate::manifest::Entry;
 use crate::{Problem, blank, tree::shown};
 use std::collections::BTreeSet;
-use std::fs::File;
-use std::io::Read;
-use std::path::Path;
 
-const HEADER_BYTES: u64 = 64 * 1024;
+/// How many leading bytes of a `src/` file the header check reads.
+pub const HEADER_BYTES: usize = 64 * 1024;
 const HEADER_LINES: usize = 10;
 const SPDX_TAG: &str = "SPDX-License-Identifier:";
 
@@ -48,19 +46,11 @@ fn normalize(path: &str) -> Option<&str> {
     ok.then_some(p)
 }
 
-/// `Some(text)` when the first 64 KiB of the file is UTF-8, a cut last character aside.
-fn head_text(path: &Path) -> Option<String> {
-    let mut bytes = Vec::new();
-    File::open(path)
-        .ok()?
-        .take(HEADER_BYTES)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    match std::str::from_utf8(&bytes) {
-        Ok(s) => Some(s.to_string()),
-        Err(e) if e.error_len().is_none() => {
-            Some(String::from_utf8_lossy(&bytes[..e.valid_up_to()]).into_owned())
-        }
+/// `Some(text)` when `bytes` are UTF-8, a cut last character aside.
+fn head_text(bytes: &[u8]) -> Option<&str> {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => Some(s),
+        Err(e) if e.error_len().is_none() => std::str::from_utf8(&bytes[..e.valid_up_to()]).ok(),
         Err(_) => None,
     }
 }
@@ -90,7 +80,12 @@ impl Licensing {
     }
 
     /// Returns problems and warnings, each in input order, then licence texts, then headers.
-    pub fn check(&self, study: &Path, files: &[Entry]) -> (Vec<Problem>, Vec<Problem>) {
+    /// `head(path)` gives the first `HEADER_BYTES` of a `src/` file; `None` skips the file.
+    pub fn check<'h>(
+        &self,
+        files: &[Entry],
+        head: &dyn Fn(&str) -> Option<&'h [u8]>,
+    ) -> (Vec<Problem>, Vec<Problem>) {
         let mut problems = Vec::new();
         let mut warnings = Vec::new();
         for (i, input) in self.inputs.iter().enumerate() {
@@ -166,7 +161,7 @@ impl Licensing {
             }
         }
         for f in files.iter().filter(|f| f.path.starts_with("src/")) {
-            let Some(text) = head_text(&study.join(&f.path)) else {
+            let Some(text) = head(&f.path).and_then(head_text) else {
                 continue;
             };
             if !text

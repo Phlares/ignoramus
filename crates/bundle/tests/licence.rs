@@ -1,6 +1,5 @@
-use bundle::licence::{Input, Kind, Licensing, Record};
+use bundle::licence::{HEADER_BYTES, Input, Kind, Licensing, Record};
 use bundle::manifest::Entry;
-use std::fs;
 
 const H: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const H2: &str = "1111111111111111111111111111111111111111111111111111111111111111";
@@ -28,6 +27,11 @@ fn entry(path: &str, sha: &str) -> Entry {
         sha256: sha.into(),
         size: 1,
     }
+}
+
+/// The leading bytes of each `src/` file, as the build hands them to the check.
+fn heads<'a>(m: &'a [(&str, &'a [u8])]) -> impl Fn(&str) -> Option<&'a [u8]> + 'a {
+    move |p| m.iter().find(|(q, _)| *q == p).map(|(_, b)| *b)
 }
 
 fn licensing(inputs: Vec<Input>) -> Licensing {
@@ -74,10 +78,6 @@ fn all_licences() -> Vec<Entry> {
 
 #[test]
 fn check_finds_every_problem() {
-    let dir = tempfile::tempdir().unwrap();
-    fs::create_dir(dir.path().join("src")).unwrap();
-    fs::write(dir.path().join("src/run"), "echo hi\n").unwrap();
-    fs::write(dir.path().join("src/blob"), [0xFFu8, 0, 1]).unwrap();
     let l = licensing(vec![
         input(
             "data/a.txt",
@@ -110,7 +110,11 @@ fn check_finds_every_problem() {
             .into_iter()
             .filter(|e| !e.path.contains("CC-BY-SA")),
     );
-    let (problems, warnings) = l.check(dir.path(), &files);
+    let src = [
+        ("src/run", b"echo hi\n".as_slice()),
+        ("src/blob", [0xFFu8, 0, 1].as_slice()),
+    ];
+    let (problems, warnings) = l.check(&files, &heads(&src));
     let got: Vec<(&str, &str)> = problems.iter().map(|p| (p.code, p.path.as_str())).collect();
     assert_eq!(
         got,
@@ -155,13 +159,6 @@ fn check_finds_every_problem() {
 
 #[test]
 fn check_accepts_a_clean_set() {
-    let dir = tempfile::tempdir().unwrap();
-    fs::create_dir(dir.path().join("src")).unwrap();
-    fs::write(
-        dir.path().join("src/run"),
-        "# SPDX-License-Identifier: Apache-2.0\n",
-    )
-    .unwrap();
     let l = licensing(vec![
         input(
             "./data/a.txt",
@@ -179,7 +176,11 @@ fn check_accepts_a_clean_set() {
     files.push(entry("LICENSES/LicenseRef-x.txt", H));
     files.push(entry("data/a.txt", H));
     files.push(entry("src/run", H));
-    assert_eq!(l.check(dir.path(), &files), (vec![], vec![]));
+    let src = [(
+        "src/run",
+        b"# SPDX-License-Identifier: Apache-2.0\n".as_slice(),
+    )];
+    assert_eq!(l.check(&files, &heads(&src)), (vec![], vec![]));
 }
 
 #[test]
@@ -189,7 +190,7 @@ fn blank_creator_and_blank_id_are_refused() {
         input("y", H, rec("CC0-1.0", Kind::Common, "s", &[" "])),
         input("z", H, rec(" ", Kind::Common, "s", &["A"])),
     ]);
-    let (p, _) = l.check(std::path::Path::new("."), &all_licences());
+    let (p, _) = l.check(&all_licences(), &|_| None);
     let paths: Vec<&str> = p.iter().map(|p| p.path.as_str()).collect();
     assert_eq!(
         paths,
@@ -209,7 +210,7 @@ fn display_text_is_escaped() {
         rec("Custom\u{202e}1", Kind::Unspecified, "s\u{1b}", &["A"]),
     )]);
     let files = vec![entry("d/\u{1b}x", H)];
-    let (p, _) = l.check(std::path::Path::new("."), &files);
+    let (p, _) = l.check(&files, &|_| None);
     for pr in &p {
         let all = format!("{} {} {}", pr.path, pr.message, pr.instruction);
         assert!(
@@ -232,14 +233,15 @@ fn header_at(line: usize) -> String {
 
 #[test]
 fn spdx_header_must_be_in_the_first_ten_lines() {
-    let dir = tempfile::tempdir().unwrap();
-    fs::create_dir(dir.path().join("src")).unwrap();
-    fs::write(dir.path().join("src/ten"), header_at(10)).unwrap();
-    fs::write(dir.path().join("src/eleven"), header_at(11)).unwrap();
+    let (ten, eleven) = (header_at(10), header_at(11));
     let mut files = all_licences();
     files.push(entry("src/ten", H));
     files.push(entry("src/eleven", H));
-    let (p, w) = licensing(vec![]).check(dir.path(), &files);
+    let src = [
+        ("src/ten", ten.as_bytes()),
+        ("src/eleven", eleven.as_bytes()),
+    ];
+    let (p, w) = licensing(vec![]).check(&files, &heads(&src));
     assert!(p.is_empty());
     assert_eq!(w.len(), 1);
     assert_eq!((w[0].code, w[0].path.as_str()), ("W-PUB-002", "src/eleven"));
@@ -247,30 +249,33 @@ fn spdx_header_must_be_in_the_first_ten_lines() {
 
 #[test]
 fn a_multibyte_char_cut_at_the_read_limit_is_still_text() {
-    let dir = tempfile::tempdir().unwrap();
-    fs::create_dir(dir.path().join("src")).unwrap();
     let mut files = all_licences();
     files.push(entry("src/cut", H));
-    let mut s = String::from("# SPDX-License-Identifier: MIT\n");
-    while s.len() < 65535 {
-        s.push('a');
-    }
-    s.push('\u{e9}');
-    s.push_str("\ntail\n");
-    assert!(!s.is_char_boundary(65536));
-    fs::write(dir.path().join("src/cut"), &s).unwrap();
-    let (_, w) = licensing(vec![]).check(dir.path(), &files);
-    assert!(w.is_empty());
+    let warnings = |head: &[u8]| {
+        let src = [("src/cut", head)];
+        licensing(vec![]).check(&files, &heads(&src)).1
+    };
+    // The text, `a` up to 65,535 bytes, then the first byte of the two-byte `é`.
+    let cut = |text: &[u8]| {
+        let mut b = text.to_vec();
+        b.resize(HEADER_BYTES - 1, b'a');
+        b.push(0xC3);
+        b
+    };
+    assert!(warnings(&cut(b"# SPDX-License-Identifier: MIT\n")).is_empty());
+    let w = warnings(&cut(b""));
+    assert_eq!(
+        w.iter()
+            .map(|p| (p.code, p.path.as_str()))
+            .collect::<Vec<_>>(),
+        [("W-PUB-002", "src/cut")]
+    );
     // Invalid bytes inside the window still mean binary: no warning either.
-    let mut bad = b"x\n".to_vec();
-    bad.push(0xFF);
-    fs::write(dir.path().join("src/cut"), bad).unwrap();
-    let (_, w) = licensing(vec![]).check(dir.path(), &files);
-    assert!(w.is_empty());
+    assert!(warnings(b"x\n\xFF").is_empty());
     // Plain text without a header warns.
-    fs::write(dir.path().join("src/cut"), "x\n").unwrap();
-    let (_, w) = licensing(vec![]).check(dir.path(), &files);
-    assert_eq!(w.len(), 1);
+    assert_eq!(warnings(b"x\n").len(), 1);
+    // A file the build gave no head for is not checked.
+    assert!(licensing(vec![]).check(&files, &|_| None).1.is_empty());
 }
 
 const HEAD: &str = "# Licences
