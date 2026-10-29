@@ -485,6 +485,44 @@ fn spdx_headers_are_read_from_the_first_64_kib() {
 }
 
 #[test]
+fn an_out_inside_the_study_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let study = study_copy(tmp.path());
+    let mut outs = vec![
+        study.join("results/out"),
+        study.join("doc/new/out"),
+        study.join("results/../out"),
+        study.clone(),
+    ];
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&study, tmp.path().join("link")).unwrap();
+        outs.push(tmp.path().join("link/out"));
+    }
+    for out in outs {
+        let (problems, _) = refused(build(&study, &out, &facts(), &release()));
+        let got: Vec<(&str, &str, &str)> = problems
+            .iter()
+            .map(|p| (p.code, p.path.as_str(), p.message.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [("E-PUB-010", "out", "lies inside the study folder")],
+            "{out:?}"
+        );
+        assert_eq!(
+            problems[0].instruction,
+            "Build the bundle in a folder outside the study folder."
+        );
+    }
+    assert!(!study.join("results/out").exists());
+    assert!(!study.join("out").exists());
+    assert!(!study.join("doc").exists());
+    let beside = tmp.path().join("study-out");
+    build(&study, &beside, &facts(), &release()).unwrap();
+}
+
+#[test]
 fn licence_warnings_ride_along() {
     let tmp = tempfile::tempdir().unwrap();
     let mut f = facts();

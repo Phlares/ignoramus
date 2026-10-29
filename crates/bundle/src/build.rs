@@ -227,6 +227,20 @@ fn put(out: &Path, path: &str, src: &mut impl Read) -> io::Result<Entry> {
     })
 }
 
+/// `p` with its parent made canonical, through the parent's deepest existing ancestor.
+fn anchored(p: &Path) -> io::Result<PathBuf> {
+    let (Some(parent), Some(name)) = (p.parent(), p.file_name()) else {
+        return p.canonicalize();
+    };
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    let base = parent.canonicalize().or_else(|_| anchored(parent))?;
+    Ok(base.join(name))
+}
+
 fn json_text(v: &impl serde::Serialize) -> String {
     let mut s = serde_json::to_string_pretty(v).expect("a JSON tree serialises");
     s.push('\n');
@@ -321,6 +335,15 @@ pub fn build(study: &Path, out: &Path, facts: &Facts, release: &Release) -> Resu
                 format!("Attach the file the profile names: {file}."),
             ));
         }
+    }
+
+    if anchored(out)?.starts_with(study.canonicalize()?) {
+        problems.push(Problem::new(
+            "E-PUB-010",
+            "out",
+            "lies inside the study folder",
+            "Build the bundle in a folder outside the study folder.",
+        ));
     }
 
     let (true, Some(citation), Some(profile)) = (problems.is_empty(), citation, profile) else {
@@ -429,6 +452,17 @@ mod tests {
     fn a_missing_copy_is_refused() {
         let e = verify_copied(&[entry("a", "1")], &[]).unwrap_err();
         assert_eq!(e.to_string(), "a changed while the bundle was built");
+    }
+
+    #[test]
+    fn anchored_resolves_through_the_deepest_existing_folder() {
+        let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+        assert_eq!(anchored(Path::new("x")).unwrap(), cwd.join("x"));
+        assert_eq!(
+            anchored(Path::new("no-such/x")).unwrap(),
+            cwd.join("no-such/x")
+        );
+        assert_eq!(anchored(Path::new("src/../x")).unwrap(), cwd.join("x"));
     }
 
     #[test]
