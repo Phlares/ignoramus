@@ -59,11 +59,11 @@ fn bounded_scores_against_the_null_mean() {
 }
 
 #[test]
-fn bounded_uses_the_longer_side_when_mean_is_high() {
+fn bounded_scale_is_the_longer_side_with_a_negative_lower_bound() {
     let s = Score::Bounded {
-        lo: 0.0,
+        lo: -1.0,
         hi: 1.0,
-        mean: 0.75,
+        mean: 0.5,
     };
     let mut p = EProcess::new(s, Tail::Upper, f64::INFINITY).unwrap();
     let v = run(&mut p, &[1.0, 1.0]);
