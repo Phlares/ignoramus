@@ -3,6 +3,7 @@ pub mod level0;
 pub mod level1;
 mod output;
 pub mod seccomp;
+pub mod selftest;
 
 pub use output::output_hash;
 
@@ -51,7 +52,11 @@ pub struct RowOutcome {
     pub cpu_seconds: f64,
     pub wall_seconds: f64,
     pub output_hash: String,
-    pub selftest_ok: bool,
+    /// What the level 1 self-test found before the row; `None` at level 0 and when it
+    /// printed nothing readable.
+    pub selftest: Option<selftest::SelfTest>,
+    /// Why the CPU count is missing the sandbox's own processes, when it is.
+    pub cpu_unknown: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,7 +114,8 @@ pub fn outcome(job: &RowJob, start: Instant, mut exit: Exit, cpu_seconds: f64) -
         cpu_seconds,
         wall_seconds,
         output_hash,
-        selftest_ok: true,
+        selftest: None,
+        cpu_unknown: None,
     }
 }
 

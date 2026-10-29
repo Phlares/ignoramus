@@ -843,8 +843,19 @@ fn attempt_row(
                 cpu_seconds: 0.0,
                 wall_seconds: 0.0,
                 output_hash: String::new(),
-                selftest_ok: false,
+                selftest: None,
+                cpu_unknown: None,
             });
+        if let Some(t) = &o.selftest {
+            let span = watch.row.borrow().1.clone();
+            let attrs = json!({
+                "row": row.index,
+                "connect_blocked": t.connect_blocked,
+                "vsock_blocked": t.vsock_blocked,
+                "io_uring_blocked": t.io_uring_blocked,
+            });
+            log_event(plan, dir, Some(&span), "sandbox.selftest", "info", attrs)?;
+        }
         control::row_ended(&plan.home, &plan.study_id);
         // A row ended early is not data: its spend is recorded, and the run ends.
         if let Some(h) = watch.ended.borrow_mut().take() {
@@ -902,6 +913,9 @@ fn attempt_row(
     if let Some(why) = reason {
         body["reason"] = json!(why);
     }
+    if let Some(why) = &outcome.cpu_unknown {
+        body["cpu_unknown"] = json!(why);
+    }
     records::append(
         log,
         &plan.key,
@@ -933,8 +947,11 @@ fn unrecorded(
     o: &RowOutcome,
     reason: &str,
 ) -> Result<(), RunError> {
-    let body =
+    let mut body =
         json!({ "cpu_seconds": o.cpu_seconds, "wall_seconds": o.wall_seconds, "reason": reason });
+    if let Some(why) = &o.cpu_unknown {
+        body["cpu_unknown"] = json!(why);
+    }
     records::append(
         log,
         &plan.key,

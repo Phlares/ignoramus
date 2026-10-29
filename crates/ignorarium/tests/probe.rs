@@ -24,7 +24,8 @@ impl Backend for Fake {
             cpu_seconds: 0.0,
             wall_seconds: 0.0,
             output_hash: String::new(),
-            selftest_ok: true,
+            selftest: None,
+            cpu_unknown: None,
         })
     }
 }

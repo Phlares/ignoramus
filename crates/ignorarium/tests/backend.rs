@@ -1,5 +1,6 @@
 mod common;
 use ignorarium::backend::level0::Level0;
+use ignorarium::backend::level1;
 use ignorarium::backend::{Backend, Exit, Probe, RowJob, Watch, output_hash};
 use ignorarium::sys;
 use sha2::{Digest, Sha256};
@@ -42,7 +43,7 @@ fn level0_runs_hashes_output_and_times_the_row() {
         )
         .unwrap();
     assert_eq!(o.exit, Exit::Ok);
-    assert!(o.selftest_ok);
+    assert_eq!(o.selftest, None);
     assert!(o.wall_seconds > 0.0 && o.wall_seconds < 30.0);
     assert!(o.cpu_seconds >= 0.0 && o.cpu_seconds < 30.0);
     let manifest = format!("[[\"result\",\"file\",\"{}\"]]", sha(b"42"));
@@ -399,21 +400,33 @@ impl Watch for Leaders {
 }
 
 #[test]
-fn every_registered_backend_reports_one_leader_start() {
+fn every_registered_backend_reports_each_sandbox_start_as_a_leader() {
+    // The test binary cannot stand in for the box in the self-test sandbox.
+    let bwrap = level1::Level1::new().bwrap;
+    let box_exe = env!("CARGO_BIN_EXE_ignorarium");
     for b in ignorarium::backend::registered() {
-        if b.level() == 1 && common::skip_level1() {
+        let level = b.level();
+        let b: Box<dyn Backend> = if level == 1 {
+            Box::new(level1::Level1::with(bwrap.clone(), box_exe.into()))
+        } else {
+            b
+        };
+        if level == 1 && common::skip_level1() {
             continue;
         }
-        assert_eq!(b.probe(), Probe::Available, "level {}", b.level());
+        assert_eq!(b.probe(), Probe::Available, "level {level}");
         let d = tempfile::tempdir().unwrap();
         let watch = Leaders::default();
         let o = b
             .run_row(&job(d.path(), "sleep 0.2", Duration::from_secs(30)), &watch)
             .unwrap();
         assert_eq!(o.exit, Exit::Ok);
+        // Level 1 starts the self-test sandbox, then the row's.
         let seen = watch.0.borrow();
-        assert_eq!(seen.len(), 1, "level {}", b.level());
-        assert_eq!(seen[0].1, seen[0].0);
+        assert_eq!(seen.len(), 1 + usize::from(level == 1), "level {level}");
+        for (pid, group) in seen.iter() {
+            assert_eq!(group, pid);
+        }
     }
 }
 

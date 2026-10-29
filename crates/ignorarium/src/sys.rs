@@ -124,20 +124,7 @@ pub fn wait4(pid: u32, block: bool) -> io::Result<Option<Reaped>> {
 pub fn inherit_only(cmd: &mut std::process::Command, keep: [i32; 2]) {
     use std::os::unix::process::CommandExt;
     let hook = move || -> io::Result<()> {
-        let (first, last): (libc::c_uint, libc::c_uint) = (3, libc::c_uint::MAX);
-        // SAFETY: close_range takes three integers and only marks this process's descriptors
-        // close-on-exec; it reads and writes no memory.
-        let marked = unsafe {
-            libc::syscall(
-                libc::SYS_close_range,
-                first,
-                last,
-                libc::CLOSE_RANGE_CLOEXEC,
-            )
-        };
-        if marked != 0 {
-            return Err(io::Error::last_os_error());
-        }
+        close_range_cloexec(3, libc::c_uint::MAX)?;
         for fd in keep {
             // SAFETY: fcntl F_SETFD with 0 clears close-on-exec on a descriptor number; it
             // reads and writes no memory.
@@ -150,6 +137,42 @@ pub fn inherit_only(cmd: &mut std::process::Command, keep: [i32; 2]) {
     // SAFETY: `hook` runs in the child between fork and exec. It makes only the
     // async-signal-safe close_range and fcntl calls, and it allocates nothing.
     unsafe { cmd.pre_exec(hook) };
+}
+
+/// Mark every descriptor from `first` to `last` close-on-exec. Fails with `EINVAL` or
+/// `ENOSYS` before Linux 5.11.
+pub fn close_range_cloexec(first: libc::c_uint, last: libc::c_uint) -> io::Result<()> {
+    // SAFETY: close_range takes three integers and only marks this process's descriptors
+    // close-on-exec; it reads and writes no memory.
+    let marked = unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            first,
+            last,
+            libc::CLOSE_RANGE_CLOEXEC,
+        )
+    };
+    if marked == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// True when `io_uring_setup` fails (a filter, a sysctl or an old kernel). A call that
+/// succeeds closes its descriptor and gives false.
+pub fn io_uring_setup_fails() -> bool {
+    // The kernel's `struct io_uring_params` is 120 bytes, all-zero for a plain ring.
+    let mut params = [0u64; 15];
+    // SAFETY: io_uring_setup reads and writes only the 120-byte params struct, which
+    // `params` is, and takes the entry count by value.
+    let fd = unsafe { libc::syscall(libc::SYS_io_uring_setup, 1u32, params.as_mut_ptr()) };
+    if fd < 0 {
+        return true;
+    }
+    // SAFETY: the kernel just returned `fd`, which nothing else owns.
+    unsafe { libc::close(fd as libc::c_int) };
+    false
 }
 
 /// Send SIGKILL to the process group led by `pid`. A group already gone is fine.

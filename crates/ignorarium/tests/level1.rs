@@ -661,6 +661,51 @@ fn a_setup_fault_keeps_the_last_4_kib_of_stderr() {
     );
 }
 
+/// A stand-in bubblewrap whose sandbox exits 0 and leaves a process behind, reported as
+/// the sandbox's PID 1, in a session of its own so the group kill misses it, and holding
+/// none of the pipes. The self-test sandbox, which names `/box/ignorarium`, prints a passing
+/// result instead. The fake waits 0.3 s so the process has left the group before the group kill.
+fn fake_with_stuck_pid_1(dir: &Path) -> Level1 {
+    let path = dir.join("bwrap-stuck");
+    write_exec(
+        &path,
+        "#!/bin/bash
+         if [ \"$1\" = --version ]; then echo 'bubblewrap 0.9.0'; exit 0; fi
+         prev=; for a in \"$@\"; do [ \"$prev\" = --json-status-fd ] && fd=$a; prev=$a; done
+         case \"$*\" in *' /box/ignorarium '*)
+           echo '{\"connect_blocked\":true,\"vsock_blocked\":true,\"io_uring_blocked\":true}'
+           echo '{\"exit-code\": 0}' >&$fd
+           exit 0;; esac
+         pid=$( eval \"exec $fd>&-\"; setsid sleep 20 >/dev/null 2>&1 & echo $! )
+         sleep 0.3
+         echo \"{\\\"child-pid\\\": $pid}\" >&$fd
+         echo '{\"exit-code\": 0}' >&$fd
+         exit 0
+",
+    );
+    Level1::with(path, BOX.into())
+}
+
+#[test]
+fn a_stuck_sandbox_pid_1_marks_the_cpu_unknown_and_the_row_goes_on() {
+    let d = TempDir::new().unwrap();
+    let b = fake_with_stuck_pid_1(d.path());
+    let (_w, job) = row("true", LONG);
+    let t = Instant::now();
+    let o = b.run_row(&job, &|| true).unwrap();
+    assert_eq!(o.exit, Exit::Ok);
+    assert_eq!(
+        o.cpu_unknown.as_deref(),
+        Some("the sandbox's PID 1 did not exit in time; its CPU time is unknown")
+    );
+    // The wait ends at the limit: it neither returns at once nor hangs.
+    let waited = t.elapsed();
+    assert!(
+        waited >= Duration::from_secs(5) && waited < Duration::from_secs(15),
+        "{waited:?}"
+    );
+}
+
 fn why(b: &Level1) -> String {
     match b.probe() {
         Probe::Unavailable(why) => why,

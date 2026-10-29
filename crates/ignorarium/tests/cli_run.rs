@@ -42,6 +42,11 @@ fn probe_writes_machine_toml_and_prints_the_level() {
     let out = text(&a);
     assert!(out.contains(&format!("max level: {want}")), "{out}");
     assert!(out.contains("/dev/kvm"), "{out}");
+    assert!(out.contains("level 0 (process): available\n"), "{out}");
+    if want == 1 {
+        assert!(out.contains("): available\n"), "{out}");
+        assert!(out.contains("level 1 (bubblewrap 0."), "{out}");
+    }
     let m = ignorarium::machine::load(&lab.home.root).unwrap();
     assert_eq!(m.max_level, want);
     assert_eq!(m.rate_usd_per_hour, 2.5);
@@ -50,6 +55,37 @@ fn probe_writes_machine_toml_and_prints_the_level() {
     assert_eq!(probe.len(), 1);
     assert_eq!(probe[0]["attrs"]["max_level"], want);
     assert!(probe[0]["attrs"]["kvm"].is_boolean());
+}
+
+#[test]
+fn probe_names_the_reason_each_backend_is_unavailable() {
+    let lab = lab();
+    let dir = tempfile::tempdir().unwrap();
+    // No bwrap on PATH: the reason is the one the backend gives, verbatim.
+    let a = bin(&lab)
+        .env("PATH", dir.path())
+        .arg("probe")
+        .assert()
+        .code(0);
+    let out = text(&a);
+    assert!(out.contains("level 0 (process): available\n"), "{out}");
+    assert!(
+        out.contains("level 1 (bubblewrap unknown): unavailable: cannot run bwrap: "),
+        "{out}"
+    );
+    assert!(out.contains("max level: 0\n"), "{out}");
+    // A bwrap older than the floor.
+    let old = dir.path().join("bwrap");
+    common::write_exec(&old, "#!/bin/sh\necho 'bubblewrap 0.7.0'\n");
+    let a = bin(&lab)
+        .env("PATH", dir.path())
+        .arg("probe")
+        .assert()
+        .code(0);
+    let out = text(&a);
+    let want = "level 1 (bubblewrap 0.7.0): unavailable: bubblewrap 0.7.0 is older than 0.8, \
+                which level 1 needs for --disable-userns\n";
+    assert!(out.contains(want), "{out}");
 }
 
 #[test]

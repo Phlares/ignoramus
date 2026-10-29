@@ -76,10 +76,20 @@ pub fn load(home: &Path) -> Result<Machine, MachineError> {
     Ok(m)
 }
 
-/// Fill a profile from this host. `rate_usd_per_hour`, `experiment_mode` and
-/// `long_job_minutes` come from an existing `machine.toml`. A file that fails
-/// to load is an error; the probe never writes.
+/// Ask each backend whether it can run here, as (level, answer).
+pub fn probe_backends(backends: &[Box<dyn Backend>]) -> Vec<(u8, Probe)> {
+    backends.iter().map(|b| (b.level(), b.probe())).collect()
+}
+
+/// Fill a profile from this host and `backends`. `rate_usd_per_hour`, `experiment_mode`
+/// and `long_job_minutes` come from an existing `machine.toml`. A file that fails to load
+/// is an error; the probe never writes.
 pub fn probe(home: &Path, backends: &[Box<dyn Backend>]) -> Result<Machine, MachineError> {
+    measure(home, &probe_backends(backends))
+}
+
+/// `probe` with the backends' answers already in hand.
+pub fn measure(home: &Path, probes: &[(u8, Probe)]) -> Result<Machine, MachineError> {
     let kept = load(home)?;
     let name = std::fs::read_to_string("/proc/sys/kernel/hostname")
         .map(|s| s.trim().to_string())
@@ -93,10 +103,10 @@ pub fn probe(home: &Path, backends: &[Box<dyn Backend>]) -> Result<Machine, Mach
         .ok()
         .and_then(|t| mem_gib_of(&t))
         .unwrap_or(1);
-    let max_level = backends
+    let max_level = probes
         .iter()
-        .filter(|b| b.probe() == Probe::Available)
-        .map(|b| b.level())
+        .filter(|(_, p)| *p == Probe::Available)
+        .map(|(level, _)| *level)
         .max()
         .unwrap_or(0);
     Ok(Machine {

@@ -678,7 +678,8 @@ impl Backend for StopThenFail {
             cpu_seconds: 0.0,
             wall_seconds: 0.0,
             output_hash: String::new(),
-            selftest_ok: false,
+            selftest: None,
+            cpu_unknown: None,
         })
     }
 }
@@ -1057,7 +1058,8 @@ impl Backend for StopThenBlind {
             cpu_seconds: 0.0,
             wall_seconds: 0.0,
             output_hash: String::new(),
-            selftest_ok: true,
+            selftest: None,
+            cpu_unknown: None,
         })
     }
 }
