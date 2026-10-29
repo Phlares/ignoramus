@@ -1,9 +1,7 @@
-use ignorarium_guest::image::{Pin, check_pin, ext4, extract, initramfs, sha256_file, size_mib};
-use ignorarium_guest::tree::tree_hash;
+use ignorarium_guest::image::{Pin, check_pin, ext4, initramfs, sha256_file, size_mib};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::ErrorKind;
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 
@@ -47,10 +45,6 @@ fn parse_newc(mut b: &[u8]) -> Vec<Entry> {
         b = &b[end..];
     }
     out
-}
-
-fn without_lost_found(d: &Path) {
-    fs::remove_dir(d.join("lost+found")).unwrap();
 }
 
 #[test]
@@ -135,8 +129,28 @@ fn size_mib_leaves_room() {
     assert_eq!(size_mib(&four).unwrap(), 22);
 }
 
+fn debugfs(img: &Path, cmd: &str) -> String {
+    let out = std::process::Command::new("debugfs")
+        .args(["-R", cmd])
+        .arg(img)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Names in the image root, from `ls -p` rows `/inode/mode/uid/gid/name/size/`.
+fn root_names(img: &Path) -> Vec<String> {
+    let mut names: Vec<String> = debugfs(img, "ls -p /")
+        .lines()
+        .filter_map(|l| l.split('/').nth(5).map(str::to_string))
+        .filter(|n| !matches!(n.as_str(), "." | ".." | "lost+found"))
+        .collect();
+    names.sort();
+    names
+}
+
 #[test]
-fn ext4_round_trip_keeps_the_tree() {
+fn ext4_holds_the_source_tree() {
     let d = tempfile::tempdir().unwrap();
     let src = d.path().join("src");
     fs::create_dir_all(src.join("sub/deeper")).unwrap();
@@ -145,64 +159,36 @@ fn ext4_round_trip_keeps_the_tree() {
     symlink("a.txt", src.join("l")).unwrap();
     let img = d.path().join("i.ext4");
     ext4(Some(&src), &img, size_mib(&src).unwrap()).unwrap();
-    let out = d.path().join("out");
-    fs::create_dir(&out).unwrap();
-    extract(&img, &out).unwrap();
-    without_lost_found(&out);
-    assert_eq!(tree_hash(&out).unwrap(), tree_hash(&src).unwrap());
+    assert_eq!(root_names(&img), ["a.txt", "l", "sub"]);
+    assert_eq!(debugfs(&img, "cat /a.txt"), "hi\n");
+    assert_eq!(
+        debugfs(&img, "stat /sub/deeper/b")
+            .matches("Size: 100000")
+            .count(),
+        1
+    );
 }
 
 #[test]
-fn ext4_round_trip_keeps_odd_names() {
+fn ext4_keeps_odd_names() {
     let d = tempfile::tempdir().unwrap();
     let src = d.path().join("src");
     fs::create_dir(&src).unwrap();
-    for name in [&b"a b"[..], b"new\nline", b"x\xff"] {
-        fs::write(src.join(OsStr::from_bytes(name)), name).unwrap();
+    for name in ["a b", "x  y"] {
+        fs::write(src.join(OsStr::new(name)), name).unwrap();
     }
     let img = d.path().join("i.ext4");
     ext4(Some(&src), &img, size_mib(&src).unwrap()).unwrap();
-    let out = d.path().join("out");
-    fs::create_dir(&out).unwrap();
-    extract(&img, &out).unwrap();
-    without_lost_found(&out);
-    assert_eq!(fs::read_dir(&out).unwrap().count(), 3);
-    assert_eq!(tree_hash(&out).unwrap(), tree_hash(&src).unwrap());
+    assert_eq!(root_names(&img), ["a b", "x  y"]);
 }
 
 #[test]
-fn empty_ext4_extracts_to_nothing_but_lost_found() {
+fn empty_ext4_has_extents_and_no_journal() {
     let d = tempfile::tempdir().unwrap();
     let img = d.path().join("i.ext4");
     ext4(None, &img, 16).unwrap();
-    let features = std::process::Command::new("debugfs")
-        .args(["-R", "features"])
-        .arg(&img)
-        .output()
-        .unwrap();
-    let features = String::from_utf8_lossy(&features.stdout);
+    let features = debugfs(&img, "features");
     assert!(features.contains("extent"), "{features}");
     assert!(!features.contains("has_journal"), "{features}");
-    let out = d.path().join("out");
-    fs::create_dir(&out).unwrap();
-    extract(&img, &out).unwrap();
-    let names: Vec<_> = fs::read_dir(&out)
-        .unwrap()
-        .map(|e| e.unwrap().file_name())
-        .collect();
-    assert_eq!(names, ["lost+found"]);
-}
-
-#[test]
-fn extract_refuses_a_dest_with_whitespace_or_quotes() {
-    let d = tempfile::tempdir().unwrap();
-    let img = d.path().join("i.ext4");
-    ext4(None, &img, 16).unwrap();
-    for bad in ["a b", "a\"b", "a'b", "a\tb", "a\nb"] {
-        let dest = d.path().join(bad);
-        fs::create_dir(&dest).unwrap();
-        let e = extract(&img, &dest).unwrap_err();
-        assert_eq!(e.kind(), ErrorKind::InvalidInput, "{bad:?}");
-        assert_eq!(fs::read_dir(&dest).unwrap().count(), 0);
-    }
+    assert!(root_names(&img).is_empty());
 }

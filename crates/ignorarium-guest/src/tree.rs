@@ -54,7 +54,7 @@ fn walk(dir: &Path, prefix: &str, rows: &mut Vec<Row>) -> io::Result<()> {
 }
 
 /// `None` when the path stopped being a regular file between listing and open.
-fn open_regular(path: &Path) -> io::Result<Option<File>> {
+pub(crate) fn open_regular(path: &Path) -> io::Result<Option<File>> {
     let f = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)

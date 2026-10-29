@@ -397,6 +397,7 @@ version = "0.0.1"
 dependencies = [
  "hex",
  "libc",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

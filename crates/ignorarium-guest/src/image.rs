@@ -156,22 +156,3 @@ pub fn ext4(src: Option<&Path>, dest: &Path, size_mib: u64) -> io::Result<()> {
     }
     run(cmd.arg(dest))
 }
-
-/// Copies the root of an ext4 image into the existing directory `dest`.
-/// `debugfs -R` splits its command on whitespace, so `dest` may hold none and no quotes.
-pub fn extract(img: &Path, dest: &Path) -> io::Result<()> {
-    let text = dest
-        .to_str()
-        .filter(|t| !t.contains(|c: char| c.is_whitespace() || c == '"' || c == '\''))
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "dest must be UTF-8 without whitespace or quotes",
-            )
-        })?;
-    // As non-root, debugfs warns that it cannot change ownership and still exits 0.
-    run(Command::new("debugfs")
-        .arg("-R")
-        .arg(format!("rdump / {text}"))
-        .arg(img))
-}
