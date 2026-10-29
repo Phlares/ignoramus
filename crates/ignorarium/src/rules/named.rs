@@ -154,6 +154,7 @@ fn resolve(ctx: &CheckCtx, rel: &str) -> Option<PathBuf> {
     let mut any = false;
     for part in rel.split('/').filter(|c| !c.is_empty()) {
         let mut parts = Path::new(part).components();
+        // One Normal component per segment: no `..`, root or prefix, so the result stays inside.
         let plain = matches!(
             (parts.next(), parts.next()),
             (Some(Component::Normal(_)), None)
@@ -167,7 +168,7 @@ fn resolve(ctx: &CheckCtx, rel: &str) -> Option<PathBuf> {
             return None;
         }
     }
-    (any && path.starts_with(&ctx.study_dir)).then_some(path)
+    any.then_some(path)
 }
 
 /// The bytes of a regular file; never opens a pipe or device.
@@ -254,20 +255,40 @@ fn open_unit(x: f64) -> bool {
     x > 0.0 && x < 1.0
 }
 
-/// Alpha, power and icc come from the defaults step; absent means skip.
+/// Alpha, power and icc come from the defaults step. If one is absent the gate
+/// cannot be computed, so it fails closed. A mistyped one is skipped: the type rule reports it.
 fn power_met(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
-    let (Some(variance), Some(sesoi), Some(per), Some(alpha), Some(power), Some(icc)) = (
+    let (Some(variance), Some(sesoi), Some(per)) = (
         num(spec, "design.variance.value"),
         num(spec, "design.sesoi"),
         val(spec, "design.units_per_cluster").and_then(Value::as_i64),
-        num(spec, "design.alpha"),
-        num(spec, "design.power"),
-        num(spec, "design.icc"),
     ) else {
         return vec![];
     };
-    // E-CNF-001 and the range rules report these.
-    if sesoi <= 0.0 || !open_unit(alpha) || !open_unit(power) || !(0.0..1.0).contains(&icc) {
+    let fields = ["alpha", "power", "icc"].map(|f| (f, val(spec, &format!("design.{f}"))));
+    if sesoi <= 0.0
+        || fields
+            .iter()
+            .any(|(_, v)| v.is_some_and(|v| !v.is_number()))
+    {
+        return vec![];
+    }
+    let absent: Vec<_> = fields.iter().filter(|(_, v)| v.is_none()).collect();
+    if !absent.is_empty() {
+        return nodes(spec, pat)
+            .into_iter()
+            .filter(|(_, v)| v.is_array())
+            .flat_map(|(path, _)| {
+                absent.iter().map(move |(f, _)| Hit {
+                    path: path.clone(),
+                    detail: Some(format!("cannot compute power: design.{f} is absent")),
+                })
+            })
+            .collect();
+    }
+    let [alpha, power, icc] = fields.map(|(_, v)| v.and_then(Value::as_f64).unwrap_or_default());
+    // The range rules report these.
+    if !open_unit(alpha) || !open_unit(power) || !(0.0..1.0).contains(&icc) {
         return vec![];
     }
     let per = per.max(0);
@@ -304,9 +325,13 @@ fn variance_from_record(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
 /// The array is empty, or one element is also a selection cluster.
 fn selection_confirmation_disjoint(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
     let selection = list(spec, "design.selection.clusters").map_or(&[][..], Vec::as_slice);
-    flag(spec, pat, |v| match v.as_array() {
-        Some(a) => a.is_empty(),
-        None => selection.contains(v),
+    let elements = pat.ends_with("[*]");
+    flag(spec, pat, |v| {
+        if elements {
+            selection.contains(v)
+        } else {
+            v.as_array().is_some_and(Vec::is_empty)
+        }
     })
 }
 
@@ -339,10 +364,12 @@ fn budget_present(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
 fn route_valid(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
     let hypotheses = texts(spec, "question.hypotheses[*].id");
     let follow = text(spec, "scope.end_of_run.route") == Some("follow-on");
+    let whens = pat.ends_with("[*].when");
     flag(spec, pat, |v| match v {
-        Value::Array(a) => follow && a.is_empty(),
+        Value::Array(a) => !whens && follow && a.is_empty(),
         Value::String(w) => {
-            !matches!(w.rsplit_once('.'), Some((id, "pass" | "fail")) if hypotheses.contains(&id))
+            whens
+                && !matches!(w.rsplit_once('.'), Some((id, "pass" | "fail")) if hypotheses.contains(&id))
         }
         _ => false,
     })

@@ -305,6 +305,25 @@ fn faults() -> Vec<Fault> {
             guard("/design/icc", json!(0.0)),
             vec![("E-CNF-002", "design.confirmation.clusters")],
         ),
+        // Fail closed: an absent alpha, power or icc cannot be computed.
+        f(
+            vec![("/design/alpha", None)],
+            vec![("E-CNF-002", "design.confirmation.clusters")],
+        ),
+        f(
+            vec![("/design/power", None)],
+            vec![("E-CNF-002", "design.confirmation.clusters")],
+        ),
+        f(
+            vec![("/design/icc", None)],
+            vec![("E-CNF-002", "design.confirmation.clusters")],
+        ),
+        // An empty array as an element is not an empty array-level field.
+        f(
+            vec![("/design/confirmation/clusters/0", j(json!([])))],
+            vec![],
+        ),
+        f(route(json!([{ "when": [], "spec": "f.toml" }])), vec![]),
         // A budget of negatives is not a budget.
         f(
             vec![
@@ -508,6 +527,7 @@ fn junk() -> Vec<Value> {
         json!(7),
         json!(i64::MAX),
         json!(-1.5),
+        json!([]),
         json!([1, "a"]),
         json!({}),
         json!(true),
@@ -791,6 +811,35 @@ fn symlinks_under_the_study_folder_are_refused_and_never_read() {
     assert!(named(&with_input("real/x.txt", ABC, "calibration"), dir.path()).is_empty());
 }
 
+#[test]
+fn absent_power_fields_say_which_is_missing() {
+    let dir = study_dir();
+    for field in ["alpha", "power", "icc"] {
+        let ptr: &'static str = Box::leak(format!("/design/{field}").into_boxed_str());
+        let d = named(&edited(&[(ptr, None)]), dir.path());
+        assert_eq!(d.len(), 1, "{field}");
+        assert!(
+            d[0].problem
+                .ends_with(&format!("cannot compute power: design.{field} is absent")),
+            "{}",
+            d[0].problem
+        );
+    }
+    // Two absent fields give two diagnostics; a mistyped one among them skips the gate.
+    let d = named(
+        &edited(&[("/design/alpha", None), ("/design/icc", None)]),
+        dir.path(),
+    );
+    assert_eq!(d.len(), 2);
+    assert!(
+        named(
+            &edited(&[("/design/alpha", None), ("/design/power", j(json!("x")))]),
+            dir.path()
+        )
+        .is_empty()
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn a_pipe_is_never_opened() {
@@ -801,10 +850,24 @@ fn a_pipe_is_never_opened() {
         .unwrap()
         .success();
     assert!(ok);
-    let (prior, seen) = fake(None, None);
-    let d = fresh(&with_input("pipe", ABC, "confirmation"), dir.path(), prior);
-    assert_eq!(codes_paths(&d), [("E-HSH-001", "inputs[0].sha256")]);
-    assert!(seen.borrow().is_empty());
+    // Run in a thread: a check that opens the pipe blocks forever.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (spec, path) = (
+        with_input("pipe", ABC, "confirmation"),
+        dir.path().to_path_buf(),
+    );
+    std::thread::spawn(move || {
+        let d = named(&spec, &path);
+        let got: Vec<_> = d.iter().map(|x| (x.code.clone(), x.path.clone())).collect();
+        let _ = tx.send(got);
+    });
+    let got = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the check blocked on a pipe");
+    assert_eq!(
+        got,
+        [("E-HSH-001".to_string(), "inputs[0].sha256".to_string())]
+    );
 }
 
 // ---- rule loading and gating ----

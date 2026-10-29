@@ -65,6 +65,24 @@ fn faults() -> Vec<Fault> {
         ),
         ("E-FMT-001", "/study/id", Some(json!("étude-1")), "study.id"),
         (
+            "E-RNG-001",
+            "/scope/budget/cpu_hours",
+            Some(json!(-0.5)),
+            "scope.budget.cpu_hours",
+        ),
+        (
+            "E-RNG-001",
+            "/scope/budget/wall_hours",
+            Some(json!(-0.5)),
+            "scope.budget.wall_hours",
+        ),
+        (
+            "E-RNG-001",
+            "/scope/budget/money_usd",
+            Some(json!(-0.5)),
+            "scope.budget.money_usd",
+        ),
+        (
             "E-FMT-001",
             "/design/conditions/1/id",
             Some(json!("Arm A")),
@@ -830,5 +848,15 @@ fn interval_syntax_is_strict() {
         "[]",
     ] {
         assert!(!interval(bad), "{bad}");
+    }
+}
+
+#[test]
+fn budget_values_of_zero_pass_the_range_and_negatives_do_not() {
+    for k in ["cpu_hours", "wall_hours", "money_usd"] {
+        let zero = with(&["scope", "budget", k], json!(0.0));
+        assert!(rng_codes(&zero).is_empty(), "{k}");
+        let neg = with(&["scope", "budget", k], json!(-1e-9));
+        assert_eq!(rng_codes(&neg), [format!("scope.budget.{k}")]);
     }
 }

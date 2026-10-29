@@ -493,8 +493,8 @@ target = [
 [[rule]]
 code = "E-PTH-001"
 severity = "error"
-problem = "A file path is absolute, contains .. or a backslash, starts with a drive, or passes through a symbolic link."
-instruction = "Use a relative path with forward slashes that stays inside the study folder."
+problem = "A file path is absolute, starts with a drive, has a . or .. segment, contains a backslash or a colon, has a segment ending in a dot or space, or passes through a symbolic link."
+instruction = "Write the path from the study folder with no `.` or `..` segment, no `:` or `\\`, and no segment ending in a dot or space; write `data/x.txt`, not `./data/x.txt`."
 why = "The checker reads only files inside the study folder. It never follows links, so a spec cannot point it at other files."
 sources = []
 target = [
