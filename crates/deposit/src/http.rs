@@ -63,7 +63,9 @@ pub struct Curl {
 }
 
 const KEEP_LIMIT: usize = 64 * 1024 * 1024;
-const MAX_SECS: u32 = 600;
+/// curl aborts only a stalled transfer: one slower than 1 KiB/s for 2 minutes, or a
+/// connection not made in 30 s. A long upload that keeps moving is never cut.
+const LIMITS: &str = "connect-timeout = 30\nspeed-limit = 1024\nspeed-time = 120\n";
 
 impl Curl {
     pub fn new() -> Curl {
@@ -103,7 +105,7 @@ fn config(req: &Request) -> Result<String, Error> {
         ""
     };
     let mut c = format!(
-        "silent\nshow-error\ngloboff\nproto = \"=https\"\nproto-redir = \"=https\"\n{follow}max-time = {MAX_SECS}\nurl = {}\nrequest = \"{method}\"\n",
+        "silent\nshow-error\ngloboff\nproto = \"=https\"\nproto-redir = \"=https\"\n{follow}{LIMITS}url = {}\nrequest = \"{method}\"\n",
         quote(&req.url)?
     );
     if let Some(t) = req.token {

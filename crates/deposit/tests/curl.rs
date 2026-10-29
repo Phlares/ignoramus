@@ -36,7 +36,9 @@ fn head() -> String {
         "proto-redir = \"=https\"",
         "location",
         "max-redirs = 3",
-        "max-time = 600",
+        "connect-timeout = 30",
+        "speed-limit = 1024",
+        "speed-time = 120",
         "",
     ]
     .join("\n")
