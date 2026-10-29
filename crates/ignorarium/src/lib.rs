@@ -17,4 +17,5 @@ pub mod scan;
 pub mod schedule;
 pub mod seed;
 pub mod spec;
+pub mod store;
 pub mod time;
