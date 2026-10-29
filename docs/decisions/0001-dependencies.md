@@ -15,8 +15,8 @@ Runtime:
 - `regex`: matches text patterns in checks.
 - `rustix`: kills a process group, waits on a child with `waitid` and reads the user id, through safe interfaces.
 - `libc`: reads a child's CPU time with `wait4` and installs signal handlers with `sigaction`; only `src/sys.rs` calls it.
-- `libc`: gives the `O_NOFOLLOW` and `O_NONBLOCK` flags for opening output files, and the few calls rustix lacks (virtual sockets, the random-pool reseed, child CPU time) in `sys.rs`.
-- `rustix` (features `fs`, `process`, `time`): makes FIFOs when the host unpacks guest output, sets the guest clock, and waits for and signals the payload process group, all without `unsafe`.
+- `libc`: gives the `O_NOFOLLOW` and `O_NONBLOCK` flags for opening output files, and the few calls rustix lacks (virtual sockets, the random-pool reseed, child CPU time, a kill of every other process) in `sys.rs`.
+- `rustix` (features `fs`, `mount`, `process`, `system`, `time`): makes FIFOs when the host unpacks guest output, sets the guest clock, waits for and signals the payload process group, mounts the payload's view, and powers the guest off, all without `unsafe`.
 
 Development:
 
