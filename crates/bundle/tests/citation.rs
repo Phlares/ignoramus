@@ -30,6 +30,26 @@ fn block_prints_top_level_scalars_and_numbers() {
 }
 
 #[test]
+fn block_prints_top_level_sequences() {
+    assert_eq!(yaml::block(&json!([1])), "- 1\n");
+    assert_eq!(yaml::block(&json!([])), "[]\n");
+    assert_eq!(yaml::block(&json!([[1]])), "-\n  - 1\n");
+}
+
+#[test]
+fn block_indents_nested_maps_and_sequences() {
+    assert_eq!(yaml::block(&json!({"key": {"b": 1}})), "key:\n  b: 1\n");
+    assert_eq!(
+        yaml::block(&json!({"key": [{}, []]})),
+        "key:\n  - {}\n  - []\n"
+    );
+    assert_eq!(
+        yaml::block(&json!({"refs": [{"names": [{"n": "x"}]}]})),
+        "refs:\n  - names:\n      - n: \"x\"\n"
+    );
+}
+
+#[test]
 fn block_quotes_yaml_special_text() {
     let cases = [
         ("no", "v: \"no\"\n"),

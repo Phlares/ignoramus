@@ -102,3 +102,47 @@ impl From<std::io::Error> for Error {
         Error::Io(e)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(code: &'static str, path: &str) -> Problem {
+        Problem::new(code, path, "is wrong", "Fix it.")
+    }
+
+    #[test]
+    fn a_problem_prints_code_path_message_and_instruction() {
+        assert_eq!(
+            p("E-PUB-001", "a/b").to_string(),
+            "E-PUB-001 a/b: is wrong. Fix it."
+        );
+    }
+
+    #[test]
+    fn a_refusal_prints_one_problem_per_line() {
+        let one = Error::Refused {
+            problems: vec![p("E-PUB-001", "a")],
+            warnings: vec![p("W-PUB-001", "w")],
+        };
+        assert_eq!(one.to_string(), "E-PUB-001 a: is wrong. Fix it.");
+        let three = Error::Refused {
+            problems: vec![
+                p("E-PUB-001", "a"),
+                p("E-PUB-002", "b"),
+                p("E-PUB-003", "c"),
+            ],
+            warnings: Vec::new(),
+        };
+        assert_eq!(
+            three.to_string(),
+            "E-PUB-001 a: is wrong. Fix it.\nE-PUB-002 b: is wrong. Fix it.\nE-PUB-003 c: is wrong. Fix it."
+        );
+    }
+
+    #[test]
+    fn an_io_error_prints_its_cause() {
+        let e = Error::Io(std::io::Error::other("disk full"));
+        assert_eq!(e.to_string(), "I/O error: disk full");
+    }
+}
