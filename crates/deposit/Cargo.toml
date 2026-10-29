@@ -7,6 +7,8 @@ license = "Apache-2.0"
 description = "Deposits files with DataCite metadata to a research archive."
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.10"
 hex = "0.4"
 

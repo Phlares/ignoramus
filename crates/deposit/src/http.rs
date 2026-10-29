@@ -40,6 +40,12 @@ pub trait Transport {
     fn send(&self, req: &Request) -> Result<Response, Error>;
 }
 
+impl<T: Transport + ?Sized> Transport for &T {
+    fn send(&self, req: &Request) -> Result<Response, Error> {
+        (**self).send(req)
+    }
+}
+
 pub struct Curl {
     program: PathBuf,
     max_secs: u32,

@@ -1,0 +1,21 @@
+{
+  "contents": [
+    {
+      "key": "a.txt",
+      "size": 5,
+      "checksum": "md5:5d41402abc4b2a76b9719d911017c592",
+      "links": {
+        "self": "https://sandbox.zenodo.org/api/files/568377dd-daf8-4a0d-9d9d-c1c1d8b3c2c1/a.txt"
+      }
+    },
+    {
+      "key": "b.zip",
+      "size": 11,
+      "checksum": "md5:5eb63bbbe01eeed093cb22bb8f5acdc3",
+      "links": {
+        "self": "https://sandbox.zenodo.org/api/files/568377dd-daf8-4a0d-9d9d-c1c1d8b3c2c1/b.zip"
+      }
+    }
+  ],
+  "id": "568377dd-daf8-4a0d-9d9d-c1c1d8b3c2c1"
+}
