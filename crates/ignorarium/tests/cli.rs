@@ -491,7 +491,7 @@ fn guide_wording_is_public() {
     let dir = TempDir::new().unwrap();
     let a = bin(dir.path()).arg("guide").assert().success();
     let out = stdout(&a);
-    assert!(!out.contains("Plan 2"));
+    assert!(!regex::Regex::new(r"Plan \d").unwrap().is_match(&out), "{out}");
     assert_eq!(out.matches("not available yet").count(), 3);
 }
 
