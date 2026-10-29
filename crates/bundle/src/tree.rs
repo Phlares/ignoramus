@@ -1,0 +1,65 @@
+//! Safe folder walk. Links and special files are refused, never followed.
+use crate::Problem;
+use std::fs;
+use std::io;
+use std::path::Path;
+
+const INSTRUCTION: &str = "Replace links and special files with regular files, and rename files to UTF-8 names without control characters or backslashes.";
+
+fn refuse(path: String, message: &str) -> Problem {
+    Problem {
+        code: "E-PUB-001",
+        path,
+        message: message.to_string(),
+        instruction: INSTRUCTION.to_string(),
+    }
+}
+
+fn name_is_safe(name: &str) -> bool {
+    !name
+        .chars()
+        .any(|c| c < '\u{20}' || c == '\u{7f}' || c == '\\')
+}
+
+/// Lists regular files as `/`-joined relative paths, sorted by bytes.
+/// Every refused entry is one E-PUB-001 problem.
+pub fn walk(dir: &Path) -> Result<(Vec<String>, Vec<Problem>), io::Error> {
+    let mut files = Vec::new();
+    let mut problems = Vec::new();
+    visit(dir, "", &mut files, &mut problems)?;
+    files.sort_unstable();
+    problems.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok((files, problems))
+}
+
+fn visit(
+    dir: &Path,
+    prefix: &str,
+    files: &mut Vec<String>,
+    problems: &mut Vec<Problem>,
+) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let raw = entry.file_name();
+        let (name, valid) = match raw.to_str() {
+            Some(s) => (s.to_string(), name_is_safe(s)),
+            None => (raw.to_string_lossy().into_owned(), false),
+        };
+        let rel = format!("{prefix}{name}");
+        if !valid {
+            problems.push(refuse(rel, "name cannot be held in a bundle"));
+            continue;
+        }
+        let kind = fs::symlink_metadata(entry.path())?.file_type();
+        if kind.is_symlink() {
+            problems.push(refuse(rel, "is a symbolic link"));
+        } else if kind.is_dir() {
+            visit(&entry.path(), &format!("{rel}/"), files, problems)?;
+        } else if kind.is_file() {
+            files.push(rel);
+        } else {
+            problems.push(refuse(rel, "is not a regular file or folder"));
+        }
+    }
+    Ok(())
+}

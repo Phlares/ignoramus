@@ -115,6 +115,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bundle"
+version = "0.0.1"
+dependencies = [
+ "hex",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
