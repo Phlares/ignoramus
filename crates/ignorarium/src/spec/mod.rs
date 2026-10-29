@@ -3,6 +3,8 @@ use crate::canon;
 use serde_json::Value;
 use std::path::Path;
 
+pub mod model;
+
 #[derive(Debug)]
 pub struct RawSpec {
     pub value: Value,

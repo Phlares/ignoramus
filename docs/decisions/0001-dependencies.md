@@ -5,7 +5,7 @@ Each dependency has one job. Add a line here with its reason when you add a crat
 Runtime:
 
 - `clap`: parses command-line arguments.
-- `serde`: reads and writes typed data.
+- `serde` (feature `derive`): reads and writes typed data, and derives the spec schema structs.
 - `serde_json`: reads and writes JSON, the base of the canonical form we hash.
 - `toml`: reads study specs, which use TOML.
 - `sha2`: computes SHA-256 hashes.
