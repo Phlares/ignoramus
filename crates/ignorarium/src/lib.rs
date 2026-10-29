@@ -4,6 +4,7 @@ pub mod backend;
 pub mod canon;
 pub mod cli;
 pub mod diag;
+pub mod environ;
 pub mod estimate;
 pub mod events;
 pub mod files;
