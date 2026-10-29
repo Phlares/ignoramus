@@ -214,6 +214,19 @@ fn two_records_for_one_file_are_refused() {
 }
 
 #[test]
+fn the_code_and_data_licence_texts_are_always_required() {
+    let (p, _) = licensing(vec![]).check(&[entry("data/a.txt", H)], &|_| None);
+    let got: Vec<(&str, &str)> = p.iter().map(|p| (p.code, p.path.as_str())).collect();
+    assert_eq!(
+        got,
+        [
+            ("E-PUB-007", "LICENSES/Apache-2.0.txt"),
+            ("E-PUB-007", "LICENSES/CC0-1.0.txt")
+        ]
+    );
+}
+
+#[test]
 fn blank_creator_and_blank_id_are_refused() {
     let l = licensing(vec![
         input("x", H, rec("CC0-1.0", Kind::Common, "s", &[])),

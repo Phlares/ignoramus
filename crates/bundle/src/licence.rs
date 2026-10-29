@@ -158,7 +158,12 @@ impl Licensing {
                 None => {}
             }
         }
-        let ids: BTreeSet<&str> = files.iter().map(|f| self.of(&f.path)).collect();
+        // LICENSE.md names the code and the data licence texts, so both are always required.
+        let ids: BTreeSet<&str> = files
+            .iter()
+            .map(|f| self.of(&f.path))
+            .chain([self.code.as_str(), self.data.as_str()])
+            .collect();
         for id in ids {
             let want = format!("LICENSES/{id}.txt");
             if !files.iter().any(|f| f.path == want) {
