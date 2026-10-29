@@ -1,0 +1,43 @@
+# Patterns for the secret and personal-data scan. Practice follows gitleaks.
+# The reported text is the group `(?P<hit>...)`, or the whole match without one.
+# `allow` entries are regexes. A match is dropped when any entry matches the
+# reported text. The scan then resumes at the end of the reported text.
+
+[[pattern]]
+kind = "private-key"
+regex = '-----BEGIN [A-Z ]*PRIVATE KEY-----'
+
+[[pattern]]
+kind = "aws-key"
+regex = 'AKIA[0-9A-Z]{16}'
+
+[[pattern]]
+kind = "github-token"
+regex = 'gh[pousr]_[A-Za-z0-9]{36,}'
+
+[[pattern]]
+kind = "generic-secret"
+# The value needs 8 characters, a letter and a digit, and is no placeholder.
+# Prose of the form `keyword = mixed value` still flags; reword it.
+regex = '(?i)(?:api[_-]?key|secret|token|password)[\x22\x27]?\s*[:=]\s*[\x22\x27]?(?P<hit>[^\s\x22\x27]{8,})'
+allow = ['^[^A-Za-z]*$', '^\D*$', '^[$<{]', '^env:']
+
+[[pattern]]
+kind = "email"
+regex = '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
+# RFC 2606 names.
+allow = ['@example\.(org|com|net)$', '\.(invalid|test)$']
+
+[[pattern]]
+kind = "ipv4"
+# Each octet is 0-255. The edges reject a digit or dot on either side, so
+# five-part version strings and octets above 255 do not match; a closing sentence dot is fine.
+regex = '(?:^|[^\d.])(?P<hit>(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))(?:$|[^\d.]|\.(?:$|[^\d]))'
+# Loopback, unspecified, and the RFC 5737 documentation ranges.
+allow = ['^127\.0\.0\.1$', '^0\.0\.0\.0$', '^192\.0\.2\.', '^198\.51\.100\.', '^203\.0\.113\.']
+
+[[pattern]]
+kind = "phone"
+# North American shapes only, area code 2-9 first: `(ddd) ddd-dddd`, `ddd-ddd-dddd`,
+# `ddd.ddd.dddd`, or a `+1` prefix. Bare-space digit runs are not phones.
+regex = '\+1[\s.-]?\(?[2-9]\d{2}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b|\([2-9]\d{2}\)\s?\d{3}[.-]\d{4}\b|\b[2-9]\d{2}[.-]\d{3}[.-]\d{4}\b'

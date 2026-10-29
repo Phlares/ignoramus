@@ -1,0 +1,591 @@
+# Rules for ignorarium v0. One [[rule]] per code, one `target` entry per checked path.
+# Paths use dots and [*] for every array element. "**" means any depth.
+# Checks: required, non-empty, type, enum, range, format, finite, known-key, unique, named:<name>.
+# `unique` takes an optional `key`: the field to compare across an array of tables.
+
+[[rule]]
+code = "E-REQ-001"
+severity = "error"
+problem = "A required field is missing."
+instruction = "Add the field. Copy its shape from the template."
+why = "The checker and the run need every field. A silent default would hide a gap in the plan."
+sources = ["https://toml.io/en/v1.0.0"]
+target = [
+  { path = "study", check = "required" },
+  { path = "study.id", check = "required" },
+  { path = "study.template", check = "required" },
+  { path = "study.mode", check = "required" },
+  { path = "study.label", check = "required" },
+  { path = "study.test_log", check = "required" },
+  { path = "question", check = "required" },
+  { path = "question.population", check = "required" },
+  { path = "question.intervention", check = "required" },
+  { path = "question.comparator", check = "required" },
+  { path = "question.negative_control", check = "required" },
+  { path = "question.hypotheses", check = "required" },
+  { path = "question.hypotheses[*].id", check = "required" },
+  { path = "question.hypotheses[*].statement", check = "required" },
+  { path = "question.hypotheses[*].rival", check = "required" },
+  { path = "outcomes", check = "required" },
+  { path = "outcomes[*].id", check = "required" },
+  { path = "outcomes[*].registered", check = "required" },
+  { path = "scope", check = "required" },
+  { path = "scope.stop_rule", check = "required" },
+  { path = "scope.budget", check = "required" },
+  { path = "scope.budget.cpu_hours", check = "required" },
+  { path = "scope.budget.wall_hours", check = "required" },
+  { path = "scope.budget.money_usd", check = "required" },
+  { path = "scope.end_of_run", check = "required" },
+  { path = "scope.end_of_run.route", check = "required" },
+  { path = "scope.end_of_run.follow_on", check = "required" },
+  { path = "scope.end_of_run.follow_on[*].when", check = "required" },
+  { path = "scope.end_of_run.follow_on[*].spec", check = "required" },
+  { path = "design", check = "required" },
+  { path = "design.unit", check = "required" },
+  { path = "design.cluster", check = "required" },
+  { path = "design.stratum", check = "required" },
+  { path = "design.reference", check = "required" },
+  { path = "design.row_seconds", check = "required" },
+  { path = "design.test", check = "required" },
+  { path = "design.sesoi", check = "required" },
+  { path = "design.icc", check = "required" },
+  { path = "design.units_per_cluster", check = "required" },
+  { path = "design.variance", check = "required" },
+  { path = "design.variance.value", check = "required" },
+  { path = "design.variance.source", check = "required" },
+  { path = "design.conditions", check = "required" },
+  { path = "design.conditions[*].id", check = "required" },
+  { path = "design.selection", check = "required" },
+  { path = "design.selection.clusters", check = "required" },
+  { path = "design.confirmation", check = "required" },
+  { path = "design.confirmation.clusters", check = "required" },
+  { path = "inputs", check = "required" },
+  { path = "inputs[*].path", check = "required" },
+  { path = "inputs[*].sha256", check = "required" },
+  { path = "inputs[*].role", check = "required" },
+  { path = "inputs[*].licence", check = "required" },
+  { path = "inputs[*].licence.spdx", check = "required" },
+  { path = "inputs[*].licence.type", check = "required" },
+  { path = "inputs[*].licence.source", check = "required" },
+  { path = "inputs[*].licence.creators", check = "required" },
+  { path = "pins", check = "required" },
+  { path = "pins.environment", check = "required" },
+  { path = "pins.payload", check = "required" },
+  { path = "pins.rule_base", check = "required" },
+  { path = "mutations", check = "required" },
+  { path = "mutations.operators", check = "required" },
+  { path = "mutations.operators[*].name", check = "required" },
+  { path = "mutations.operators[*].type", check = "required" },
+  { path = "mutations.operators[*].range", check = "required" },
+  { path = "mutations.operators[*].acts_on", check = "required" },
+  { path = "mutations.triggers", check = "required" },
+  { path = "mutations.triggers[*].id", check = "required" },
+  { path = "mutations.triggers[*].metric", check = "required" },
+  { path = "mutations.triggers[*].threshold_e", check = "required" },
+  { path = "mutations.seeds", check = "required" },
+  { path = "mutations.seeds.spawn", check = "required" },
+  { path = "mutations.seeds.report", check = "required" },
+  { path = "report", check = "required" },
+  { path = "report.licence_code", check = "required" },
+  { path = "report.licence_data", check = "required" },
+  { path = "report.publish", check = "required" },
+]
+
+[[rule]]
+code = "E-TYP-001"
+severity = "error"
+problem = "A field has the wrong type."
+instruction = "Use the type the template shows for this field."
+why = "A wrong type changes what the value means, and later checks cannot read it."
+sources = ["https://toml.io/en/v1.0.0"]
+target = [
+  { path = "study", check = "type", kind = "table" },
+  { path = "study.id", check = "type", kind = "string" },
+  { path = "study.template", check = "type", kind = "string" },
+  { path = "study.mode", check = "type", kind = "string" },
+  { path = "study.label", check = "type", kind = "string" },
+  { path = "study.test_log", check = "type", kind = "bool" },
+  { path = "question", check = "type", kind = "table" },
+  { path = "question.population", check = "type", kind = "string" },
+  { path = "question.intervention", check = "type", kind = "string" },
+  { path = "question.comparator", check = "type", kind = "string" },
+  { path = "question.negative_control", check = "type", kind = "string" },
+  { path = "question.hypotheses", check = "type", kind = "array" },
+  { path = "question.hypotheses[*]", check = "type", kind = "table" },
+  { path = "question.hypotheses[*].id", check = "type", kind = "string" },
+  { path = "question.hypotheses[*].statement", check = "type", kind = "string" },
+  { path = "question.hypotheses[*].rival", check = "type", kind = "string" },
+  { path = "outcomes", check = "type", kind = "array" },
+  { path = "outcomes[*]", check = "type", kind = "table" },
+  { path = "outcomes[*].id", check = "type", kind = "string" },
+  { path = "outcomes[*].unit", check = "type", kind = "string" },
+  { path = "outcomes[*].direction", check = "type", kind = "string" },
+  { path = "outcomes[*].registered", check = "type", kind = "bool" },
+  { path = "scope", check = "type", kind = "table" },
+  { path = "scope.min_isolation", check = "type", kind = "int" },
+  { path = "scope.stop_rule", check = "type", kind = "string" },
+  { path = "scope.budget", check = "type", kind = "table" },
+  { path = "scope.budget.cpu_hours", check = "type", kind = "float" },
+  { path = "scope.budget.wall_hours", check = "type", kind = "float" },
+  { path = "scope.budget.money_usd", check = "type", kind = "float" },
+  { path = "scope.end_of_run", check = "type", kind = "table" },
+  { path = "scope.end_of_run.route", check = "type", kind = "string" },
+  { path = "scope.end_of_run.follow_on", check = "type", kind = "array" },
+  { path = "scope.end_of_run.follow_on[*]", check = "type", kind = "table" },
+  { path = "scope.end_of_run.follow_on[*].when", check = "type", kind = "string" },
+  { path = "scope.end_of_run.follow_on[*].spec", check = "type", kind = "string" },
+  { path = "design", check = "type", kind = "table" },
+  { path = "design.unit", check = "type", kind = "string" },
+  { path = "design.cluster", check = "type", kind = "string" },
+  { path = "design.stratum", check = "type", kind = "string" },
+  { path = "design.reference", check = "type", kind = "string" },
+  { path = "design.repeats", check = "type", kind = "int" },
+  { path = "design.row_seconds", check = "type", kind = "float" },
+  { path = "design.test", check = "type", kind = "string" },
+  { path = "design.alpha", check = "type", kind = "float" },
+  { path = "design.power", check = "type", kind = "float" },
+  { path = "design.sesoi", check = "type", kind = "float" },
+  { path = "design.icc", check = "type", kind = "float" },
+  { path = "design.units_per_cluster", check = "type", kind = "int" },
+  { path = "design.variance", check = "type", kind = "table" },
+  { path = "design.variance.value", check = "type", kind = "float" },
+  { path = "design.variance.source", check = "type", kind = "string" },
+  { path = "design.conditions", check = "type", kind = "array" },
+  { path = "design.conditions[*]", check = "type", kind = "table" },
+  { path = "design.conditions[*].id", check = "type", kind = "string" },
+  { path = "design.selection", check = "type", kind = "table" },
+  { path = "design.selection.clusters", check = "type", kind = "array" },
+  { path = "design.selection.clusters[*]", check = "type", kind = "string" },
+  { path = "design.confirmation", check = "type", kind = "table" },
+  { path = "design.confirmation.clusters", check = "type", kind = "array" },
+  { path = "design.confirmation.clusters[*]", check = "type", kind = "string" },
+  { path = "inputs", check = "type", kind = "array" },
+  { path = "inputs[*]", check = "type", kind = "table" },
+  { path = "inputs[*].path", check = "type", kind = "string" },
+  { path = "inputs[*].sha256", check = "type", kind = "string" },
+  { path = "inputs[*].role", check = "type", kind = "string" },
+  { path = "inputs[*].licence", check = "type", kind = "table" },
+  { path = "inputs[*].licence.spdx", check = "type", kind = "string" },
+  { path = "inputs[*].licence.type", check = "type", kind = "string" },
+  { path = "inputs[*].licence.source", check = "type", kind = "string" },
+  { path = "inputs[*].licence.creators", check = "type", kind = "array" },
+  { path = "inputs[*].licence.creators[*]", check = "type", kind = "string" },
+  { path = "pins", check = "type", kind = "table" },
+  { path = "pins.environment", check = "type", kind = "string" },
+  { path = "pins.payload", check = "type", kind = "string" },
+  { path = "pins.rule_base", check = "type", kind = "string" },
+  { path = "mutations", check = "type", kind = "table" },
+  { path = "mutations.depth_cap", check = "type", kind = "int" },
+  { path = "mutations.operators", check = "type", kind = "array" },
+  { path = "mutations.operators[*]", check = "type", kind = "table" },
+  { path = "mutations.operators[*].name", check = "type", kind = "string" },
+  { path = "mutations.operators[*].type", check = "type", kind = "string" },
+  { path = "mutations.operators[*].range", check = "type", kind = "array" },
+  { path = "mutations.operators[*].acts_on", check = "type", kind = "string" },
+  { path = "mutations.triggers", check = "type", kind = "array" },
+  { path = "mutations.triggers[*]", check = "type", kind = "table" },
+  { path = "mutations.triggers[*].id", check = "type", kind = "string" },
+  { path = "mutations.triggers[*].metric", check = "type", kind = "string" },
+  { path = "mutations.triggers[*].threshold_e", check = "type", kind = "float" },
+  { path = "mutations.seeds", check = "type", kind = "table" },
+  { path = "mutations.seeds.spawn", check = "type", kind = "string" },
+  { path = "mutations.seeds.report", check = "type", kind = "string" },
+  { path = "access", check = "type", kind = "table" },
+  { path = "access.blind", check = "type", kind = "bool" },
+  { path = "report", check = "type", kind = "table" },
+  { path = "report.licence_code", check = "type", kind = "string" },
+  { path = "report.licence_data", check = "type", kind = "string" },
+  { path = "report.publish", check = "type", kind = "string" },
+]
+
+[[rule]]
+code = "E-ENM-001"
+severity = "error"
+problem = "The value is not one of the allowed values."
+instruction = "Use one of the values listed in the template comment for this field."
+why = "A value outside the set has no defined meaning in the checker or the run."
+sources = ["https://toml.io/en/v1.0.0"]
+target = [
+  { path = "study.template", check = "enum", values = ["numeric-ablation", "planted-spawn"] },
+  { path = "study.mode", check = "enum", values = ["exploratory", "confirmatory"] },
+  { path = "study.label", check = "enum", values = ["signal", "confirmed", "replicated", "generalized"] },
+  { path = "scope.stop_rule", check = "enum", values = ["budget-only", "e-process"] },
+  { path = "scope.end_of_run.route", check = "enum", values = ["report", "follow-on", "share"] },
+  { path = "design.test", check = "enum", values = ["paired-mean", "descriptive"] },
+  { path = "inputs[*].role", check = "enum", values = ["calibration", "selection", "confirmation", "model"] },
+  { path = "inputs[*].licence.type", check = "enum", values = ["common", "custom", "request-form", "unspecified"] },
+  { path = "mutations.operators[*].type", check = "enum", values = ["int", "float", "enum"] },
+  { path = "report.publish", check = "enum", values = ["none", "zenodo-sandbox"] },
+]
+
+[[rule]]
+code = "E-RNG-001"
+severity = "error"
+problem = "A number is outside its allowed range."
+instruction = "Bring the value into range: min_isolation 0 to 3, alpha above 0 up to 0.5, power 0.5 to 0.999, icc 0 up to but below 1, repeats at least 1, each budget value 0 or more, row_seconds above 0, units_per_cluster 1 up to 4294967295, repeats up to 4294967295, variance and sesoi 0 or more, depth_cap 0 to 255, each trigger threshold_e above 0."
+why = "Values outside these ranges are meaningless or make the sample-size maths fail. The default alpha is 0.005, because 0.05 gives too many false findings."
+sources = ["https://doi.org/10.1038/s41562-017-0189-z", "https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661"]
+target = [
+  { path = "scope.min_isolation", check = "range", interval = "[0, 3]" },
+  { path = "design.alpha", check = "range", interval = "(0, 0.5]" },
+  { path = "design.power", check = "range", interval = "[0.5, 0.999]" },
+  { path = "design.icc", check = "range", interval = "[0, 1)" },
+  { path = "design.repeats", check = "range", interval = "[1, 4294967295]" },
+  { path = "scope.budget.cpu_hours", check = "range", interval = "[0, inf)" },
+  { path = "scope.budget.wall_hours", check = "range", interval = "[0, inf)" },
+  { path = "scope.budget.money_usd", check = "range", interval = "[0, inf)" },
+  { path = "design.row_seconds", check = "range", interval = "(0, inf)" },
+  { path = "design.units_per_cluster", check = "range", interval = "[1, 4294967295]" },
+  { path = "design.variance.value", check = "range", interval = "[0, inf)" },
+  { path = "design.sesoi", check = "range", interval = "[0, inf)" },
+  { path = "mutations.depth_cap", check = "range", interval = "[0, 255]" },
+  { path = "mutations.triggers[*].threshold_e", check = "range", interval = "(0, inf)" },
+]
+
+[[rule]]
+code = "E-FMT-001"
+severity = "error"
+problem = "An id is not ASCII kebab-case."
+instruction = "Use ASCII lowercase letters and digits, joined by single hyphens, for example my-study."
+why = "Ids become file names and seed inputs. Accents and look-alike letters would make two ids that look the same differ."
+sources = ["https://toml.io/en/v1.0.0"]
+target = [
+  { path = "study.id", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
+  { path = "design.conditions[*].id", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
+  { path = "outcomes[*].id", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
+]
+
+[[rule]]
+code = "E-FMT-002"
+severity = "error"
+problem = "The variance source is not in a known form."
+instruction = "Use stated, or record:<sha256> with the 64 lowercase hex characters of a record."
+why = "A variance must say where it came from. A record reference must name one exact record."
+sources = ["https://toml.io/en/v1.0.0"]
+target = [
+  { path = "design.variance.source", check = "format", pattern = "^(stated|record:[0-9a-f]{64})$" },
+]
+
+[[rule]]
+code = "E-FMT-003"
+severity = "error"
+problem = "An input hash is not a SHA-256 digest."
+instruction = "Use 64 lowercase hex characters, or leave it empty until the input is pinned."
+why = "The run compares this hash with the file it reads. Any other form can never match."
+sources = ["https://toml.io/en/v1.0.0"]
+target = [
+  { path = "inputs[*].sha256", check = "format", pattern = "^([0-9a-f]{64})?$" },
+]
+
+[[rule]]
+code = "E-NUM-001"
+severity = "error"
+problem = "A number is not finite (nan or inf)."
+instruction = "Replace nan or inf with a finite value."
+why = "TOML allows nan and inf, but JSON does not. The spec hash and the sample-size maths need finite numbers."
+sources = ["https://www.rfc-editor.org/rfc/rfc8259#section-6", "https://toml.io/en/v1.0.0#float"]
+target = [
+  { path = "**", check = "finite" },
+]
+
+[[rule]]
+code = "E-KEY-001"
+severity = "error"
+problem = "The spec has a field the schema does not define."
+instruction = "Remove the field, or fix its name. The template lists every field."
+why = "A misspelt field is silently ignored by most readers. Rejecting it keeps the plan and the run in step."
+sources = ["https://toml.io/en/v1.0.0"]
+target = [
+  { path = "**", check = "known-key" },
+]
+
+[[rule]]
+code = "E-UNQ-001"
+severity = "error"
+problem = "A list repeats an id, path or name."
+instruction = "Give every entry its own value. Remove the repeat, or rename it."
+why = "A repeated cluster would count its units twice in the power gate. A repeated condition, outcome, hypothesis, input, operator or trigger id makes later steps pick one entry and ignore the other."
+sources = []
+target = [
+  { path = "design.selection.clusters", check = "unique" },
+  { path = "design.confirmation.clusters", check = "unique" },
+  { path = "design.conditions", check = "unique", key = "id" },
+  { path = "outcomes", check = "unique", key = "id" },
+  { path = "question.hypotheses", check = "unique", key = "id" },
+  { path = "inputs", check = "unique", key = "path" },
+  { path = "mutations.operators", check = "unique", key = "name" },
+  { path = "mutations.triggers", check = "unique", key = "id" },
+]
+
+[[rule]]
+code = "E-OUT-001"
+severity = "error"
+problem = "An outcome has no unit."
+instruction = "Give every outcome a unit, for example ratio or seconds."
+why = "An effect size has no meaning without its unit. The smallest effect of interest is stated in this unit."
+sources = ["https://doi.org/10.1136/bmj.e7586"]
+target = [
+  { path = "outcomes[*].unit", check = "non-empty" },
+]
+
+[[rule]]
+code = "E-OUT-002"
+severity = "error"
+problem = "An outcome does not say which direction is better."
+instruction = "Set direction to lower or higher, whichever is better for this outcome."
+why = "The test needs to know which way counts as an improvement. Choosing after the data are in would bias the result."
+sources = ["https://doi.org/10.1136/bmj.e7586"]
+target = [
+  { path = "outcomes[*].direction", check = "required" },
+  { path = "outcomes[*].direction", check = "enum", values = ["lower", "higher"] },
+]
+
+[[rule]]
+code = "W-LIC-001"
+severity = "warning"
+problem = "An input has no licence id."
+instruction = "Add the licence the authors gave the data, as an SPDX id. Publishing is blocked until you do."
+why = "Re-sharing data without its licence can break the terms the authors set. The run itself does not need it."
+sources = ["https://spdx.org/licenses/"]
+target = [
+  { path = "inputs[*].licence.spdx", check = "non-empty" },
+]
+
+[[rule]]
+code = "W-HSH-001"
+severity = "warning"
+problem = "An input has no SHA-256 pin."
+instruction = "Pin the input: add its SHA-256, 64 lowercase hex characters."
+why = "Without a pin the run cannot tell if the file changed after the plan was approved. The run itself still starts."
+sources = []
+target = [
+  { path = "inputs[*].sha256", check = "non-empty" },
+]
+
+[[rule]]
+code = "E-REF-001"
+severity = "error"
+problem = "design.conditions is empty, or design.reference is not one of its ids."
+instruction = "List at least one condition in design.conditions. Set design.reference to the id of one of them."
+why = "Every comparison is made against the reference condition. A reference that matches no condition leaves the run with nothing to compare to, and the registered id cannot be reused."
+sources = []
+target = [
+  { path = "design.conditions", check = "non-empty" },
+  { path = "design.reference", check = "named:reference-is-condition" },
+]
+
+[[rule]]
+code = "E-LBL-001"
+severity = "error"
+problem = "An exploratory study carries a label above signal."
+instruction = "Set label to signal, or change the mode to confirmatory."
+why = "Only a confirmatory study with a registered test can earn a stronger label. Exploratory results are leads."
+sources = []
+when = { mode = "exploratory" }
+target = [
+  { path = "study.label", check = "named:label-allowed-for-mode" },
+]
+
+[[rule]]
+code = "E-CNF-001"
+severity = "error"
+problem = "A confirmatory study has no smallest effect of interest above zero."
+instruction = "Set design.sesoi to the smallest effect, in outcome units, that you would act on. It must be above 0."
+why = "The sample size depends on the effect you care about. Without it the power gate has nothing to size."
+sources = ["https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "design.sesoi", check = "named:sesoi-required" },
+]
+
+[[rule]]
+code = "E-CNF-002"
+severity = "error"
+problem = "The confirmation sample is too small."
+instruction = "Add confirmation clusters or units per cluster until the count reaches the number the power gate needs."
+why = "A test with too few units misses real effects and exaggerates the ones it finds. The gate uses alpha, power, the variance, the smallest effect, and the cluster correlation."
+sources = ["https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "design.confirmation.clusters", check = "named:power-met" },
+]
+
+[[rule]]
+code = "E-CNF-003"
+severity = "error"
+problem = "The variance is not taken from a record."
+instruction = "Measure the variance in an earlier run and set design.variance.source to record:<sha256> of that record."
+why = "A variance guessed by hand can be too small, which makes the power gate pass a study that is too small."
+sources = ["https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "design.variance.source", check = "named:variance-from-record" },
+]
+
+[[rule]]
+code = "E-CNF-004"
+severity = "error"
+problem = "The confirmation clusters are empty or overlap the selection clusters."
+instruction = "List confirmation clusters that do not appear in the selection clusters."
+why = "A winner picked on some data looks better on that same data. Only fresh clusters give an honest test."
+sources = ["https://doi.org/10.1038/s41562-016-0021"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "design.confirmation.clusters", check = "named:selection-confirmation-disjoint" },
+  { path = "design.confirmation.clusters[*]", check = "named:selection-confirmation-disjoint" },
+]
+
+[[rule]]
+code = "E-CNF-005"
+severity = "error"
+problem = "Selection or confirmation data was used by an earlier study."
+instruction = "Use data no earlier plan used for selection or confirmation, or change the role of this input."
+why = "Reused data has already shaped a decision. A test on it is not independent."
+sources = ["https://doi.org/10.1038/s41562-016-0021"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "inputs[*].path", check = "named:data-fresh" },
+]
+
+[[rule]]
+code = "E-CNF-006"
+severity = "error"
+problem = "A confirmatory study uses a test the checker does not allow."
+instruction = "Set design.test to paired-mean."
+why = "v0 confirms only with the paired-mean test. Other tests have no power gate yet."
+sources = []
+when = { mode = "confirmatory" }
+target = [
+  { path = "design.test", check = "named:confirmatory-test-allowed" },
+]
+
+[[rule]]
+code = "E-BUD-001"
+severity = "error"
+problem = "The budget is empty."
+instruction = "Set at least one of cpu_hours, wall_hours or money_usd above 0."
+why = "A run with no budget has no stop. The budget is the cap the run enforces."
+sources = []
+target = [
+  { path = "scope.budget", check = "named:budget-present" },
+]
+
+[[rule]]
+code = "E-END-001"
+severity = "error"
+problem = "The end-of-run route is not valid."
+instruction = "For route follow-on, list at least one follow_on entry. Write each when as <hypothesis id>.pass or <hypothesis id>.fail, using an id from question.hypotheses."
+why = "A follow-on that names no hypothesis can never run. The route must say what happens, before the data come in."
+sources = []
+target = [
+  { path = "scope.end_of_run.follow_on", check = "named:route-valid" },
+  { path = "scope.end_of_run.follow_on[*].when", check = "named:route-valid" },
+]
+
+[[rule]]
+code = "E-END-002"
+severity = "error"
+problem = "A follow-on spec file is missing."
+instruction = "Create the file under the study folder, or fix the spec path."
+why = "The run would reach the follow-on step and find nothing to run."
+sources = []
+target = [
+  { path = "scope.end_of_run.follow_on[*].spec", check = "named:follow-on-exists" },
+]
+
+[[rule]]
+code = "E-MUT-001"
+severity = "error"
+problem = "The spawn depth cap is above 2."
+instruction = "Set mutations.depth_cap to 2 or less."
+why = "Each spawn level multiplies the number of runs and the chances of a chance finding. The cap is 2."
+sources = []
+target = [
+  { path = "mutations.depth_cap", check = "named:depth-cap" },
+]
+
+[[rule]]
+code = "E-MUT-002"
+severity = "error"
+problem = "The spawn and report seed sets overlap."
+instruction = "Give spawn and report seed prefixes where neither is a prefix of the other, for example spawn/ and report/."
+why = "Overlapping seeds would let spawned runs reuse the draws that the report runs use."
+sources = []
+target = [
+  { path = "mutations.seeds", check = "named:seed-sets-disjoint" },
+]
+
+[[rule]]
+code = "E-MUT-003"
+severity = "error"
+problem = "A trigger names a metric that is not an outcome."
+instruction = "Set the trigger metric to the id of an outcome."
+why = "A trigger on an unregistered metric would let the run pick its own signal after the fact."
+sources = []
+target = [
+  { path = "mutations.triggers[*].metric", check = "named:trigger-declared" },
+]
+
+[[rule]]
+code = "E-ISO-001"
+severity = "error"
+problem = "This machine cannot give the isolation level the plan asks for."
+instruction = "Lower scope.min_isolation, or run the plan on a machine that offers the level."
+why = "Running at a lower level than the plan asks for would break the plan's own safety terms."
+sources = []
+target = [
+  { path = "scope.min_isolation", check = "named:isolation-reachable" },
+]
+
+[[rule]]
+code = "E-PTH-001"
+severity = "error"
+problem = "A file path is absolute, starts with a drive, has a . or .. segment, contains a backslash or a colon, has a segment ending in a dot or space, or passes through a symbolic link."
+instruction = "Write the path from the study folder with no `.` or `..` segment, no `:` or `\\`, and no segment ending in a dot or space; write `data/x.txt`, not `./data/x.txt`."
+why = "The checker reads only files inside the study folder. It never follows links, so a spec cannot point it at other files."
+sources = []
+target = [
+  { path = "inputs[*].path", check = "named:input-path-safe" },
+  { path = "scope.end_of_run.follow_on[*].spec", check = "named:input-path-safe" },
+]
+
+[[rule]]
+code = "E-HSH-001"
+severity = "error"
+problem = "An input file is missing or its SHA-256 differs from the pin."
+instruction = "Fix the path, or update the sha256 if the file was changed on purpose."
+why = "The pin says which bytes the plan was approved on. A different file is a different study."
+sources = []
+target = [
+  { path = "inputs[*].sha256", check = "named:input-hash-matches" },
+]
+
+[[rule]]
+code = "E-SEC-001"
+severity = "error"
+problem = "A string looks like a secret or personal data; the diagnostic names the kind."
+instruction = "Remove the value from the spec, or move it out of the spec and refer to it by name. Do not copy the value into any other text."
+why = "A registered plan is kept and shared. A secret or personal detail in it cannot be taken back."
+sources = ["https://github.com/gitleaks/gitleaks"]
+target = [
+  { path = "**", check = "named:secret-scan" },
+  { path = "comments", check = "named:comment-scan" },
+]
+
+[[rule]]
+code = "E-REG-001"
+severity = "error"
+problem = "`register` needs a person at a terminal, and standard input is not a terminal."
+instruction = "Ask the person to run `ignorarium register <spec>` in an interactive terminal and type the approval themselves. Do not pipe or script the approval."
+why = "Registration locks the plan. The person who owns the study must approve it by reading the hash, not a program acting for them."
+sources = []
+check = "documented"
+
+[[rule]]
+code = "E-REG-002"
+severity = "error"
+problem = "A study with this id is already registered in the box."
+instruction = "Choose a new `study.id` for a new plan. A registered plan cannot be replaced."
+why = "A plan registered once is fixed. A second plan under the same id would hide the first."
+sources = []
+check = "documented"

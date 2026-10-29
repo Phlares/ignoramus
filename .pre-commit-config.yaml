@@ -7,6 +7,10 @@ repos:
       # copier update writes conflicts as inline markers outside a git merge.
       - id: check-merge-conflict
         args: [--assume-in-merge]
+      # Files written on Windows can land with CRLF. The CRLF fixtures stay.
+      - id: mixed-line-ending
+        args: [--fix=lf]
+        exclude: \.crlf\.toml$
   - repo: https://github.com/gitleaks/gitleaks
     rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e  # frozen: v8.30.1
     hooks:

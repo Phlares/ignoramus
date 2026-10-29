@@ -1,0 +1,57 @@
+# The steps of a study, in order. `ignorarium guide` prints them.
+
+[[step]]
+id = "brief"
+title = "Write the brief"
+does = "State the question, the claim you want to earn and the limits, in plain words."
+produces = "A short brief that you turn into a spec."
+command = "ignorarium guide"
+
+[[step]]
+id = "template"
+title = "Pick a template"
+does = "Copy a template into a new study folder under the current directory."
+produces = "studies/<id>/spec.toml"
+command = "ignorarium new --template numeric-ablation --id <id>"
+
+[[step]]
+id = "fill"
+title = "Fill in the spec"
+does = "Replace each empty field with the real value. Keep the comments for the fields you did not change."
+produces = "A complete spec.toml."
+command = "edit studies/<id>/spec.toml"
+
+[[step]]
+id = "check"
+title = "Check the plan"
+does = "Run every rule on the spec. Fix each error the output lists, then run again until it passes."
+produces = "Diagnostics, a cost estimate and the claim label the plan can earn."
+command = "ignorarium check studies/<id>/spec.toml"
+
+[[step]]
+id = "review"
+title = "Review the plan"
+does = "Print one page that a person reads before approving the plan."
+produces = "A Markdown page with the plan, the cost and the warnings."
+command = "ignorarium review studies/<id>/spec.toml"
+
+[[step]]
+id = "register"
+title = "Register the plan"
+does = "A person types the first 8 characters of the spec hash to approve. The plan is then frozen."
+produces = "A frozen copy of the spec and a signed entry in the plan log."
+command = "ignorarium register studies/<id>/spec.toml"
+
+[[step]]
+id = "run"
+title = "Run the plan"
+does = "Runs the registered plan: not available yet."
+produces = "Run records: not available yet."
+command = "not available yet"
+
+[[step]]
+id = "report"
+title = "Write the report"
+does = "Turns the run records into a report: not available yet."
+produces = "A report: not available yet."
+command = "not available yet"
