@@ -1,6 +1,6 @@
 //! Per-file licence map, licence checks for a study's inputs, and the LICENSE.md text.
 use crate::manifest::Entry;
-use crate::{Problem, tree::shown};
+use crate::{Problem, blank, tree::shown};
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::Read;
@@ -46,19 +46,6 @@ fn normalize(path: &str) -> Option<&str> {
     }
     let ok = !p.is_empty() && !p.contains('\\') && p.split('/').all(|s| !s.is_empty() && s != "..");
     ok.then_some(p)
-}
-
-fn problem(code: &'static str, path: String, message: String, instruction: &str) -> Problem {
-    Problem {
-        code,
-        path,
-        message,
-        instruction: instruction.to_string(),
-    }
-}
-
-fn blank(s: &str) -> bool {
-    s.trim().is_empty()
 }
 
 /// `Some(text)` when the first 64 KiB of the file is UTF-8, a cut last character aside.
@@ -125,7 +112,7 @@ impl Licensing {
                 ));
             }
             if !gaps.is_empty() {
-                problems.push(problem(
+                problems.push(Problem::new(
                     "E-PUB-005",
                     format!("inputs[{i}].licence"),
                     format!("The licence record is incomplete: {}", gaps.join("; ")),
@@ -138,27 +125,26 @@ impl Licensing {
                 Some(e) => {
                     let path = shown(&e.path);
                     if no_share {
-                        problems.push(problem(
+                        problems.push(Problem::new(
                             "E-PUB-006",
                             path.clone(),
-                            "The file is an input whose licence does not allow sharing it"
-                                .to_string(),
+                            "The file is an input whose licence does not allow sharing it",
                             "Leave the file out of the bundle and cite its source, or record a licence that allows sharing it.",
                         ));
                     }
                     if !e.sha256.eq_ignore_ascii_case(&input.sha256) {
-                        problems.push(problem(
+                        problems.push(Problem::new(
                             "E-PUB-011",
                             path,
-                            "The file differs from the registered input".to_string(),
+                            "The file differs from the registered input",
                             "Restore the registered file, or register an amendment with the new hash.",
                         ));
                     }
                 }
-                None if no_share => warnings.push(problem(
+                None if no_share => warnings.push(Problem::new(
                     "W-PUB-001",
                     format!("inputs[{i}]"),
-                    "The input is cited only and its licence does not allow sharing it".to_string(),
+                    "The input is cited only and its licence does not allow sharing it",
                     "Check that the published results may use this input.",
                 )),
                 None => {}
@@ -169,11 +155,11 @@ impl Licensing {
             let want = format!("LICENSES/{id}.txt");
             if !files.iter().any(|f| f.path == want) {
                 let shown_want = shown(&want);
-                problems.push(problem(
+                problems.push(Problem::new(
                     "E-PUB-007",
                     shown_want.clone(),
-                    "The licence text is missing".to_string(),
-                    &format!(
+                    "The licence text is missing",
+                    format!(
                         "Add the licence text as {shown_want} (https://reuse.software/spec-3.3/)."
                     ),
                 ));
@@ -188,7 +174,7 @@ impl Licensing {
                 .take(HEADER_LINES)
                 .any(|l| l.contains(SPDX_TAG))
             {
-                warnings.push(problem(
+                warnings.push(Problem::new(
                     "W-PUB-002",
                     shown(&f.path),
                     format!("The file has no {SPDX_TAG} line in its first {HEADER_LINES} lines"),

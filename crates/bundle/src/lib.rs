@@ -25,6 +25,38 @@ pub struct Problem {
     pub instruction: String,
 }
 
+impl Problem {
+    pub(crate) fn new(
+        code: &'static str,
+        path: impl Into<String>,
+        message: impl Into<String>,
+        instruction: impl Into<String>,
+    ) -> Problem {
+        Problem {
+            code,
+            path: path.into(),
+            message: message.into(),
+            instruction: instruction.into(),
+        }
+    }
+}
+
+/// `Ok` when there is no problem, else one refusal that lists them all.
+pub(crate) fn refuse_any(problems: Vec<Problem>) -> Result<(), Error> {
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::Refused {
+            problems,
+            warnings: Vec::new(),
+        })
+    }
+}
+
+pub(crate) fn blank(s: &str) -> bool {
+    s.trim().is_empty()
+}
+
 impl fmt::Display for Problem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(

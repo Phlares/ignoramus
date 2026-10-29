@@ -7,12 +7,7 @@ use std::path::Path;
 const INSTRUCTION: &str = "Replace links and special files with regular files, and rename files to UTF-8 names without control characters or backslashes.";
 
 fn refuse(path: String, message: &str) -> Problem {
-    Problem {
-        code: "E-PUB-001",
-        path,
-        message: message.to_string(),
-        instruction: INSTRUCTION.to_string(),
-    }
+    Problem::new("E-PUB-001", path, message, INSTRUCTION)
 }
 
 /// Controls, C1 controls and bidi or format marks: a terminal or reader may act on them.

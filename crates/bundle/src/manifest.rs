@@ -1,5 +1,5 @@
 //! SHA-256 manifest in `sha256sum` format.
-use crate::{Error, Problem, tree};
+use crate::{Error, Problem, refuse_any, tree};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
@@ -38,12 +38,7 @@ pub fn sha256_bytes(b: &[u8]) -> String {
 /// Walks `dir` and hashes every file. Refuses when the walk finds an unsafe entry.
 pub fn scan(dir: &Path) -> Result<Vec<Entry>, Error> {
     let (files, problems) = tree::walk(dir)?;
-    if !problems.is_empty() {
-        return Err(Error::Refused {
-            problems,
-            warnings: vec![],
-        });
-    }
+    refuse_any(problems)?;
     files
         .into_iter()
         .map(|f| {
@@ -65,12 +60,12 @@ pub fn render(entries: &[Entry]) -> String {
 }
 
 fn mismatch(path: &str, message: &str) -> Problem {
-    Problem {
-        code: "E-PUB-015",
-        path: tree::shown(path),
-        message: message.to_string(),
-        instruction: "Rebuild the bundle; never edit a built bundle.".to_string(),
-    }
+    Problem::new(
+        "E-PUB-015",
+        tree::shown(path),
+        message,
+        "Rebuild the bundle; never edit a built bundle.",
+    )
 }
 
 /// Verifies `dir` against `dir/MANIFEST.sha256`. Returns the SHA-256 of the manifest bytes.
@@ -101,12 +96,6 @@ pub fn check(dir: &Path) -> Result<String, Error> {
     for path in listed.keys() {
         problems.push(mismatch(path, "listed in the manifest but missing"));
     }
-    if problems.is_empty() {
-        Ok(sha256_bytes(&bytes))
-    } else {
-        Err(Error::Refused {
-            problems,
-            warnings: vec![],
-        })
-    }
+    refuse_any(problems)?;
+    Ok(sha256_bytes(&bytes))
 }

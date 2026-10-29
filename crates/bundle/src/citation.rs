@@ -1,8 +1,8 @@
 //! Reads `citation.toml` and renders CITATION.cff and DataCite metadata from it.
 //!
 //! The keys of `citation.toml` are the Citation File Format 1.2.0 keys.
-use crate::Problem;
 use crate::tree::shown;
+use crate::{Problem, blank};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::path::Path;
@@ -65,16 +65,12 @@ impl RefKind {
 }
 
 fn problem(path: &str, message: impl Into<String>) -> Problem {
-    Problem {
-        code: "E-PUB-004",
-        path: format!("citation.toml{path}"),
-        message: message.into(),
-        instruction: CITATION_INSTRUCTION.into(),
-    }
-}
-
-fn blank(s: &str) -> bool {
-    s.trim().is_empty()
+    Problem::new(
+        "E-PUB-004",
+        format!("citation.toml{path}"),
+        message,
+        CITATION_INSTRUCTION,
+    )
 }
 
 fn set(o: &Option<String>) -> bool {
@@ -227,11 +223,13 @@ fn is_date(s: &str) -> bool {
 
 /// Checks the release facts the caller passes in.
 pub fn check_release(r: &Release) -> Vec<Problem> {
-    let bad = |path: &str, message: &str| Problem {
-        code: "E-PUB-013",
-        path: format!("release.{path}"),
-        message: message.into(),
-        instruction: RELEASE_INSTRUCTION.into(),
+    let bad = |path: &str, message: &str| {
+        Problem::new(
+            "E-PUB-013",
+            format!("release.{path}"),
+            message,
+            RELEASE_INSTRUCTION,
+        )
     };
     let mut out = Vec::new();
     if r.version.is_empty()

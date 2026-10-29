@@ -1,6 +1,6 @@
 //! Deterministic stored zip: same files, same bytes. No times, modes or extras.
 use crate::tree::{self, Found};
-use crate::{Error, Problem};
+use crate::{Error, Problem, refuse_any};
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
@@ -45,12 +45,7 @@ pub fn crc32(bytes: &[u8]) -> u32 {
 }
 
 fn limit(path: &str, message: &str) -> Problem {
-    Problem {
-        code: "E-PUB-012",
-        path: path.to_string(),
-        message: message.to_string(),
-        instruction: INSTRUCTION.to_string(),
-    }
+    Problem::new("E-PUB-012", path, message, INSTRUCTION)
 }
 
 /// Checks the limits from the walk's sizes only. No file is read.
@@ -76,14 +71,7 @@ fn check_limits(files: &[Found]) -> Result<(), Error> {
     if total >= LIMIT {
         problems.push(limit("", "bundle zip would reach 4 GiB"));
     }
-    if problems.is_empty() {
-        Ok(())
-    } else {
-        Err(Error::Refused {
-            problems,
-            warnings: Vec::new(),
-        })
-    }
+    refuse_any(problems)
 }
 
 fn crc_reader(reader: &mut impl Read) -> io::Result<(u32, u64)> {
@@ -143,12 +131,7 @@ fn changed(name: &str) -> io::Error {
 /// Returns the SHA-256 of the zip bytes.
 pub fn pack(dir: &Path, out: &Path) -> Result<String, Error> {
     let (files, problems) = tree::walk(dir)?;
-    if !problems.is_empty() {
-        return Err(Error::Refused {
-            problems,
-            warnings: Vec::new(),
-        });
-    }
+    refuse_any(problems)?;
     pack_files(dir, &files, out)
 }
 

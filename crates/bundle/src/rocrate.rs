@@ -95,14 +95,12 @@ pub fn missing(runs: &[Run], names: &[&str]) -> Vec<Problem> {
             for (j, item) in items.iter().enumerate() {
                 let Item::Path(p) = item else { continue };
                 if !names.contains(&p.as_str()) {
-                    out.push(Problem {
-                        code: "E-PUB-008",
-                        path: format!("runs[{i}].{field}[{j}]"),
-                        message: format!("{} is not in the bundle", shown(p)),
-                        instruction:
-                            "Add the file to the bundle, or refer to it by name and SHA-256."
-                                .into(),
-                    });
+                    out.push(Problem::new(
+                        "E-PUB-008",
+                        format!("runs[{i}].{field}[{j}]"),
+                        format!("{} is not in the bundle", shown(p)),
+                        "Add the file to the bundle, or refer to it by name and SHA-256.",
+                    ));
                 }
             }
         }

@@ -53,15 +53,6 @@ pub fn zip_name(study_id: &str, version: &str) -> String {
     format!("{study_id}-{version}.zip")
 }
 
-fn problem(code: &'static str, path: String, message: &str, instruction: &str) -> Problem {
-    Problem {
-        code,
-        path,
-        message: message.to_string(),
-        instruction: instruction.to_string(),
-    }
-}
-
 /// Each `before` file must appear in `after` with the same hash.
 fn verify_copied(before: &[Entry], after: &[Entry]) -> io::Result<()> {
     let now: BTreeMap<&str, &str> = after
@@ -94,7 +85,7 @@ fn unknown_top_level(files: &[Found]) -> Vec<Problem> {
             REQUIRED_FILES.contains(&name)
         };
         if !known && seen.insert(name) {
-            out.push(problem(
+            out.push(Problem::new(
                 "E-PUB-003",
                 shown(name),
                 "is not an allowed top-level file or folder",
@@ -132,7 +123,7 @@ fn check_attachments(attachments: &[(String, Vec<u8>)], study: &[Entry]) -> Vec<
                 .iter()
                 .any(|(o, _)| nested(o, path) || nested(path, o));
         if !attachment_path_ok(path) || clash {
-            out.push(problem(
+            out.push(Problem::new(
                 "E-PUB-010",
                 shown(path),
                 "cannot be attached",
@@ -159,7 +150,7 @@ fn hash_artifacts(
             && is_artifact_name(&name)
             && name != zip;
         if !valid || !seen.insert(name.clone()) {
-            problems.push(problem(
+            problems.push(Problem::new(
                 "E-PUB-010",
                 shown(&name),
                 "cannot be an artifact name",
@@ -192,9 +183,9 @@ fn missing_files(names: &[&str]) -> Vec<Problem> {
             names.contains(&w)
         };
         if !found {
-            out.push(problem(
+            out.push(Problem::new(
                 "E-PUB-002",
-                w.to_string(),
+                w,
                 "is missing",
                 "Add it: a study folder holds README.md, citation.toml, spec.toml, LICENSES/ and results/.",
             ));
@@ -237,9 +228,9 @@ pub fn build(study: &Path, out: &Path, facts: &Facts, release: &Release) -> Resu
     problems.extend(citation::check_release(release));
     let profile = profile::for_label(&facts.label);
     if profile.is_none() {
-        problems.push(problem(
+        problems.push(Problem::new(
             "E-PUB-014",
-            "label".to_string(),
+            "label",
             "is not a claim label",
             "Use one of the claim labels: signal, confirmed, replicated, generalized.",
         ));
@@ -278,11 +269,11 @@ pub fn build(study: &Path, out: &Path, facts: &Facts, release: &Release) -> Resu
         if let (Level::Required, Some(file)) = (step.level, &step.file)
             && !names.contains(&file.as_str())
         {
-            problems.push(problem(
+            problems.push(Problem::new(
                 "E-PUB-009",
                 shown(file),
                 "is a file a required step leaves",
-                &format!("Attach the file the profile names: {file}."),
+                format!("Attach the file the profile names: {file}."),
             ));
         }
     }
