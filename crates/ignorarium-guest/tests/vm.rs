@@ -220,6 +220,21 @@ fn the_payload_has_no_privileges() {
 
 #[test]
 #[ignore = "boots a VM; see the top of the file"]
+fn the_outputs_are_on_the_disk_when_the_report_arrives() {
+    // The host kills the VMM the moment the report arrives, so the outputs are there only
+    // if the agent synced them before it reported.
+    let mut row = Row::sh("head -c 4M /dev/urandom > /out/r; echo done > /out/small");
+    row.vm.exit_timeout = Duration::ZERO;
+    let o = row.run();
+    assert_eq!(o.report.end, Some(End::Code(0)));
+    assert_eq!(o.output_hash, o.report.output_hash);
+    let r = fs::metadata(row.dir.path().join("out/r")).unwrap();
+    assert_eq!(r.len(), 4 << 20);
+    assert_eq!(row.out("small"), "done\n");
+}
+
+#[test]
+#[ignore = "boots a VM; see the top of the file"]
 fn escaped_children_die_before_the_outputs_are_packed() {
     // The payload exits only once the child has left its session, so the group kill
     // cannot reach the child.

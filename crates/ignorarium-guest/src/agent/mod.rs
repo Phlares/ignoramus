@@ -72,14 +72,16 @@ fn run() -> io::Result<()> {
     let env = Path::new("/env");
     fs::create_dir_all(env)?;
     sandbox::mount_fs(&rootfs, env, "ext4", MountFlags::RDONLY, "")?;
-    let out_disk = OpenOptions::new().write(true).open(&out)?;
+    // Open until after the report: the `sync_all` before the report, not the flush that
+    // comes with the last close of a block device, must put the pack on the disk.
+    let mut out_disk = OpenOptions::new().write(true).open(&out)?;
     let out_bytes = disk_bytes(sys_block, &out)?;
     sandbox::build(env, Path::new("/sandbox"), &inputs, out_bytes)?;
 
     let mut chan = File::from(connect()?);
     let agent = env!("CARGO_PKG_VERSION").to_string();
     write_frame(&mut chan, &ToHost::Hello { agent })?;
-    match caught(|| row(&mut chan, out_disk)) {
+    match caught(|| row(&mut chan, &mut out_disk)) {
         Ok(report) => write_frame(&mut chan, &ToHost::Report(report)),
         Err(e) => {
             let reason = e.to_string();
@@ -112,7 +114,7 @@ fn connect() -> io::Result<OwnedFd> {
 
 /// Takes the job, seeds and sets the clock, then runs the payload behind the self-test and
 /// packs `/out` onto the output disk.
-fn row(chan: &mut File, mut out_disk: File) -> io::Result<Report> {
+fn row(chan: &mut File, out_disk: &mut File) -> io::Result<Report> {
     let job: Job = read_frame(chan)?;
     let seed = seed_from_hex(&job.seed_hex)?;
     mix_seed(&seed, &OpenOptions::new().write(true).open("/dev/urandom")?)?;
@@ -130,7 +132,7 @@ fn row(chan: &mut File, mut out_disk: File) -> io::Result<Report> {
         reap_all()?;
         let out = Path::new("/out");
         let hash = tree_hash(out)?;
-        let mut w = BufWriter::new(&mut out_disk);
+        let mut w = BufWriter::new(out_disk);
         pack::write(out, &mut w)?;
         w.into_inner()?.sync_all()?;
         Ok((ran, hash))
