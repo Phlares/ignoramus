@@ -297,8 +297,26 @@ fn emit(ctx: &Ctx, name: &str, done: &Done) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+/// A study with a record log, before the log is read: the box home and the path of the log.
+/// Refuses an id that is not a study id, and a study with no log.
+fn located<'a>(ctx: &'a Ctx, id: &str) -> Result<(&'a Home, PathBuf), CliError> {
+    let home = ctx.home()?;
+    if !new::id_is_valid(id)? {
+        return Err(CliError::refuse(format!("{id} is not a study id")));
+    }
+    let log = home.study_dir(id).join("records.jsonl");
+    if !log.is_file() {
+        return Err(not_registered(id));
+    }
+    Ok((home, log))
+}
+
+fn not_registered(id: &str) -> CliError {
+    CliError::refuse(format!("study {id} is not registered"))
+}
+
 /// A registered study: the box key and the study's verified records.
-/// Refuses an id that is not a study id, and a study with no `register` record.
+/// Refuses what `located` refuses, and a study with no `register` record.
 fn registered<'a>(
     ctx: &'a Ctx,
     id: &str,
@@ -310,22 +328,14 @@ fn registered<'a>(
     ),
     CliError,
 > {
-    let home = ctx.home()?;
-    if !new::id_is_valid(id)? {
-        return Err(CliError::refuse(format!("{id} is not a study id")));
-    }
-    let unknown = || CliError::refuse(format!("study {id} is not registered"));
+    let (home, log) = located(ctx, id)?;
     let key = crate::keys::load(home)
         .map_err(|e| CliError::usage(format!("box key: {e}")))?
-        .ok_or_else(unknown)?;
-    let log = home.study_dir(id).join("records.jsonl");
-    if !log.is_file() {
-        return Err(unknown());
-    }
+        .ok_or_else(|| not_registered(id))?;
     let all = crate::records::read_all(&log, &key.verifying_key())
         .map_err(|e| CliError::usage(format!("records of {id}: {e}")))?;
     if !all.iter().any(|r| r.kind == "register") {
-        return Err(unknown());
+        return Err(not_registered(id));
     }
     Ok((home, key, all))
 }

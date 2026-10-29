@@ -399,6 +399,41 @@ fn sighup_kills_the_row_records_its_spend_and_pauses() {
 }
 
 #[test]
+fn stop_sends_its_request_before_it_reads_a_torn_log() {
+    let lab = lab();
+    let id = "torn";
+    let dir = with_payload(&lab, id, SLEEPY_ROW_0);
+    let child = start_run(&lab, id);
+    let row = row_0_file(&dir);
+    // A torn last line, as a crash in mid-write leaves it.
+    let log = dir.join("records.jsonl");
+    let bytes = std::fs::read(&log).unwrap();
+    std::fs::write(&log, &bytes[..bytes.len() - 10]).unwrap();
+    let a = bin(&lab)
+        .args(["stop", id, "--reason", "torn log"])
+        .assert()
+        .code(2);
+    assert_eq!(
+        err(&a),
+        "error: the stop request is sent, but records of torn: line 1 is not a whole record\n"
+    );
+    assert_eq!(
+        ControlFile::of(&lab.home, id).peek().unwrap(),
+        Some(Signal::Stop("torn log".into()))
+    );
+    // The live run still sees the stop: its row's group dies and the box ends. The box
+    // cannot add its stop record to the torn log, so it ends with an error.
+    let (code, stderr) = ended(child);
+    assert_eq!(code.code(), Some(2), "{stderr}");
+    std::thread::sleep(Duration::from_millis(2000));
+    assert!(!dir.join("run/rows/0/out/late").exists());
+    assert_eq!(
+        live_in_group(row["pgid"].as_u64().unwrap()),
+        Vec::<u64>::new()
+    );
+}
+
+#[test]
 fn a_box_started_with_sigchld_ignored_still_sees_each_row_end() {
     let lab = lab();
     plain(&lab, "chld");
