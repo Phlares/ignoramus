@@ -351,7 +351,7 @@ fn check_all_fills_defaults_before_the_power_gate() {
     assert_eq!(paths(filled), ["design.alpha", "design.power"]);
     let cnf: Vec<_> = diags.iter().filter(|d| d.code == "E-CNF-002").collect();
     assert_eq!(cnf.len(), 1);
-    assert!(!cnf[0].problem.contains("cannot compute power"));
+    assert!(!cnf[0].problem.contains("Cannot compute power"));
     // The input is untouched.
     assert!(v["design"].get("alpha").is_none());
 }
@@ -364,7 +364,7 @@ fn check_named_alone_fails_closed_without_defaults() {
     assert!(!cnf.is_empty());
     assert!(
         cnf.iter()
-            .all(|d| d.problem.contains("cannot compute power"))
+            .all(|d| d.problem.contains("Cannot compute power"))
     );
 }
 

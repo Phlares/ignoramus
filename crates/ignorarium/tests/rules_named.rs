@@ -893,11 +893,11 @@ fn absent_power_fields_say_which_is_missing() {
         let ptr: &'static str = Box::leak(format!("/design/{field}").into_boxed_str());
         let d = named(&edited(&[(ptr, None)]), dir.path());
         assert_eq!(d.len(), 1, "{field}");
-        assert!(
-            d[0].problem
-                .ends_with(&format!("cannot compute power: design.{field} is absent")),
-            "{}",
-            d[0].problem
+        assert_eq!(
+            d[0].problem,
+            format!(
+                "The confirmation sample is too small. Cannot compute power: design.{field} is absent."
+            )
         );
     }
     // Two absent fields give two diagnostics; a mistyped one among them skips the gate.

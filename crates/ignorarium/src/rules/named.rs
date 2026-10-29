@@ -290,7 +290,7 @@ fn power_met(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
             .flat_map(|(path, _)| {
                 absent.iter().map(move |(f, _)| Hit {
                     path: path.clone(),
-                    detail: Some(format!("cannot compute power: design.{f} is absent")),
+                    detail: Some(format!("Cannot compute power: design.{f} is absent.")),
                 })
             })
             .collect();
