@@ -172,7 +172,7 @@ pub fn up_to(backends: Vec<Box<dyn Backend>>, max: u8) -> Vec<Box<dyn Backend>> 
     backends.into_iter().filter(|b| b.level() <= max).collect()
 }
 
-/// Load a registered study, gate its late data, write its schedule, and pick the lowest
+/// Load a registered study, gate its late data, write its schedule, and pick the highest
 /// backend that meets `scope.min_isolation`.
 pub fn prepare_with(
     home: &Home,
@@ -196,7 +196,7 @@ pub fn prepare_with(
     let backend = backends
         .into_iter()
         .filter(|b| b.level() >= need)
-        .min_by_key(|b| b.level())
+        .max_by_key(|b| b.level())
         .ok_or(RunError::NoBackend { need, have })?;
 
     let (payload, payload_sha256) = read_payload(&dir)?;

@@ -1,5 +1,7 @@
 //! Backends run one schedule row in isolation and report what happened.
 pub mod level0;
+pub mod level1;
+pub mod seccomp;
 
 use crate::sys::{self, Ended};
 use std::io;
@@ -14,7 +16,7 @@ const POLL: Duration = Duration::from_millis(5);
 
 /// What to run: a read-only input dir and one write-only output dir.
 /// The backend sets `IGNORARIUM_IN` and `IGNORARIUM_OUT` to the paths the payload sees.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RowJob {
     pub argv: Vec<String>,
     pub env: Vec<(String, String)>,
@@ -79,7 +81,33 @@ pub trait Backend {
 
 /// Every backend this build knows, lowest level first.
 pub fn registered() -> Vec<Box<dyn Backend>> {
-    vec![Box::new(level0::Level0)]
+    vec![Box::new(level0::Level0), Box::new(level1::Level1::new())]
+}
+
+/// The outcome of a row that ended with `exit` after `cpu_seconds` of CPU: the wall time
+/// since `start` and the hash of `job.output_dir`.
+pub fn outcome(job: &RowJob, start: Instant, mut exit: Exit, cpu_seconds: f64) -> RowOutcome {
+    let wall_seconds = start.elapsed().as_secs_f64();
+    // A row the box ended is not data: nothing reads its hash, and a large output would
+    // hold up the spend record. Otherwise the payload ran, and an output it left
+    // unhashable is its own result, not a box fault.
+    let output_hash = if exit == Exit::Stopped {
+        String::new()
+    } else {
+        level0::output_hash(&job.output_dir).unwrap_or_else(|e| {
+            if exit == Exit::Ok {
+                exit = Exit::Void(format!("cannot hash output: {e}"));
+            }
+            String::new()
+        })
+    };
+    RowOutcome {
+        exit,
+        cpu_seconds,
+        wall_seconds,
+        output_hash,
+        selftest_ok: true,
+    }
 }
 
 /// Run `cmd` (program, args, env and stdio already set) as its own process group leader and

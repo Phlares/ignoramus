@@ -164,3 +164,39 @@ pub fn write_exec(path: &Path, text: &str) {
         .unwrap();
     assert!(child.wait().unwrap().success(), "cannot write {path:?}");
 }
+
+/// Why bubblewrap cannot run a level 1 sandbox on this host, or `None` when it can.
+/// Found by calling `bwrap` directly, never through the box's code, so a fault in that
+/// code fails the level 1 tests instead of skipping them.
+pub fn no_level1() -> Option<String> {
+    let run = |args: &[&str]| std::process::Command::new("bwrap").args(args).output();
+    let version = match run(&["--version"]) {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        Err(e) => return Some(format!("cannot run bwrap: {e}")),
+    };
+    let number = |p: Option<&str>| p?.parse::<u32>().ok();
+    let mut parts = version.strip_prefix("bubblewrap ").unwrap_or("").split('.');
+    match (number(parts.next()), number(parts.next())) {
+        (Some(major), Some(minor)) if (major, minor) >= (0, 8) => {}
+        _ => return Some(format!("{version:?} is not bubblewrap 0.8 or later")),
+    }
+    let namespaces = [
+        "--unshare-user",
+        "--unshare-ipc",
+        "--unshare-pid",
+        "--unshare-net",
+        "--unshare-uts",
+        "--unshare-cgroup",
+        "--disable-userns",
+        "--ro-bind",
+        "/",
+        "/",
+        "--",
+        "/bin/true",
+    ];
+    match run(&namespaces) {
+        Ok(o) if o.status.success() => None,
+        Ok(o) => Some(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+        Err(e) => Some(format!("cannot run bwrap: {e}")),
+    }
+}

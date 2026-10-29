@@ -8,6 +8,7 @@ use std::time::Duration;
 fn job(dir: &std::path::Path, script: &str, timeout: Duration) -> RowJob {
     let out = dir.join("out");
     std::fs::create_dir_all(&out).unwrap();
+    std::fs::create_dir_all(dir.join("in")).unwrap();
     RowJob {
         argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
         env: vec![("OUT".into(), out.to_string_lossy().into())],

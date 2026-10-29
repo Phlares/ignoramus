@@ -1,7 +1,8 @@
-//! The run verbs, driven through the real binary at isolation level 0.
+//! The run verbs, driven through the real binary. The test machine file reaches level 1,
+//! so rows run in bubblewrap.
 mod common;
 use assert_cmd::Command;
-use common::{Lab, kind_of, lab, plain, register_study, with_payload};
+use common::{Lab, kind_of, lab, no_level1, plain, register_study, with_payload};
 use ignorarium::cli::status::blind_order;
 use ignorarium::control::{ControlFile, RunLock, Signal, State};
 use ignorarium::keys;
@@ -35,17 +36,19 @@ fn probe_writes_machine_toml_and_prints_the_level() {
         "max_level = 0\nrate_usd_per_hour = 2.5\n",
     )
     .unwrap();
+    // Level 1 where bubblewrap can run here, else level 0.
+    let want = u8::from(no_level1().is_none());
     let a = bin(&lab).arg("probe").assert().code(0);
     let out = text(&a);
-    assert!(out.contains("max level: 0"), "{out}");
+    assert!(out.contains(&format!("max level: {want}")), "{out}");
     assert!(out.contains("/dev/kvm"), "{out}");
     let m = ignorarium::machine::load(&lab.home.root).unwrap();
-    assert_eq!(m.max_level, 0);
+    assert_eq!(m.max_level, want);
     assert_eq!(m.rate_usd_per_hour, 2.5);
     let events = common::events_of(&lab.home.root);
     let probe = common::named(&events, "probe");
     assert_eq!(probe.len(), 1);
-    assert_eq!(probe[0]["attrs"]["max_level"], 0);
+    assert_eq!(probe[0]["attrs"]["max_level"], want);
     assert!(probe[0]["attrs"]["kvm"].is_boolean());
 }
 

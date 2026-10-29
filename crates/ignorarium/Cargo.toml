@@ -16,8 +16,9 @@ hex = "0.4"
 regex = "1"
 getrandom = "0.3"
 ed25519-dalek = "2"
-rustix = { version = "1", features = ["process"] }
+rustix = { version = "1", features = ["process", "pipe", "net"] }
 libc = "0.2"
+seccompiler = "0.5"
 
 [dev-dependencies]
 assert_cmd = "2"

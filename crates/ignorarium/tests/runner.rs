@@ -717,21 +717,25 @@ fn need_isolation(t: String) -> String {
 }
 
 #[test]
-fn the_lowest_backend_that_meets_min_isolation_runs() {
+fn the_highest_backend_that_meets_min_isolation_runs() {
     let lab = lab();
     plain(&lab, "lvl0");
     register_study(&lab, "lvl1", need_isolation, &[], PAYLOAD);
-    let pick = |id: &str| {
-        let all = vec![fake_at(2), fake_at(0), fake_at(1)];
+    let pick = |id: &str, levels: &[u8]| {
+        let all = levels.iter().map(|&l| fake_at(l)).collect();
         prepare_with(&lab.home, id, all).unwrap().backend.level()
     };
-    assert_eq!(pick("lvl0"), 0);
-    assert_eq!(pick("lvl1"), 1);
+    assert_eq!(pick("lvl0", &[2, 0, 1]), 2);
+    assert_eq!(pick("lvl0", &[0, 1]), 1);
+    assert_eq!(pick("lvl0", &[1, 0]), 1);
+    assert_eq!(pick("lvl0", &[0]), 0);
+    assert_eq!(pick("lvl1", &[2, 0, 1]), 2);
+    assert_eq!(pick("lvl1", &[0, 1]), 1);
     let only0 = prepare_with(&lab.home, "lvl1", vec![fake_at(0)])
         .err()
         .unwrap();
     assert!(
-        matches!(only0, RunError::NoBackend { need: 1, .. }),
+        matches!(&only0, RunError::NoBackend { need: 1, have } if *have == [0]),
         "{only0}"
     );
 }

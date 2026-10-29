@@ -1,5 +1,5 @@
 //! Level 0: a bare process on the host. No isolation.
-use super::{Backend, Exit, Probe, RowJob, RowOutcome, Watch, supervise};
+use super::{Backend, Exit, Probe, RowJob, RowOutcome, Watch, outcome, supervise};
 use crate::canon::{sha256_hex, to_canonical};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -29,28 +29,8 @@ impl Backend for Level0 {
 
     fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> io::Result<RowOutcome> {
         let start = Instant::now();
-        let (mut exit, cpu_seconds) = run_child(job, start, watch);
-        let wall_seconds = start.elapsed().as_secs_f64();
-        // A row the box ended is not data: nothing reads its hash, and a large output would
-        // hold up the spend record. Otherwise the payload ran, and an output it left
-        // unhashable is its own result, not a box fault.
-        let output_hash = if exit == Exit::Stopped {
-            String::new()
-        } else {
-            output_hash(&job.output_dir).unwrap_or_else(|e| {
-                if exit == Exit::Ok {
-                    exit = Exit::Void(format!("cannot hash output: {e}"));
-                }
-                String::new()
-            })
-        };
-        Ok(RowOutcome {
-            exit,
-            cpu_seconds,
-            wall_seconds,
-            output_hash,
-            selftest_ok: true,
-        })
+        let (exit, cpu_seconds) = run_child(job, start, watch);
+        Ok(outcome(job, start, exit, cpu_seconds))
     }
 }
 
