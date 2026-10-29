@@ -1245,3 +1245,76 @@ fn two_threads_stopping_an_idle_study_at_once_write_one_record() {
     let why = stops[0].body["why"].as_str().unwrap().to_string();
     assert_eq!(state_of(&lab, "both"), Some(State::Stopped(why)));
 }
+
+#[test]
+fn await_stop_returns_the_record_an_idle_study_gets() {
+    let lab = lab();
+    plain(&lab, "aw1");
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    ControlFile::of(&lab.home, "aw1")
+        .request_stop("enough")
+        .unwrap();
+    let r = control::await_stop(&lab.home, "aw1", &key, Duration::from_millis(100))
+        .unwrap()
+        .expect("an idle study records the stop at once");
+    assert_eq!(r.kind, "stop");
+    assert_eq!(r.body["why"], "enough");
+    assert_eq!(kind_of(&lab, "aw1", "stop").len(), 1);
+}
+
+#[test]
+fn await_stop_times_out_while_a_live_run_never_answers() {
+    let lab = lab();
+    plain(&lab, "aw2");
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let held = RunLock::try_take(&lab.home, "aw2").unwrap().unwrap();
+    ControlFile::of(&lab.home, "aw2")
+        .request_stop("later")
+        .unwrap();
+    let start = Instant::now();
+    let got = control::await_stop(&lab.home, "aw2", &key, Duration::from_millis(150)).unwrap();
+    assert!(got.is_none());
+    assert!(start.elapsed() >= Duration::from_millis(150));
+    assert!(kind_of(&lab, "aw2", "stop").is_empty());
+    drop(held);
+}
+
+#[test]
+fn await_stop_returns_a_record_the_live_run_writes_while_it_waits() {
+    let lab = lab();
+    plain(&lab, "aw3");
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let held = RunLock::try_take(&lab.home, "aw3").unwrap().unwrap();
+    ControlFile::of(&lab.home, "aw3")
+        .request_stop("live")
+        .unwrap();
+    let (home, k) = (lab.home.clone(), key.clone());
+    let waiter = thread::spawn(move || {
+        control::await_stop(&home, "aw3", &k, Duration::from_secs(10)).unwrap()
+    });
+    thread::sleep(Duration::from_millis(200));
+    held.stop(&key, "live", None).unwrap();
+    let r = waiter.join().unwrap().expect("the record the run wrote");
+    assert_eq!(r.kind, "stop");
+}
+
+#[test]
+fn run_is_live_probes_without_taking_the_lock() {
+    let lab = lab();
+    plain(&lab, "lv");
+    assert!(!control::run_is_live(&lab.home, "lv").unwrap());
+    assert!(
+        !lab.home.study_dir("lv").join("run").exists(),
+        "reads make no run/"
+    );
+    let held = RunLock::try_take(&lab.home, "lv").unwrap().unwrap();
+    assert!(control::run_is_live(&lab.home, "lv").unwrap());
+    assert!(
+        control::run_is_live(&lab.home, "lv").unwrap(),
+        "a probe leaves it held"
+    );
+    drop(held);
+    assert!(!control::run_is_live(&lab.home, "lv").unwrap());
+    // A probe in progress does not make a run Busy: the lock is free once it returns.
+    assert!(RunLock::try_take(&lab.home, "lv").unwrap().is_some());
+}

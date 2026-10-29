@@ -300,6 +300,51 @@ pub fn stop_if_idle(
     lock.stop(key, &reason, None).map(Some)
 }
 
+/// Whether a run holds the study's lock now. A shared probe, released at once: it never
+/// takes the exclusive lock, so it neither blocks a starting run nor reads as a holder
+/// to another probe. A study that never ran has no lock.
+pub fn run_is_live(home: &Home, study_id: &str) -> io::Result<bool> {
+    let lock = run_path(home, study_id, "lock", false)?;
+    let file = match File::open(&lock) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    match file.try_lock_shared() {
+        Ok(()) => Ok(false),
+        Err(TryLockError::WouldBlock) => Ok(true),
+        Err(TryLockError::Error(e)) => Err(e),
+    }
+}
+
+/// How often `await_stop` looks again.
+const STOP_POLL: Duration = Duration::from_millis(50);
+
+/// Wait up to `wait` for the study's stop record: write the trace here when no run holds
+/// the lock, else let the live run write it. `None` when the wait runs out.
+pub fn await_stop(
+    home: &Home,
+    study_id: &str,
+    key: &SigningKey,
+    wait: Duration,
+) -> Result<Option<Record>, ControlError> {
+    let log = home.study_dir(study_id).join("records.jsonl");
+    let start = Instant::now();
+    loop {
+        if let Some(r) = stop_if_idle(home, study_id, key)? {
+            return Ok(Some(r));
+        }
+        let all = records::read_all(&log, &key.verifying_key())?;
+        if let Some(r) = all.into_iter().find(|r| r.kind == "stop") {
+            return Ok(Some(r));
+        }
+        if start.elapsed() >= wait {
+            return Ok(None);
+        }
+        std::thread::sleep(STOP_POLL);
+    }
+}
+
 /// The last state a run wrote, at `run/state.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

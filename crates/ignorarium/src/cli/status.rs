@@ -2,13 +2,11 @@
 //! Reads only: it never creates the study's `run` folder.
 use super::{CliError, Ctx, Done, Run, out, registered, stopped_why};
 use crate::canon::sha256_hex;
-use crate::control::{ControlFile, RunLock, Signal, State};
-use crate::estimate::apply_defaults;
+use crate::control::{ControlFile, Signal, State, run_is_live};
 use crate::records::Record;
-use crate::spec::model::Spec;
-use crate::{machine, schedule, seed, spec};
+use crate::runner::progress;
+use crate::seed;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
 
 /// The condition ids in a fixed order that depends on the spec hash and on nothing else:
 /// each id sorts by a hash of its seed and itself.
@@ -50,11 +48,8 @@ fn standing(
     if let Some(why) = stopped_why(all) {
         return Ok(("stopped", Some(why)));
     }
-    if home.study_dir(id).join("run").is_dir() {
-        match RunLock::try_take(home, id).map_err(|e| io(&e))? {
-            None => return Ok(("running", None)),
-            Some(lock) => drop(lock),
-        }
+    if run_is_live(home, id).map_err(|e| io(&e))? {
+        return Ok(("running", None));
     }
     Ok(match State::read(home, id).map_err(|e| io(&e))? {
         Some(State::Running) => ("interrupted", None),
@@ -69,33 +64,11 @@ fn standing(
 pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
     let (home, _, all) = registered(ctx, id)?;
     let bad = |e: &dyn std::fmt::Display| CliError::usage(format!("cannot report {id}: {e}"));
-    let raw = spec::load(&home.study_dir(id).join("spec.toml")).map_err(|e| bad(&e))?;
-    let mut value = raw.value;
-    apply_defaults(&mut value);
-    let spec = Spec::from_value(&value).map_err(|e| bad(&e))?;
-    let spec_hash = spec::hash_bytes(&raw.hash).ok_or_else(|| bad(&"bad spec hash"))?;
-    let machine = machine::load(&home.root).map_err(|e| bad(&e))?;
-    let rows = schedule::expand(&spec, &spec_hash, &schedule::units_from_spec(&spec))
-        .map_err(|e| bad(&e))?;
-
-    let recorded: Vec<&Record> = all.iter().filter(|r| r.kind == "row").collect();
-    let num = |r: &Record, k: &str| r.body[k].as_f64().unwrap_or(0.0);
-    let spent: Vec<&Record> = all
-        .iter()
-        .filter(|r| r.kind == "row" || r.kind == "spend")
-        .collect();
-    let cpu_seconds: f64 = spent.iter().map(|r| num(r, "cpu_seconds")).sum();
-    let wall_seconds: f64 = spent.iter().map(|r| num(r, "wall_seconds")).sum();
-    let done_rows: BTreeSet<u64> = recorded.iter().filter_map(|r| r.row).collect();
-    let (done, total) = (done_rows.len(), rows.len());
-    let voided = recorded.iter().filter(|r| r.body["exit"] != "ok").count();
-    let retried: u64 = recorded
-        .iter()
-        .map(|r| r.body["attempts"].as_u64().unwrap_or(1).saturating_sub(1))
-        .sum();
-
+    let p = progress(home, id, &all).map_err(|e| bad(&e))?;
+    let (spec, spec_hash, done, total) = (&p.spec, p.spec_hash, p.done, p.total);
+    let wall_seconds = p.cost.wall_seconds;
     let hours = wall_seconds / 3600.0;
-    let money = hours * machine.rate_usd_per_hour;
+    let (cpu_hours, money) = (p.cost.cpu_seconds / 3600.0, p.cost.usd);
     let per_hour = (done > 0 && hours > 0.0).then(|| done as f64 / hours);
     let eta = if done >= total {
         Some(0.0)
@@ -103,11 +76,7 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
         per_hour.map(|r| (total - done) as f64 / r * 3600.0)
     };
     let budget = &spec.scope.budget;
-    let cost = json!({
-        "cpu_hours": cpu_seconds / 3600.0,
-        "wall_hours": hours,
-        "money_usd": money,
-    });
+    let cost = json!({ "cpu_hours": cpu_hours, "wall_hours": hours, "money_usd": money });
     let fraction = |spent: f64, cap: f64| (cap > 0.0).then(|| spent / cap);
 
     let ids: Vec<String> = spec
@@ -126,22 +95,10 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
     } else {
         ids.iter().map(|i| (i.clone(), i.clone())).collect()
     };
-    let mut counts: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
-    for r in &rows {
-        counts.entry(r.condition.as_str()).or_default().1 += 1;
-    }
-    let mut seen = BTreeSet::new();
-    for r in &recorded {
-        if let (Some(i), Some(c)) = (r.row, r.body["condition"].as_str())
-            && seen.insert(i)
-        {
-            counts.entry(c).or_default().0 += 1;
-        }
-    }
     let conditions: Vec<Value> = shown
         .iter()
         .map(|(real, label)| {
-            let (d, t) = counts.get(real.as_str()).copied().unwrap_or_default();
+            let (d, t) = p.conditions.get(real.as_str()).copied().unwrap_or_default();
             json!({ "label": label, "done": d, "total": t })
         })
         .collect();
@@ -170,13 +127,13 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
             "money_usd": budget.money_usd,
         },
         "used": {
-            "cpu_hours": fraction(cpu_seconds / 3600.0, budget.cpu_hours),
+            "cpu_hours": fraction(cpu_hours, budget.cpu_hours),
             "wall_hours": fraction(hours, budget.wall_hours),
             "money_usd": fraction(money, budget.money_usd),
         },
         "cost_rate_usd_per_hour": (hours > 0.0).then(|| money / hours),
-        "voided": voided,
-        "retried": retried,
+        "voided": p.voided,
+        "retried": p.retried,
         "triggers": [],
         "blind": blind,
         "conditions": conditions,
@@ -240,6 +197,8 @@ fn render(r: &Value) -> String {
         "voided: {}\nretried: {}\n",
         r["voided"], r["retried"]
     ));
+    let blind = if r["blind"] == true { "yes" } else { "no" };
+    s.push_str(&format!("blind: {blind}\n"));
     let triggers = r["triggers"].as_array().map_or(&[][..], Vec::as_slice);
     if triggers.is_empty() {
         s.push_str("triggers: none\n");

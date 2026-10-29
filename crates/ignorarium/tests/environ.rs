@@ -1,3 +1,4 @@
+mod common;
 use ignorarium::environ::{
     Builder, EnvError, Recipe, build, check_pinned, rebuild_rate, recipe_hash,
 };
@@ -89,7 +90,6 @@ fn the_fixture_dockerfile_is_pinned() {
 /// `build` writes the next id from `ids` (cycling) to the --iidfile and logs
 /// its arguments. `save` prints a tar marker that names the id.
 fn fake(dir: &Path, ids: &[&str]) -> (Builder, PathBuf) {
-    use std::os::unix::fs::PermissionsExt;
     let log = dir.join("calls.log");
     let script = format!(
         "#!/bin/sh\n\
@@ -111,8 +111,7 @@ fn fake(dir: &Path, ids: &[&str]) -> (Builder, PathBuf) {
         list = ids.join(" "),
     );
     let p = dir.join("engine");
-    std::fs::write(&p, script).unwrap();
-    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::write_exec(&p, &script);
     (Builder::with_program(&p), log)
 }
 
@@ -261,24 +260,21 @@ fn the_id_file_lives_under_the_store_root() {
 
 #[test]
 fn an_id_file_that_is_a_link_is_refused() {
-    use std::os::unix::fs::PermissionsExt;
     let t = tempfile::tempdir().unwrap();
     let dir = recipe_dir(t.path());
     let real = t.path().join("real");
     std::fs::write(&real, format!("sha256:{A}")).unwrap();
     let p = t.path().join("engine");
-    std::fs::write(
+    common::write_exec(
         &p,
-        format!(
+        &format!(
             "#!/bin/sh
 prev=\"\"
 for a in \"$@\"; do [ \"$prev\" = \"--iidfile\" ] && ln -s '{}' \"$a\"; prev=\"$a\"; done
 ",
             real.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let b = Builder::with_program(&p);
     let r = rebuild_rate(&b, &dir, &store_in(t.path()), 1);
     assert!(matches!(r, Err(EnvError::Io(_))), "{r:?}");

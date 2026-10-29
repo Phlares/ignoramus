@@ -159,7 +159,7 @@ enum Verb {
         /// Study id.
         study: String,
         /// Use no backend above this isolation level.
-        #[arg(long)]
+        #[arg(long, value_parser = clap::value_parser!(u8).range(..=3))]
         max_level: Option<u8>,
     },
     /// Show how far a study has run and what it has spent.

@@ -1,6 +1,6 @@
 //! `run`: prepare a registered study and run its rows.
 use super::{CliError, Ctx, Done, Run, out, registered, stopped_why};
-use crate::control::{ControlFile, Signal};
+use crate::control::{ControlFile, Signal, run_is_live};
 use crate::machine;
 use crate::runner::{self, RunError, RunStatus};
 
@@ -16,6 +16,15 @@ pub fn go(ctx: &Ctx, id: &str, max_level: Option<u8>, resume: bool) -> Run {
         return Err(CliError::refuse(format!("study {id} is stopped: {why}")));
     }
     let control = ControlFile::of(home, id);
+    // A live run reads the request at its next row boundary; this call starts nothing.
+    if resume && run_is_live(home, id).map_err(|e| CliError::usage(e.to_string()))? {
+        control
+            .request_resume()
+            .map_err(|e| CliError::usage(format!("cannot write the resume request: {e}")))?;
+        out("the live run continues
+")?;
+        return Ok(Done::exit(0));
+    }
     let pending = control
         .peek()
         .map_err(|e| CliError::usage(format!("cannot read the control file: {e}")))?;

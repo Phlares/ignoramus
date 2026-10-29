@@ -58,12 +58,7 @@ pub fn register_study(
     assert_eq!(done.code, 0, "{}", String::from_utf8_lossy(&out));
     let dir = lab.home.study_dir(id);
     std::fs::create_dir_all(dir.join("payload")).unwrap();
-    std::fs::write(dir.join("payload/run"), payload).unwrap();
-    std::fs::set_permissions(
-        dir.join("payload/run"),
-        std::os::unix::fs::PermissionsExt::from_mode(0o755),
-    )
-    .unwrap();
+    write_exec(&dir.join("payload/run"), payload);
     dir
 }
 
@@ -123,4 +118,24 @@ pub fn events_of(dir: &Path) -> Vec<serde_json::Value> {
 
 pub fn named<'a>(events: &'a [serde_json::Value], name: &str) -> Vec<&'a serde_json::Value> {
     events.iter().filter(|e| e["name"] == name).collect()
+}
+
+/// Write an executable file without this process holding a write descriptor to it.
+/// A thread that forks while such a descriptor is open hands it to its child, and an
+/// `exec` of the file then fails with ETXTBSY. A child process writes the file instead.
+pub fn write_exec(path: &Path, text: &str) {
+    use std::io::Write;
+    let mut child = std::process::Command::new("sh")
+        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+        .arg(path)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(text.as_bytes())
+        .unwrap();
+    assert!(child.wait().unwrap().success(), "cannot write {path:?}");
 }

@@ -3,8 +3,7 @@ mod common;
 use assert_cmd::Command;
 use common::{Lab, kind_of, lab, plain, register_study, with_payload};
 use ignorarium::cli::status::blind_order;
-use ignorarium::cli::stop::{Stopped, stop_study};
-use ignorarium::control::{ControlFile, RunLock, State};
+use ignorarium::control::{ControlFile, RunLock, Signal, State};
 use ignorarium::keys;
 use serde_json::Value;
 use std::time::Duration;
@@ -99,22 +98,19 @@ fn run_refuses_when_the_machine_is_below_min_isolation() {
 }
 
 #[test]
-fn max_level_flag_caps_the_backends() {
+fn max_level_flag_parses_and_a_value_above_3_is_a_usage_error() {
     let lab = lab();
-    std::fs::write(lab.home.root.join("machine.toml"), "max_level = 2\n").unwrap();
-    register_study(
-        &lab,
-        "cap",
-        |t| t.replace("min_isolation = 0", "min_isolation = 1"),
-        &[],
-        common::PAYLOAD,
-    );
-    // Only level 0 exists in this build, so level 1 is refused whatever the flag says.
-    let a = bin(&lab)
-        .args(["run", "cap", "--max-level", "0"])
+    plain(&lab, "ml");
+    bin(&lab)
+        .args(["run", "ml", "--max-level", "4"])
         .assert()
-        .code(1);
-    assert!(err(&a).contains("ignorarium probe"), "{}", err(&a));
+        .code(2);
+    assert!(kind_of(&lab, "ml", "row").is_empty());
+    bin(&lab)
+        .args(["run", "ml", "--max-level", "0"])
+        .assert()
+        .code(0);
+    assert_eq!(status(&lab, "ml")["state"], "done");
 }
 
 #[test]
@@ -227,7 +223,7 @@ fn stop_needs_a_reason() {
 }
 
 #[test]
-fn stop_during_a_live_run_is_recorded_by_the_run() {
+fn resume_and_stop_during_a_live_run() {
     let lab = lab();
     with_payload(&lab, "live", "#!/bin/sh\nsleep 20\n");
     let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("ignorarium"))
@@ -245,33 +241,163 @@ fn stop_during_a_live_run_is_recorded_by_the_run() {
         std::thread::sleep(Duration::from_millis(50));
     }
     assert!(row_file.exists(), "the row never started");
-    let s = status(&lab, "live");
-    assert_eq!(s["state"], "running");
-    bin(&lab)
+    assert_eq!(status(&lab, "live")["state"], "running");
+    // A resume while the run is live clears the pause and starts nothing.
+    bin(&lab).args(["pause", "live"]).assert().code(0);
+    assert_eq!(status(&lab, "live")["request"], "pause");
+    let a = bin(&lab).args(["resume", "live"]).assert().code(0);
+    assert_eq!(text(&a), "the live run continues\n");
+    assert_eq!(status(&lab, "live")["request"], "resume");
+    let start = std::time::Instant::now();
+    let a = bin(&lab)
         .args(["stop", "live", "--reason", "too slow"])
         .assert()
         .code(0);
-    let code = child.wait().unwrap().code().unwrap();
-    assert_eq!(code, 1);
-    assert_eq!(kind_of(&lab, "live", "stop").len(), 1);
+    let stops = kind_of(&lab, "live", "stop");
+    assert_eq!(stops.len(), 1);
+    assert_eq!(text(&a), format!("stop record: {}\n", stops[0].seq));
+    assert!(
+        start.elapsed() < Duration::from_secs(15),
+        "the run answered the stop"
+    );
+    assert_eq!(child.wait().unwrap().code().unwrap(), 1);
     assert_eq!(status(&lab, "live")["state"], "stopped");
 }
 
 #[test]
-fn stop_while_a_live_run_never_answers_says_the_run_records_it() {
+fn pause_refuses_a_stopped_study() {
     let lab = lab();
-    plain(&lab, "w1");
-    let key = keys::load(&lab.home).unwrap().unwrap();
-    let held = RunLock::try_take(&lab.home, "w1").unwrap().unwrap();
-    let got = stop_study(&lab.home, &key, "w1", "later", Duration::from_millis(200)).unwrap();
-    assert!(matches!(got, Stopped::Requested));
-    drop(held);
+    plain(&lab, "ps");
+    bin(&lab)
+        .args(["stop", "ps", "--reason", "x"])
+        .assert()
+        .code(0);
+    let a = bin(&lab).args(["pause", "ps"]).assert().code(1);
+    assert!(err(&a).contains("stopped"), "{}", err(&a));
     assert_eq!(
-        ControlFile::of(&lab.home, "w1").peek().unwrap(),
-        Some(ignorarium::control::Signal::Stop("later".into()))
+        ControlFile::of(&lab.home, "ps").peek().unwrap(),
+        Some(Signal::Stop("x".into()))
     );
-    let again = stop_study(&lab.home, &key, "w1", "later", Duration::from_millis(200)).unwrap();
-    assert!(matches!(again, Stopped::Recorded(_)));
+}
+
+#[test]
+fn run_refuses_a_bad_machine_file_with_exit_2() {
+    let lab = lab();
+    plain(&lab, "bm");
+    std::fs::write(lab.home.root.join("machine.toml"), "cpus = 0\n").unwrap();
+    let a = bin(&lab).args(["run", "bm"]).assert().code(2);
+    assert!(err(&a).contains("machine.toml"), "{}", err(&a));
+}
+
+/// Signed records with known spend on a study that never ran.
+fn plant(lab: &Lab, id: &str, rows: &[(u64, &str, &str, f64, f64, u64)]) {
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let log = lab.home.study_dir(id).join("records.jsonl");
+    for &(row, condition, exit, cpu, wall, attempts) in rows {
+        let draft = ignorarium::records::RecordDraft {
+            study: id.into(),
+            row: Some(row),
+            kind: "row".into(),
+            body: serde_json::json!({
+                "condition": condition, "exit": exit, "cpu_seconds": cpu,
+                "wall_seconds": wall, "attempts": attempts,
+            }),
+        };
+        ignorarium::records::append(&log, &key, draft).unwrap();
+    }
+    let spend = ignorarium::records::RecordDraft {
+        study: id.into(),
+        row: Some(99),
+        kind: "spend".into(),
+        body: serde_json::json!({ "cpu_seconds": 1800.0, "wall_seconds": 0.0, "reason": "x" }),
+    };
+    ignorarium::records::append(&log, &key, spend).unwrap();
+}
+
+#[test]
+fn status_values_are_exact_for_planted_records() {
+    let lab = lab();
+    std::fs::write(
+        lab.home.root.join("machine.toml"),
+        "max_level = 1\nrate_usd_per_hour = 2.0\n",
+    )
+    .unwrap();
+    plain(&lab, "ex");
+    plant(
+        &lab,
+        "ex",
+        &[
+            (0, "exact", "ok", 1800.0, 3600.0, 2),
+            (1, "arm-a", "payload:3", 0.0, 0.0, 1),
+        ],
+    );
+    let s = status(&lab, "ex");
+    let total = s["total"].as_u64().unwrap();
+    assert_eq!(s["done"], 2);
+    assert_eq!(s["voided"], 1);
+    assert_eq!(s["retried"], 1);
+    assert_eq!(s["cost"]["cpu_hours"], 1.0);
+    assert_eq!(s["cost"]["wall_hours"], 1.0);
+    assert_eq!(s["cost"]["money_usd"], 2.0);
+    assert_eq!(s["used"]["cpu_hours"], 1.0);
+    assert_eq!(s["used"]["wall_hours"], 1.0);
+    assert!(s["used"]["money_usd"].is_null(), "no cap, no fraction");
+    assert_eq!(s["elapsed_seconds"], 3600.0);
+    assert_eq!(s["rows_per_hour"], 2.0);
+    assert_eq!(s["cost_rate_usd_per_hour"], 2.0);
+    assert_eq!(
+        s["eta_seconds"].as_f64().unwrap(),
+        (total - 2) as f64 / 2.0 * 3600.0
+    );
+    assert_eq!(s["conditions"][0]["done"], 1);
+    assert_eq!(s["conditions"][1]["done"], 1);
+    let a = bin(&lab).args(["status", "ex"]).assert().success();
+    let t = text(&a);
+    for want in [
+        "rows: 2/".to_string(),
+        "rate: 2.00 rows/hour".to_string(),
+        "elapsed: 3600.00 s".to_string(),
+        format!("eta: {:.2} s", (total - 2) as f64 / 2.0 * 3600.0),
+        "cost: cpu 1.000 h, wall 1.000 h, money $2.000".to_string(),
+        "(100%)".to_string(),
+        "(no cap)".to_string(),
+        "cost rate: 2.00 USD/hour".to_string(),
+        "voided: 1\nretried: 1\nblind: no\n".to_string(),
+    ] {
+        assert!(t.contains(&want), "{want} in {t}");
+    }
+}
+
+#[test]
+fn blind_labels_follow_the_seeded_order() {
+    let lab = lab();
+    let dir = register_study(
+        &lab,
+        "bl",
+        |t| t.replace("blind = false", "blind = true"),
+        &[],
+        common::PAYLOAD,
+    );
+    plant(&lab, "bl", &[(0, "exact", "ok", 1.0, 1.0, 1)]);
+    let hash =
+        ignorarium::spec::hash_bytes(&ignorarium::spec::load(&dir.join("spec.toml")).unwrap().hash)
+            .unwrap();
+    let order = blind_order(&hash, &["exact".to_string(), "arm-a".to_string()]);
+    let at = order.iter().position(|c| c == "exact").unwrap();
+    let s = status(&lab, "bl");
+    let conds = s["conditions"].as_array().unwrap();
+    assert_eq!(conds[at]["done"], 1);
+    assert_eq!(conds[1 - at]["done"], 0);
+    assert_eq!(
+        conds[at]["label"],
+        if at == 0 {
+            "condition A"
+        } else {
+            "condition B"
+        }
+    );
+    let a = bin(&lab).args(["status", "bl"]).assert().success();
+    assert!(text(&a).contains("blind: yes\n"));
 }
 
 #[test]

@@ -18,7 +18,7 @@ use crate::{keys, spec};
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -179,14 +179,10 @@ pub fn prepare_with(
         .iter()
         .find(|r| r.kind == "register")
         .ok_or_else(|| RunError::NotRegistered(study_id.into()))?;
-    let raw = spec::load(&dir.join("spec.toml")).map_err(|e| RunError::Spec(e.to_string()))?;
-    if register.body["spec_hash"].as_str() != Some(raw.hash.as_str()) {
+    let (spec, spec_hash, hash_text) = stored_spec(&dir)?;
+    if register.body["spec_hash"].as_str() != Some(hash_text.as_str()) {
         return Err(RunError::SpecChanged);
     }
-    let mut value = raw.value;
-    apply_defaults(&mut value);
-    let spec = Spec::from_value(&value).map_err(|e| RunError::Spec(e.to_string()))?;
-    let spec_hash = decode_hash(&raw.hash)?;
 
     let have: Vec<u8> = backends.iter().map(|b| b.level()).collect();
     let need = spec.scope.min_isolation;
@@ -220,8 +216,7 @@ pub fn prepare_with(
     let machine = machine::load(&home.root).map_err(io)?;
     let prior = Tally::of(&all).cost(0.0);
     let data_hashes = gate_late_data(home, &spec, log, leaf, &key)?;
-    let rows = schedule::expand(&spec, &spec_hash, &schedule::units_from_spec(&spec))
-        .map_err(|e| RunError::Spec(e.to_string()))?;
+    let rows = expand_rows(&spec, &spec_hash)?;
     let schedule = Schedule::new(&spec_hash, rows);
     schedule::write_once(&dir, &schedule)?;
     Ok(RunPlan {
@@ -240,8 +235,70 @@ pub fn prepare_with(
     })
 }
 
-fn decode_hash(h: &str) -> Result<[u8; 32], RunError> {
-    spec::hash_bytes(h).ok_or_else(|| RunError::Spec(format!("bad spec hash {h}")))
+/// The stored spec with defaults filled, its hash bytes, and its hash text.
+fn stored_spec(dir: &Path) -> Result<(Spec, [u8; 32], String), RunError> {
+    let fault = |e: &dyn fmt::Display| RunError::Spec(e.to_string());
+    let raw = spec::load(&dir.join("spec.toml")).map_err(|e| fault(&e))?;
+    let mut value = raw.value;
+    apply_defaults(&mut value);
+    let spec = Spec::from_value(&value).map_err(|e| fault(&e))?;
+    let hash = spec::hash_bytes(&raw.hash)
+        .ok_or_else(|| RunError::Spec(format!("bad spec hash {}", raw.hash)))?;
+    Ok((spec, hash, raw.hash))
+}
+
+fn expand_rows(spec: &Spec, hash: &[u8; 32]) -> Result<Vec<Row>, RunError> {
+    schedule::expand(spec, hash, &schedule::units_from_spec(spec))
+        .map_err(|e| RunError::Spec(e.to_string()))
+}
+
+/// How far a study has run, from its signed records and its stored spec.
+pub struct Progress {
+    pub spec: Spec,
+    pub spec_hash: [u8; 32],
+    pub total: usize,
+    pub done: usize,
+    /// Condition id to (rows done, rows scheduled).
+    pub conditions: BTreeMap<String, (u64, u64)>,
+    /// Rows whose exit is not `ok`.
+    pub voided: u64,
+    /// Attempts beyond the first, over all recorded rows.
+    pub retried: u64,
+    /// Spend in the records, money at the machine rate.
+    pub cost: Cost,
+}
+
+pub fn progress(
+    home: &Home,
+    study_id: &str,
+    all: &[records::Record],
+) -> Result<Progress, RunError> {
+    let (spec, spec_hash, _) = stored_spec(&home.study_dir(study_id))?;
+    let machine = machine::load(&home.root).map_err(io)?;
+    let rows = expand_rows(&spec, &spec_hash)?;
+    let tally = Tally::of(all);
+    let mut conditions: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    for r in &rows {
+        conditions.entry(r.condition.clone()).or_default().1 += 1;
+    }
+    let mut seen = BTreeSet::new();
+    for r in all.iter().filter(|r| r.kind == "row") {
+        if let (Some(i), Some(c)) = (r.row, r.body["condition"].as_str())
+            && seen.insert(i)
+        {
+            conditions.entry(c.to_string()).or_default().0 += 1;
+        }
+    }
+    Ok(Progress {
+        spec,
+        spec_hash,
+        total: rows.len(),
+        done: seen.len(),
+        conditions,
+        voided: tally.voided,
+        retried: tally.retried,
+        cost: tally.cost(machine.rate_usd_per_hour),
+    })
 }
 
 /// Hash every input. A selection or confirmation input that the registered plan leaf did not
@@ -583,6 +640,8 @@ struct Tally {
     rows: u64,
     cpu: f64,
     wall: f64,
+    voided: u64,
+    retried: u64,
 }
 
 impl Tally {
@@ -596,6 +655,10 @@ impl Tally {
             t.cpu += num("cpu_seconds");
             t.wall += num("wall_seconds");
             t.rows += u64::from(r.kind == "row");
+            if r.kind == "row" {
+                t.voided += u64::from(r.body["exit"] != "ok");
+                t.retried += r.body["attempts"].as_u64().unwrap_or(1).saturating_sub(1);
+            }
         }
         t
     }
