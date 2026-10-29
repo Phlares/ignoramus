@@ -260,6 +260,14 @@ pub fn build(study: &Path, out: &Path, facts: &Facts, release: &Release) -> Resu
             "Use one of the claim labels: signal, confirmed, replicated, generalized.",
         ));
     }
+    if !is_artifact_name(&facts.study_id) {
+        problems.push(Problem::new(
+            "E-PUB-016",
+            "study_id",
+            "cannot name a bundle zip",
+            "Use letters, digits, dots, hyphens and underscores in the study id.",
+        ));
+    }
 
     let mut files = Vec::with_capacity(found.len());
     let mut heads = BTreeMap::new();

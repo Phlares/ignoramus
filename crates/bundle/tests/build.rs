@@ -418,6 +418,29 @@ fn a_citation_that_is_not_utf8_is_a_problem() {
 }
 
 #[test]
+fn a_study_id_must_name_a_zip() {
+    for bad in ["", "a b", "a/b", "\u{e9}", "a\nb"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut f = facts();
+        f.study_id = bad.into();
+        let out = tmp.path().join("out");
+        let (problems, _) = refused(build(&fixture(), &out, &f, &release()));
+        assert_eq!(problems.len(), 1, "{bad:?}");
+        let p = &problems[0];
+        assert_eq!(
+            (p.code, p.path.as_str(), p.message.as_str()),
+            ("E-PUB-016", "study_id", "cannot name a bundle zip"),
+            "{bad:?}"
+        );
+        assert_eq!(
+            p.instruction,
+            "Use letters, digits, dots, hyphens and underscores in the study id."
+        );
+        assert!(!out.exists());
+    }
+}
+
+#[test]
 fn zip_name_joins_id_and_version() {
     assert_eq!(
         zip_name("fixture-numeric", "1.0.0"),
