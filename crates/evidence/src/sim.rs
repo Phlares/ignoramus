@@ -95,11 +95,15 @@ pub struct Report {
 /// mean is not 0. An undeclared rejection counts as a discovery of its tree but not as
 /// one of the stream's.
 pub fn simulate(s: &Scenario, reps: usize, rng: &mut Rng) -> Result<Report, Error> {
+    let fresh = Stream::new(s.alpha, s.gamma).map_err(|e| match e {
+        Error::Parameter("m") => Error::Parameter("gamma"),
+        e => e,
+    })?;
     let parents = parents(s, reps)?;
     let weights = vec![1.0; s.children * parents + 1];
     let (mut fwer, mut fdr, mut power, mut powered) = (0.0, 0.0, 0.0, 0);
     for _ in 0..reps {
-        let mut stream = Stream::new(s.alpha, s.gamma)?;
+        let mut stream = fresh.clone();
         let mut false_rejection = false;
         let (mut found, mut false_found, mut true_found, mut effects) = (0, 0, 0, 0);
         for _ in 0..s.trees {
@@ -132,11 +136,10 @@ pub fn simulate(s: &Scenario, reps: usize, rng: &mut Rng) -> Result<Report, Erro
     })
 }
 
-/// Validates the scenario and returns the number of declared nodes above `depth`.
+/// Validates the fields the stream does not and returns the number of declared nodes
+/// above `depth`.
 fn parents(s: &Scenario, reps: usize) -> Result<usize, Error> {
     let checks = [
-        (s.alpha > 0.0 && s.alpha < 1.0, "alpha"),
-        (s.gamma != Gamma::Bounded { m: 0 }, "gamma"),
         (s.trees >= 1, "trees"),
         (s.depth <= 2, "depth"),
         (s.units >= 1, "units"),
@@ -191,7 +194,7 @@ fn run_tree(
             ran[s.children * k + 1..=s.children * k + s.children].fill(true);
             for _ in 0..s.undeclared {
                 let e = report.e_value(0.0, rng)?;
-                stray += usize::from(level > 0.0 && e >= 1.0 / level);
+                stray += usize::from(decide(level, &[1.0], &[Some(e)])?.rejected[0]);
             }
         }
     }

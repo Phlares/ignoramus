@@ -6,6 +6,7 @@ use evidence::sim::{Estimate, Report, Scenario, simulate};
 const SINGLE: u8 = 0;
 const STREAM: u8 = 1;
 const OTHER: u8 = 2;
+const LOOSE: u8 = 3;
 /// One null child tested alone at level 0.05 over 20 units rejects about 1 time in
 /// 1,300, so the family-wise error passes 0.05 only near 70 such children.
 const DEFECT: usize = 100;
@@ -80,6 +81,30 @@ fn stream_grid() -> Vec<Scenario> {
     grid
 }
 
+/// Trees at alpha 0.5. The last row is a firing root with 16 null children: without
+/// the split, their family-wise error is about 0.66.
+fn loose_grid() -> Vec<Scenario> {
+    let mut grid = Vec::new();
+    for rho in [0.0, 0.9] {
+        for depth in [1, 2] {
+            grid.push(Scenario {
+                alpha: 0.5,
+                rho,
+                depth,
+                ..base()
+            });
+        }
+    }
+    grid.push(Scenario {
+        alpha: 0.5,
+        children: 16,
+        non_null: 1.0,
+        effect: 2.0,
+        ..base()
+    });
+    grid
+}
+
 fn run(grid: &[Scenario], reps: usize, family: u8) -> Vec<Report> {
     grid.iter()
         .enumerate()
@@ -94,11 +119,13 @@ fn run(grid: &[Scenario], reps: usize, family: u8) -> Vec<Report> {
         .collect()
 }
 
-fn single_trees_hold(reps: usize) {
-    let grid = single_tree_grid();
-    for (s, r) in grid.iter().zip(run(&grid, reps, SINGLE)) {
-        assert!(r.fwer.holds(0.05), "{s:?} {r:?}");
-        assert!(r.fdr.holds(0.05), "{s:?} {r:?}");
+fn trees_hold(grid: &[Scenario], reps: usize, family: u8) {
+    for (s, r) in grid.iter().zip(run(grid, reps, family)) {
+        assert!(r.fwer.holds(s.alpha), "{s:?} {r:?}");
+        // A tree that carries the effect makes no false discoveries.
+        if s.non_null == 0.0 {
+            assert!(r.fdr.holds(s.alpha), "{s:?} {r:?}");
+        }
     }
 }
 
@@ -150,12 +177,32 @@ fn wilson_clamps_the_mean_into_the_unit_interval() {
 
 #[test]
 fn single_trees_hold_fwer_and_fdr() {
-    single_trees_hold(2_000);
+    trees_hold(&single_tree_grid(), 2_000, SINGLE);
+}
+
+#[test]
+fn loose_trees_hold_fwer_and_fdr() {
+    trees_hold(&loose_grid(), 2_000, LOOSE);
 }
 
 #[test]
 fn streams_hold_fdr() {
     streams_hold(500);
+}
+
+#[test]
+fn a_slot_past_the_cap_discovers_nothing() {
+    // Bounded { m: 1 } gives the second slot level 0. Both trees carry an effect
+    // strong enough that the first is always found, so power is exactly 1/2.
+    let s = Scenario {
+        trees: 2,
+        non_null: 1.0,
+        effect: 3.0,
+        root_only: false,
+        ..base()
+    };
+    let r = simulate(&s, 200, &mut seed(OTHER, 10)).unwrap();
+    assert_eq!((r.power.mean, r.power.n), (0.5, 200));
 }
 
 #[test]
@@ -248,7 +295,7 @@ fn non_null_one_carries_even_at_a_draw_of_one() {
 
 #[test]
 fn spawned_children_share_the_tree_level() {
-    // Both runs draw the same spawn values, so only the spawn differs. Spawned null
+    // Both runs start from the same seed and differ only in theta. Spawned null
     // children cut the root's level to a quarter and dilute the tree's e-value.
     let s = Scenario {
         non_null: 1.0,
@@ -499,6 +546,7 @@ fn rejects_bad_scenarios() {
 #[test]
 #[ignore]
 fn null_tree_suite_full() {
-    single_trees_hold(100_000);
+    trees_hold(&single_tree_grid(), 100_000, SINGLE);
+    trees_hold(&loose_grid(), 100_000, LOOSE);
     streams_hold(10_000);
 }
