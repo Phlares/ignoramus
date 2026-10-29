@@ -905,6 +905,28 @@ fn cost_inputs_are_range_checked_at_their_edges() {
             vec!["mutations.depth_cap".into()],
         ),
         (vec!["mutations", "depth_cap"], json!(0), vec![]),
+        (vec!["mutations", "depth_cap"], json!(255), vec![]),
+        (
+            vec!["mutations", "depth_cap"],
+            json!(256),
+            vec!["mutations.depth_cap".into()],
+        ),
+        (vec!["design", "repeats"], json!(4294967295u32), vec![]),
+        (
+            vec!["design", "repeats"],
+            json!(4294967296u64),
+            vec!["design.repeats".into()],
+        ),
+        (
+            vec!["design", "units_per_cluster"],
+            json!(4294967295u32),
+            vec![],
+        ),
+        (
+            vec!["design", "units_per_cluster"],
+            json!(4294967296u64),
+            vec!["design.units_per_cluster".into()],
+        ),
         (
             vec!["mutations", "triggers"],
             trig(json!(0.0)),

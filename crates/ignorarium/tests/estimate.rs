@@ -1,3 +1,4 @@
+use ignorarium::diag::Severity;
 use ignorarium::estimate::{Estimate, apply_defaults, estimate, units};
 use ignorarium::machine::{self, Machine};
 use ignorarium::prior::NoPriorUse;
@@ -356,4 +357,65 @@ fn check_named_alone_fails_closed_without_defaults() {
         cnf.iter()
             .all(|d| d.problem.contains("cannot compute power"))
     );
+}
+
+/// Paths of the numeric fields in the template.
+const NUMERIC: [&[&str]; 11] = [
+    &["scope", "min_isolation"],
+    &["scope", "budget", "cpu_hours"],
+    &["scope", "budget", "wall_hours"],
+    &["scope", "budget", "money_usd"],
+    &["design", "repeats"],
+    &["design", "row_seconds"],
+    &["design", "alpha"],
+    &["design", "power"],
+    &["design", "sesoi"],
+    &["design", "icc"],
+    &["design", "units_per_cluster"],
+];
+
+#[test]
+fn a_spec_that_passes_check_always_deserializes() {
+    let rules = v0();
+    let dir = tempfile::tempdir().unwrap();
+    let mut specs = vec![template()];
+    let sweep = [
+        json!(-1),
+        json!(0),
+        json!(1),
+        json!(2),
+        json!(4294967296u64),
+        json!(1.5),
+        json!(i64::MAX),
+    ];
+    let more: [&[&str]; 3] = [
+        &["design", "variance", "value"],
+        &["mutations", "depth_cap"],
+        &["mutations", "triggers"],
+    ];
+    for path in NUMERIC.iter().chain(more.iter()) {
+        for x in &sweep {
+            let mut v = template();
+            let mut cur = &mut v;
+            for k in &path[..path.len() - 1] {
+                cur = &mut cur[*k];
+            }
+            let last = path[path.len() - 1];
+            cur[last] = if last == "triggers" {
+                json!([{ "id": "T1", "metric": "m", "threshold_e": x }])
+            } else {
+                x.clone()
+            };
+            specs.push(v);
+        }
+    }
+    let mut passing = 0;
+    for v in specs {
+        let (out, _, diags) = rules::check_all(&v, &rules, &ctx(dir.path()));
+        if !diags.iter().any(|d| d.severity == Severity::Error) {
+            passing += 1;
+            Spec::from_value(&out).unwrap_or_else(|e| panic!("{v}: {e}"));
+        }
+    }
+    assert!(passing > 10);
 }
