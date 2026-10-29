@@ -39,6 +39,13 @@ const DEVICES: [(&str, u32, u32); 6] = [
 /// Builds the view at `sandbox` from the environment at `env_root` and the input disk
 /// `inputs`.
 pub fn build(env_root: &Path, sandbox: &Path, inputs: &Path, out_bytes: u64) -> io::Result<()> {
+    if out_bytes == 0 {
+        // A tmpfs of size 0 has no limit.
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "an output size of 0 would leave /out unlimited",
+        ));
+    }
     let (ro, no_suid_dev) = (MountFlags::RDONLY, MountFlags::NOSUID | MountFlags::NODEV);
     fs::create_dir_all(sandbox)?;
     tmpfs(sandbox, MountFlags::empty(), "mode=0755")?;

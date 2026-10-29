@@ -4,8 +4,9 @@ use ignorarium_guest::host::{HostJob, Vm, VmError, VmOutcome, run_row, vmm_args}
 use ignorarium_guest::pack;
 use ignorarium_guest::proto::{End, Job, Report, SelfTest, ToHost, read_frame, write_frame};
 use ignorarium_guest::tree::tree_hash;
-use std::fs;
+use std::fs::{self, Permissions};
 use std::io::{Read, Seek, Write};
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::thread::{self, JoinHandle};
@@ -581,12 +582,16 @@ fn guest_text_in_errors_is_capped_and_escaped() {
     }
 }
 
-fn refused_before_boot(rig: &Rig, work: &Path) {
+/// Returns the refusal's text.
+fn refused_before_boot(rig: &Rig, work: &Path) -> String {
     let res = run_row(&rig.vm, &rig.job, work);
-    assert!(matches!(res, Err(VmError::Io(_))), "{:?}", res);
+    let Err(VmError::Io(e)) = res else {
+        panic!("{res:?}")
+    };
     thread::sleep(ms(100));
     assert!(!rig.root.path().join("vmm.pid").exists());
     assert_eq!(fs::read_dir(work).unwrap().count(), 0);
+    e.to_string()
 }
 
 #[test]
@@ -676,4 +681,67 @@ fn channel_errors_hold_no_raw_guest_bytes() {
         }
         other => panic!("{:?}", other),
     }
+}
+
+#[test]
+fn output_disks_of_zero_or_over_half_the_memory_are_refused_before_boot() {
+    let mut rig = Rig::new(&format!("touch $PIDFILE\n{SLEEPER}"));
+    // A tmpfs of size 0 has no limit; /out and /tmp live in guest memory.
+    for (out_mib, mem_mib) in [(0, 256), (129, 256)] {
+        (rig.vm.out_mib, rig.vm.mem_mib) = (out_mib, mem_mib);
+        let msg = refused_before_boot(&rig, &rig.work);
+        assert!(msg.contains("output disk"), "{msg}");
+    }
+}
+
+/// The checks before boot pass when the fake VMM starts and the boot then times out.
+fn boots(rig: &mut Rig) {
+    rig.vm.boot_timeout = ms(200);
+    let res = rig.run();
+    assert!(matches!(res, Err(VmError::Boot(_))), "{res:?}");
+    rig.pid_gone();
+}
+
+#[test]
+fn an_output_disk_of_half_the_memory_boots() {
+    let mut rig = Rig::sleeper();
+    (rig.vm.out_mib, rig.vm.mem_mib) = (128, 256);
+    boots(&mut rig);
+}
+
+#[test]
+fn inputs_the_payload_cannot_read_are_refused_before_boot() {
+    let rig = Rig::new(&format!("touch $PIDFILE\n{SLEEPER}"));
+    let input = &rig.job.input_dir;
+    let (secret, sub) = (input.join("secret"), input.join("sub"));
+    fs::write(&secret, "x").unwrap();
+    fs::create_dir(&sub).unwrap();
+    let mode = |p: &Path, m: u32| fs::set_permissions(p, Permissions::from_mode(m)).unwrap();
+    // A file without other-read, a directory without other-read, one without other-execute.
+    let cases = [
+        (&secret, 0o640, 0o644),
+        (&sub, 0o711, 0o755),
+        (&sub, 0o754, 0o755),
+    ];
+    for (path, bad, good) in cases {
+        mode(path, bad);
+        let msg = refused_before_boot(&rig, &rig.work);
+        assert!(msg.contains(path.to_str().unwrap()), "{msg}");
+        mode(path, good);
+    }
+    fs::write(sub.join("deep"), "x").unwrap();
+    mode(&sub.join("deep"), 0o600);
+    let msg = refused_before_boot(&rig, &rig.work);
+    assert!(msg.contains("deep"), "{msg}");
+}
+
+#[test]
+fn readable_inputs_and_links_boot() {
+    let mut rig = Rig::sleeper();
+    let input = rig.job.input_dir.clone();
+    fs::create_dir(input.join("sub")).unwrap();
+    fs::write(input.join("sub/f"), "x").unwrap();
+    // A link is not followed, so its target need not exist.
+    symlink("missing", input.join("link")).unwrap();
+    boots(&mut rig);
 }

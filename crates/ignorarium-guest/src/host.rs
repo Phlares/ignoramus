@@ -10,6 +10,7 @@ use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, BufReader, Read, Write};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -327,6 +328,39 @@ fn check_inputs(vm: &Vm, job: &HostJob, work: &Path) -> io::Result<()> {
     for (what, dir) in [("work dir", work), ("output dir", &job.output_dir)] {
         if fs::read_dir(dir)?.next().is_some() {
             return Err(invalid(format!("{what} {} is not empty", dir.display())));
+        }
+    }
+    // A tmpfs of size 0 has no limit, and /out and /tmp both live in guest memory.
+    if vm.out_mib == 0 || vm.out_mib.saturating_mul(2) > u64::from(vm.mem_mib) {
+        return Err(invalid(format!(
+            "output disk of {} MiB: it needs at least 1 MiB and at most half of the {} MiB guest memory",
+            vm.out_mib, vm.mem_mib
+        )));
+    }
+    readable_by_others(&job.input_dir)
+}
+
+/// The payload runs as an unprivileged user, so every input below `dir` must be readable by
+/// others: a file needs other-read, a directory other-read and other-execute. Links are not
+/// followed.
+fn readable_by_others(dir: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let meta = entry.metadata()?;
+        let need = match meta.file_type() {
+            t if t.is_dir() => 0o005,
+            t if t.is_symlink() => 0,
+            _ => 0o004,
+        };
+        if meta.mode() & need != need {
+            return Err(invalid(format!(
+                "input {} has mode {:o}, which the unprivileged payload cannot read",
+                entry.path().display(),
+                meta.mode() & 0o7777
+            )));
+        }
+        if meta.is_dir() {
+            readable_by_others(&entry.path())?;
         }
     }
     Ok(())

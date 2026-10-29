@@ -1,10 +1,10 @@
 mod common;
 
 use common::write_exec;
-use ignorarium_guest::agent::gate;
 use ignorarium_guest::agent::payload::{self, Ran};
 use ignorarium_guest::agent::selftest::{self, route_blocked};
 use ignorarium_guest::agent::steps::{disk_by_serial, disk_bytes, mix_seed, now_nanos, set_clock};
+use ignorarium_guest::agent::{gate, sandbox};
 use ignorarium_guest::proto::{End, Job, SEED_ENV, SelfTest};
 use rustix::process::{Pid, Signal, kill_process_group};
 use std::cell::Cell;
@@ -280,4 +280,15 @@ fn gate_runs_the_payload_only_after_a_passing_selftest() {
     assert_eq!(passed.output_hash, "abc");
     assert_eq!(passed.payload_wall_ns, 5_000_000);
     assert_eq!(passed.cpu_seconds, 0.25);
+}
+
+#[test]
+fn the_view_refuses_an_output_size_of_zero() {
+    // A tmpfs of size 0 has no limit.
+    let d = tempfile::tempdir().unwrap();
+    let view = d.path().join("view");
+    let none = Path::new("/nonexistent");
+    let err = sandbox::build(none, &view, none, 0).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+    assert!(!view.exists());
 }
