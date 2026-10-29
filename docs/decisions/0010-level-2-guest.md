@@ -4,13 +4,13 @@ Level 2 runs each row in a fresh virtual machine. The crate `ignorarium-guest` h
 
 Decision:
 
-- Hypervisor: Cloud Hypervisor v54.0, the static release binary. The guest kernel is `vmlinux-x86_64` from the cloud-hypervisor/linux release `ch-release-v7.2.8-20261009`. Both are pinned by SHA-256 in `image.rs` and checked with `image::check_pin`. The host needs `/dev/kvm`.
+- Hypervisor: Cloud Hypervisor v54.0, the static release binary. The guest kernel is `vmlinux-x86_64` from the cloud-hypervisor/linux release `ch-release-v7.2.8-20261009`. Both are pinned by SHA-256 in `image.rs`. `guest-image` checks the kernel pin; the level 2 backend checks both pins when it probes the machine. The host needs `/dev/kvm`.
 - Guest image: three parts, each hashed.
   - The kernel, as pinned.
   - An initramfs that holds only the agent, as `/init`, with `/dev/console` and `/dev/null`. The crate writes it in the kernel's `newc` format, with fixed times and owners, so the same agent gives the same bytes.
   - The environment rootfs as a read-only ext4 disk, built without root by `mkfs.ext4 -d` from the exported environment image. The environment stays exactly the environment; the agent is not added to it.
 - Disks: the rootfs and the inputs are read-only ext4 disks that the host builds. The output disk is a raw, zero-filled file.
-- Outputs: the payload writes to `/out`, a tmpfs capped at the output disk's size. After the payload, the agent writes `/out` to the raw disk as a pack: a simple stream of directory, file, link and other entries. The host reads it with `pack::unpack`, which refuses `..`, absolute paths, NUL bytes, duplicates, children of anything but an earlier directory entry, over-long names, and a total over the limit. Each entry costs one 4 KiB block against the limit, so the limit also bounds the entry count. The host then hashes the tree itself and compares with the hash the guest reported.
+- Outputs: the payload writes to `/out`, a tmpfs capped at the output disk's size. After the payload, the agent writes `/out` to the raw disk as a pack: a simple stream of directory, file, link and other entries. The host reads it with `pack::unpack`, which refuses `..`, absolute paths, NUL bytes, duplicates, children of anything but an earlier directory entry, over-long names, link targets that are absolute or climb above the output directory (read lexically from the link's own directory), and a total over the limit. Each entry costs one 4 KiB block against the limit, so the limit also bounds the entry count. The guest's `pack::write` charges the same limit (the output disk size) by the same rule and refuses the same link targets; the agent reports its refusal as `Failed`. The host then hashes the tree itself and compares with the hash the guest reported.
 - Control channel: one vsock connection, guest to host, on port 7201. Cloud Hypervisor delivers it to a Unix socket on the host. The host accepts one connection, then removes the listening socket, so no second host path exists. Frames are a 4-byte length and JSON, at most 1 MiB. Every read and write on the host side has one absolute deadline: boot, then the row's wall time plus slack.
 - No network device. No API socket. The serial console is off unless a log file is asked for.
 - Agent sequence, as PID 1: mount `/proc`, `/sys`, `/dev`; find the three disks by their serial numbers; mount the rootfs; build the payload's view; connect; read the job; write the host seed to `/dev/urandom` and ask the kernel to reseed (`RNDRESEEDCRNG`); set the clock from the host's time; run the self-test; run the payload only if the self-test passes; kill every other process and reap it; hash and pack `/out`; report; power off. Any error after connecting is reported as `Failed`. Every path ends in power off.
@@ -19,7 +19,7 @@ Decision:
   - `usr bin lib lib64 etc` from the environment: directories bound read-only, nosuid, nodev; symbolic links copied as links; missing names left out;
   - `/in`: the input disk, read-only, nosuid, nodev;
   - `/out`: tmpfs, nosuid, nodev, owned by the payload's user, capped at the output disk size;
-  - `/proc` with `hidepid=2`; `/dev`: tmpfs with `null zero full random urandom tty`; `/tmp`: tmpfs, mode 1777;
+  - `/proc` with `hidepid=2`; `/dev`: tmpfs with `null zero full random urandom tty`; `/tmp`: tmpfs, mode 1777, capped at the output disk size;
   - the root is a tmpfs, read-only once built.
 - The payload runs as uid and gid 65534 with no supplementary groups and with `no_new_privs` set, in a clean environment (the job's variables plus `IGNORARIUM_SEED`), with null standard streams, in its own process group, under the row's wall timeout.
 
@@ -35,7 +35,7 @@ The numpy payload itself took 1.14 times as long inside the machine (1323 ms aga
 Limits:
 
 - The host refuses an input file or directory that an unprivileged user cannot read, because the payload does not run as the file owner.
-- `/out` and `/tmp` live in guest memory, so the host refuses an output disk of zero bytes or of more than half the guest memory.
+- `/out` and `/tmp` live in guest memory, each up to the output disk size, so the host refuses an output disk of zero bytes or of more than a quarter of the guest memory.
 - `/dev` has no `shm`, so programs that need POSIX shared memory fail.
 - Waiting for the runner: the level 2 backend, storing the three image parts in the content store, caching input disks by tree hash, and one output-hash function shared with level 0.
 
