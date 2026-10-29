@@ -30,6 +30,7 @@ fn head() -> String {
     [
         "silent",
         "show-error",
+        "globoff",
         "proto = \"=https\"",
         "proto-redir = \"=https\"",
         "location",
@@ -184,4 +185,70 @@ fn secrets_never_print() {
     assert_eq!(tok.expose(), "tok123");
     let r = req("https://x", Some(&tok), Body::None, true);
     assert!(!format!("{r:?}").contains("tok123"));
+}
+
+#[test]
+fn a_status_outside_100_to_599_is_not_a_response() {
+    for tail in ["000", "099", "600"] {
+        let dir = TempDir::new().unwrap();
+        let curl = Curl::with_program(fake(dir.path(), &format!("printf '\n{tail}'")));
+        match curl.send(&req("https://h/x", None, Body::None, true)) {
+            Err(Error::Transport(m)) => assert_eq!(m, "curl output has no status line"),
+            other => panic!("{tail}: {other:?}"),
+        }
+    }
+    for (tail, want) in [("100", 100), ("599", 599)] {
+        let dir = TempDir::new().unwrap();
+        let curl = Curl::with_program(fake(dir.path(), &format!("printf '\n{tail}'")));
+        let r = curl
+            .send(&req("https://h/x", None, Body::None, true))
+            .unwrap();
+        assert_eq!(r.status, want);
+    }
+}
+
+#[test]
+fn the_keep_body_cap_is_64_mib() {
+    const CAP: usize = 64 * 1024 * 1024;
+    for (len, kept) in [(CAP, true), (CAP + 1, false)] {
+        let dir = TempDir::new().unwrap();
+        let script = format!("head -c {len} /dev/zero | tr '\000' x; printf '\n200'");
+        let curl = Curl::with_program(fake(dir.path(), &script));
+        let got = curl.send(&req("https://h/x", None, Body::None, true));
+        if kept {
+            let r = got.unwrap();
+            assert_eq!(r.body.len(), CAP);
+            assert_eq!(r.size, CAP as u64);
+        } else {
+            assert!(matches!(got, Err(Error::Transport(_))), "{got:?}");
+        }
+    }
+}
+
+#[test]
+fn a_nul_token_or_a_broken_file_path_runs_nothing() {
+    let nul = Secret::new("a\0b");
+    let cr = Secret::new("a\rb");
+    let cases = [
+        req("https://x", Some(&nul), Body::None, true),
+        req("https://x", Some(&cr), Body::None, true),
+        req("https://x", None, Body::File(PathBuf::from("/a\nb")), true),
+        req("https://x", None, Body::File(PathBuf::from("/a\rb")), true),
+    ];
+    for r in &cases {
+        let dir = TempDir::new().unwrap();
+        let curl = Curl::with_program(fake(dir.path(), r"printf '\n200'"));
+        assert!(matches!(curl.send(r), Err(Error::Request(_))), "{r:?}");
+        assert!(!dir.path().join("stdin").exists(), "{r:?}");
+    }
+}
+
+#[test]
+fn a_missing_program_is_a_transport_error() {
+    let dir = TempDir::new().unwrap();
+    let curl = Curl::with_program(dir.path().join("absent"));
+    match curl.send(&req("https://h/x", None, Body::None, true)) {
+        Err(Error::Transport(m)) => assert!(m.starts_with("cannot run "), "{m}"),
+        other => panic!("{other:?}"),
+    }
 }

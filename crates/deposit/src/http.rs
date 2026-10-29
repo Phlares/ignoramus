@@ -86,7 +86,7 @@ fn config(req: &Request, max_secs: u32) -> Result<String, Error> {
         Method::Put => "PUT",
     };
     let mut c = format!(
-        "silent\nshow-error\nproto = \"=https\"\nproto-redir = \"=https\"\nlocation\nmax-redirs = 3\nmax-time = {max_secs}\nurl = {}\nrequest = \"{method}\"\n",
+        "silent\nshow-error\ngloboff\nproto = \"=https\"\nproto-redir = \"=https\"\nlocation\nmax-redirs = 3\nmax-time = {max_secs}\nurl = {}\nrequest = \"{method}\"\n",
         quote(&req.url)?
     );
     if let Some(t) = req.token {
@@ -192,6 +192,7 @@ impl Transport for Curl {
         let status = std::str::from_utf8(digits)
             .ok()
             .and_then(|s| s.parse().ok())
+            .filter(|s| (100..=599).contains(s))
             .ok_or_else(no_status)?;
         Ok(Response {
             status,
