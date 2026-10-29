@@ -1,9 +1,12 @@
 //! The run engine: writes the schedule, runs each row on a backend, records each row.
 //! A row is done when its signed record exists. A crash before the record reruns the row.
 use crate::backend::{self, Backend, Exit, Probe, RowJob, RowOutcome};
+use crate::budget::{Alerts, Cost, CostMeter, Decision, HostMeter, decide, dimension_name};
 use crate::canon::sha256_hex;
-use crate::estimate::apply_defaults;
+use crate::estimate::{apply_defaults, estimate, units};
+use crate::events::{self, Event};
 use crate::home::Home;
+use crate::machine::{self, Machine};
 use crate::planlog::store::{Leaf, LogError, PlanLog};
 use crate::prior::file_hashes;
 use crate::records::{self, RecordDraft, RecordError, VerifyError};
@@ -12,7 +15,7 @@ use crate::schedule::{self, Row, Schedule, ScheduleError};
 use crate::spec::model::{Role, Spec};
 use crate::{keys, spec};
 use ed25519_dalek::SigningKey;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -36,6 +39,8 @@ pub struct RunPlan {
     pub data_hashes: Vec<(String, String)>,
     pub payload: PathBuf,
     pub payload_sha256: String,
+    /// Cumulative cost, read before each row.
+    pub meter: Box<dyn CostMeter>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,6 +197,8 @@ pub fn prepare_with(
             )));
         }
     };
+    let machine = machine::load(&home.root).map_err(io)?;
+    let prior = Tally::of(&all).cost(0.0);
     let data_hashes = gate_late_data(home, &spec, log, leaf, &key)?;
     let rows = schedule::expand(&spec, &spec_hash, &schedule::units_from_spec(&spec))
         .map_err(|e| RunError::Spec(e.to_string()))?;
@@ -208,6 +215,7 @@ pub fn prepare_with(
         data_hashes,
         payload,
         payload_sha256,
+        meter: Box::new(HostMeter::new(prior, machine.rate_usd_per_hour)),
     })
 }
 
@@ -291,30 +299,133 @@ fn no_links(base: &Path, parts: &[&str]) -> Result<(), RunError> {
     Ok(())
 }
 
-/// Run every row that has no record. Pauses when a row voids on infrastructure faults.
+/// Run every row that has no record. Before each row the meter is read; the run pauses
+/// instead of starting a row when a cap is reached or the row would reach one.
 pub fn run(plan: &RunPlan) -> Result<RunStatus, RunError> {
     let dir = plan.home.study_dir(&plan.study_id);
     let log = dir.join("records.jsonl");
-    let done: BTreeSet<u64> = records::read_all(&log, &plan.key.verifying_key())?
+    let machine = machine::load(&plan.home.root).map_err(io)?;
+    let all = records::read_all(&log, &plan.key.verifying_key())?;
+    let done: BTreeSet<u64> = all
         .iter()
         .filter(|r| r.kind == "row")
         .filter_map(|r| r.row)
         .collect();
+    let mut tally = Tally::of(&all);
+    let per_row = row_estimate(plan, &machine);
+    let budget = &plan.spec.scope.budget;
+    let mut alerts = None;
     for row in plan
         .schedule
         .rows
         .iter()
         .filter(|r| !done.contains(&r.index))
     {
-        if let Some(why) = run_row(plan, row, &dir, &log)? {
-            return Ok(RunStatus::Paused(why));
+        let sampled = plan.meter.sample();
+        let now = sampled.clone().unwrap_or_default();
+        if let Ok(c) = &sampled {
+            let fresh = alerts
+                .get_or_insert_with(|| Alerts::seeded(c, budget))
+                .fresh(c, budget);
+            for (dim, fraction) in fresh {
+                let attrs = json!({ "dimension": dimension_name(dim), "fraction": fraction });
+                log_event(plan, &dir, "budget.alert", attrs)?;
+            }
+        }
+        let next = per_row.larger(&tally.mean(machine.rate_usd_per_hour));
+        if let Decision::Pause(why) = decide(&now, &next, budget, sampled.map(|_| ())) {
+            return pause(plan, &dir, why.to_string());
+        }
+        if let Some(why) = run_row(plan, row, &dir, &log, &mut tally)? {
+            return pause(plan, &dir, why);
         }
     }
     Ok(RunStatus::Done)
 }
 
+fn pause(plan: &RunPlan, dir: &Path, reason: String) -> Result<RunStatus, RunError> {
+    log_event(plan, dir, "run.pause", json!({ "reason": reason }))?;
+    Ok(RunStatus::Paused(reason))
+}
+
+/// One event line in the study's event log. The study is the trace.
+fn log_event(plan: &RunPlan, dir: &Path, name: &str, attrs: Value) -> Result<(), RunError> {
+    events::emit(
+        &dir.join("events.jsonl"),
+        Event {
+            ts: crate::time::now_rfc3339(),
+            trace_id: hex::encode(&plan.spec_hash[..16]),
+            span_id: None,
+            name: name.into(),
+            level: "warn".into(),
+            attrs,
+        },
+    )
+    .map_err(io)
+}
+
+/// The spec estimate for one row. Zero when the schedule has no rows.
+fn row_estimate(plan: &RunPlan, machine: &Machine) -> Cost {
+    let e = estimate(&plan.spec, machine, units(&plan.spec));
+    let n = e.rows.max(1) as f64;
+    Cost {
+        cpu_seconds: e.cpu_hours * 3600.0 / n,
+        wall_seconds: e.wall_hours * 3600.0 / n,
+        usd: e.money_usd / n,
+    }
+}
+
+/// Cost recorded by row records.
+#[derive(Default)]
+struct Tally {
+    rows: u64,
+    cpu: f64,
+    wall: f64,
+}
+
+impl Tally {
+    fn of(records: &[records::Record]) -> Tally {
+        let mut t = Tally::default();
+        for r in records.iter().filter(|r| r.kind == "row") {
+            let num = |k: &str| r.body[k].as_f64().unwrap_or(0.0);
+            t.add(num("cpu_seconds"), num("wall_seconds"));
+        }
+        t
+    }
+
+    fn add(&mut self, cpu: f64, wall: f64) {
+        self.rows += 1;
+        self.cpu += cpu;
+        self.wall += wall;
+    }
+
+    fn cost(&self, rate_usd_per_hour: f64) -> Cost {
+        Cost {
+            cpu_seconds: self.cpu,
+            wall_seconds: self.wall,
+            usd: self.wall / 3600.0 * rate_usd_per_hour,
+        }
+    }
+
+    /// The mean row so far; zero before the first row.
+    fn mean(&self, rate_usd_per_hour: f64) -> Cost {
+        let n = self.rows.max(1) as f64;
+        Cost {
+            cpu_seconds: self.cpu / n,
+            wall_seconds: self.wall / n,
+            usd: self.wall / n / 3600.0 * rate_usd_per_hour,
+        }
+    }
+}
+
 /// One row, retries included. `Some(reason)` means the run must pause.
-fn run_row(plan: &RunPlan, row: &Row, dir: &Path, log: &Path) -> Result<Option<String>, RunError> {
+fn run_row(
+    plan: &RunPlan,
+    row: &Row,
+    dir: &Path,
+    log: &Path,
+    tally: &mut Tally,
+) -> Result<Option<String>, RunError> {
     let mut attempts = 0u32;
     let outcome = loop {
         attempts += 1;
@@ -361,6 +472,8 @@ fn run_row(plan: &RunPlan, row: &Row, dir: &Path, log: &Path) -> Result<Option<S
             }),
         },
     )?;
+    tally.add(outcome.cpu_seconds, outcome.wall_seconds);
+    plan.meter.add_row(outcome.cpu_seconds);
     Ok(match outcome.exit {
         Exit::Infra(why) => Some(format!(
             "row {} voided by infrastructure faults: {why}",

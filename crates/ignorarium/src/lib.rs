@@ -1,6 +1,7 @@
 //! ignorarium library crate.
 #![deny(unsafe_code)]
 pub mod backend;
+pub mod budget;
 pub mod canon;
 pub mod cli;
 pub mod diag;

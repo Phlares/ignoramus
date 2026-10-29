@@ -1,5 +1,6 @@
 use ignorarium::backend::level0::Level0;
 use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome};
+use ignorarium::budget::{Cost, FakeMeter, MeterError};
 use ignorarium::canon::sha256_hex;
 use ignorarium::cli::register;
 use ignorarium::home::Home;
@@ -645,4 +646,170 @@ fn a_plan_leaf_labelled_like_the_study_is_not_its_own_use() {
         err_of(&lab, "signal"),
         RunError::DataReused { .. }
     ));
+}
+
+fn events_of(dir: &std::path::Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(dir.join("events.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+fn named<'a>(events: &'a [serde_json::Value], name: &str) -> Vec<&'a serde_json::Value> {
+    events.iter().filter(|e| e["name"] == name).collect()
+}
+
+fn cost(cpu: f64, wall: f64) -> Result<Cost, MeterError> {
+    Ok(Cost {
+        cpu_seconds: cpu,
+        wall_seconds: wall,
+        usd: 0.0,
+    })
+}
+
+#[test]
+fn planted_overspend_leaves_the_crossing_row_unrun() {
+    let lab = lab();
+    let dir = plain(&lab, "b1");
+    let mut plan = plan_of(&lab, "b1");
+    // Row 0 starts from zero. Row 1 sees 3570 of the 3600 cpu seconds; a row estimates 60.
+    plan.meter = Box::new(FakeMeter::new(vec![cost(0.0, 0.0), cost(3570.0, 0.0)]));
+    let (b, seen) = fake(vec![]);
+    plan.backend = Box::new(b);
+    let status = run(&plan).unwrap();
+    assert_eq!(
+        status,
+        RunStatus::Paused("the next row would reach the cpu cap".into())
+    );
+    assert_eq!(*seen.borrow(), vec![0]);
+    assert_eq!(indices(&lab, "b1"), vec![0]);
+    assert!(dir.join("run/rows/0/out").is_dir());
+    assert!(!dir.join("run/rows/1").exists());
+    let ev = events_of(&dir);
+    let pause = named(&ev, "run.pause");
+    assert_eq!(pause.len(), 1);
+    assert_eq!(
+        pause[0]["attrs"]["reason"],
+        "the next row would reach the cpu cap"
+    );
+    assert_eq!(pause[0]["level"], "warn");
+    // 3570 of 3600 is past 95 %, but the first sample seeds the alerts; the second raises all three.
+    let alerts = named(&ev, "budget.alert");
+    let fractions: Vec<f64> = alerts
+        .iter()
+        .map(|e| e["attrs"]["fraction"].as_f64().unwrap())
+        .collect();
+    assert_eq!(fractions, vec![0.5, 0.8, 0.95]);
+    assert_eq!(alerts[0]["attrs"]["dimension"], "cpu");
+    // The alerts come before the pause.
+    let pos = |n: &str| ev.iter().position(|e| e["name"] == n).unwrap();
+    assert!(pos("budget.alert") < pos("run.pause"));
+    assert_eq!(pause[0]["trace_id"], alerts[0]["trace_id"]);
+}
+
+#[test]
+fn a_reached_cap_pauses_before_the_first_row() {
+    let lab = lab();
+    let dir = plain(&lab, "b2");
+    let mut plan = plan_of(&lab, "b2");
+    plan.meter = Box::new(FakeMeter::new(vec![cost(0.0, 3600.0)]));
+    assert_eq!(
+        run(&plan).unwrap(),
+        RunStatus::Paused("the wall cap is reached".into())
+    );
+    assert!(indices(&lab, "b2").is_empty());
+    assert!(!dir.join("run/rows").exists());
+}
+
+#[test]
+fn meter_fault_pauses_the_run_before_any_row() {
+    let lab = lab();
+    let dir = plain(&lab, "b3");
+    let mut plan = plan_of(&lab, "b3");
+    plan.meter = Box::new(FakeMeter::new(vec![Err(MeterError("no reading".into()))]));
+    assert_eq!(
+        run(&plan).unwrap(),
+        RunStatus::Paused("the cost meter failed: no reading".into())
+    );
+    assert!(indices(&lab, "b3").is_empty());
+    assert!(!dir.join("run/rows").exists());
+    assert_eq!(named(&events_of(&dir), "run.pause").len(), 1);
+}
+
+#[test]
+fn a_meter_fault_after_some_rows_pauses_there() {
+    let lab = lab();
+    plain(&lab, "b3b");
+    let mut plan = plan_of(&lab, "b3b");
+    plan.meter = Box::new(FakeMeter::new(vec![
+        cost(0.0, 0.0),
+        cost(0.0, 0.0),
+        Err(MeterError("gone".into())),
+    ]));
+    assert!(matches!(run(&plan).unwrap(), RunStatus::Paused(_)));
+    assert_eq!(indices(&lab, "b3b"), vec![0, 1]);
+}
+
+#[test]
+fn alerts_already_crossed_at_start_are_not_emitted_again() {
+    let lab = lab();
+    let dir = plain(&lab, "b4");
+    let mut plan = plan_of(&lab, "b4");
+    // 0.6 of the wall budget at the start, 0.85 after row 0, then flat.
+    plan.meter = Box::new(FakeMeter::new(vec![cost(0.0, 2160.0), cost(0.0, 3060.0)]));
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let ev = events_of(&dir);
+    let alerts = named(&ev, "budget.alert");
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0]["attrs"]["fraction"], 0.8);
+    assert_eq!(alerts[0]["attrs"]["dimension"], "wall");
+    assert!(named(&ev, "run.pause").is_empty());
+}
+
+#[test]
+fn spend_survives_a_resume_through_the_signed_records() {
+    let lab = lab();
+    let dir = plain(&lab, "b5");
+    let mut plan = plan_of(&lab, "b5");
+    let (mut b, _) = fake(vec![]);
+    b.wall = Some(100.0);
+    plan.backend = Box::new(b);
+    run(&plan).unwrap();
+    // Keep the register record and rows 0..3, as a crash would.
+    let log = dir.join("records.jsonl");
+    let text = std::fs::read_to_string(&log).unwrap();
+    let kept: String = text.split_inclusive('\n').take(4).collect();
+    std::fs::write(&log, kept).unwrap();
+    let resumed = plan_of(&lab, "b5");
+    let c = resumed.meter.sample().unwrap();
+    assert_eq!(c.cpu_seconds, 150.0);
+    assert!(
+        (300.0..330.0).contains(&c.wall_seconds),
+        "{}",
+        c.wall_seconds
+    );
+}
+
+#[test]
+fn the_next_row_costs_the_larger_of_the_estimate_and_the_recorded_mean() {
+    let lab = lab();
+    plain(&lab, "b6");
+    let mut plan = plan_of(&lab, "b6");
+    // Rows take 1000 s of wall, far over the 60 s estimate. After three rows 3000 s are spent
+    // and the mean says the fourth reaches 4000 s, past the 3600 s cap.
+    plan.meter = Box::new(FakeMeter::new(vec![
+        cost(0.0, 0.0),
+        cost(0.0, 1000.0),
+        cost(0.0, 2000.0),
+        cost(0.0, 3000.0),
+    ]));
+    let (mut b, seen) = fake(vec![]);
+    b.wall = Some(1000.0);
+    plan.backend = Box::new(b);
+    assert_eq!(
+        run(&plan).unwrap(),
+        RunStatus::Paused("the next row would reach the wall cap".into())
+    );
+    assert_eq!(*seen.borrow(), vec![0, 1, 2]);
 }
