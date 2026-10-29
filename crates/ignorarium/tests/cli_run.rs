@@ -272,6 +272,154 @@ fn resume_and_stop_during_a_live_run() {
     assert_eq!(status(&lab, "live")["state"], "stopped");
 }
 
+/// Row 0 leaves a child that writes `late` after 1.5 s, marks itself started, and sleeps.
+const SLEEPY_ROW_0: &str = r#"#!/bin/sh
+if [ "$IGNORARIUM_ROW" = 0 ]; then
+  (sleep 1.5; echo late > "$IGNORARIUM_OUT/late") &
+  echo started > "$IGNORARIUM_OUT/started"
+  sleep 30
+fi
+"#;
+
+/// `ignorarium run <id>` in the background.
+fn start_run(lab: &Lab, id: &str) -> std::process::Child {
+    std::process::Command::new(assert_cmd::cargo::cargo_bin("ignorarium"))
+        .args(["run", id])
+        .env("IGNORARIUM_HOME", &lab.home.root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+/// The box's row file, once row 0 of the study at `dir` runs.
+fn row_0_file(dir: &std::path::Path) -> Value {
+    let t = std::time::Instant::now();
+    loop {
+        let row = std::fs::read(dir.join("run/row.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .filter(|_| dir.join("run/rows/0/out/started").exists());
+        if let Some(row) = row {
+            return row;
+        }
+        assert!(t.elapsed() < Duration::from_secs(20), "row 0 never started");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// The box's exit status and stderr, or a panic when it runs on past 10 s.
+fn ended(mut child: std::process::Child) -> (std::process::ExitStatus, String) {
+    let t = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            let mut stderr = String::new();
+            std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr).unwrap();
+            return (status, stderr);
+        }
+        if t.elapsed() > Duration::from_secs(10) {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("the box did not end");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Live processes of group `pgid`. A killed orphan may linger as a zombie until its new
+/// parent reaps it; a zombie runs nothing.
+fn live_in_group(pgid: u64) -> Vec<u64> {
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(|e| {
+            let pid: u64 = e.ok()?.file_name().to_str()?.parse().ok()?;
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+            let group: u64 = fields.get(2)?.parse().ok()?;
+            (group == pgid && *fields.first()? != "Z").then_some(pid)
+        })
+        .collect()
+}
+
+/// Send `sig` to a box whose row 0 runs: the row's group dies, its spend is recorded, and
+/// the run pauses with exit 1.
+fn a_signal_pauses_the_run(sig: &str) {
+    let lab = lab();
+    let id = "sig";
+    let dir = with_payload(&lab, id, SLEEPY_ROW_0);
+    let child = start_run(&lab, id);
+    let row = row_0_file(&dir);
+    let sent = std::process::Command::new("kill")
+        .args([format!("-{sig}"), child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(sent.success());
+    let (code, stderr) = ended(child);
+    let why = "interrupted by a signal";
+    assert_eq!(code.code(), Some(1), "{code:?} {stderr}");
+    assert_eq!(stderr, format!("error: paused: {why}\n"));
+    // The row's whole group is gone: its child never writes.
+    std::thread::sleep(Duration::from_millis(2000));
+    assert!(dir.join("run/rows/0/out/started").is_file());
+    assert!(!dir.join("run/rows/0/out/late").exists());
+    assert_eq!(
+        live_in_group(row["pgid"].as_u64().unwrap()),
+        Vec::<u64>::new()
+    );
+    assert!(!dir.join("run/row.json").exists());
+    let spend = kind_of(&lab, id, "spend");
+    assert_eq!(spend.len(), 1);
+    assert_eq!(spend[0].row, Some(0));
+    assert_eq!(spend[0].body["reason"], why);
+    assert!(spend[0].body["wall_seconds"].as_f64().unwrap() > 0.0);
+    assert!(kind_of(&lab, id, "row").is_empty());
+    assert_eq!(
+        State::read(&lab.home, id).unwrap(),
+        Some(State::Paused(why.into()))
+    );
+    let s = status(&lab, id);
+    assert_eq!(s["state"], "paused");
+    assert_eq!(s["detail"], why);
+}
+
+#[test]
+fn sigint_kills_the_row_records_its_spend_and_pauses() {
+    a_signal_pauses_the_run("INT");
+}
+
+#[test]
+fn sigterm_kills_the_row_records_its_spend_and_pauses() {
+    a_signal_pauses_the_run("TERM");
+}
+
+#[test]
+fn sighup_kills_the_row_records_its_spend_and_pauses() {
+    a_signal_pauses_the_run("HUP");
+}
+
+#[test]
+fn a_box_started_with_sigchld_ignored_still_sees_each_row_end() {
+    let lab = lab();
+    plain(&lab, "chld");
+    // An ignored SIGCHLD lets the kernel reap children before the box can look at them.
+    let out = std::process::Command::new("env")
+        .arg("--ignore-signal=CHLD")
+        .arg(assert_cmd::cargo::cargo_bin("ignorarium"))
+        .args(["run", "chld"])
+        .env("IGNORARIUM_HOME", &lab.home.root)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let rows = kind_of(&lab, "chld", "row");
+    assert_eq!(rows.len(), 6);
+    for r in &rows {
+        assert_eq!(r.body["exit"], "ok");
+        assert_eq!(r.body["attempts"], 1);
+    }
+}
+
 #[test]
 fn pause_refuses_a_stopped_study() {
     let lab = lab();

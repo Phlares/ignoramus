@@ -14,7 +14,7 @@ use crate::records::{self, RecordDraft, RecordError, VerifyError};
 use crate::rules::input_bytes;
 use crate::schedule::{self, Row, Schedule, ScheduleError};
 use crate::spec::model::{Role, Spec};
-use crate::{keys, spec};
+use crate::{keys, spec, sys};
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
 use std::cell::{Cell, RefCell};
@@ -31,6 +31,7 @@ const MIN_TIMEOUT: Duration = Duration::from_secs(60);
 const TIMEOUT_FACTOR: f64 = 10.0;
 const PATH_ENV: &str = "/usr/bin:/bin";
 const PAUSE_REQUESTED: &str = "a pause was requested";
+const INTERRUPTED: &str = "interrupted by a signal";
 /// The payload, relative to the study folder.
 const PAYLOAD: &str = "payload/run";
 
@@ -418,8 +419,10 @@ fn no_links(base: &Path, parts: &[&str]) -> Result<(), RunError> {
 /// read: a stop ends the run with the stop trace, a pause ends it at that boundary. Then the
 /// meter is read: the run pauses instead of starting a row when a cap is reached or the row
 /// would reach one. While a row runs, the backend ticks the watch, which emits heartbeats and
-/// ends the row on a stop.
+/// ends the row on a stop. SIGINT, SIGTERM or SIGHUP ends the row as a stop does, and the
+/// run pauses.
 pub fn run(plan: &RunPlan) -> Result<RunStatus, RunError> {
+    sys::catch_interrupts().map_err(io)?;
     no_links(&plan.home.study_dir(&plan.study_id), &["run"])?;
     let lock = RunLock::try_take(&plan.home, &plan.study_id)
         .map_err(io)?
@@ -563,14 +566,15 @@ impl Books {
     }
 }
 
-/// Between rows: a stop or a pause ends the run, and so does a control file that cannot be
-/// read, as a pause.
+/// Between rows: a stop or a pause ends the run, and so do a signal and a control file that
+/// cannot be read, as a pause.
 fn at_boundary(control: &ControlFile) -> Option<Halt> {
     match control.take() {
         Ok(Some(Signal::Stop(why))) => Some(Halt::Stop {
             why,
             in_flight: None,
         }),
+        _ if sys::interrupted() => Some(Halt::Pause(INTERRUPTED.into())),
         Ok(Some(Signal::Pause)) => Some(Halt::Pause(PAUSE_REQUESTED.into())),
         Ok(_) => None,
         Err(e) => Some(Halt::Pause(format!("the control file cannot be read: {e}"))),
@@ -695,6 +699,9 @@ impl Watch for RunWatch<'_> {
         if let Ok(Some(Signal::Stop(why))) = self.control.peek_now() {
             let in_flight = Some(self.row.borrow().0);
             self.end(Halt::Stop { why, in_flight });
+        }
+        if sys::interrupted() {
+            self.end(Halt::Pause(INTERRUPTED.into()));
         }
         self.ended.borrow().is_none()
     }

@@ -340,6 +340,60 @@ fn a_retry_that_would_reach_a_cap_pauses_instead() {
     assert_eq!(plan.meter.sample().unwrap().cpu_seconds, 2000.0);
 }
 
+/// Runs level 0. Once row 0 has ended, this process gets SIGTERM, as from a supervisor,
+/// and the backend returns only after the box has seen it.
+struct SignalAfterRow0;
+
+impl Backend for SignalAfterRow0 {
+    fn level(&self) -> u8 {
+        0
+    }
+    fn probe(&self) -> Probe {
+        Probe::Available
+    }
+    fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> std::io::Result<RowOutcome> {
+        let o = Level0.run_row(job, watch)?;
+        if job
+            .env
+            .iter()
+            .any(|(k, v)| k == "IGNORARIUM_ROW" && v == "0")
+        {
+            let me = std::process::id().to_string();
+            let sent = std::process::Command::new("kill")
+                .args(["-TERM", &me])
+                .status()?;
+            assert!(sent.success());
+            let t = std::time::Instant::now();
+            while !ignorarium::sys::interrupted() {
+                assert!(t.elapsed().as_secs() < 5, "the signal never arrived");
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        Ok(o)
+    }
+}
+
+#[test]
+fn a_signal_between_rows_pauses_at_the_next_boundary() {
+    // The signal flag is process-wide, so the test runs in a child process of its own.
+    const NAME: &str = "a_signal_between_rows_pauses_at_the_next_boundary";
+    if !common::is_child(NAME) {
+        let here = std::env::current_dir().unwrap();
+        assert!(common::in_child(NAME, &here, &[]));
+        return;
+    }
+    let lab = lab();
+    plain(&lab, "between");
+    let mut plan = plan_of(&lab, "between");
+    plan.backend = Box::new(SignalAfterRow0);
+    let why = "interrupted by a signal";
+    assert_eq!(run(&plan).unwrap(), RunStatus::Paused(why.into()));
+    // Row 0 ended before the signal counted, so it has its record; row 1 never started.
+    assert_eq!(indices(&lab, "between"), vec![0]);
+    assert!(kind_of(&lab, "between", "spend").is_empty());
+    assert!(!lab.home.study_dir("between").join("run/rows/1").exists());
+}
+
 #[test]
 fn payload_failure_is_void_and_not_retried() {
     let lab = lab();
