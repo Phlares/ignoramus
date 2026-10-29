@@ -6,7 +6,7 @@ Runtime:
 
 - `clap`: parses command-line arguments.
 - `serde` (feature `derive`): reads and writes typed data, and derives the spec schema structs.
-- `serde_json`: reads and writes JSON, the base of the canonical form we hash.
+- `serde_json` (feature `float_roundtrip`): reads and writes JSON, the base of the canonical form we hash. The feature makes a 17-digit float read back as the same number, so `verify` does not report a bad hash on an untouched record.
 - `toml`: reads study specs, which use TOML.
 - `sha2`: computes SHA-256 hashes.
 - `hex`: writes hashes as text.

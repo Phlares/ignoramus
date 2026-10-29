@@ -698,3 +698,26 @@ fn timestamps_match_a_day_by_day_calendar() {
         }
     }
 }
+
+#[test]
+fn a_record_with_long_floats_verifies_after_a_write_and_read() {
+    let d = tempfile::tempdir().unwrap();
+    let k = key(1);
+    let p = d.path().join("log.jsonl");
+    let body = |floats: Vec<f64>| RecordDraft {
+        body: json!({ "m": floats }),
+        ..draft(0)
+    };
+    records::append(&p, &k, body(vec![0.1 + 0.2, 1.0 / 3.0, 12345.678901234567])).unwrap();
+    // 200 pseudo-random 17-digit floats: the default float parser misreads some of them.
+    let mut bits: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut many = Vec::new();
+    for _ in 0..200 {
+        bits = bits
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        many.push(f64::from_bits(0x3FF0_0000_0000_0000 | (bits >> 12)));
+    }
+    records::append(&p, &k, body(many)).unwrap();
+    assert_eq!(records::verify(&p, &k.verifying_key()).unwrap(), 2);
+}
