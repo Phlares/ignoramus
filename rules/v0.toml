@@ -211,7 +211,7 @@ target = [
 code = "E-RNG-001"
 severity = "error"
 problem = "A number is outside its allowed range."
-instruction = "Bring the value into range: min_isolation 0 to 3, alpha above 0 up to 0.5, power 0.5 to 0.999, icc 0 up to but below 1, repeats at least 1."
+instruction = "Bring the value into range: min_isolation 0 to 3, alpha above 0 up to 0.5, power 0.5 to 0.999, icc 0 up to but below 1, repeats at least 1, each budget value 0 or more."
 why = "Values outside these ranges are meaningless or make the sample-size maths fail. The default alpha is 0.005, because 0.05 gives too many false findings."
 sources = ["https://doi.org/10.1038/s41562-017-0189-z", "https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661"]
 target = [
@@ -220,6 +220,9 @@ target = [
   { path = "design.power", check = "range", interval = "[0.5, 0.999]" },
   { path = "design.icc", check = "range", interval = "[0, 1)" },
   { path = "design.repeats", check = "range", interval = "[1, inf)" },
+  { path = "scope.budget.cpu_hours", check = "range", interval = "[0, inf)" },
+  { path = "scope.budget.wall_hours", check = "range", interval = "[0, inf)" },
+  { path = "scope.budget.money_usd", check = "range", interval = "[0, inf)" },
 ]
 
 [[rule]]
@@ -382,6 +385,7 @@ sources = ["https://doi.org/10.1038/s41562-016-0021"]
 when = { mode = "confirmatory" }
 target = [
   { path = "design.confirmation.clusters", check = "named:selection-confirmation-disjoint" },
+  { path = "design.confirmation.clusters[*]", check = "named:selection-confirmation-disjoint" },
 ]
 
 [[rule]]
@@ -428,6 +432,7 @@ why = "A follow-on that names no hypothesis can never run. The route must say wh
 sources = []
 target = [
   { path = "scope.end_of_run.follow_on", check = "named:route-valid" },
+  { path = "scope.end_of_run.follow_on[*].when", check = "named:route-valid" },
 ]
 
 [[rule]]
@@ -494,6 +499,7 @@ why = "The checker reads only files inside the study folder. It never follows li
 sources = []
 target = [
   { path = "inputs[*].path", check = "named:input-path-safe" },
+  { path = "scope.end_of_run.follow_on[*].spec", check = "named:input-path-safe" },
 ]
 
 [[rule]]

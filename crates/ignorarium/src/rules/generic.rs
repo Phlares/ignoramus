@@ -110,7 +110,7 @@ fn is_kind(k: Kind, v: &Value) -> bool {
     }
 }
 
-fn join(prefix: &str, key: &str) -> String {
+pub(super) fn join(prefix: &str, key: &str) -> String {
     if prefix.is_empty() {
         key.to_string()
     } else {
@@ -121,7 +121,7 @@ fn join(prefix: &str, key: &str) -> String {
 /// Nodes a path selects, as (concrete path, value). `None` marks a missing key.
 /// A missing or non-table parent selects nothing: its own rule reports it.
 /// `**` selects every value at any depth.
-fn select<'a>(root: &'a Value, pattern: &str) -> Vec<(String, Option<&'a Value>)> {
+pub(super) fn select<'a>(root: &'a Value, pattern: &str) -> Vec<(String, Option<&'a Value>)> {
     if pattern == "**" {
         let mut out = Vec::new();
         all_nodes(root, "", &mut out);

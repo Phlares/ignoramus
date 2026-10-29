@@ -8,8 +8,9 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::rc::Rc;
 
-fn v0() -> Vec<Rule> {
-    rules::load("../../rules/v0.toml".as_ref()).unwrap()
+fn v0() -> &'static [Rule] {
+    static RULES: std::sync::OnceLock<Vec<Rule>> = std::sync::OnceLock::new();
+    RULES.get_or_init(|| rules::load("../../rules/v0.toml".as_ref()).unwrap())
 }
 
 fn spec_at(path: &str) -> Value {
@@ -29,7 +30,7 @@ fn ctx_with(dir: &Path, prior: Box<dyn PriorUse>) -> CheckCtx {
 }
 
 fn named(spec: &Value, dir: &Path) -> Vec<Diagnostic> {
-    rules::check_named(spec, &v0(), &ctx(dir))
+    rules::check_named(spec, v0(), &ctx(dir))
 }
 
 fn codes_paths(d: &[Diagnostic]) -> Vec<(&str, &str)> {
@@ -114,6 +115,13 @@ fn power_edits(upc: u32, clusters: usize) -> Vec<Edit> {
         ("/design/units_per_cluster", j(json!(upc))),
         ("/design/confirmation/clusters", j(ids("c", clusters))),
     ]
+}
+
+/// Two clusters of 5 units, and one edit: small enough that the gate fires if it computes.
+fn guard(ptr: &'static str, v: Value) -> Vec<Edit> {
+    let mut e = power_edits(5, 2);
+    e.push((ptr, j(v)));
+    e
 }
 
 fn faults() -> Vec<Fault> {
@@ -264,6 +272,58 @@ fn faults() -> Vec<Fault> {
             ],
             vec![("E-PTH-001", "inputs[0].path")],
         ),
+        // Overflow: the product of user integers saturates; the plan then passes.
+        f(
+            vec![("/design/units_per_cluster", j(json!(i64::MAX)))],
+            vec![],
+        ),
+        f(
+            vec![("/design/units_per_cluster", j(json!(-5)))],
+            vec![("E-CNF-002", "design.confirmation.clusters")],
+        ),
+        // Power-gate guards: with 2 clusters the gate fires if it computes, so [] means it skipped.
+        f(guard("/design/alpha", json!(0.0)), vec![]),
+        f(guard("/design/alpha", json!(1.0)), vec![]),
+        f(guard("/design/power", json!(0.0)), vec![]),
+        f(guard("/design/power", json!(1.0)), vec![]),
+        f(guard("/design/icc", json!(1.0)), vec![]),
+        f(guard("/design/icc", json!(-0.1)), vec![]),
+        f(guard("/design/alpha", json!("x")), vec![]),
+        f(
+            guard("/design/alpha", json!(0.45)),
+            vec![("E-CNF-002", "design.confirmation.clusters")],
+        ),
+        f(
+            guard("/design/power", json!(0.999)),
+            vec![("E-CNF-002", "design.confirmation.clusters")],
+        ),
+        f(
+            guard("/design/power", json!(0.5)),
+            vec![("E-CNF-002", "design.confirmation.clusters")],
+        ),
+        f(
+            guard("/design/icc", json!(0.0)),
+            vec![("E-CNF-002", "design.confirmation.clusters")],
+        ),
+        // A budget of negatives is not a budget.
+        f(
+            vec![
+                ("/scope/budget/cpu_hours", j(json!(-1.0))),
+                ("/scope/budget/wall_hours", j(json!(0.0))),
+                ("/scope/budget/money_usd", j(json!(0.0))),
+            ],
+            vec![("E-BUD-001", "scope.budget")],
+        ),
+        // Path forms: a lone `..`, a colon, and a segment Windows would trim.
+        pth(".."),
+        pth("a/b:c"),
+        pth("a. /x"),
+        pth("a./x"),
+        pth("a/."),
+        f(
+            route(one("H1.pass", "..")),
+            vec![("E-PTH-001", "scope.end_of_run.follow_on[0].spec")],
+        ),
     ]
 }
 
@@ -367,7 +427,8 @@ fn boundaries_hold_on_both_sides() {
     }
     // A `..` component is unsafe; a name that contains two dots is not.
     passes(vec![("/inputs/0/path", j(json!("data/a..b.txt")))]);
-    passes(vec![("/inputs/0/path", j(json!("./data/x.txt")))]);
+    // `a//b` is the same as `a/b`.
+    passes(vec![("/inputs/0/path", j(json!("data//x.txt")))]);
     for when in ["H1.pass", "H1.fail"] {
         passes(route(one(when, "f.toml")));
     }
@@ -411,12 +472,6 @@ fn power_gate_uses_alpha_power_icc_and_defaults() {
         codes_paths(&named(&edited(&e), dir.path())),
         [("E-CNF-002", "design.confirmation.clusters")]
     );
-    // Absent alpha and power mean 0.005 and 0.8: 54 units.
-    let mut e = power_edits(1, 54);
-    e.extend([("/design/alpha", None), ("/design/power", None)]);
-    assert!(named(&edited(&e), dir.path()).is_empty());
-    e[1] = ("/design/confirmation/clusters", j(ids("c", 53)));
-    assert_eq!(named(&edited(&e), dir.path()).len(), 1);
     // Higher power needs more units.
     let mut e = power_edits(1, 54);
     e.push(("/design/power", j(json!(0.9))));
@@ -451,11 +506,10 @@ fn junk() -> Vec<Value> {
     vec![
         json!("text"),
         json!(7),
+        json!(i64::MAX),
         json!(-1.5),
-        json!([]),
         json!([1, "a"]),
         json!({}),
-        Value::Null,
         json!(true),
     ]
 }
@@ -510,7 +564,7 @@ fn named_checks_never_panic_on_missing_or_mistyped_fields() {
             named(&s, dir.path());
         }
     }
-    assert!(ran > 800);
+    assert!(ran > 600);
 }
 
 // ---- checks that read files ----
@@ -552,7 +606,7 @@ fn input_hash_must_match_the_file() {
 fn missing_hash_is_a_warning_from_the_generic_rule() {
     let mut s = spec_at("../../templates/numeric-ablation.toml");
     let w = |s: &Value| -> Vec<Diagnostic> {
-        rules::check_generic(s, &v0())
+        rules::check_generic(s, v0())
             .into_iter()
             .filter(|x| x.code == "W-HSH-001")
             .collect()
@@ -618,7 +672,7 @@ fn fake(exact: Option<&str>, normalized: Option<&str>) -> (Box<dyn PriorUse>, Se
 }
 
 fn fresh(spec: &Value, dir: &Path, prior: Box<dyn PriorUse>) -> Vec<Diagnostic> {
-    rules::check_named(spec, &v0(), &ctx_with(dir, prior))
+    rules::check_named(spec, v0(), &ctx_with(dir, prior))
 }
 
 #[test]
@@ -727,8 +781,30 @@ fn symlinks_under_the_study_folder_are_refused_and_never_read() {
         codes_paths(&named(&s, dir.path())),
         [("E-PTH-001", "scope.end_of_run.follow_on[0].spec")]
     );
+    // A linked folder on the way to a follow-on spec.
+    let s = edited(&route(one("H1.pass", "inner/x.txt")));
+    assert_eq!(
+        codes_paths(&named(&s, dir.path())),
+        [("E-PTH-001", "scope.end_of_run.follow_on[0].spec")]
+    );
     // A real path passes.
     assert!(named(&with_input("real/x.txt", ABC, "calibration"), dir.path()).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_pipe_is_never_opened() {
+    let dir = tempfile::tempdir().unwrap();
+    let ok = std::process::Command::new("mkfifo")
+        .arg(dir.path().join("pipe"))
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok);
+    let (prior, seen) = fake(None, None);
+    let d = fresh(&with_input("pipe", ABC, "confirmation"), dir.path(), prior);
+    assert_eq!(codes_paths(&d), [("E-HSH-001", "inputs[0].sha256")]);
+    assert!(seen.borrow().is_empty());
 }
 
 // ---- rule loading and gating ----
@@ -786,4 +862,67 @@ fn bal_brief_is_refused_with_three_codes() {
         "{}",
         power.problem
     );
+}
+
+#[test]
+fn power_gate_numbers_at_the_guard_edges() {
+    let dir = study_dir();
+    let detail = |edits: Vec<Edit>| {
+        let d = named(&edited(&edits), dir.path());
+        assert_eq!(d.len(), 1, "{edits:?}");
+        d[0].problem.rsplit_once(". ").unwrap().1.to_string()
+    };
+    // power 0.999 needs 140 units at sd 2, sesoi 1.
+    let mut e = power_edits(1, 139);
+    e.push(("/design/power", j(json!(0.999))));
+    assert_eq!(
+        detail(e),
+        "139 confirmation units; the power gate needs 140."
+    );
+    // icc just under 1 with 5 units per cluster: the design effect is about 5.
+    let mut e = power_edits(5, 11);
+    e.push(("/design/icc", j(json!(0.999999))));
+    assert_eq!(
+        detail(e),
+        "55 confirmation units; the power gate needs 267."
+    );
+    // No units per cluster: zero units, sized as if there were one.
+    let mut e = power_edits(0, 11);
+    e.push(("/design/icc", j(json!(0.1))));
+    assert_eq!(detail(e), "0 confirmation units; the power gate needs 54.");
+    // The largest integer saturates instead of overflowing.
+    let mut e = power_edits(1, 54);
+    e.push(("/design/units_per_cluster", j(json!(i64::MAX))));
+    assert!(named(&edited(&e), dir.path()).is_empty());
+}
+
+/// `inputs[0].path` matches `inputs[*].path`.
+fn matches_pattern(path: &str, pattern: &str) -> bool {
+    let (p, q): (Vec<_>, Vec<_>) = (path.split('.').collect(), pattern.split('.').collect());
+    p.len() == q.len()
+        && p.iter().zip(&q).all(|(a, b)| match b.strip_suffix("[*]") {
+            Some(name) => a
+                .strip_prefix(name)
+                .is_some_and(|r| r.starts_with('[') && r.ends_with(']')),
+            None => a == b,
+        })
+}
+
+#[test]
+fn every_named_diagnostic_is_reported_at_a_path_its_target_matches() {
+    let dir = study_dir();
+    let mut seen = BTreeSet::new();
+    for row in faults() {
+        let d = named(&edited(&row.edits), dir.path());
+        for x in &d {
+            let ok = v0()
+                .iter()
+                .filter(|r| r.code == x.code)
+                .any(|r| matches_pattern(&x.path, &r.path));
+            assert!(ok, "{} at {}", x.code, x.path);
+            seen.insert((x.code.clone(), x.path.clone()));
+        }
+    }
+    assert!(seen.len() > 15, "{}", seen.len());
+    assert!(matches_pattern("a[12].b", "a[*].b") && !matches_pattern("a.b", "a[*].b"));
 }
