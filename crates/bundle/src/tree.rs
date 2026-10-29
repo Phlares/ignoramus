@@ -15,10 +15,26 @@ fn refuse(path: String, message: &str) -> Problem {
     }
 }
 
+/// Controls, C1 controls and bidi or format marks: a terminal or reader may act on them.
+fn is_hidden(c: char) -> bool {
+    matches!(c,
+        '\u{0}'..='\u{1f}' | '\u{7f}'..='\u{9f}' | '\u{61c}' | '\u{200e}' | '\u{200f}'
+        | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
 fn name_is_safe(name: &str) -> bool {
-    !name
-        .chars()
-        .any(|c| c < '\u{20}' || c == '\u{7f}' || c == '\\')
+    !name.chars().any(|c| is_hidden(c) || c == '\\')
+}
+
+/// Text for display: hidden chars as `\u{..}` escapes and a backslash as `\\`.
+pub fn shown(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\\' => "\\\\".to_string(),
+            c if is_hidden(c) => c.escape_unicode().to_string(),
+            c => c.to_string(),
+        })
+        .collect()
 }
 
 /// Lists regular files as `/`-joined relative paths, sorted by bytes.
@@ -47,7 +63,7 @@ fn visit(
         };
         let rel = format!("{prefix}{name}");
         if !valid {
-            problems.push(refuse(rel, "name cannot be held in a bundle"));
+            problems.push(refuse(shown(&rel), "name cannot be held in a bundle"));
             continue;
         }
         let kind = fs::symlink_metadata(entry.path())?.file_type();

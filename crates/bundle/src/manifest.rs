@@ -64,7 +64,7 @@ pub fn render(entries: &[Entry]) -> String {
 fn mismatch(path: &str, message: &str) -> Problem {
     Problem {
         code: "E-PUB-015",
-        path: path.to_string(),
+        path: tree::shown(path),
         message: message.to_string(),
         instruction: "Rebuild the bundle; never edit a built bundle.".to_string(),
     }

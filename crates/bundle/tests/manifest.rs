@@ -151,6 +151,56 @@ fn check_refuses_edits_additions_and_removals() {
 }
 
 #[test]
+fn refused_names_are_shown_escaped() {
+    let cases = [
+        ("a\u{1b}[31mb", "a\\u{1b}[31mb"),
+        ("a\u{202e}b", "a\\u{202e}b"),
+        ("a\u{85}b", "a\\u{85}b"),
+    ];
+    for (name, shown) in cases {
+        let t = tempfile::tempdir().unwrap();
+        if fs::write(t.path().join(name), "").is_err() {
+            continue;
+        }
+        let (files, problems) = tree::walk(t.path()).unwrap();
+        assert!(files.is_empty(), "{shown}");
+        assert_eq!(problems.len(), 1, "{shown}");
+        assert_eq!(problems[0].code, "E-PUB-001");
+        assert_eq!(problems[0].path, shown);
+    }
+}
+
+#[test]
+fn shown_escapes_only_hidden_chars_and_backslash() {
+    assert_eq!(tree::shown("a b"), "a b");
+    assert_eq!(tree::shown("é"), "é");
+    assert_eq!(tree::shown("a\\b"), "a\\\\b");
+    assert_eq!(
+        tree::shown("\u{9f}\u{a0}\u{2069}\u{2066}"),
+        "\\u{9f}\u{a0}\\u{2069}\\u{2066}"
+    );
+    assert_eq!(
+        tree::shown("\u{61c}\u{200e}\u{200f}\u{202a}"),
+        "\\u{61c}\\u{200e}\\u{200f}\\u{202a}"
+    );
+}
+
+#[test]
+fn manifest_paths_are_shown_escaped() {
+    let t = tempfile::tempdir().unwrap();
+    let hash = manifest::sha256_bytes(b"");
+    fs::write(
+        t.path().join(manifest::NAME),
+        format!("{hash}  x\u{1b}[31my\n"),
+    )
+    .unwrap();
+    let problems = refused(manifest::check(t.path()).unwrap_err());
+    assert_eq!(problems.len(), 1);
+    assert_eq!(problems[0].path, "x\\u{1b}[31my");
+    assert_eq!(problems[0].message, "listed in the manifest but missing");
+}
+
+#[test]
 fn check_reports_every_mismatch_at_once() {
     let t = tempfile::tempdir().unwrap();
     study(t.path());
