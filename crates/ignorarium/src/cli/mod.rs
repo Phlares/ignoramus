@@ -10,8 +10,11 @@ use std::path::PathBuf;
 mod check;
 mod docs;
 mod guide;
+mod history;
 mod new;
+pub mod register;
 mod review;
+mod verify;
 
 /// A verb failed. `code` is the exit code: 1 for a refusal, 2 for a usage or I/O error.
 #[derive(Debug)]
@@ -36,10 +39,13 @@ impl CliError {
     }
 }
 
-/// What a verb did: its exit code, and the spec hash when it read a spec.
+/// What a verb did: its exit code, the spec hash when it read a spec,
+/// and the plan log leaf index when it added one.
+#[derive(Debug)]
 pub struct Done {
     pub code: i32,
     pub spec_hash: Option<String>,
+    pub leaf: Option<u64>,
 }
 
 type Run = Result<Done, CliError>;
@@ -106,6 +112,26 @@ enum Verb {
         /// The spec file.
         spec: PathBuf,
     },
+    /// Approve a checked plan and add it to the plan log. Needs a terminal.
+    Register {
+        /// The spec file.
+        spec: PathBuf,
+    },
+    /// Record the hashes of earlier data files, so later plans cannot reuse them.
+    ImportHistory {
+        /// Name of the earlier phase, kept as the leaf label.
+        #[arg(long)]
+        phase: String,
+        /// The data files.
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+    },
+    /// Check the plan logs and, with --study, one study's record chain.
+    Verify {
+        /// Study id.
+        #[arg(long)]
+        study: Option<String>,
+    },
     #[command(hide = true, subcommand)]
     Dev(Dev),
 }
@@ -127,6 +153,9 @@ impl Verb {
             Verb::New { .. } => "new",
             Verb::Check { .. } => "check",
             Verb::Review { .. } => "review",
+            Verb::Register { .. } => "register",
+            Verb::ImportHistory { .. } => "import-history",
+            Verb::Verify { .. } => "verify",
             Verb::Dev(Dev::GenRuleDocs { .. }) => "dev.gen-rule-docs",
         }
     }
@@ -137,6 +166,9 @@ impl Verb {
             Verb::New { template, id } => new::run(&template, &id),
             Verb::Check { spec, json } => check::run(ctx, &spec, json),
             Verb::Review { spec } => review::run(ctx, &spec),
+            Verb::Register { spec } => register::run_stdio(ctx, &spec),
+            Verb::ImportHistory { phase, files } => history::run(ctx, &phase, &files),
+            Verb::Verify { study } => verify::run(ctx, study.as_deref()),
             Verb::Dev(Dev::GenRuleDocs { out }) => docs::run(&out),
         }
     }
@@ -164,6 +196,7 @@ where
         Done {
             code: e.code,
             spec_hash: None,
+            leaf: None,
         }
     });
     if let Err(e) = emit(&ctx, name, &done) {
@@ -175,8 +208,13 @@ where
 fn emit(ctx: &Ctx, name: &str, done: &Done) -> Result<(), String> {
     let home = ctx.home.as_ref().map_err(String::clone)?;
     let mut attrs = json!({ "exit": done.code });
-    if let (Some(h), Some(map)) = (&done.spec_hash, attrs.as_object_mut()) {
-        map.insert("spec_hash".into(), Value::String(h.clone()));
+    if let Some(map) = attrs.as_object_mut() {
+        if let Some(h) = &done.spec_hash {
+            map.insert("spec_hash".into(), Value::String(h.clone()));
+        }
+        if let Some(i) = done.leaf {
+            map.insert("leaf".into(), Value::from(i));
+        }
     }
     events::emit(
         &home.root.join("events.jsonl"),

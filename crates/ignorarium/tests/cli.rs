@@ -468,3 +468,218 @@ fn a_stdout_write_error_other_than_a_closed_pipe_exits_2() {
         .unwrap();
     assert_eq!(st.code(), Some(2));
 }
+
+fn events(home: &Path) -> Vec<Value> {
+    std::fs::read_to_string(home.join("events.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+#[test]
+fn register_refuses_without_a_terminal() {
+    let (_d, home, spec) = setup(|t| t);
+    let a = bin(&home)
+        .arg("register")
+        .arg(&spec)
+        .write_stdin("00000000\n")
+        .assert()
+        .code(1);
+    let err = stderr(&a);
+    assert!(err.contains("E-REG-001"), "{err}");
+    assert!(err.contains("docs/rules/E-REG-001.md"), "{err}");
+    assert!(!home.join("studies/my-study").exists());
+    let ev = events(&home);
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0]["name"], "register");
+    assert_eq!(ev[0]["attrs"]["exit"], 1);
+}
+
+/// A confirmatory spec in `dir` whose selection input is `data.txt`.
+fn reuse_spec(dir: &Path, bytes: &[u8]) -> PathBuf {
+    std::fs::create_dir_all(dir.join("data")).unwrap();
+    std::fs::write(dir.join("data/example.txt"), bytes).unwrap();
+    let text = std::fs::read_to_string(TEMPLATE)
+        .unwrap()
+        .replace("mode = \"exploratory\"", "mode = \"confirmatory\"")
+        .replace("label = \"signal\"", "label = \"confirmed\"")
+        .replace(
+            "sha256 = \"\"",
+            &format!("sha256 = \"{}\"", ignorarium::canon::sha256_hex(bytes)),
+        )
+        .replace("role = \"calibration\"", "role = \"selection\"");
+    let spec = dir.join("spec.toml");
+    std::fs::write(&spec, text).unwrap();
+    spec
+}
+
+#[test]
+fn import_history_then_confirmatory_reuse_fails_check() {
+    let (d, home, _) = setup(|t| t);
+    let old = d.path().join("old.txt");
+    std::fs::write(&old, "Some  Earlier TEXT").unwrap();
+    let a = bin(&home)
+        .args(["import-history", "--phase", "pilot"])
+        .arg(&old)
+        .assert()
+        .code(0);
+    assert_eq!(stdout(&a), "leaf 0\n");
+    // Same bytes, and the same text with other case and spacing.
+    for bytes in [&b"Some  Earlier TEXT"[..], b"some earlier\ntext"] {
+        let spec = reuse_spec(&d.path().join("study"), bytes);
+        let a = bin(&home).arg("check").arg(&spec).assert().code(1);
+        let out = stdout(&a);
+        assert!(out.contains("error[E-CNF-005]"), "{out}");
+        assert!(out.contains("leaf 0 (legacy)"), "{out}");
+    }
+    let ev = events(&home);
+    assert_eq!(ev[0]["name"], "import-history");
+    assert_eq!(ev[0]["attrs"]["exit"], 0);
+    assert_eq!(ev[0]["attrs"]["leaf"], 0);
+}
+
+fn leaf_lines(home: &Path, log: &str) -> Vec<Value> {
+    std::fs::read_to_string(home.join(log).join("leaves.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+#[test]
+fn import_history_records_one_leaf_with_every_files_hashes() {
+    let (d, home, _) = setup(|t| t);
+    let (a, b) = (d.path().join("a.txt"), d.path().join("b.bin"));
+    std::fs::write(&a, "Hello  World").unwrap();
+    std::fs::write(&b, [0xff, 0xfe, 0x00]).unwrap();
+    bin(&home)
+        .args(["import-history", "--phase", "pilot"])
+        .args([&a, &b])
+        .assert()
+        .code(0);
+    let leaves = leaf_lines(&home, "planlog");
+    assert_eq!(leaves.len(), 1);
+    let l = &leaves[0];
+    assert_eq!(l["kind"], "legacy");
+    assert_eq!(l["label"], "pilot");
+    assert!(l["commitment"].is_null() && l["family"].is_null() && l["mode"].is_null());
+    let sha = ignorarium::canon::sha256_hex;
+    assert_eq!(
+        l["data_hashes"],
+        serde_json::json!([
+            [sha(b"Hello  World"), sha(b"hello world")],
+            [sha(&[0xff, 0xfe, 0x00]), ""]
+        ])
+    );
+    // A second call adds a second leaf.
+    let a2 = bin(&home)
+        .args(["import-history", "--phase", "later"])
+        .arg(&a)
+        .assert()
+        .code(0);
+    assert_eq!(stdout(&a2), "leaf 1\n");
+}
+
+#[test]
+fn import_history_refuses_a_bad_file_before_appending() {
+    let (d, home, _) = setup(|t| t);
+    let good = d.path().join("good.txt");
+    std::fs::write(&good, "x").unwrap();
+    for bad in [d.path().join("missing.txt"), d.path().to_path_buf()] {
+        let a = bin(&home)
+            .args(["import-history", "--phase", "p"])
+            .arg(&good)
+            .arg(&bad)
+            .assert()
+            .code(2);
+        assert!(stderr(&a).contains(&bad.display().to_string()));
+    }
+    assert!(leaf_lines(&home, "planlog").is_empty());
+}
+
+/// Register the template through the library, then return the box.
+fn registered() -> (TempDir, PathBuf, PathBuf) {
+    let (d, home, spec) = setup(|t| t);
+    let h = ignorarium::home::Home::open_at(&home).unwrap();
+    let typed = format!("{}\n", &ignorarium::spec::load(&spec).unwrap().hash[7..15]);
+    let mut out = Vec::new();
+    ignorarium::cli::register::run(
+        &spec,
+        &h,
+        &mut std::io::Cursor::new(typed.into_bytes()),
+        &mut out,
+        true,
+    )
+    .unwrap();
+    (d, home, spec)
+}
+
+#[test]
+fn verify_passes_after_a_register_and_counts_leaves() {
+    let (_d, home, _) = registered();
+    let a = bin(&home)
+        .args(["verify", "--study", "my-study"])
+        .assert()
+        .code(0);
+    let out = stdout(&a);
+    assert!(out.contains("planlog: 1 signed, 1 leaves"), "{out}");
+    assert!(out.contains("testlog: 0 signed, 0 leaves"), "{out}");
+    assert!(out.contains("study my-study: 1 records"), "{out}");
+    assert!(!out.contains("warning"), "{out}");
+    let ev = events(&home);
+    assert_eq!(ev.last().unwrap()["name"], "verify");
+    assert_eq!(ev.last().unwrap()["attrs"]["exit"], 0);
+}
+
+#[test]
+fn verify_warns_about_unsigned_leaves() {
+    let (_d, home, _) = registered();
+    let p = home.join("planlog/leaves.jsonl");
+    let mut text = std::fs::read_to_string(&p).unwrap();
+    let again = text.clone();
+    text.push_str(&again);
+    std::fs::write(&p, text).unwrap();
+    let a = bin(&home).arg("verify").assert().code(0);
+    let out = stdout(&a);
+    assert!(out.contains("planlog: 1 signed, 2 leaves"), "{out}");
+    assert!(
+        out.contains("warning: planlog has 1 unsigned leaves"),
+        "{out}"
+    );
+}
+
+#[test]
+fn verify_fails_on_a_tampered_leaf_naming_the_log() {
+    let (_d, home, _) = registered();
+    let p = home.join("planlog/leaves.jsonl");
+    let text = std::fs::read_to_string(&p).unwrap();
+    assert!(text.contains("signal"));
+    std::fs::write(&p, text.replace("signal", "signaL")).unwrap();
+    let a = bin(&home).arg("verify").assert().code(1);
+    assert!(stderr(&a).contains("planlog"), "{}", stderr(&a));
+}
+
+#[test]
+fn verify_study_fails_on_a_tampered_record() {
+    let (_d, home, _) = registered();
+    bin(&home).arg("verify").assert().code(0);
+    let p = home.join("studies/my-study/records.jsonl");
+    let text = std::fs::read_to_string(&p).unwrap();
+    std::fs::write(&p, text.replace("register", "regista")).unwrap();
+    // Without --study the record chain is not read.
+    bin(&home).arg("verify").assert().code(0);
+    let a = bin(&home)
+        .args(["verify", "--study", "my-study"])
+        .assert()
+        .code(1);
+    assert!(stderr(&a).contains("my-study"), "{}", stderr(&a));
+}
+
+#[test]
+fn verify_study_needs_a_known_id() {
+    let (_d, home, _) = registered();
+    for id in ["nope", "../x", ".."] {
+        bin(&home).args(["verify", "--study", id]).assert().code(2);
+    }
+}

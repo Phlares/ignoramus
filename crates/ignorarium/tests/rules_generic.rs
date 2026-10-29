@@ -363,7 +363,7 @@ fn removing_any_required_node_reports_it_at_its_path() {
 fn every_non_wildcard_rule_path_selects_a_node_in_some_template() {
     let fat = fat_templates();
     for r in v0() {
-        if r.path == "**" || matches!(r.check, Check::Named(_)) {
+        if r.path == "**" || matches!(r.check, Check::Named(_) | Check::Documented) {
             continue;
         }
         let n: usize = fat.iter().map(|t| expand(t, &r.path).len()).sum();
@@ -421,7 +421,10 @@ fn human_render_matches_exactly() {
 #[test]
 fn no_duplicate_path_and_kind_pairs() {
     let mut seen = HashSet::new();
-    for r in v0() {
+    for r in v0()
+        .iter()
+        .filter(|r| !matches!(r.check, Check::Documented))
+    {
         assert!(
             seen.insert((r.path.clone(), r.check.name())),
             "{}: {}",
@@ -973,4 +976,19 @@ fn key_safety_boundary_is_one_to_forty_of_lowercase_digit_underscore_hyphen() {
     assert_eq!(path_of("a.b"), "study.<key>");
     assert_eq!(path_of(""), "study.<key>");
     assert_eq!(path_of("\u{e9}"), "study.<key>");
+}
+
+#[test]
+fn a_rule_with_no_targets_is_documented_only_and_checks_nothing() {
+    let text = format!(
+        "[[rule]]
+{HEAD}
+target = []
+"
+    );
+    let rules = local_rules(&text);
+    assert_eq!(rules.len(), 1);
+    assert!(matches!(rules[0].check, Check::Documented));
+    assert_eq!(rules[0].check.name(), "documented");
+    assert!(rules::check_generic(&serde_json::json!({}), &rules).is_empty());
 }

@@ -40,5 +40,6 @@ pub fn run(json: bool) -> Run {
     Ok(Done {
         code: 0,
         spec_hash: None,
+        leaf: None,
     })
 }

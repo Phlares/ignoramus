@@ -150,5 +150,6 @@ pub fn run(ctx: &Ctx, spec: &Path) -> Run {
     Ok(Done {
         code: a.exit_code(),
         spec_hash: Some(a.hash),
+        leaf: None,
     })
 }

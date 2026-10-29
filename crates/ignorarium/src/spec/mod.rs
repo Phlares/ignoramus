@@ -42,8 +42,12 @@ impl std::fmt::Display for LoadError {
 impl std::error::Error for LoadError {}
 
 pub fn load(path: &Path) -> Result<RawSpec, LoadError> {
-    let bytes = std::fs::read(path).map_err(LoadError::Io)?;
-    let text = std::str::from_utf8(&bytes).map_err(|e| LoadError::Utf8 {
+    parse(&std::fs::read(path).map_err(LoadError::Io)?)
+}
+
+/// `load` for bytes already read, so a caller can hash and store the same bytes.
+pub fn parse(bytes: &[u8]) -> Result<RawSpec, LoadError> {
+    let text = std::str::from_utf8(bytes).map_err(|e| LoadError::Utf8 {
         offset: e.valid_up_to(),
     })?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);

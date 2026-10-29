@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 mod generic;
 mod named;
 pub use generic::check_generic;
-pub use named::{CheckCtx, check_named};
+pub use named::{CheckCtx, check_named, input_bytes};
 
 #[derive(Debug, Clone)]
 pub struct Rule {
@@ -41,6 +41,8 @@ pub enum Check {
     KnownKey,
     /// A cross-field check in Rust; the generic checker skips it.
     Named(String),
+    /// A code the CLI raises itself. It checks no spec field; the rule file only documents it.
+    Documented,
 }
 
 impl Check {
@@ -56,6 +58,7 @@ impl Check {
             Check::Finite => "finite".into(),
             Check::KnownKey => "known-key".into(),
             Check::Named(n) => format!("named:{n}"),
+            Check::Documented => "documented".into(),
         }
     }
 }
@@ -159,6 +162,20 @@ fn parse(text: &str) -> Result<Vec<Rule>, RulesError> {
     })?;
     let mut out = Vec::new();
     for row in file.rule {
+        if row.target.is_empty() {
+            out.push(Rule {
+                code: row.code,
+                severity: row.severity,
+                path: String::new(),
+                check: Check::Documented,
+                problem: row.problem,
+                instruction: row.instruction,
+                why: row.why,
+                sources: row.sources,
+                when: row.when,
+            });
+            continue;
+        }
         for t in row.target {
             let check = parse_check(&t).map_err(|msg| RulesError::Invalid {
                 code: row.code.clone(),

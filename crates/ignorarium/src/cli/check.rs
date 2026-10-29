@@ -40,6 +40,14 @@ impl PriorUse for Unreadable {
     }
 }
 
+/// The folder an input path is relative to: the spec's own folder.
+pub fn study_dir(spec_path: &Path) -> PathBuf {
+    match spec_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
 pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
     let home = ctx.home()?;
     let shown = spec_path.display();
@@ -52,12 +60,8 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         Ok(log) => Box::new(log),
         Err(e) => Box::new(Unreadable(e.to_string())),
     };
-    let study_dir = match spec_path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-        _ => PathBuf::from("."),
-    };
     let cc = CheckCtx {
-        study_dir,
+        study_dir: study_dir(spec_path),
         prior,
         machine_max_level: machine.max_level,
     };
@@ -157,6 +161,7 @@ pub fn run(ctx: &Ctx, spec_path: &Path, json: bool) -> Run {
             return Ok(Done {
                 code: e.code,
                 spec_hash: None,
+                leaf: None,
             });
         }
         other => other?,
@@ -170,5 +175,6 @@ pub fn run(ctx: &Ctx, spec_path: &Path, json: bool) -> Run {
     Ok(Done {
         code: a.exit_code(),
         spec_hash: Some(a.hash),
+        leaf: None,
     })
 }

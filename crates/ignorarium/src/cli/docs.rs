@@ -1,6 +1,6 @@
 //! `dev gen-rule-docs`: one Markdown page per rule code, from the built-in rules.
 use super::{CliError, Done, Run, out};
-use crate::rules::{self, Rule};
+use crate::rules::{self, Check, Rule};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -22,6 +22,13 @@ fn page(code: &str, rules: &[&Rule]) -> String {
     }
     s.push_str("## Applies to\n\n");
     for r in rules {
+        if matches!(r.check, Check::Documented) {
+            s.push_str(
+                "- the command line, not a spec field
+",
+            );
+            continue;
+        }
         s.push_str(&format!("- `{}` ({})", r.path, r.check.name()));
         if let Some(w) = &r.when {
             let gates: Vec<String> = [("mode", &w.mode), ("label", &w.label)]
@@ -50,6 +57,7 @@ pub fn run(dir: &Path) -> Run {
     Ok(Done {
         code: 0,
         spec_hash: None,
+        leaf: None,
     })
 }
 
@@ -57,7 +65,6 @@ pub fn run(dir: &Path) -> Run {
 mod tests {
     use super::*;
     use crate::diag::Severity;
-    use crate::rules::Check;
 
     fn rule(sources: Vec<String>) -> Rule {
         Rule {

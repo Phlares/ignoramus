@@ -7,7 +7,7 @@ use super::{Check, Rule};
 use crate::canon::sha256_hex;
 use crate::diag::Diagnostic;
 use crate::power::required_units;
-use crate::prior::{PriorUse, normalized_sha256};
+use crate::prior::{PriorUse, file_hashes};
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
 
@@ -147,11 +147,11 @@ fn with_parent<'a>(spec: &'a Value, pattern: &str) -> Vec<(String, &'a Value, &'
 /// segment must be one plain name; empty segments (`a//b`) are skipped. A `:`, a
 /// backslash, a leading `/`, a segment ending in `.` or a space (Windows trims
 /// them), or any symlink on the way makes it unsafe.
-fn resolve(ctx: &CheckCtx, rel: &str) -> Option<PathBuf> {
+fn resolve(study_dir: &Path, rel: &str) -> Option<PathBuf> {
     if rel.starts_with('/') || rel.contains(['\\', ':']) {
         return None;
     }
-    let mut path = ctx.study_dir.clone();
+    let mut path = study_dir.to_path_buf();
     let mut any = false;
     for part in rel.split('/').filter(|c| !c.is_empty()) {
         let mut parts = Path::new(part).components();
@@ -180,9 +180,16 @@ fn read_file(path: &Path) -> Option<Vec<u8>> {
         .and_then(|_| std::fs::read(path).ok())
 }
 
+/// The bytes of the regular file `rel` names under `study_dir`, or `None` when
+/// the path is unsafe or the file is absent.
+pub fn input_bytes(study_dir: &Path, rel: &str) -> Option<Vec<u8>> {
+    resolve(study_dir, rel).and_then(|p| read_file(&p))
+}
+
 fn input_path_safe(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     flag(spec, pat, |v| {
-        v.as_str().is_some_and(|rel| resolve(ctx, rel).is_none())
+        v.as_str()
+            .is_some_and(|rel| resolve(&ctx.study_dir, rel).is_none())
     })
 }
 
@@ -196,7 +203,7 @@ fn input_hash_matches(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
         if want.is_empty() {
             continue;
         }
-        let Some(file) = resolve(ctx, rel) else {
+        let Some(file) = resolve(&ctx.study_dir, rel) else {
             continue;
         };
         if read_file(&file).map(|b| sha256_hex(&b)).as_deref() != Some(want) {
@@ -209,7 +216,7 @@ fn input_hash_matches(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
 fn follow_on_exists(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     flag(spec, pat, |v| {
         v.as_str()
-            .and_then(|rel| resolve(ctx, rel))
+            .and_then(|rel| resolve(&ctx.study_dir, rel))
             .is_some_and(|p| !p.is_file())
     })
 }
@@ -221,18 +228,11 @@ fn data_fresh(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
         if !matches!(role, Some("selection" | "confirmation")) {
             continue;
         }
-        let Some(bytes) = rel
-            .as_str()
-            .and_then(|r| resolve(ctx, r))
-            .and_then(|p| read_file(&p))
-        else {
+        let Some(bytes) = rel.as_str().and_then(|r| input_bytes(&ctx.study_dir, r)) else {
             continue;
         };
-        // Not UTF-8 text: no normalized hash exists, so pass an empty one.
-        let normalized = std::str::from_utf8(&bytes)
-            .map(normalized_sha256)
-            .unwrap_or_default();
-        let detail = match ctx.prior.used(&sha256_hex(&bytes), &normalized) {
+        let (exact, normalized) = file_hashes(&bytes);
+        let detail = match ctx.prior.used(&exact, &normalized) {
             Ok(None) => continue,
             Ok(Some(id)) => format!("The earlier entry is {id}."),
             Err(e) => format!("The plan log cannot be read: {e}."),

@@ -47,7 +47,7 @@ pub(super) fn applies(rule: &Rule, spec: &Value) -> bool {
 
 fn violations(rule: &Rule, spec: &Value, known: &HashSet<&str>) -> Vec<String> {
     match &rule.check {
-        Check::Named(_) => vec![],
+        Check::Named(_) | Check::Documented => vec![],
         Check::KnownKey => {
             let mut out = Vec::new();
             unknown_keys(spec, "", "", known, &mut out);

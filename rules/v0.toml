@@ -529,3 +529,21 @@ sources = ["https://github.com/gitleaks/gitleaks"]
 target = [
   { path = "**", check = "named:secret-scan" },
 ]
+
+[[rule]]
+code = "E-REG-001"
+severity = "error"
+problem = "`register` needs a person at a terminal, and standard input is not a terminal."
+instruction = "Ask the person to run `ignorarium register <spec>` in an interactive terminal and type the approval themselves. Do not pipe or script the approval."
+why = "Registration locks the plan. The person who owns the study must approve it by reading the hash, not a program acting for them."
+sources = []
+target = []
+
+[[rule]]
+code = "E-REG-002"
+severity = "error"
+problem = "A study with this id is already registered in the box."
+instruction = "Choose a new `study.id` for a new plan. A registered plan cannot be replaced."
+why = "A plan registered once is fixed. A second plan under the same id would hide the first."
+sources = []
+target = []

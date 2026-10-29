@@ -88,6 +88,7 @@ pub fn run(template: &str, id: &str) -> Run {
     Ok(Done {
         code: 0,
         spec_hash: None,
+        leaf: None,
     })
 }
 

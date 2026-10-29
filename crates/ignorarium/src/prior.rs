@@ -41,3 +41,12 @@ pub fn normalized_sha256(text: &str) -> String {
         .join(" ");
     sha256_hex(folded.as_bytes())
 }
+
+/// `(exact, normalized)` SHA-256 of a file. The normalized hash is empty
+/// when the bytes are not UTF-8 text.
+pub fn file_hashes(bytes: &[u8]) -> (String, String) {
+    let normalized = std::str::from_utf8(bytes)
+        .map(normalized_sha256)
+        .unwrap_or_default();
+    (sha256_hex(bytes), normalized)
+}
