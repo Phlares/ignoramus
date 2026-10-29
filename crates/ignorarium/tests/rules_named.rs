@@ -159,6 +159,29 @@ fn faults() -> Vec<Fault> {
             power_edits(3, 17),
             vec![("E-CNF-002", "design.confirmation.clusters")],
         ),
+        // A repeated id counts once: 11 copies of one cluster are 5 units, a doubled list of 30 is 30.
+        f(
+            vec![
+                ("/design/units_per_cluster", j(json!(5))),
+                ("/design/confirmation/clusters", j(json!(vec!["c00"; 11]))),
+            ],
+            vec![("E-CNF-002", "design.confirmation.clusters")],
+        ),
+        f(
+            vec![
+                ("/design/units_per_cluster", j(json!(1))),
+                (
+                    "/design/confirmation/clusters",
+                    j(json!(ids("c", 30)
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .chain(ids("c", 30).as_array().unwrap())
+                        .collect::<Vec<_>>())),
+                ),
+            ],
+            vec![("E-CNF-002", "design.confirmation.clusters")],
+        ),
         f(
             vec![("/design/variance/value", j(json!(0.0)))],
             vec![("E-CNF-002", "design.confirmation.clusters")],
@@ -318,9 +341,17 @@ fn faults() -> Vec<Fault> {
             vec![("/design/icc", None)],
             vec![("E-CNF-002", "design.confirmation.clusters")],
         ),
-        // An empty array as an element is not an empty array-level field.
+        // An empty array as an element is not an empty array-level field, and is no cluster.
         f(
-            vec![("/design/confirmation/clusters/0", j(json!([])))],
+            vec![(
+                "/design/confirmation/clusters",
+                j(json!(ids("c", 11)
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .chain(&[json!([])])
+                    .collect::<Vec<_>>())),
+            )],
             vec![],
         ),
         f(route(json!([{ "when": [], "spec": "f.toml" }])), vec![]),

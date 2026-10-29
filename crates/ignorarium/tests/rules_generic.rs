@@ -269,7 +269,8 @@ fn fat_templates() -> Vec<Value> {
         .iter()
         .map(|t| {
             let mut s = spec_at(&format!("../../templates/{t}.toml"));
-            let second = s["outcomes"][0].clone();
+            let mut second = s["outcomes"][0].clone();
+            second["id"] = json!("second");
             s["outcomes"].as_array_mut().unwrap().push(second);
             s["scope"]["end_of_run"]["follow_on"] = json!([
                 { "when": "H1.pass", "spec": "follow/a.toml" },
@@ -1036,4 +1037,89 @@ fn the_documented_codes_are_exactly_the_register_refusals() {
         .collect();
     codes.sort_unstable();
     assert_eq!(codes, ["E-REG-001", "E-REG-002"]);
+}
+
+#[test]
+fn unique_reports_each_repeat_at_its_element_and_skips_non_strings() {
+    let r = one_rule("", "path = \"a\"
+check = \"unique\"");
+    for ok in [
+        json!({}),
+        json!({"a": "x"}),
+        json!({"a": []}),
+        json!({"a": ["x", "y"]}),
+        json!({"a": [1, 1]}),
+    ] {
+        assert!(rules::check_generic(&ok, &r).is_empty(), "{ok}");
+    }
+    let d = rules::check_generic(&json!({"a": ["x", "y", "x", "x"]}), &r);
+    assert_eq!(
+        codes_paths(&d),
+        [("X-TST-001", "a[2]"), ("X-TST-001", "a[3]")]
+    );
+}
+
+#[test]
+fn unique_with_a_key_compares_that_field_of_each_table() {
+    let r = one_rule("", "path = \"a\"
+check = \"unique\"
+key = \"id\"");
+    for ok in [
+        json!({"a": [{"id": "x"}, {"id": "y"}]}),
+        json!({"a": [{"id": 1}, {"id": 1}]}),
+        json!({"a": [{"n": "x"}, {"n": "x"}, "x", "x"]}),
+    ] {
+        assert!(rules::check_generic(&ok, &r).is_empty(), "{ok}");
+    }
+    let d = rules::check_generic(&json!({"a": [{"id": "x"}, {"id": "y"}, {"id": "x"}]}), &r);
+    assert_eq!(codes_paths(&d), [("X-TST-001", "a[2].id")]);
+}
+
+/// (array path, key) for each unique target of E-UNQ-001.
+const UNIQUE_TARGETS: [(&str, Option<&str>); 8] = [
+    ("design.selection.clusters", None),
+    ("design.confirmation.clusters", None),
+    ("design.conditions", Some("id")),
+    ("outcomes", Some("id")),
+    ("question.hypotheses", Some("id")),
+    ("inputs", Some("path")),
+    ("mutations.operators", Some("name")),
+    ("mutations.triggers", Some("id")),
+];
+
+fn set_path(v: &mut Value, path: &str, x: Value) {
+    let (parent, last) = path.rsplit_once('.').unwrap_or(("", path));
+    let mut cur = v;
+    for seg in parent.split('.').filter(|s| !s.is_empty()) {
+        cur = &mut cur[seg];
+    }
+    cur[last] = x;
+}
+
+#[test]
+fn e_unq_001_fires_on_a_repeat_in_each_list_and_not_on_distinct_values() {
+    let rules = v0();
+    let unq = |s: &Value| -> Vec<String> {
+        rules::check_generic(s, &rules)
+            .into_iter()
+            .filter(|d| d.code == "E-UNQ-001")
+            .map(|d| d.path)
+            .collect()
+    };
+    assert!(unq(&template()).is_empty());
+    for (path, key) in UNIQUE_TARGETS {
+        let item = |v: &str| match key {
+            None => json!(v),
+            Some(k) => json!({ k: v }),
+        };
+        let mut s = template();
+        set_path(&mut s, path, json!([item("a"), item("b")]));
+        assert!(unq(&s).is_empty(), "{path}");
+        set_path(&mut s, path, json!([item("a"), item("b"), item("a")]));
+        let want = match key {
+            None => format!("{path}[2]"),
+            Some(k) => format!("{path}[2].{k}"),
+        };
+        assert_eq!(unq(&s), [want], "{path}");
+    }
 }

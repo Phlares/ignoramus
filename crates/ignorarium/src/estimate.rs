@@ -69,16 +69,16 @@ pub struct Estimate {
     pub is_long_job: bool,
 }
 
+/// How many different ids a list holds. The one count of clusters, here and in the power gate.
+pub fn distinct<T: Ord>(ids: impl IntoIterator<Item = T>) -> u64 {
+    ids.into_iter().collect::<BTreeSet<_>>().len() as u64
+}
+
 /// Distinct clusters in both sets times units per cluster; no listed cluster counts as one.
 pub fn units(spec: &Spec) -> u64 {
     let d = &spec.design;
-    let ids: BTreeSet<&String> = d
-        .selection
-        .clusters
-        .iter()
-        .chain(&d.confirmation.clusters)
-        .collect();
-    (ids.len().max(1) as u64).saturating_mul(u64::from(d.units_per_cluster))
+    let clusters = distinct(d.selection.clusters.iter().chain(&d.confirmation.clusters));
+    clusters.max(1).saturating_mul(u64::from(d.units_per_cluster))
 }
 
 pub fn estimate(spec: &Spec, machine: &Machine, units: u64) -> Estimate {

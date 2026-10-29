@@ -53,12 +53,38 @@ fn violations(rule: &Rule, spec: &Value, known: &HashSet<&str>) -> Vec<String> {
             unknown_keys(spec, "", "", known, &mut out);
             out
         }
+        Check::Unique(key) => select(spec, &rule.path)
+            .into_iter()
+            .filter_map(|(p, v)| Some((p, v?.as_array()?)))
+            .flat_map(|(p, items)| {
+                let suffix = key.as_ref().map(|k| format!(".{k}")).unwrap_or_default();
+                repeats(items, key.as_deref())
+                    .into_iter()
+                    .map(move |i| format!("{p}[{i}]{suffix}"))
+            })
+            .collect(),
         check => select(spec, &rule.path)
             .into_iter()
             .filter(|(_, v)| fails(check, *v))
             .map(|(p, _)| p)
             .collect(),
     }
+}
+
+/// Indexes of the items whose string (the item, or its `key` field) appeared earlier.
+fn repeats(items: &[Value], key: Option<&str>) -> Vec<usize> {
+    let mut seen = HashSet::new();
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, item)| {
+            let s = match key {
+                None => item.as_str(),
+                Some(k) => item.get(k)?.as_str(),
+            }?;
+            (!seen.insert(s)).then_some(i)
+        })
+        .collect()
 }
 
 /// `v` is `None` for a missing key. Wrongly typed values pass every check but

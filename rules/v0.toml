@@ -1,6 +1,7 @@
 # Rules for ignorarium v0. One [[rule]] per code, one `target` entry per checked path.
 # Paths use dots and [*] for every array element. "**" means any depth.
-# Checks: required, non-empty, type, enum, range, format, finite, known-key, named:<name>.
+# Checks: required, non-empty, type, enum, range, format, finite, known-key, unique, named:<name>.
+# `unique` takes an optional `key`: the field to compare across an array of tables.
 
 [[rule]]
 code = "E-REQ-001"
@@ -286,6 +287,24 @@ why = "A misspelt field is silently ignored by most readers. Rejecting it keeps 
 sources = ["https://toml.io/en/v1.0.0"]
 target = [
   { path = "**", check = "known-key" },
+]
+
+[[rule]]
+code = "E-UNQ-001"
+severity = "error"
+problem = "A list repeats an id, path or name."
+instruction = "Give every entry its own value. Remove the repeat, or rename it."
+why = "A repeated cluster would count its units twice in the power gate. A repeated condition, outcome, hypothesis, input, operator or trigger id makes later steps pick one entry and ignore the other."
+sources = []
+target = [
+  { path = "design.selection.clusters", check = "unique" },
+  { path = "design.confirmation.clusters", check = "unique" },
+  { path = "design.conditions", check = "unique", key = "id" },
+  { path = "outcomes", check = "unique", key = "id" },
+  { path = "question.hypotheses", check = "unique", key = "id" },
+  { path = "inputs", check = "unique", key = "path" },
+  { path = "mutations.operators", check = "unique", key = "name" },
+  { path = "mutations.triggers", check = "unique", key = "id" },
 ]
 
 [[rule]]

@@ -39,6 +39,8 @@ pub enum Check {
     Finite,
     /// Every key must match a `Type` target.
     KnownKey,
+    /// An array repeats a string, or (with a key) repeats one field across its tables.
+    Unique(Option<String>),
     /// A cross-field check in Rust; the generic checker skips it.
     Named(String),
     /// A code the CLI raises itself. It checks no spec field; the rule file only documents it.
@@ -57,6 +59,7 @@ impl Check {
             Check::Format(_) => "format".into(),
             Check::Finite => "finite".into(),
             Check::KnownKey => "known-key".into(),
+            Check::Unique(_) => "unique".into(),
             Check::Named(n) => format!("named:{n}"),
             Check::Documented => "documented".into(),
         }
@@ -143,6 +146,7 @@ struct Target {
     values: Option<Vec<String>>,
     interval: Option<String>,
     pattern: Option<String>,
+    key: Option<String>,
 }
 
 /// Flattens the file to one `Rule` per target; targets of one code share its text.
@@ -225,6 +229,7 @@ fn parse_check(t: &Target) -> Result<Check, String> {
         "non-empty" => (Check::NonEmpty, None),
         "finite" => (Check::Finite, None),
         "known-key" => (Check::KnownKey, None),
+        "unique" => (Check::Unique(t.key.clone()), Some("key")),
         "type" => (
             Check::Type(t.kind.ok_or_else(|| need("kind"))?),
             Some("kind"),
@@ -254,6 +259,7 @@ fn parse_check(t: &Target) -> Result<Check, String> {
         ("values", t.values.is_some()),
         ("interval", t.interval.is_some()),
         ("pattern", t.pattern.is_some()),
+        ("key", t.key.is_some()),
     ];
     for (name, set) in given {
         if set && Some(name) != param {

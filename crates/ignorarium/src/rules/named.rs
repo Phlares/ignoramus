@@ -6,6 +6,7 @@ use super::generic::{applies, diagnostic, join, select};
 use super::{Check, Rule};
 use crate::canon::sha256_hex;
 use crate::diag::Diagnostic;
+use crate::estimate::distinct;
 use crate::power::required_units;
 use crate::prior::{PriorUse, file_hashes};
 use serde_json::Value;
@@ -305,7 +306,7 @@ fn power_met(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
         let detail = if variance <= 0.0 {
             "The variance must be > 0.".to_string()
         } else {
-            let have = (clusters.len() as u64).saturating_mul(per.unsigned_abs());
+            let have = distinct(clusters.iter().filter_map(Value::as_str)).saturating_mul(per.unsigned_abs());
             let need = required_units(alpha, power, variance.sqrt(), sesoi, m, icc);
             if have >= need {
                 continue;
