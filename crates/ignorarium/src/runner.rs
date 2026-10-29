@@ -417,10 +417,11 @@ fn no_links(base: &Path, parts: &[&str]) -> Result<(), RunError> {
 /// Run every row that has no record, holding the run lock; a second run gets `Busy`.
 /// A row a dead box left running is killed first. At each row boundary the control file is
 /// read: a stop ends the run with the stop trace, a pause ends it at that boundary. Then the
-/// meter is read: the run pauses instead of starting a row when a cap is reached or the row
-/// would reach one. While a row runs, the backend ticks the watch, which emits heartbeats and
-/// ends the row on a stop. SIGINT, SIGTERM or SIGHUP ends the row as a stop does, and the
-/// run pauses.
+/// gate runs before each attempt, retries included: the run pauses instead of starting it
+/// when a cap is reached or the attempt would reach one, or when the payload or an input
+/// changed. While a row runs, the backend ticks the watch, which emits heartbeats and ends
+/// the row on a stop. SIGINT, SIGTERM or SIGHUP ends the row as a stop does, and the run
+/// pauses.
 pub fn run(plan: &RunPlan) -> Result<RunStatus, RunError> {
     sys::catch_interrupts().map_err(io)?;
     no_links(&plan.home.study_dir(&plan.study_id), &["run"])?;
@@ -508,10 +509,8 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
 /// Before each attempt: the budget has room, and the payload and inputs are the bytes the
 /// run began with. Otherwise the run pauses and the attempt never starts.
 fn gate(plan: &RunPlan, dir: &Path, books: &mut Books) -> Result<Option<Halt>, RunError> {
-    Ok(match books.check(plan, dir)? {
-        Some(h) => Some(h),
-        None => stale(plan, dir).map(Halt::Pause),
-    })
+    let budget = books.check(plan, dir)?;
+    Ok(budget.or_else(|| stale(plan, dir).map(Halt::Pause)))
 }
 
 /// This session's spend: the signed records' tally, the alerts already fired, and the row
