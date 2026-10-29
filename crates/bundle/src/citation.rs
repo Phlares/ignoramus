@@ -50,7 +50,7 @@ pub struct Reference {
 #[serde(rename_all = "kebab-case")]
 pub enum RefKind {
     Article,
-    Dataset,
+    Data,
     Software,
 }
 
@@ -58,7 +58,7 @@ impl RefKind {
     fn as_str(self) -> &'static str {
         match self {
             RefKind::Article => "article",
-            RefKind::Dataset => "data",
+            RefKind::Data => "data",
             RefKind::Software => "software",
         }
     }

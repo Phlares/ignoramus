@@ -1,6 +1,7 @@
 //! Publication steps per claim profile, read from `rules/publish.toml`.
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -47,29 +48,31 @@ struct Row {
     file: Option<String>,
 }
 
-fn rules() -> Rules {
-    toml::from_str(include_str!("../../../rules/publish.toml"))
-        .expect("rules/publish.toml is valid")
+fn rules() -> &'static Rules {
+    static RULES: OnceLock<Rules> = OnceLock::new();
+    RULES.get_or_init(|| {
+        toml::from_str(include_str!("../../../rules/publish.toml"))
+            .expect("rules/publish.toml is valid")
+    })
 }
 
 /// The profile `exploratory`, `replay` or `confirmatory`.
 pub fn named(name: &str) -> Option<Profile> {
     let rules = rules();
+    let pick: fn(&Row) -> Level = match name {
+        "exploratory" => |r| r.exploratory,
+        "replay" => |r| r.replay,
+        "confirmatory" => |r| r.confirmatory,
+        _ => return None,
+    };
     let steps = rules
         .step
-        .into_iter()
-        .map(|r| {
-            let level = match name {
-                "exploratory" => r.exploratory,
-                "replay" => r.replay,
-                _ => r.confirmatory,
-            };
-            Step {
-                id: r.id,
-                level,
-                note: r.note.unwrap_or_default(),
-                file: r.file,
-            }
+        .iter()
+        .map(|r| Step {
+            id: r.id.clone(),
+            level: pick(r),
+            note: r.note.clone().unwrap_or_default(),
+            file: r.file.clone(),
         })
         .collect();
     Some(Profile {

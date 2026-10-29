@@ -241,11 +241,14 @@ fn stale_generated_files_are_regenerated() {
     let tmp = tempfile::tempdir().unwrap();
     let study = study_copy(tmp.path());
     fs::write(study.join("CITATION.cff"), "title: \"old\"\n").unwrap();
+    fs::create_dir_all(study.join("doc")).unwrap();
+    fs::write(study.join("doc/CITATION.cff"), "nested\n").unwrap();
     let out = tmp.path().join("out");
     build(&study, &out, &facts(), &release()).unwrap();
     let cff = fs::read_to_string(out.join("CITATION.cff")).unwrap();
     assert!(!cff.contains("\"old\""));
     assert!(cff.contains("cff-version: \"1.2.0\""));
+    assert_eq!(fs::read(out.join("doc/CITATION.cff")).unwrap(), b"nested\n");
 }
 
 #[test]

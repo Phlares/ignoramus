@@ -13,7 +13,7 @@ affiliation = "Example Lab"
 name = "The ignorarium fixture team"
 
 [[references]]
-type = "dataset"
+type = "data"
 title = "Example input texts"
 doi = "10.5072/zenodo.1"
 

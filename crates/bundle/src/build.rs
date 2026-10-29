@@ -62,11 +62,21 @@ fn problem(code: &'static str, path: String, message: &str, instruction: &str) -
     }
 }
 
-fn changed(path: &str) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("{} changed while the bundle was built", shown(path)),
-    )
+/// Each `before` file must appear in `after` with the same hash.
+fn verify_copied(before: &[Entry], after: &[Entry]) -> io::Result<()> {
+    let now: BTreeMap<&str, &str> = after
+        .iter()
+        .map(|e| (e.path.as_str(), e.sha256.as_str()))
+        .collect();
+    for e in before {
+        if now.get(e.path.as_str()) != Some(&e.sha256.as_str()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} changed while the bundle was built", shown(&e.path)),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn top(path: &str) -> &str {
@@ -336,18 +346,7 @@ pub fn build(study: &Path, out: &Path, facts: &Facts, release: &Release) -> Resu
     put(out, "ro-crate-metadata.json", json_text(&doc).as_bytes())?;
 
     let final_files = manifest::scan(out)?;
-    let copied: BTreeMap<&str, &str> = files
-        .iter()
-        .map(|e| (e.path.as_str(), e.sha256.as_str()))
-        .collect();
-    for e in &final_files {
-        if copied
-            .get(e.path.as_str())
-            .is_some_and(|sha| *sha != e.sha256)
-        {
-            return Err(Error::Io(changed(&e.path)));
-        }
-    }
+    verify_copied(&files, &final_files)?;
     let text = manifest::render(&final_files);
     put(out, manifest::NAME, text.as_bytes())?;
 
@@ -358,4 +357,52 @@ pub fn build(study: &Path, out: &Path, facts: &Facts, release: &Release) -> Resu
         warnings,
         profile,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(path: &str, sha: &str) -> Entry {
+        Entry {
+            path: path.into(),
+            sha256: sha.into(),
+            size: 1,
+        }
+    }
+
+    #[test]
+    fn matching_copies_pass() {
+        let before = [entry("a", "1"), entry("data/texts/a.txt", "2")];
+        let after = [
+            entry("MANIFEST.sha256", "9"),
+            entry("a", "1"),
+            entry("data/texts/a.txt", "2"),
+        ];
+        assert!(verify_copied(&before, &after).is_ok());
+    }
+
+    #[test]
+    fn a_changed_copy_is_refused() {
+        let before = [entry("a", "1"), entry("data/texts/a.txt", "2")];
+        let after = [entry("a", "1"), entry("data/texts/a.txt", "3")];
+        let e = verify_copied(&before, &after).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            e.to_string(),
+            "data/texts/a.txt changed while the bundle was built"
+        );
+    }
+
+    #[test]
+    fn a_missing_copy_is_refused() {
+        let e = verify_copied(&[entry("a", "1")], &[]).unwrap_err();
+        assert_eq!(e.to_string(), "a changed while the bundle was built");
+    }
+
+    #[test]
+    fn the_path_is_shown_escaped() {
+        let e = verify_copied(&[entry("a\u{1}b", "1")], &[entry("a\u{1}b", "2")]).unwrap_err();
+        assert_eq!(e.to_string(), "a\\u{1}b changed while the bundle was built");
+    }
 }

@@ -65,7 +65,7 @@ affiliation = "Lab"
 name = "Team"
 
 [[references]]
-type = "dataset"
+type = "data"
 title = "Data"
 doi = "10.5072/zenodo.1"
 
@@ -90,7 +90,7 @@ fn parse_reads_a_full_citation() {
     assert_eq!(c.authors[0].affiliation.as_deref(), Some("Lab"));
     assert_eq!(c.authors[1].name.as_deref(), Some("Team"));
     assert_eq!(c.references.len(), 1);
-    assert_eq!(c.references[0].kind, RefKind::Dataset);
+    assert_eq!(c.references[0].kind, RefKind::Data);
     assert_eq!(c.references[0].doi.as_deref(), Some("10.5072/zenodo.1"));
     assert_eq!(c.references[0].url, None);
 }
@@ -112,7 +112,7 @@ given-names = "Ada"
 orcid = "0000-0002-1825-0097"
 
 [[references]]
-type = "dataset"
+type = "data"
 title = "D"
 [[references.authors]]
 name = "C"
@@ -347,7 +347,7 @@ fn fixture() -> Citation {
             entity("Team"),
         ],
         references: vec![Reference {
-            kind: RefKind::Dataset,
+            kind: RefKind::Data,
             title: "D".into(),
             authors: vec![entity("C")],
             doi: Some("10.5072/zenodo.1".into()),
@@ -441,4 +441,27 @@ fn datacite_handles_url_references_and_absent_fields() {
         got["relatedIdentifiers"][1],
         json!({"relatedIdentifier":"https://example.org/d","relatedIdentifierType":"URL","relationType":"References"})
     );
+}
+
+#[test]
+fn a_dataset_reference_type_is_refused() {
+    let text = r#"
+title = "T"
+message = "M"
+abstract = "A"
+
+[[authors]]
+name = "Team"
+
+[[references]]
+type = "dataset"
+title = "D"
+doi = "10.5072/zenodo.1"
+[[references.authors]]
+name = "C"
+"#;
+    let ps = citation::parse(text).unwrap_err();
+    assert_eq!(ps.len(), 1);
+    assert_eq!(ps[0].code, "E-PUB-004");
+    assert_eq!(ps[0].path, "citation.toml");
 }
