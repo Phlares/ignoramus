@@ -302,7 +302,7 @@ fn graph_order_follows_the_spec() {
     let v = build(&fixture());
     let u1 = format!("urn:uuid:{}", run_uuid("fixture-numeric", "row-1"));
     let u2 = format!("urn:uuid:{}", run_uuid("fixture-numeric", "row-2"));
-    let env = format!("#env-{}", &sha256_bytes(b"LANG=C")[..12]);
+    let env = format!("#env-{}", &sha256_bytes(b"LANG C")[..12]);
     let sha2 = format!("#sha256-{H2}");
     let image = format!("#image-{H1}");
     assert_eq!(
@@ -310,6 +310,7 @@ fn graph_order_follows_the_spec() {
         [
             "ro-crate-metadata.json",
             "./",
+            "https://w3id.org/ro/wfrun/process/0.6",
             "src/run.py",
             "data/in.csv",
             "results/out.csv",
@@ -379,7 +380,7 @@ fn runs_record_status_image_and_environment() {
     let v = build(&fixture());
     let u1 = format!("urn:uuid:{}", run_uuid("fixture-numeric", "row-1"));
     let u2 = format!("urn:uuid:{}", run_uuid("fixture-numeric", "row-2"));
-    let env = format!("#env-{}", &sha256_bytes(b"LANG=C")[..12]);
+    let env = format!("#env-{}", &sha256_bytes(b"LANG C")[..12]);
     assert_eq!(
         entity(&v, &u1),
         &json!({
@@ -504,13 +505,84 @@ fn missing_names_absent_paths() {
     f.runs[0].result = vec![];
     f.runs[1].object = vec![Item::Path("data/in.csv".into())];
     f.runs[1].result = vec![Item::Path("results/gone\n.csv".into()), hash("x", H3)];
+    f.runs[0]
+        .object
+        .insert(0, Item::Path("data/lost.csv".into()));
     let p = missing(&f.runs, &["data/in.csv"]);
-    assert_eq!(p.len(), 1);
-    assert_eq!(p[0].code, "E-PUB-008");
-    assert_eq!(p[0].path, "runs[1].result[0]");
-    assert_eq!(p[0].message, "results/gone\\u{a}.csv is not in the bundle");
+    let got: Vec<(&str, &str, &str)> = p
+        .iter()
+        .map(|x| (x.code, x.path.as_str(), x.message.as_str()))
+        .collect();
     assert_eq!(
-        p[0].instruction,
-        "Add the file to the bundle, or refer to it by name and SHA-256."
+        got,
+        [
+            (
+                "E-PUB-008",
+                "runs[0].object[0]",
+                "data/lost.csv is not in the bundle"
+            ),
+            (
+                "E-PUB-008",
+                "runs[1].result[0]",
+                "results/gone\\u{a}.csv is not in the bundle"
+            ),
+        ]
+    );
+    for x in &p {
+        assert_eq!(
+            x.instruction,
+            "Add the file to the bundle, or refer to it by name and SHA-256."
+        );
+    }
+}
+
+#[test]
+fn env_ids_do_not_collide_and_repeats_collapse() {
+    let mut f = fixture();
+    f.runs[0].env = vec![
+        ("a".into(), "b=c".into()),
+        ("a=b".into(), "c".into()),
+        ("a".into(), "b=c".into()),
+    ];
+    f.runs[1].env.clear();
+    let v = build(&f);
+    let e1 = format!("#env-{}", &sha256_bytes(b"a\0b=c")[..12]);
+    let e2 = format!("#env-{}", &sha256_bytes(b"a=b\0c")[..12]);
+    assert_ne!(e1, e2);
+    assert_eq!(entity(&v, &e1)["value"], "b=c");
+    assert_eq!(entity(&v, &e2)["name"], "a=b");
+    let u1 = format!("urn:uuid:{}", run_uuid("fixture-numeric", "row-1"));
+    assert_eq!(
+        entity(&v, &u1)["environment"],
+        json!([{"@id": e1}, {"@id": e2}])
+    );
+}
+
+#[test]
+fn data_entity_ids_are_percent_encoded() {
+    let mut f = fixture();
+    f.files.push(entry("data/a b#1%.txt", 3));
+    f.files.push(entry("data/\u{e9}.txt", 4));
+    f.runs[0].object = vec![Item::Path("data/a b#1%.txt".into())];
+    let v = build(&f);
+    let enc = "data/a%20b%231%25.txt";
+    assert_eq!(entity(&v, enc)["contentSize"], "3");
+    assert_eq!(entity(&v, "data/%C3%A9.txt")["contentSize"], "4");
+    assert_eq!(count(&v, "data/a b#1%.txt"), 0);
+    let parts = entity(&v, "./")["hasPart"].as_array().unwrap().clone();
+    assert!(parts.contains(&json!({"@id": enc})));
+    assert!(parts.contains(&json!({"@id": "data/%C3%A9.txt"})));
+    let u1 = format!("urn:uuid:{}", run_uuid("fixture-numeric", "row-1"));
+    assert_eq!(entity(&v, &u1)["object"], json!([{"@id": enc}]));
+}
+
+#[test]
+fn licence_references_are_encoded() {
+    let mut f = fixture();
+    f.licensing.data = "LicenseRef-a b".into();
+    let v = build(&f);
+    assert_eq!(
+        entity(&v, "./")["license"],
+        json!({"@id": "LICENSES/LicenseRef-a%20b.txt"})
     );
 }
