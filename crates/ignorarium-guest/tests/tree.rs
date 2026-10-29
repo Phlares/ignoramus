@@ -70,6 +70,20 @@ fn a_nested_non_utf8_name_hashes_part_by_part() {
 }
 
 #[test]
+fn rows_with_the_same_path_text_sort_by_digest_as_in_level_0() {
+    // Both names encode to `!bytes:ff`; the walk meets the UTF-8 one first.
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("!bytes:ff"), "a").unwrap();
+    std::fs::write(d.path().join(OsStr::from_bytes(b"\xff")), "b").unwrap();
+    let digest = |s: &str| hex::encode(sha2::Sha256::digest(s));
+    let (a, b) = (digest("a"), digest("b"));
+    assert!(b < a);
+    let rows = serde_json::json!([["!bytes:ff", "file", b], ["!bytes:ff", "file", a]]);
+    let want = hex::encode(sha2::Sha256::digest(serde_json::to_vec(&rows).unwrap()));
+    assert_eq!(tree_hash(d.path()).unwrap(), want);
+}
+
+#[test]
 fn a_linked_top_dir_is_an_error() {
     let d = tempfile::tempdir().unwrap();
     std::fs::create_dir(d.path().join("real")).unwrap();

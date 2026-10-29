@@ -1,5 +1,5 @@
-//! Directory trees: one walk, and the output hash, SHA-256 of the sorted rows
-//! `[relpath, kind, digest]`.
+//! Directory trees: one walk, and the output hash, SHA-256 of the rows
+//! `[relpath, kind, digest]` sorted as whole rows.
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, FileType, OpenOptions};
@@ -31,7 +31,7 @@ pub fn tree_hash(dir: &Path) -> io::Result<String> {
         rows.push((rel_text(rel), kind, digest));
         Ok(())
     })?;
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows.sort();
     let rows: Vec<Value> = rows.into_iter().map(|(p, k, d)| json!([p, k, d])).collect();
     let bytes = serde_json::to_vec(&Value::Array(rows))?;
     Ok(hex::encode(Sha256::digest(bytes)))
