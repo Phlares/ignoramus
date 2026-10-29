@@ -1,8 +1,8 @@
 //! `run`: prepare a registered study and run its rows.
 use super::{CliError, Ctx, Done, Run, out, refuse_if_stopped, registered};
 use crate::control::{ControlFile, Signal, run_is_live};
-use crate::machine;
 use crate::runner::{self, RunError, RunStatus};
+use crate::{machine, sys};
 
 pub fn run(ctx: &Ctx, id: &str, max_level: Option<u8>) -> Run {
     go(ctx, id, max_level, false)
@@ -46,6 +46,9 @@ pub fn go(ctx: &Ctx, id: &str, max_level: Option<u8>, resume: bool) -> Run {
     if resume {
         request_resume()?;
     }
+    // Rows start below: a terminal signal must end the row, not leave it running.
+    sys::catch_interrupts()
+        .map_err(|e| CliError::usage(format!("cannot install the signal handlers: {e}")))?;
     let status = runner::run(&plan).map_err(run_error)?;
     match status {
         RunStatus::Done => {

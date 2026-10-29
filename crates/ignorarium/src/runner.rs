@@ -420,10 +420,10 @@ fn no_links(base: &Path, parts: &[&str]) -> Result<(), RunError> {
 /// gate runs before each attempt, retries included: the run pauses instead of starting it
 /// when a cap is reached or the attempt would reach one, or when the payload or an input
 /// changed. While a row runs, the backend ticks the watch, which emits heartbeats and ends
-/// the row on a stop. SIGINT, SIGTERM or SIGHUP ends the row as a stop does, and the run
-/// pauses.
+/// the row on a stop. Once the caller has called `sys::catch_interrupts`, SIGINT, SIGTERM or
+/// SIGHUP ends the row as a stop does, and the run pauses. The library leaves signal handling
+/// to its caller.
 pub fn run(plan: &RunPlan) -> Result<RunStatus, RunError> {
-    sys::catch_interrupts().map_err(io)?;
     no_links(&plan.home.study_dir(&plan.study_id), &["run"])?;
     let lock = RunLock::try_take(&plan.home, &plan.study_id)
         .map_err(io)?

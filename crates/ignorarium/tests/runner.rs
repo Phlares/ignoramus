@@ -382,6 +382,7 @@ fn a_signal_between_rows_pauses_at_the_next_boundary() {
         assert!(common::in_child(NAME, &here, &[]));
         return;
     }
+    ignorarium::sys::catch_interrupts().unwrap();
     let lab = lab();
     plain(&lab, "between");
     let mut plan = plan_of(&lab, "between");
@@ -392,6 +393,34 @@ fn a_signal_between_rows_pauses_at_the_next_boundary() {
     assert_eq!(indices(&lab, "between"), vec![0]);
     assert!(kind_of(&lab, "between", "spend").is_empty());
     assert!(!lab.home.study_dir("between").join("run/rows/1").exists());
+}
+
+/// The signal mask `field` (`SigCgt`, `SigIgn`) of this process, from `/proc/self/status`.
+fn signal_mask(field: &str) -> u64 {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    let line = status
+        .lines()
+        .find_map(|l| l.strip_prefix(&format!("{field}:")))
+        .unwrap();
+    u64::from_str_radix(line.trim(), 16).unwrap()
+}
+
+#[test]
+fn a_library_run_leaves_signal_handling_to_its_caller() {
+    // Signal dispositions are process-wide, so the test runs in a child process of its own.
+    const NAME: &str = "a_library_run_leaves_signal_handling_to_its_caller";
+    if !common::is_child(NAME) {
+        let here = std::env::current_dir().unwrap();
+        assert!(common::in_child(NAME, &here, &[]));
+        return;
+    }
+    let before = (signal_mask("SigCgt"), signal_mask("SigIgn"));
+    let lab = lab();
+    plain(&lab, "library");
+    assert_eq!(run(&plan_of(&lab, "library")).unwrap(), RunStatus::Done);
+    assert_eq!((signal_mask("SigCgt"), signal_mask("SigIgn")), before);
+    // SIGINT (bit 1), SIGHUP (bit 0) and SIGTERM (bit 14) keep their default action.
+    assert_eq!(signal_mask("SigCgt") & (1 << 1 | 1 << 0 | 1 << 14), 0);
 }
 
 #[test]
