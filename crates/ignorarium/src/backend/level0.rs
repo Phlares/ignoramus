@@ -70,6 +70,7 @@ fn run_child(job: &RowJob, start: Instant, watch: &dyn Watch) -> (Exit, f64) {
         Err(e) => return (Exit::Infra(format!("cannot start {prog}: {e}")), 0.0),
     };
     let pid = child.id();
+    watch.started(pid);
     // Set when the box ends the row itself: a stop or the wall timeout.
     let mut ended_by_box: Option<Exit> = None;
     let mut fault: Option<String> = None;

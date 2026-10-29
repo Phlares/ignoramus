@@ -1,24 +1,20 @@
 mod common;
 
-use common::{Lab, PAYLOAD, events_of, indices, lab, named, plain, register_study, rows_of};
+use common::{
+    Lab, PAYLOAD, events_of, indices, kind_of, lab, named, plain, register_study, rows_of,
+};
 use ignorarium::backend::level0::Level0;
 use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome, Watch};
 use ignorarium::budget::{Cost, FakeMeter, MeterError};
 use ignorarium::canon::sha256_hex;
-use ignorarium::control::ControlFile;
 use ignorarium::planlog::store::PlanLog;
 use ignorarium::prior::{PriorUse, file_hashes};
-use ignorarium::runner::{self, RunError, RunPlan, RunStatus, prepare, prepare_with, up_to};
+use ignorarium::runner::{RunError, RunPlan, RunStatus, prepare, prepare_with, run, up_to};
 use ignorarium::{estimate, keys, records, schedule, spec};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
-
-/// `runner::run` with the study's own control file.
-fn run(plan: &RunPlan) -> Result<RunStatus, RunError> {
-    runner::run(plan, &ControlFile::of(&plan.home, &plan.study_id))
-}
 
 fn conf_input(t: String) -> String {
     t.replace("data/example.txt", "data/conf.txt")
@@ -775,15 +771,66 @@ fn the_next_row_costs_the_larger_of_the_estimate_and_the_recorded_mean() {
 }
 
 #[test]
-fn a_backend_stop_with_no_stop_heard_is_a_void_row() {
+fn an_unrequested_backend_stop_voids_the_row_and_pauses() {
     let lab = lab();
     plain(&lab, "void-stop");
     let mut plan = plan_of(&lab, "void-stop");
-    let (b, _) = fake(vec![Exit::Stopped]);
+    let (b, seen) = fake(vec![Exit::Stopped]);
     plan.backend = Box::new(b);
-    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(
+        run(&plan).unwrap(),
+        RunStatus::Paused(
+            "row 0 voided by infrastructure faults: the backend stopped the row with no stop requested"
+                .into()
+        )
+    );
+    // A backend fault, not a payload result: no retry, and the run pauses.
+    assert_eq!(*seen.borrow(), vec![0]);
     let rows = rows_of(&lab, "void-stop");
-    assert_eq!(rows[0].body["exit"], "void:stopped");
-    assert_eq!(rows[1].body["exit"], "ok");
-    assert_eq!(rows.len(), 6);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].body["exit"], "void:infra");
+    assert_eq!(rows[0].body["attempts"], 1);
+}
+
+#[test]
+fn attempts_before_a_backend_pause_are_spend_that_counts_on_resume() {
+    // 100 s of a 3600 s wall cap leaves room; 3000 s means the next row would reach it.
+    for (id, wall) in [("spend-low", 100.0), ("spend-high", 3000.0)] {
+        let lab = lab();
+        plain(&lab, id);
+        let mut plan = plan_of(&lab, id);
+        let (mut b, _) = fake(vec![Exit::Infra("box fault".into())]);
+        b.probe = Probe::Unavailable("gone".into());
+        b.wall = Some(wall);
+        plan.backend = Box::new(b);
+        assert_eq!(
+            run(&plan).unwrap(),
+            RunStatus::Paused("backend unavailable: gone".into())
+        );
+        assert!(rows_of(&lab, id).is_empty());
+        let spend = kind_of(&lab, id, "spend");
+        assert_eq!(spend.len(), 1);
+        assert_eq!(spend[0].row, Some(0));
+        assert_eq!(
+            spend[0].body,
+            serde_json::json!({"cpu_seconds": wall / 2.0, "wall_seconds": wall,
+                               "reason": "backend unavailable: gone"})
+        );
+        // The signed spend record is part of the earlier spend a resume starts from.
+        let resumed = plan_of(&lab, id);
+        let prior = resumed.meter.sample().unwrap();
+        assert!(prior.wall_seconds >= wall, "{}", prior.wall_seconds);
+        assert_eq!(prior.cpu_seconds, wall / 2.0);
+        let status = run(&resumed).unwrap();
+        if wall < 1000.0 {
+            assert_eq!(status, RunStatus::Done);
+            assert_eq!(rows_of(&lab, id).len(), 6);
+        } else {
+            assert_eq!(
+                status,
+                RunStatus::Paused("the next row would reach the wall cap".into())
+            );
+            assert!(rows_of(&lab, id).is_empty());
+        }
+    }
 }

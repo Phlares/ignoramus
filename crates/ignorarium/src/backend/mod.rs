@@ -44,10 +44,12 @@ pub enum Probe {
     Unavailable(String),
 }
 
-/// Called by a backend over and over while a row runs.
+/// What a backend tells the box while a row runs.
 pub trait Watch {
-    /// `false` means stop the row now.
+    /// Called over and over while the row runs. `false` means stop the row now.
     fn tick(&self) -> bool;
+    /// The row now runs as process `pid`, the leader of its own process group.
+    fn started(&self, _pid: u32) {}
 }
 
 impl<F: Fn() -> bool> Watch for F {

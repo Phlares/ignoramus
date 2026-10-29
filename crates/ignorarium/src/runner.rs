@@ -241,10 +241,7 @@ pub fn prepare_with(
 }
 
 fn decode_hash(h: &str) -> Result<[u8; 32], RunError> {
-    h.strip_prefix("sha256:")
-        .and_then(|x| hex::decode(x).ok())
-        .and_then(|b| b.try_into().ok())
-        .ok_or_else(|| RunError::Spec(format!("bad spec hash {h}")))
+    spec::hash_bytes(h).ok_or_else(|| RunError::Spec(format!("bad spec hash {h}")))
 }
 
 /// Hash every input. A selection or confirmation input that the registered plan leaf did not
@@ -321,49 +318,67 @@ fn no_links(base: &Path, parts: &[&str]) -> Result<(), RunError> {
 }
 
 /// Run every row that has no record, holding the run lock; a second run gets `Busy`.
-/// At each row boundary the control file is read: a stop ends the run with the stop trace,
-/// a pause ends it at that boundary. Then the meter is read: the run pauses instead of
-/// starting a row when a cap is reached or the row would reach one. While a row runs, the
-/// backend ticks the watch, which emits heartbeats and ends the row on a stop.
-pub fn run(plan: &RunPlan, control: &ControlFile) -> Result<RunStatus, RunError> {
+/// A row a dead box left running is killed first. At each row boundary the control file is
+/// read: a stop ends the run with the stop trace, a pause ends it at that boundary. Then the
+/// meter is read: the run pauses instead of starting a row when a cap is reached or the row
+/// would reach one. While a row runs, the backend ticks the watch, which emits heartbeats and
+/// ends the row on a stop.
+pub fn run(plan: &RunPlan) -> Result<RunStatus, RunError> {
     no_links(&plan.home.study_dir(&plan.study_id), &["run"])?;
-    let status = {
-        let lock = RunLock::try_take(&plan.home, &plan.study_id)
-            .map_err(io)?
-            .ok_or(RunError::Busy)?;
-        run_locked(plan, control, &lock)?
-    };
-    // A stop sent after this run's last look found the lock still held: finish it here.
-    Ok(
-        match control::stop_if_idle(&plan.home, &plan.study_id, &plan.key, control)? {
-            Some(r) => RunStatus::Stopped(why_of(&r)),
-            None => status,
-        },
-    )
+    let lock = RunLock::try_take(&plan.home, &plan.study_id)
+        .map_err(io)?
+        .ok_or(RunError::Busy)?;
+    let result = run_locked(plan, &lock);
+    drop(lock);
+    // A stop sent while this run held the lock, after its last look or before an error,
+    // found the lock taken: finish it here, on every path. A failure of this check leaves
+    // the run's own result, which already ended the run safely.
+    let late = control::stop_if_idle(&plan.home, &plan.study_id, &plan.key);
+    match (result, late) {
+        (Ok(_), Ok(Some(r))) => Ok(RunStatus::Stopped(why_of(&r))),
+        (result, _) => result,
+    }
 }
 
-fn run_locked(
-    plan: &RunPlan,
-    control: &ControlFile,
-    lock: &RunLock,
-) -> Result<RunStatus, RunError> {
+fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
     let dir = plan.home.study_dir(&plan.study_id);
     let log = dir.join("records.jsonl");
     let machine = machine::load(&plan.home.root).map_err(io)?;
     let all = records::read_all(&log, &plan.key.verifying_key())?;
     if let Some(r) = all.iter().find(|r| r.kind == "stop") {
-        return halt(plan, &dir, lock, Halt::Stop(why_of(r)));
+        let why = why_of(r);
+        return halt(
+            plan,
+            &dir,
+            lock,
+            Halt::Stop {
+                why,
+                in_flight: None,
+            },
+        );
+    }
+    match control::end_orphan(&plan.home, &plan.study_id) {
+        Ok(Some(o)) => {
+            let attrs = json!({ "row": o.row, "exit": "orphaned", "note": o.note });
+            log_event(plan, &dir, Some(&o.span), "row.end", "info", attrs)?;
+        }
+        Ok(None) => {}
+        Err(e) => {
+            let why = format!("cannot end the row a dead box left: {e}");
+            return halt(plan, &dir, lock, Halt::Pause(why));
+        }
     }
     State::Running
         .write(&plan.home, &plan.study_id)
         .map_err(io)?;
+    let control = ControlFile::of(&plan.home, &plan.study_id);
     let watch = RunWatch {
         plan,
-        control,
+        control: &control,
         dir: &dir,
-        heard: RefCell::new(None),
         row: RefCell::new((0, String::new())),
         last_beat: Cell::new(Instant::now()),
+        ended: RefCell::new(None),
     };
     let done: BTreeSet<u64> = all
         .iter()
@@ -381,7 +396,7 @@ fn run_locked(
         .iter()
         .filter(|r| !done.contains(&r.index))
     {
-        if let Some(h) = watch.at_boundary() {
+        if let Some(h) = at_boundary(&control) {
             return halt(plan, &dir, lock, h);
         }
         let sampled = plan.meter.sample();
@@ -404,10 +419,46 @@ fn run_locked(
     Ok(RunStatus::Done)
 }
 
+/// Between rows: a stop or a pause ends the run, and so does a control file that cannot be
+/// read, as a pause.
+fn at_boundary(control: &ControlFile) -> Option<Halt> {
+    match control.take() {
+        Ok(Some(Signal::Stop(why))) => Some(Halt::Stop {
+            why,
+            in_flight: None,
+        }),
+        Ok(Some(Signal::Pause)) => Some(Halt::Pause(PAUSE_REQUESTED.into())),
+        Ok(_) => None,
+        Err(e) => Some(Halt::Pause(format!("the control file cannot be read: {e}"))),
+    }
+}
+
 /// Why a run ends before its last row.
 enum Halt {
     Pause(String),
-    Stop(String),
+    /// `in_flight` names the row the stop killed.
+    Stop {
+        why: String,
+        in_flight: Option<u64>,
+    },
+}
+
+impl Halt {
+    /// The `row.end` exit of a row this halt ends early.
+    fn exit(&self) -> &'static str {
+        match self {
+            Halt::Pause(_) => "paused",
+            Halt::Stop { .. } => "stopped",
+        }
+    }
+
+    /// The reason a spend record gives for a row this halt ends early.
+    fn reason(&self) -> String {
+        match self {
+            Halt::Pause(why) => why.clone(),
+            Halt::Stop { why, .. } => format!("stopped: {why}"),
+        }
+    }
 }
 
 /// End the run. A pause writes `run.pause` and the paused state; a stop writes the stop trace.
@@ -427,8 +478,8 @@ fn halt(plan: &RunPlan, dir: &Path, lock: &RunLock, h: Halt) -> Result<RunStatus
                 .map_err(io)?;
             Ok(RunStatus::Paused(why))
         }
-        Halt::Stop(why) => {
-            control::stop(&plan.home, &plan.study_id, &plan.key, &why, lock)?;
+        Halt::Stop { why, in_flight } => {
+            lock.stop(&plan.key, &why, in_flight)?;
             Ok(RunStatus::Stopped(why))
         }
     }
@@ -451,7 +502,7 @@ fn log_event(
         &dir.join("events.jsonl"),
         Event {
             ts: crate::time::now_rfc3339(),
-            trace_id: hex::encode(&plan.spec_hash[..16]),
+            trace_id: events::trace_id(&plan.spec_hash),
             span_id: span.map(String::from),
             name: name.into(),
             level: level.into(),
@@ -461,52 +512,29 @@ fn log_event(
     .map_err(io)
 }
 
-/// What the backend ticks while a row runs: a heartbeat on the plan's cadence, and a read
-/// of the control file, so a stop ends the row at once.
+/// What the backend tells the box while a row runs. Each tick emits a heartbeat on the
+/// plan's cadence and looks at the control file without waiting; the file stays the one
+/// place requests live, and only a boundary takes them.
 struct RunWatch<'a> {
     plan: &'a RunPlan,
     control: &'a ControlFile,
     dir: &'a Path,
-    /// Every request heard so far, merged: nothing replaces a stop.
-    heard: RefCell<Option<Signal>>,
     /// The row in flight and its span id.
     row: RefCell<(u64, String)>,
     last_beat: Cell<Instant>,
+    /// Why this watch ended the row early, once it has: a stop seen, or a fault.
+    ended: RefCell<Option<Halt>>,
 }
 
 impl RunWatch<'_> {
-    fn listen(&self) -> std::io::Result<()> {
-        if let Some(s) = self.control.take()? {
-            let mut heard = self.heard.borrow_mut();
-            *heard = Some(Signal::then(heard.take(), s));
-        }
-        Ok(())
-    }
-
-    fn stop_heard(&self) -> Option<String> {
-        match &*self.heard.borrow() {
-            Some(Signal::Stop(why)) => Some(why.clone()),
-            _ => None,
-        }
-    }
-
-    /// Between rows: a stop or a pause ends the run. So does a control file that cannot be
-    /// read, as a pause; a stop heard earlier still wins.
-    fn at_boundary(&self) -> Option<Halt> {
-        let read = self.listen();
-        if let Some(why) = self.stop_heard() {
-            return Some(Halt::Stop(why));
-        }
-        match (read, &*self.heard.borrow()) {
-            (Err(e), _) => Some(Halt::Pause(format!("the control file cannot be read: {e}"))),
-            (_, Some(Signal::Pause)) => Some(Halt::Pause(PAUSE_REQUESTED.into())),
-            _ => None,
-        }
-    }
-
     fn begin(&self, index: u64, span: &str) {
         *self.row.borrow_mut() = (index, span.into());
         self.last_beat.set(Instant::now());
+    }
+
+    /// End the row early for `h`; the first reason stands.
+    fn end(&self, h: Halt) {
+        self.ended.borrow_mut().get_or_insert(h);
     }
 }
 
@@ -519,9 +547,21 @@ impl Watch for RunWatch<'_> {
             // A failed write shows at the row's end event, which ends the run.
             let _ = log_event(self.plan, self.dir, Some(&span), "heartbeat", "info", attrs);
         }
-        // A failed read is retried on the next tick and pauses the run at the boundary.
-        let _ = self.listen();
-        self.stop_heard().is_none()
+        // A failed or busy read is retried on the next tick; a boundary pauses on a failure.
+        if let Ok(Some(Signal::Stop(why))) = self.control.peek_now() {
+            let in_flight = Some(self.row.borrow().0);
+            self.end(Halt::Stop { why, in_flight });
+        }
+        self.ended.borrow().is_none()
+    }
+
+    fn started(&self, pid: u32) {
+        let (index, span) = self.row.borrow().clone();
+        let home = &self.plan.home;
+        if let Err(e) = control::row_started(home, &self.plan.study_id, index, &span, pid) {
+            // A row the box cannot find again after a crash must not run.
+            self.end(Halt::Pause(format!("cannot record the running row: {e}")));
+        }
     }
 }
 
@@ -536,7 +576,8 @@ fn row_estimate(plan: &RunPlan, machine: &Machine) -> Cost {
     }
 }
 
-/// Cost recorded by row records.
+/// Cost in the signed records: every attempt's spend, from `row` and `spend` records.
+/// `rows` counts completed rows only, so the mean stays per completed row.
 #[derive(Default)]
 struct Tally {
     rows: u64,
@@ -547,9 +588,14 @@ struct Tally {
 impl Tally {
     fn of(records: &[records::Record]) -> Tally {
         let mut t = Tally::default();
-        for r in records.iter().filter(|r| r.kind == "row") {
+        for r in records
+            .iter()
+            .filter(|r| r.kind == "row" || r.kind == "spend")
+        {
             let num = |k: &str| r.body[k].as_f64().unwrap_or(0.0);
-            t.add(num("cpu_seconds"), num("wall_seconds"));
+            t.cpu += num("cpu_seconds");
+            t.wall += num("wall_seconds");
+            t.rows += u64::from(r.kind == "row");
         }
         t
     }
@@ -599,7 +645,7 @@ fn run_row(
 }
 
 /// A row's attempts, retries included, then its record. Returns the recorded exit, or
-/// `stopped` or `paused` for a row that ends the run without a record.
+/// `stopped` or `paused` for a row that ends the run with only a spend record.
 fn attempt_row(
     plan: &RunPlan,
     row: &Row,
@@ -623,25 +669,30 @@ fn attempt_row(
                 output_hash: String::new(),
                 selftest_ok: false,
             });
+        control::row_ended(&plan.home, &plan.study_id);
         cpu += o.cpu_seconds;
         wall += o.wall_seconds;
-        // A stopped row is not data: it gets no record, and the study runs no further row.
-        if let Some(why) = watch.stop_heard() {
-            return Ok(("stopped".into(), Some(Halt::Stop(why))));
+        // A row ended early is not data: its spend is recorded, and the run ends.
+        if let Some(h) = watch.ended.borrow_mut().take() {
+            return ended_early(plan, log, row, (cpu, wall), h);
+        }
+        // A stop nobody asked for is a backend fault: void the row and pause, no retry.
+        if o.exit == Exit::Stopped {
+            let exit = Exit::Infra("the backend stopped the row with no stop requested".into());
+            break RowOutcome { exit, ..o };
         }
         if !matches!(o.exit, Exit::Infra(_)) || attempts > MAX_RETRIES {
             break o;
         }
         if let Probe::Unavailable(why) = plan.backend.probe() {
-            let why = format!("backend unavailable: {why}");
-            return Ok(("paused".into(), Some(Halt::Pause(why))));
+            let h = Halt::Pause(format!("backend unavailable: {why}"));
+            return ended_early(plan, log, row, (cpu, wall), h);
         }
     };
     let exit = match &outcome.exit {
         Exit::Ok => "ok".to_string(),
         Exit::Payload(c) => format!("payload:{c}"),
-        Exit::Infra(_) => "void:infra".to_string(),
-        Exit::Stopped => "void:stopped".to_string(),
+        Exit::Infra(_) | Exit::Stopped => "void:infra".to_string(),
     };
     records::append(
         log,
@@ -676,6 +727,29 @@ fn attempt_row(
         _ => None,
     };
     Ok((exit, halt))
+}
+
+/// A row that ends the run without a row record: its attempts' spend goes into one signed
+/// `spend` record, so a resume counts it.
+fn ended_early(
+    plan: &RunPlan,
+    log: &Path,
+    row: &Row,
+    (cpu, wall): (f64, f64),
+    h: Halt,
+) -> Result<(String, Option<Halt>), RunError> {
+    records::append(
+        log,
+        &plan.key,
+        RecordDraft {
+            study: plan.study_id.clone(),
+            row: Some(row.index),
+            kind: "spend".into(),
+            body: json!({ "cpu_seconds": cpu, "wall_seconds": wall, "reason": h.reason() }),
+        },
+    )?;
+    plan.meter.add_row(cpu);
+    Ok((h.exit().into(), Some(h)))
 }
 
 /// The job for one attempt, with a fresh output dir. An old one is renamed, never deleted.

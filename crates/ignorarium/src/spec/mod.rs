@@ -43,6 +43,13 @@ impl std::fmt::Display for LoadError {
 
 impl std::error::Error for LoadError {}
 
+/// The 32 bytes of a `"sha256:<hex>"` spec hash.
+pub fn hash_bytes(hash: &str) -> Option<[u8; 32]> {
+    hash.strip_prefix("sha256:")
+        .and_then(|x| hex::decode(x).ok())
+        .and_then(|b| b.try_into().ok())
+}
+
 pub fn load(path: &Path) -> Result<RawSpec, LoadError> {
     parse(&std::fs::read(path).map_err(LoadError::Io)?)
 }

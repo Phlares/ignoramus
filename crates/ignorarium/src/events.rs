@@ -21,6 +21,11 @@ pub fn emit(path: &Path, e: Event) -> Result<(), io::Error> {
     append_line(path, canonical_of(&e)?)
 }
 
+/// A study's trace id: the first 16 bytes of its spec hash, in hex.
+pub fn trace_id(spec_hash: &[u8; 32]) -> String {
+    hex::encode(&spec_hash[..16])
+}
+
 fn random_hex<const N: usize>() -> String {
     let mut b = [0u8; N];
     getrandom::fill(&mut b).expect("operating system random source");
