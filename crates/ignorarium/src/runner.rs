@@ -472,6 +472,8 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
     State::Running
         .write(&plan.home, &plan.study_id)
         .map_err(io)?;
+    let launch = json!({ "isolation": plan.backend.level(), "launcher": plan.backend.launcher() });
+    log_event(plan, &dir, None, "run.start", "info", launch)?;
     let control = ControlFile::of(&plan.home, &plan.study_id);
     let watch = RunWatch {
         plan,
@@ -886,6 +888,7 @@ fn attempt_row(
         "repeat": row.repeat,
         "seed": row.seed_hex,
         "isolation": plan.backend.level(),
+        "launcher": plan.backend.launcher(),
         "payload_sha256": plan.payload_sha256,
         "data_hashes": plan.inputs.iter().filter_map(|(_, h)| h.as_ref()).collect::<Vec<_>>(),
         "cpu_seconds": outcome.cpu_seconds,
@@ -977,8 +980,6 @@ fn job_for(plan: &RunPlan, row: &Row, dir: &Path) -> Result<RowJob, RunError> {
             ("PATH".into(), PATH_ENV.into()),
             ("IGNORARIUM_SEED".into(), row.seed_hex.clone()),
             ("IGNORARIUM_ROW".into(), row.index.to_string()),
-            ("IGNORARIUM_IN".into(), text(&input_dir)),
-            ("IGNORARIUM_OUT".into(), text(&out)),
         ],
         input_dir,
         output_dir: out,

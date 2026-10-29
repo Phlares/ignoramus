@@ -1,5 +1,5 @@
 use ignorarium::backend::level0::{Level0, output_hash};
-use ignorarium::backend::{Backend, Exit, Probe, RowJob};
+use ignorarium::backend::{Backend, Exit, Probe, RowJob, Watch};
 use ignorarium::sys;
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
@@ -71,9 +71,17 @@ fn level0_clears_the_environment() {
         .unwrap();
     assert_eq!(o.exit, Exit::Ok);
     let seen = std::fs::read_to_string(d.path().join("out/env")).unwrap();
+    // The backend adds the two path variables; nothing else leaks in.
+    let mut lines: Vec<&str> = seen.lines().collect();
+    lines.sort();
+    let dir = d.path().display();
     assert_eq!(
-        seen,
-        format!("OUT={}/out{}", d.path().display(), char::from(10))
+        lines,
+        vec![
+            format!("IGNORARIUM_IN={dir}/in"),
+            format!("IGNORARIUM_OUT={dir}/out"),
+            format!("OUT={dir}/out"),
+        ]
     );
 }
 
@@ -369,4 +377,60 @@ fn waits_on_a_process_that_is_not_a_child_fail_at_once() {
 fn killing_a_group_that_does_not_exist_is_fine() {
     // Above the kernel's largest process id, so no group has it.
     assert!(sys::kill_group(i32::MAX as u32).is_ok());
+}
+
+/// Records each `started` call with the process group of the pid at that moment.
+#[derive(Default)]
+struct Leaders(std::cell::RefCell<Vec<(u32, i32)>>);
+
+impl Watch for Leaders {
+    fn tick(&self) -> bool {
+        true
+    }
+    fn started(&self, pid: u32) {
+        // SAFETY: getpgid only reads a process table entry.
+        let group = unsafe { libc::getpgid(pid as i32) };
+        self.0.borrow_mut().push((pid, group));
+    }
+}
+
+#[test]
+fn every_registered_backend_reports_one_leader_start() {
+    for b in ignorarium::backend::registered() {
+        if b.probe() != Probe::Available {
+            println!("skip level{}: unavailable", b.level());
+            continue;
+        }
+        let d = tempfile::tempdir().unwrap();
+        let watch = Leaders::default();
+        let o = b
+            .run_row(&job(d.path(), "sleep 0.2", Duration::from_secs(30)), &watch)
+            .unwrap();
+        assert_eq!(o.exit, Exit::Ok);
+        let seen = watch.0.borrow();
+        assert_eq!(seen.len(), 1, "level {}", b.level());
+        assert_eq!(i64::from(seen[0].1), i64::from(seen[0].0));
+    }
+}
+
+#[test]
+fn level0_payload_sees_its_host_paths() {
+    let d = tempfile::tempdir().unwrap();
+    let j = job(
+        d.path(),
+        "printf '%s|%s' \"$IGNORARIUM_IN\" \"$IGNORARIUM_OUT\" > \"$OUT/paths\"",
+        Duration::from_secs(30),
+    );
+    let o = Level0.run_row(&j, &|| true).unwrap();
+    assert_eq!(o.exit, Exit::Ok);
+    let seen = std::fs::read_to_string(j.output_dir.join("paths")).unwrap();
+    assert_eq!(
+        seen,
+        format!("{}|{}", j.input_dir.display(), j.output_dir.display())
+    );
+}
+
+#[test]
+fn level0_names_its_launcher() {
+    assert_eq!(Level0.launcher(), "process");
 }

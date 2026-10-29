@@ -103,6 +103,7 @@ fn run_writes_one_record_per_row_in_order() {
         assert_eq!(r.body["exit"], "ok");
         assert_eq!(r.body["attempts"], 1);
         assert_eq!(r.body["isolation"], 0);
+        assert_eq!(r.body["launcher"], "process");
         assert_eq!(r.body["payload_sha256"], plan.payload_sha256.as_str());
         assert_eq!(r.body["data_hashes"].as_array().unwrap().len(), 1);
         assert_eq!(r.body["output_hash"].as_str().unwrap().len(), 64);
@@ -1294,4 +1295,16 @@ fn attempts_before_a_backend_pause_are_spend_that_counts_on_resume() {
             assert_eq!(c.cpu_seconds, wall / 2.0);
         }
     }
+}
+
+#[test]
+fn run_start_names_the_isolation_and_the_launcher() {
+    let lab = lab();
+    let dir = plain(&lab, "starts");
+    assert_eq!(run(&plan_of(&lab, "starts")).unwrap(), RunStatus::Done);
+    let ev = events_of(&dir);
+    let starts = named(&ev, "run.start");
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0]["attrs"]["isolation"], 0);
+    assert_eq!(starts[0]["attrs"]["launcher"], "process");
 }

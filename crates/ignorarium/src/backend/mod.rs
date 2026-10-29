@@ -1,11 +1,19 @@
 //! Backends run one schedule row in isolation and report what happened.
 pub mod level0;
 
+use crate::sys::{self, Ended};
 use std::io;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::process::Command;
+use std::time::{Duration, Instant};
+
+/// Exit code reported for a row killed at its wall timeout.
+pub const TIMEOUT_CODE: i32 = 124;
+const POLL: Duration = Duration::from_millis(5);
 
 /// What to run: a read-only input dir and one write-only output dir.
+/// The backend sets `IGNORARIUM_IN` and `IGNORARIUM_OUT` to the paths the payload sees.
 #[derive(Debug, Clone)]
 pub struct RowJob {
     pub argv: Vec<String>,
@@ -64,10 +72,73 @@ impl<F: Fn() -> bool> Watch for F {
 pub trait Backend {
     fn level(&self) -> u8;
     fn probe(&self) -> Probe;
+    /// What starts the payload, recorded beside the isolation level.
+    fn launcher(&self) -> String {
+        "process".into()
+    }
     fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> io::Result<RowOutcome>;
 }
 
 /// Every backend this build knows, lowest level first.
 pub fn registered() -> Vec<Box<dyn Backend>> {
     vec![Box::new(level0::Level0)]
+}
+
+/// Run `cmd` (program, args, env and stdio already set) as its own process group leader and
+/// wait for it. Ends it at `job.wall_timeout` or when the watch says stop, kills the group,
+/// then reaps it. Returns how it ended and the CPU seconds it used.
+pub fn supervise(mut cmd: Command, job: &RowJob, start: Instant, watch: &dyn Watch) -> (Exit, f64) {
+    let prog = cmd.get_program().to_string_lossy().into_owned();
+    let child = cmd.process_group(0).spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => return (Exit::Infra(format!("cannot start {prog}: {e}")), 0.0),
+    };
+    let pid = child.id();
+    watch.started(pid);
+    // Set when the box ends the row itself: a stop or the wall timeout.
+    let mut ended_by_box: Option<Exit> = None;
+    let mut fault: Option<String> = None;
+    // Detect exit without reaping: the zombie leader keeps the process group id,
+    // so the group kill below cannot hit an unrelated group.
+    loop {
+        match sys::has_exited(pid) {
+            Ok(true) => break,
+            Ok(false) if !watch.tick() => {
+                ended_by_box = Some(Exit::Stopped);
+                break;
+            }
+            Ok(false) if start.elapsed() < job.wall_timeout => std::thread::sleep(POLL),
+            Ok(false) => {
+                // One more look: the row may have finished just now.
+                if !matches!(sys::has_exited(pid), Ok(true)) {
+                    ended_by_box = Some(Exit::Payload(TIMEOUT_CODE));
+                }
+                break;
+            }
+            Err(e) => {
+                fault = Some(format!("wait failed: {e}"));
+                break;
+            }
+        }
+    }
+    if let Err(e) = sys::kill_group(pid) {
+        fault.get_or_insert(format!("kill failed: {e}"));
+        // Kill the leader alone so the reap below cannot hang.
+        let _ = child.kill();
+    }
+    let reaped = match sys::wait4(pid, true) {
+        Ok(Some(r)) => r,
+        Ok(None) => return (Exit::Infra("wait returned early".into()), 0.0),
+        Err(e) => return (Exit::Infra(format!("wait failed: {e}")), 0.0),
+    };
+    if let Some(f) = fault {
+        return (Exit::Infra(f), reaped.cpu_seconds);
+    }
+    let exit = ended_by_box.unwrap_or(match reaped.ended {
+        Ended::Code(0) => Exit::Ok,
+        Ended::Code(c) => Exit::Payload(c),
+        Ended::Signal(s) => Exit::Payload(128 + s),
+    });
+    (exit, reaped.cpu_seconds)
 }
