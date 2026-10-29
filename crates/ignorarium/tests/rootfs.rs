@@ -1004,21 +1004,132 @@ fn a_later_member_replacing_a_hard_link_target_leaves_the_link_on_the_old_file()
 }
 
 #[test]
-fn a_compressed_layer_is_refused_with_its_kind() {
+fn a_zstd_layer_is_refused() {
     let (_h, store) = store();
-    for (kind, magic) in [
-        ("gzip", [0x1f, 0x8b, 8, 0]),
-        ("zstd", [0x28, 0xb5, 0x2f, 0xfd]),
-    ] {
-        let mut bytes = magic.to_vec();
-        bytes.extend_from_slice(&[0; 600]);
-        let digest = image_of(&store, &[bytes]);
-        let err = from_store(&store, &digest).unwrap_err();
-        assert!(
-            matches!(&err, RootfsError::Format(m) if m.contains(kind)),
-            "{kind}: {err}"
-        );
-    }
+    let mut bytes = vec![0x28, 0xb5, 0x2f, 0xfd];
+    bytes.extend_from_slice(&[0; 600]);
+    let digest = image_of(&store, &[bytes]);
+    let err = from_store(&store, &digest).unwrap_err();
+    assert!(
+        matches!(&err, RootfsError::Format(m) if m.contains("zstd")),
+        "{err}"
+    );
+    assert!(!store.root.join("rootfs").join(&digest).exists());
+}
+
+fn gzip(bytes: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    e.write_all(bytes).unwrap();
+    e.finish().unwrap()
+}
+
+/// The files of `root` with their contents (links as `-> target`).
+fn tree_of(root: &Path) -> Vec<(String, String)> {
+    files_under(root)
+        .into_iter()
+        .map(|f| {
+            let p = root.join(&f);
+            let m = fs::symlink_metadata(&p).unwrap();
+            let what = if m.is_dir() {
+                "dir".to_string()
+            } else if m.is_symlink() {
+                format!("-> {}", fs::read_link(&p).unwrap().display())
+            } else {
+                fs::read_to_string(&p).unwrap()
+            };
+            (f, what)
+        })
+        .collect()
+}
+
+#[test]
+fn a_gzip_layer_extracts_the_same_tree_as_its_plain_twin() {
+    let (_h, store) = store();
+    let layers = [
+        layer_bytes(&[
+            M::File("usr/bin/busybox", "bb"),
+            M::Hard("usr/bin/sh", "usr/bin/busybox", "box"),
+            M::Sym("bin", "usr/bin"),
+            M::File("etc/os-release", "NAME=x\n"),
+        ]),
+        layer_bytes(&[M::File(".wh.etc", ""), M::File("lib/l", "l")]),
+    ];
+    let plain = from_store(&store, &image_of(&store, &layers)).unwrap();
+    let zipped: Vec<Vec<u8>> = layers.iter().map(|l| gzip(l)).collect();
+    assert_ne!(zipped[0], layers[0]);
+    let gz = from_store(&store, &image_of(&store, &zipped)).unwrap();
+    assert_ne!(plain, gz);
+    assert_eq!(tree_of(&plain), tree_of(&gz));
+    assert!(tree_of(&gz).contains(&("usr/bin/sh".into(), "bb".into())));
+    assert!(tree_of(&gz).iter().all(|(f, _)| f != "etc"));
+    // A plain layer and a gzip layer can sit in one image.
+    let mixed = from_store(
+        &store,
+        &image_of(&store, &[layers[0].clone(), zipped[1].clone()]),
+    )
+    .unwrap();
+    assert_eq!(tree_of(&plain), tree_of(&mixed));
+}
+
+#[test]
+fn a_hostile_gzip_layer_is_judged_like_a_plain_one() {
+    let (_h, store) = store();
+    let host = host_dir();
+    let h = host.path().to_str().unwrap();
+    let layers = [
+        gzip(&layer_bytes(&[M::Sym("etc/x", h)])),
+        gzip(&layer_bytes(&[M::Hard("usr/pull", "etc/x/secret", "box")])),
+    ];
+    refused(&store, &layers, &host);
+}
+
+#[test]
+fn an_extraction_over_the_write_cap_is_refused_and_publishes_nothing() {
+    use ignorarium::backend::rootfs::from_store_capped;
+    let (_h, store) = store();
+    let layers = [layer_bytes(&[
+        M::File("usr/a", "12345"),
+        M::File("usr/b", "678"),
+    ])];
+    // Exactly the cap is allowed; one byte under is not.
+    let digest = image_of(&store, &layers);
+    let err = from_store_capped(&store, &digest, 7).unwrap_err();
+    assert!(
+        matches!(&err, RootfsError::Format(m) if m.contains("more than the 7 byte limit")),
+        "{err}"
+    );
+    let rootfs = store.root.join("rootfs");
+    assert!(!rootfs.join(&digest).exists());
+    assert_eq!(fs::read_dir(&rootfs).unwrap().count(), 0);
+    assert!(from_store_capped(&store, &digest, 8).is_ok());
+    // The cap counts the whole image, across layers.
+    let two = image_of(
+        &store,
+        &[
+            layer_bytes(&[M::File("usr/a", "1234")]),
+            layer_bytes(&[M::File("usr/b", "5678")]),
+        ],
+    );
+    assert!(from_store_capped(&store, &two, 7).is_err());
+    assert!(from_store_capped(&store, &two, 8).is_ok());
+}
+
+#[test]
+fn a_compression_bomb_stops_at_the_cap() {
+    use ignorarium::backend::rootfs::from_store_capped;
+    let (_h, store) = store();
+    let big = "0".repeat(4 << 20);
+    let bomb = gzip(&layer_bytes(&[M::File("usr/zeros", &big)]));
+    assert!(bomb.len() < 100_000, "{}", bomb.len());
+    let digest = image_of(&store, &[bomb]);
+    let err = from_store_capped(&store, &digest, 1 << 20).unwrap_err();
+    assert!(
+        matches!(&err, RootfsError::Format(m) if m.contains("byte limit")),
+        "{err}"
+    );
+    assert!(!store.root.join("rootfs").join(&digest).exists());
+    assert_eq!(fs::read_dir(store.root.join("rootfs")).unwrap().count(), 0);
 }
 
 #[test]

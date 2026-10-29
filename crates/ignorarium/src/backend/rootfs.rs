@@ -23,9 +23,12 @@ const WHITEOUT: &[u8] = b".wh.";
 const OPAQUE: &[u8] = b".wh..wh..opq";
 /// Largest `manifest.json` read.
 const MANIFEST_MAX: u64 = 16 << 20;
-/// A file with one of these first bytes is a compressed layer.
-const COMPRESSED: [(&str, &[u8]); 2] =
-    [("gzip", &[0x1f, 0x8b]), ("zstd", &[0x28, 0xb5, 0x2f, 0xfd])];
+/// A layer that starts with these bytes is gzip-compressed; it is decoded in process.
+const GZIP: &[u8] = &[0x1f, 0x8b];
+/// A layer that starts with these bytes is zstd-compressed; it is refused.
+const ZSTD: &[u8] = &[0x28, 0xb5, 0x2f, 0xfd];
+/// Most bytes one extraction may write.
+pub const WRITE_CAP: u64 = 32 << 30;
 
 #[derive(Debug)]
 pub enum RootfsError {
@@ -78,6 +81,16 @@ struct ManifestEntry {
 /// after, even when the image is gone from the store. A crash leaves a temp folder beside the
 /// result, never a partial tree at it.
 pub fn from_store(store: &Store, store_digest: &str) -> Result<PathBuf, RootfsError> {
+    from_store_capped(store, store_digest, WRITE_CAP)
+}
+
+/// `from_store` with a limit of `cap` bytes of file data written. A layer that would write
+/// more fails the call and publishes nothing.
+pub fn from_store_capped(
+    store: &Store,
+    store_digest: &str,
+    cap: u64,
+) -> Result<PathBuf, RootfsError> {
     let blob = store.path(store_digest)?;
     let parent = store.root.join("rootfs");
     make_private_dir(&parent, true, false)
@@ -93,7 +106,7 @@ pub fn from_store(store: &Store, store_digest: &str) -> Result<PathBuf, RootfsEr
     fs::create_dir(&tmp)?;
     fs::set_permissions(&tmp, fs::Permissions::from_mode(0o700))?;
     let root = tmp.join("root");
-    let built = extract(&blob, &root).and_then(|()| match fs::rename(&root, &done) {
+    let built = extract(&blob, &root, cap).and_then(|()| match fs::rename(&root, &done) {
         Ok(()) => Ok(()),
         // Another box published the same tree first.
         Err(_) if is_real_dir(&done) => Ok(()),
@@ -133,7 +146,7 @@ fn with_member<T>(
 }
 
 /// Extract the image at `blob` into `root`.
-fn extract(blob: &Path, root: &Path) -> Result<(), RootfsError> {
+fn extract(blob: &Path, root: &Path, cap: u64) -> Result<(), RootfsError> {
     let manifest = with_member(blob, Path::new("manifest.json"), |r| {
         let mut text = Vec::new();
         r.take(MANIFEST_MAX).read_to_end(&mut text)?;
@@ -156,7 +169,7 @@ fn extract(blob: &Path, root: &Path) -> Result<(), RootfsError> {
         }
     }
     fs::create_dir(root)?;
-    let mut tree = Tree::new(root);
+    let mut tree = Tree::new(root, cap);
     for name in &names {
         for pass in [Pass::Whiteouts, Pass::Content] {
             let seen = with_member(blob, name, |r| tree.layer(r, pass))?;
@@ -204,11 +217,16 @@ struct Tree<'a> {
     root: &'a Path,
     links: BTreeSet<PathBuf>,
     files: BTreeSet<PathBuf>,
+    /// File bytes still allowed.
+    budget: u64,
+    cap: u64,
 }
 
 impl<'a> Tree<'a> {
-    fn new(root: &'a Path) -> Tree<'a> {
+    fn new(root: &'a Path, cap: u64) -> Tree<'a> {
         Tree {
+            budget: cap,
+            cap,
             root,
             links: BTreeSet::new(),
             files: BTreeSet::new(),
@@ -219,14 +237,19 @@ impl<'a> Tree<'a> {
     fn layer(&mut self, layer: &mut dyn Read, pass: Pass) -> Result<(), RootfsError> {
         let mut head = Vec::new();
         layer.take(4).read_to_end(&mut head)?;
-        for (kind, magic) in COMPRESSED {
-            if head.starts_with(magic) {
-                return Err(RootfsError::Format(format!(
-                    "a {kind}-compressed layer is not supported"
-                )));
-            }
+        if head.starts_with(ZSTD) {
+            return Err(RootfsError::Format(
+                "a zstd-compressed layer is not supported".into(),
+            ));
         }
-        let mut ar = Archive::new(io::Cursor::new(head).chain(layer));
+        let joined = io::Cursor::new(head.clone()).chain(layer);
+        // Decoded here, so the same reader parses a plain and a gzip layer.
+        let stream: Box<dyn Read + '_> = if head.starts_with(GZIP) {
+            Box::new(flate2::read::MultiGzDecoder::new(joined))
+        } else {
+            Box::new(joined)
+        };
+        let mut ar = Archive::new(stream);
         for entry in ar.entries().map_err(tar_err)? {
             let mut entry = entry.map_err(tar_err)?;
             let Some(path) = normalize(&entry.path_bytes())? else {
@@ -401,7 +424,15 @@ impl<'a> Tree<'a> {
             .custom_flags(libc::O_NOFOLLOW)
             .mode(mode)
             .open(self.full(rel))?;
-        io::copy(data, &mut f)?;
+        // One byte over the budget shows the cap was crossed, and stops the copy there.
+        let copied = io::copy(&mut data.take(self.budget.saturating_add(1)), &mut f)?;
+        if copied > self.budget {
+            return Err(RootfsError::Format(format!(
+                "the image writes more than the {} byte limit",
+                self.cap
+            )));
+        }
+        self.budget -= copied;
         self.files.insert(rel.to_path_buf());
         Ok(())
     }
