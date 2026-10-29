@@ -381,16 +381,18 @@ fn killing_a_group_that_does_not_exist_is_fine() {
 
 /// Records each `started` call with the process group of the pid at that moment.
 #[derive(Default)]
-struct Leaders(std::cell::RefCell<Vec<(u32, i32)>>);
+struct Leaders(std::cell::RefCell<Vec<(u32, u32)>>);
 
 impl Watch for Leaders {
     fn tick(&self) -> bool {
         true
     }
     fn started(&self, pid: u32) {
-        // SAFETY: getpgid only reads a process table entry.
-        let group = unsafe { libc::getpgid(pid as i32) };
-        self.0.borrow_mut().push((pid, group));
+        let pid_t = rustix::process::Pid::from_raw(pid as i32).unwrap();
+        let group = rustix::process::getpgid(Some(pid_t)).unwrap();
+        self.0
+            .borrow_mut()
+            .push((pid, group.as_raw_nonzero().get() as u32));
     }
 }
 
@@ -409,7 +411,7 @@ fn every_registered_backend_reports_one_leader_start() {
         assert_eq!(o.exit, Exit::Ok);
         let seen = watch.0.borrow();
         assert_eq!(seen.len(), 1, "level {}", b.level());
-        assert_eq!(i64::from(seen[0].1), i64::from(seen[0].0));
+        assert_eq!(seen[0].1, seen[0].0);
     }
 }
 

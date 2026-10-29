@@ -73,9 +73,7 @@ pub trait Backend {
     fn level(&self) -> u8;
     fn probe(&self) -> Probe;
     /// What starts the payload, recorded beside the isolation level.
-    fn launcher(&self) -> String {
-        "process".into()
-    }
+    fn launcher(&self) -> String;
     fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> io::Result<RowOutcome>;
 }
 

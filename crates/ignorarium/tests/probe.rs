@@ -5,6 +5,9 @@ use ignorarium::machine::{self, Machine};
 
 struct Fake(u8, bool);
 impl Backend for Fake {
+    fn launcher(&self) -> String {
+        "process".into()
+    }
     fn level(&self) -> u8 {
         self.0
     }

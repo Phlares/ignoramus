@@ -473,7 +473,9 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
         .write(&plan.home, &plan.study_id)
         .map_err(io)?;
     let launch = json!({ "isolation": plan.backend.level(), "launcher": plan.backend.launcher() });
-    log_event(plan, &dir, None, "run.start", "info", launch)?;
+    let resumed = all.iter().any(|r| r.kind == "row" || r.kind == "spend");
+    let name = if resumed { "run.resume" } else { "run.start" };
+    log_event(plan, &dir, None, name, "info", launch)?;
     let control = ControlFile::of(&plan.home, &plan.study_id);
     let watch = RunWatch {
         plan,

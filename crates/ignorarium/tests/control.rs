@@ -616,6 +616,9 @@ struct Peek {
 }
 
 impl Backend for Peek {
+    fn launcher(&self) -> String {
+        "process".into()
+    }
     fn level(&self) -> u8 {
         0
     }
@@ -654,6 +657,9 @@ struct StopThenFail {
 }
 
 impl Backend for StopThenFail {
+    fn launcher(&self) -> String {
+        "process".into()
+    }
     fn level(&self) -> u8 {
         0
     }
@@ -699,6 +705,9 @@ struct LateStop {
 }
 
 impl Backend for LateStop {
+    fn launcher(&self) -> String {
+        "process".into()
+    }
     fn level(&self) -> u8 {
         0
     }
@@ -783,6 +792,9 @@ struct StopThenBreakEvents {
 }
 
 impl Backend for StopThenBreakEvents {
+    fn launcher(&self) -> String {
+        "process".into()
+    }
     fn level(&self) -> u8 {
         0
     }
@@ -950,6 +962,9 @@ struct NoRowFile {
 }
 
 impl Backend for NoRowFile {
+    fn launcher(&self) -> String {
+        "process".into()
+    }
     fn level(&self) -> u8 {
         0
     }
@@ -1022,6 +1037,9 @@ struct StopThenBlind {
 }
 
 impl Backend for StopThenBlind {
+    fn launcher(&self) -> String {
+        "process".into()
+    }
     fn level(&self) -> u8 {
         0
     }
@@ -1099,6 +1117,9 @@ struct PauseThenLook {
 }
 
 impl Backend for PauseThenLook {
+    fn launcher(&self) -> String {
+        "process".into()
+    }
     fn level(&self) -> u8 {
         0
     }

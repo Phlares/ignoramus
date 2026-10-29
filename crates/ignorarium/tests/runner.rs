@@ -33,6 +33,9 @@ struct Fake {
 }
 
 impl Backend for Fake {
+    fn launcher(&self) -> String {
+        "process".into()
+    }
     fn level(&self) -> u8 {
         self.level
     }
@@ -351,6 +354,9 @@ struct SignalAfterRow0 {
 }
 
 impl Backend for SignalAfterRow0 {
+    fn launcher(&self) -> String {
+        "process".into()
+    }
     fn level(&self) -> u8 {
         0
     }
@@ -1307,4 +1313,24 @@ fn run_start_names_the_isolation_and_the_launcher() {
     assert_eq!(starts.len(), 1);
     assert_eq!(starts[0]["attrs"]["isolation"], 0);
     assert_eq!(starts[0]["attrs"]["launcher"], "process");
+}
+
+#[test]
+fn a_resumed_run_writes_run_resume_and_no_second_run_start() {
+    let lab = lab();
+    let dir = plain(&lab, "resumes");
+    let mut plan = plan_of(&lab, "resumes");
+    let infra = || Exit::Infra("box fault".into());
+    plan.backend = Box::new(fake(vec![infra(), infra(), infra(), infra()]).0);
+    assert!(matches!(run(&plan).unwrap(), RunStatus::Paused(_)));
+    let ev = events_of(&dir);
+    assert_eq!(named(&ev, "run.start").len(), 1);
+    assert!(named(&ev, "run.resume").is_empty());
+    assert_eq!(run(&plan_of(&lab, "resumes")).unwrap(), RunStatus::Done);
+    let ev = events_of(&dir);
+    assert_eq!(named(&ev, "run.start").len(), 1);
+    let resumes = named(&ev, "run.resume");
+    assert_eq!(resumes.len(), 1);
+    assert_eq!(resumes[0]["attrs"]["isolation"], 0);
+    assert_eq!(resumes[0]["attrs"]["launcher"], "process");
 }
