@@ -1,0 +1,432 @@
+use ignorarium::backend::level0::Level0;
+use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome};
+use ignorarium::cli::register;
+use ignorarium::home::Home;
+use ignorarium::planlog::store::PlanLog;
+use ignorarium::prior::{PriorUse, file_hashes};
+use ignorarium::runner::{RunError, RunPlan, RunStatus, prepare_with, run};
+use ignorarium::{estimate, keys, records, schedule, spec};
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::io::Cursor;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::PathBuf;
+use std::rc::Rc;
+use tempfile::TempDir;
+
+const PAYLOAD: &str =
+    "#!/bin/sh\nprintf '%s %s %s' \"$2\" \"$4\" \"$6\" > \"$IGNORARIUM_OUT/result\"\n";
+
+struct Lab {
+    _dir: TempDir,
+    home: Home,
+    root: PathBuf,
+}
+
+fn lab() -> Lab {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().to_path_buf();
+    let home = Home::open_at(&root.join("home")).unwrap();
+    std::fs::write(home.root.join("machine.toml"), "max_level = 1\n").unwrap();
+    Lab {
+        _dir: dir,
+        home,
+        root,
+    }
+}
+
+/// Register a study with `register::run`, then give it a payload.
+/// `before` lists files (relative to the study folder) present at registration.
+fn register_study(
+    lab: &Lab,
+    id: &str,
+    edit: impl Fn(String) -> String,
+    before: &[(&str, &str)],
+    payload: &str,
+) -> PathBuf {
+    let work = lab.root.join(format!("work-{id}"));
+    std::fs::create_dir_all(work.join("data")).unwrap();
+    for (p, c) in before {
+        std::fs::write(work.join(p), c).unwrap();
+    }
+    let text = std::fs::read_to_string("../../templates/numeric-ablation.toml").unwrap();
+    let text = text
+        .replace("id = \"my-study\"", &format!("id = \"{id}\""))
+        .replace("min_isolation = 1", "min_isolation = 0")
+        .replace("units_per_cluster = 1", "units_per_cluster = 3");
+    let spec_path = work.join("spec.toml");
+    std::fs::write(&spec_path, edit(text)).unwrap();
+    let hash = spec::load(&spec_path).unwrap().hash;
+    let typed = format!("{}\n", &hash["sha256:".len()..][..8]);
+    let mut out = Vec::new();
+    let mut input = Cursor::new(typed.into_bytes());
+    let done = register::run(&spec_path, &lab.home, &mut input, &mut out, true)
+        .unwrap_or_else(|e| panic!("{}: {}", e.msg, String::from_utf8_lossy(&out)));
+    assert_eq!(done.code, 0, "{}", String::from_utf8_lossy(&out));
+    let dir = lab.home.study_dir(id);
+    std::fs::create_dir_all(dir.join("payload")).unwrap();
+    std::fs::write(dir.join("payload/run"), payload).unwrap();
+    std::fs::set_permissions(
+        dir.join("payload/run"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    dir
+}
+
+/// A study whose one input is `data/example.txt`.
+fn plain(lab: &Lab, id: &str) -> PathBuf {
+    let dir = register_study(
+        lab,
+        id,
+        |t| t,
+        &[("data/example.txt", "calibration")],
+        PAYLOAD,
+    );
+    std::fs::create_dir_all(dir.join("data")).unwrap();
+    std::fs::write(dir.join("data/example.txt"), "calibration").unwrap();
+    dir
+}
+
+fn conf_input(t: String) -> String {
+    t.replace("data/example.txt", "data/conf.txt")
+        .replace("role = \"calibration\"", "role = \"confirmation\"")
+}
+
+fn rows_of(lab: &Lab, id: &str) -> Vec<records::Record> {
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let path = lab.home.study_dir(id).join("records.jsonl");
+    records::read_all(&path, &key.verifying_key())
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.kind == "row")
+        .collect()
+}
+
+fn indices(lab: &Lab, id: &str) -> Vec<u64> {
+    rows_of(lab, id).iter().map(|r| r.row.unwrap()).collect()
+}
+
+/// Runs level 0, then replaces the exit with the next scripted one.
+struct Fake {
+    script: RefCell<VecDeque<Exit>>,
+    seen: Rc<RefCell<Vec<u64>>>,
+    probe: Probe,
+    panic_at: Option<u64>,
+}
+
+impl Backend for Fake {
+    fn level(&self) -> u8 {
+        0
+    }
+    fn probe(&self) -> Probe {
+        self.probe.clone()
+    }
+    fn run_row(&self, job: &RowJob) -> std::io::Result<RowOutcome> {
+        let env = |k: &str| job.env.iter().find(|(n, _)| n == k).unwrap().1.clone();
+        let index: u64 = env("IGNORARIUM_ROW").parse().unwrap();
+        self.seen.borrow_mut().push(index);
+        let o = Level0.run_row(job)?;
+        if self.panic_at == Some(index) {
+            panic!("crash after the sandbox exits");
+        }
+        Ok(match self.script.borrow_mut().pop_front() {
+            Some(exit) => RowOutcome { exit, ..o },
+            None => o,
+        })
+    }
+}
+
+fn fake(script: Vec<Exit>) -> (Fake, Rc<RefCell<Vec<u64>>>) {
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let b = Fake {
+        script: RefCell::new(script.into()),
+        seen: seen.clone(),
+        probe: Probe::Available,
+        panic_at: None,
+    };
+    (b, seen)
+}
+
+fn plan_of(lab: &Lab, id: &str) -> RunPlan {
+    prepare_with(&lab.home, id, vec![Box::new(Level0)]).unwrap()
+}
+
+fn err_of(lab: &Lab, id: &str) -> RunError {
+    prepare_with(&lab.home, id, vec![Box::new(Level0)])
+        .err()
+        .expect("prepare should refuse")
+}
+
+#[test]
+fn run_writes_one_record_per_row_in_order() {
+    let lab = lab();
+    let dir = plain(&lab, "s1");
+    let plan = plan_of(&lab, "s1");
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let log = dir.join("records.jsonl");
+    assert_eq!(records::verify(&log, &key.verifying_key()).unwrap(), 7);
+    let rows = rows_of(&lab, "s1");
+    assert_eq!(rows.len(), 6);
+    for (i, r) in rows.iter().enumerate() {
+        assert_eq!(r.row, Some(i as u64));
+        assert_eq!(r.seq, i as u64 + 1);
+        let row = &plan.schedule.rows[i];
+        assert_eq!(r.body["condition"], row.condition.as_str());
+        assert_eq!(r.body["unit"], row.unit.as_str());
+        assert_eq!(r.body["repeat"], row.repeat);
+        assert_eq!(r.body["seed"], row.seed_hex.as_str());
+        assert_eq!(r.body["exit"], "ok");
+        assert_eq!(r.body["attempts"], 1);
+        assert_eq!(r.body["isolation"], 0);
+        assert_eq!(r.body["payload_sha256"], plan.payload_sha256.as_str());
+        assert_eq!(r.body["data_hashes"].as_array().unwrap().len(), 1);
+        assert_eq!(r.body["output_hash"].as_str().unwrap().len(), 64);
+        let out = std::fs::read_to_string(dir.join(format!("run/rows/{i}/out/result"))).unwrap();
+        assert_eq!(
+            out,
+            format!("{} {} {}", row.condition, row.unit, row.repeat)
+        );
+    }
+    assert!(dir.join("schedule.json").is_file());
+    // A second run has nothing left to do.
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(rows_of(&lab, "s1").len(), 6);
+}
+
+#[test]
+fn resume_skips_only_recorded_rows() {
+    let lab = lab();
+    let dir = plain(&lab, "s2");
+    run(&plan_of(&lab, "s2")).unwrap();
+    // Keep the register record and rows 0..3.
+    let log = dir.join("records.jsonl");
+    let text = std::fs::read_to_string(&log).unwrap();
+    let kept: String = text.split_inclusive('\n').take(4).collect();
+    std::fs::write(&log, kept).unwrap();
+    std::fs::rename(dir.join("run"), dir.join("run-old")).unwrap();
+    let mut plan = plan_of(&lab, "s2");
+    let (b, seen) = fake(vec![]);
+    plan.backend = Box::new(b);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(*seen.borrow(), vec![3, 4, 5]);
+    assert_eq!(indices(&lab, "s2"), vec![0, 1, 2, 3, 4, 5]);
+}
+
+#[test]
+fn crash_before_record_reruns_the_row() {
+    let lab = lab();
+    let dir = plain(&lab, "s3");
+    let mut plan = plan_of(&lab, "s3");
+    let (mut b, _) = fake(vec![]);
+    b.panic_at = Some(2);
+    plan.backend = Box::new(b);
+    let crashed = catch_unwind(AssertUnwindSafe(|| run(&plan)));
+    assert!(crashed.is_err());
+    assert_eq!(indices(&lab, "s3"), vec![0, 1]);
+    let (b, seen) = fake(vec![]);
+    plan.backend = Box::new(b);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(*seen.borrow(), vec![2, 3, 4, 5]);
+    assert_eq!(indices(&lab, "s3"), vec![0, 1, 2, 3, 4, 5]);
+    // The crashed attempt's output is kept under another name.
+    assert!(dir.join("run/rows/2/out.crashed-0/result").is_file());
+    assert!(dir.join("run/rows/2/out/result").is_file());
+}
+
+#[test]
+fn wall_time_is_the_backend_monotonic_measure() {
+    let lab = lab();
+    register_study(&lab, "s4", |t| t, &[], "#!/bin/sh\nsleep 0.3\n");
+    run(&plan_of(&lab, "s4")).unwrap();
+    for r in rows_of(&lab, "s4") {
+        let w = r.body["wall_seconds"].as_f64().unwrap();
+        assert!((0.3..30.0).contains(&w), "{w}");
+        assert!(r.body["cpu_seconds"].as_f64().unwrap() < w);
+    }
+}
+
+#[test]
+fn infra_failure_retries_then_voids_after_three() {
+    let lab = lab();
+    plain(&lab, "s5");
+    let mut plan = plan_of(&lab, "s5");
+    let infra = || Exit::Infra("box fault".into());
+    let (b, seen) = fake(vec![infra(), infra(), infra(), infra()]);
+    plan.backend = Box::new(b);
+    let status = run(&plan).unwrap();
+    assert!(
+        matches!(&status, RunStatus::Paused(m) if m.contains("row 0")),
+        "{status:?}"
+    );
+    assert_eq!(*seen.borrow(), vec![0, 0, 0, 0]);
+    let rows = rows_of(&lab, "s5");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].body["exit"], "void:infra");
+    assert_eq!(rows[0].body["attempts"], 4);
+}
+
+#[test]
+fn infra_failure_that_clears_is_retried_and_recorded_ok() {
+    let lab = lab();
+    plain(&lab, "s5b");
+    let mut plan = plan_of(&lab, "s5b");
+    let infra = || Exit::Infra("box fault".into());
+    let (b, seen) = fake(vec![infra(), infra()]);
+    plan.backend = Box::new(b);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(seen.borrow()[..4], [0, 0, 0, 1]);
+    let rows = rows_of(&lab, "s5b");
+    assert_eq!(rows[0].body["attempts"], 3);
+    assert_eq!(rows[0].body["exit"], "ok");
+    assert_eq!(rows.len(), 6);
+}
+
+#[test]
+fn an_unavailable_backend_pauses_before_the_retry() {
+    let lab = lab();
+    plain(&lab, "s5c");
+    let mut plan = plan_of(&lab, "s5c");
+    let (mut b, seen) = fake(vec![Exit::Infra("x".into())]);
+    b.probe = Probe::Unavailable("gone".into());
+    plan.backend = Box::new(b);
+    let status = run(&plan).unwrap();
+    assert!(
+        matches!(&status, RunStatus::Paused(m) if m.contains("gone")),
+        "{status:?}"
+    );
+    assert_eq!(*seen.borrow(), vec![0]);
+    assert!(rows_of(&lab, "s5c").is_empty());
+}
+
+#[test]
+fn payload_failure_is_void_and_not_retried() {
+    let lab = lab();
+    plain(&lab, "s6");
+    let mut plan = plan_of(&lab, "s6");
+    let (b, seen) = fake(vec![Exit::Payload(1)]);
+    plan.backend = Box::new(b);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(seen.borrow().iter().filter(|&&i| i == 0).count(), 1);
+    let rows = rows_of(&lab, "s6");
+    assert_eq!(rows[0].body["exit"], "payload:1");
+    assert_eq!(rows[0].body["attempts"], 1);
+    assert_eq!(rows.len(), 6);
+}
+
+#[test]
+fn late_confirmation_data_used_before_is_refused() {
+    let lab = lab();
+    // Plan A and plan B both register with data/conf.txt absent.
+    let a = register_study(&lab, "plan-a", conf_input, &[], PAYLOAD);
+    let b = register_study(&lab, "plan-b", conf_input, &[], PAYLOAD);
+    for dir in [&a, &b] {
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        std::fs::write(dir.join("data/conf.txt"), "late file").unwrap();
+    }
+    // B runs first; its hashes land.
+    plan_of(&lab, "plan-b");
+    match err_of(&lab, "plan-a") {
+        RunError::DataReused { path, label } => {
+            assert_eq!(path, "data/conf.txt");
+            assert_eq!(label, "plan-b");
+        }
+        e => panic!("{e}"),
+    }
+    assert!(!a.join("schedule.json").exists());
+}
+
+#[test]
+fn late_data_lands_in_the_plan_log_once() {
+    let lab = lab();
+    let dir = register_study(&lab, "late", conf_input, &[], PAYLOAD);
+    std::fs::create_dir_all(dir.join("data")).unwrap();
+    std::fs::write(dir.join("data/conf.txt"), "Late  File").unwrap();
+    let (exact, norm) = file_hashes(b"Late  File");
+    let log = PlanLog::open(&lab.home.root.join("planlog")).unwrap();
+    assert_eq!(log.used(&exact, &norm).unwrap(), None);
+    plan_of(&lab, "late");
+    let hit = log.used(&exact, &norm).unwrap();
+    assert!(hit.is_some_and(|h| h.contains("legacy")));
+    let uses = log.uses(&exact, &norm).unwrap();
+    assert_eq!(uses.len(), 1);
+    assert_eq!(uses[0].1.label, "late");
+    // Resume runs prepare again: it neither refuses itself nor appends again.
+    plan_of(&lab, "late");
+    assert_eq!(log.uses(&exact, &norm).unwrap().len(), 1);
+}
+
+#[test]
+fn data_present_at_registration_is_not_late() {
+    let lab = lab();
+    let dir = register_study(
+        &lab,
+        "early",
+        conf_input,
+        &[("data/conf.txt", "known")],
+        PAYLOAD,
+    );
+    std::fs::create_dir_all(dir.join("data")).unwrap();
+    std::fs::write(dir.join("data/conf.txt"), "known").unwrap();
+    plan_of(&lab, "early");
+    let (exact, norm) = file_hashes(b"known");
+    let log = PlanLog::open(&lab.home.root.join("planlog")).unwrap();
+    let uses = log.uses(&exact, &norm).unwrap();
+    assert_eq!(uses.len(), 1);
+    assert_eq!(uses[0].1.kind, "plan");
+}
+
+#[test]
+fn prepare_refuses_a_missing_backend_a_changed_spec_and_a_changed_payload() {
+    let lab = lab();
+    let dir = plain(&lab, "guard");
+    let none = prepare_with(&lab.home, "guard", vec![]).err().unwrap();
+    assert!(
+        matches!(none, RunError::NoBackend { need: 0, .. }),
+        "{none}"
+    );
+    let nobody = err_of(&lab, "nobody");
+    assert!(matches!(nobody, RunError::NotRegistered(_)), "{nobody}");
+    // A payload that differs from a non-empty pin.
+    let spec_text = std::fs::read_to_string(dir.join("spec.toml")).unwrap();
+    std::fs::rename(dir.join("spec.toml"), dir.join("spec.old")).unwrap();
+    std::fs::write(
+        dir.join("spec.toml"),
+        spec_text.replace("repeats = 1", "repeats = 2"),
+    )
+    .unwrap();
+    let err = err_of(&lab, "guard");
+    assert!(matches!(err, RunError::SpecChanged), "{err}");
+}
+
+#[test]
+fn a_pinned_payload_must_match() {
+    let lab = lab();
+    let pin = |t: String| t.replace("payload = \"\"", "payload = \"sha256:00\"");
+    register_study(&lab, "pinned", pin, &[], PAYLOAD);
+    let err = err_of(&lab, "pinned");
+    assert!(matches!(err, RunError::PayloadChanged), "{err}");
+}
+
+#[test]
+fn units_from_spec_matches_the_estimate_count() {
+    let lab = lab();
+    plain(&lab, "units");
+    let s = plan_of(&lab, "units").spec;
+    let units = schedule::units_from_spec(&s);
+    assert_eq!(units.len() as u64, estimate::units(&s));
+    assert_eq!(
+        units[0],
+        ("all/w0".to_string(), "all".to_string(), "genre".to_string())
+    );
+    let mut s2 = s.clone();
+    s2.design.selection.clusters = vec!["b".into(), "a".into()];
+    s2.design.confirmation.clusters = vec!["b".into(), "c".into()];
+    let units = schedule::units_from_spec(&s2);
+    assert_eq!(units.len() as u64, estimate::units(&s2));
+    assert_eq!(units.len(), 9);
+    assert_eq!(units[0].0, "a/w0");
+    assert_eq!(units[8].0, "c/w2");
+    assert_eq!(units[3].1, "b");
+}

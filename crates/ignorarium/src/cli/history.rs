@@ -1,8 +1,8 @@
 //! `import-history`: record earlier data files as one `legacy` plan log leaf.
 use super::{CliError, Ctx, Done, Run, out};
-use crate::planlog::store::{Leaf, PlanLog};
+use crate::keys;
+use crate::planlog::store::PlanLog;
 use crate::prior::file_hashes;
-use crate::{keys, time};
 use std::path::PathBuf;
 
 pub fn run(ctx: &Ctx, phase: &str, files: &[PathBuf]) -> Run {
@@ -25,20 +25,7 @@ pub fn run(ctx: &Ctx, phase: &str, files: &[PathBuf]) -> Run {
     }
     let key = keys::load_or_create(home).map_err(|e| CliError::usage(format!("box key: {e}")))?;
     let (index, _) = PlanLog::open(&home.root.join("planlog"))
-        .and_then(|log| {
-            log.append(
-                Leaf {
-                    kind: "legacy".into(),
-                    commitment: None,
-                    family: None,
-                    mode: None,
-                    data_hashes,
-                    label: phase.into(),
-                    ts: time::now_rfc3339(),
-                },
-                &key,
-            )
-        })
+        .and_then(|log| log.append_legacy(phase, data_hashes, &key))
         .map_err(|e| CliError::usage(format!("planlog: {e}")))?;
     out(&format!("leaf {index}\n"))?;
     Ok(Done {

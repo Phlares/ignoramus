@@ -169,3 +169,22 @@ pub fn verify(path: &Path, key: &VerifyingKey) -> Result<u64, VerifyError> {
     }
     Ok(count)
 }
+
+/// Verify the log, then return its records in order. A missing file holds none.
+pub fn read_all(path: &Path, key: &VerifyingKey) -> Result<Vec<Record>, VerifyError> {
+    verify(path, key)?;
+    let buf = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut out = Vec::new();
+    for (i, raw) in buf.split_inclusive(|&b| b == b'\n').enumerate() {
+        out.push(
+            parse_line(raw)
+                .ok_or(VerifyError::Parse { line: i + 1 })?
+                .record,
+        );
+    }
+    Ok(out)
+}

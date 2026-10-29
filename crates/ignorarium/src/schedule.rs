@@ -109,6 +109,31 @@ pub fn expand(
     Ok(rows)
 }
 
+/// The units of a spec as (unit, cluster, stratum): `<cluster>/w<i>` for each cluster in
+/// selection and confirmation, sorted, and one cluster named `all` when none is listed.
+pub fn units_from_spec(spec: &Spec) -> Vec<UnitKey> {
+    let d = &spec.design;
+    let mut clusters: Vec<&str> = d
+        .selection
+        .clusters
+        .iter()
+        .chain(&d.confirmation.clusters)
+        .map(String::as_str)
+        .collect();
+    clusters.sort_unstable();
+    clusters.dedup();
+    if clusters.is_empty() {
+        clusters.push("all");
+    }
+    clusters
+        .iter()
+        .flat_map(|c| {
+            (0..d.units_per_cluster)
+                .map(move |i| (format!("{c}/w{i}"), (*c).to_string(), d.stratum.clone()))
+        })
+        .collect()
+}
+
 #[derive(Debug)]
 pub enum ScheduleError {
     /// `schedule.json` exists with different bytes.

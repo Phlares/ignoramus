@@ -236,25 +236,65 @@ impl PlanLog {
         })
     }
 
-    fn find_used(&self, exact: &str, normalized: &str) -> Result<Option<String>, LogError> {
+    /// Every leaf that holds this data, oldest first, with its index.
+    pub fn uses(&self, exact: &str, normalized: &str) -> Result<Vec<(usize, Leaf)>, LogError> {
         let _lock = self.read_lock()?;
-        for (i, l) in read_lines(&self.leaves_path())?.iter().enumerate() {
-            let leaf: Leaf = serde_json::from_slice(l).map_err(|_| LogError::Leaf { index: i })?;
+        let mut hits = Vec::new();
+        for (index, l) in read_lines(&self.leaves_path())?.iter().enumerate() {
+            let leaf: Leaf = serde_json::from_slice(l).map_err(|_| LogError::Leaf { index })?;
             let hit = leaf
                 .data_hashes
                 .iter()
                 .any(|(e, n)| e == exact || (!normalized.is_empty() && n == normalized));
             if hit {
-                return Ok(Some(format!("leaf {i} ({})", leaf.kind)));
+                hits.push((index, leaf));
             }
         }
-        Ok(None)
+        Ok(hits)
+    }
+
+    /// The leaf at `index`, or `None` past the end.
+    pub fn leaf(&self, index: u64) -> Result<Option<Leaf>, LogError> {
+        let _lock = self.read_lock()?;
+        let lines = read_lines(&self.leaves_path())?;
+        let Some(l) = usize::try_from(index).ok().and_then(|i| lines.get(i)) else {
+            return Ok(None);
+        };
+        let index = index as usize;
+        serde_json::from_slice(l)
+            .map(Some)
+            .map_err(|_| LogError::Leaf { index })
+    }
+
+    /// Add a `legacy` leaf that records data files seen under `label`.
+    pub fn append_legacy(
+        &self,
+        label: &str,
+        data_hashes: Vec<(String, String)>,
+        key: &SigningKey,
+    ) -> Result<(u64, TreeHead), LogError> {
+        self.append(
+            Leaf {
+                kind: "legacy".into(),
+                commitment: None,
+                family: None,
+                mode: None,
+                data_hashes,
+                label: label.into(),
+                ts: now_rfc3339(),
+            },
+            key,
+        )
     }
 }
 
 impl PriorUse for PlanLog {
     fn used(&self, exact: &str, normalized: &str) -> Result<Option<String>, PriorError> {
-        self.find_used(exact, normalized)
+        self.uses(exact, normalized)
+            .map(|hits| {
+                hits.first()
+                    .map(|(i, leaf)| format!("leaf {i} ({})", leaf.kind))
+            })
             .map_err(|e| PriorError(e.to_string()))
     }
 }
