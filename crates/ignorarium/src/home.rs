@@ -13,6 +13,8 @@ pub enum HomeError {
     WindowsMount(PathBuf),
     /// The root or a state folder is a symbolic link.
     Link(PathBuf),
+    /// An existing root that group or others can write: they could swap a state folder.
+    Shared(PathBuf),
     Io(io::Error),
 }
 
@@ -26,6 +28,11 @@ impl std::fmt::Display for HomeError {
                 p.display()
             ),
             HomeError::Link(p) => write!(f, "{} is a symbolic link", p.display()),
+            HomeError::Shared(p) => write!(
+                f,
+                "{} is writable by other users; use a folder only you can write",
+                p.display()
+            ),
             HomeError::Io(e) => write!(f, "I/O failed: {e}"),
         }
     }
@@ -56,8 +63,9 @@ impl Home {
     }
 
     /// Create the state folders (mode 0700 on unix; existing ones are
-    /// tightened to 0700). The root gets 0700 only when this call creates it: it may be a
-    /// shared folder. A symbolic link as root or subfolder is an error.
+    /// tightened to 0700). The root gets 0700 only when this call creates it; an existing
+    /// root keeps its mode but must not be writable by group or others. A symbolic link as
+    /// root or subfolder is an error.
     pub fn open_at(root: &Path) -> Result<Home, HomeError> {
         if let Ok(release) = fs::read_to_string("/proc/sys/kernel/osrelease")
             && refuse_mount(&release, root)
@@ -101,6 +109,13 @@ pub fn is_windows_mount(path: &Path) -> bool {
 pub(crate) fn make_private_dir(dir: &Path, parents: bool, tighten: bool) -> Result<(), HomeError> {
     match fs::symlink_metadata(dir) {
         Ok(m) if m.file_type().is_symlink() => return Err(HomeError::Link(dir.to_path_buf())),
+        #[cfg(unix)]
+        Ok(m)
+            if !tighten
+                && std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o022 != 0 =>
+        {
+            return Err(HomeError::Shared(dir.to_path_buf()));
+        }
         Ok(_) if !tighten => return Ok(()),
         Ok(_) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => {

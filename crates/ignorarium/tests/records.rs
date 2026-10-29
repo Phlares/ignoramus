@@ -599,6 +599,25 @@ fn an_existing_home_root_keeps_its_mode_and_its_state_folders_are_tightened() {
     assert_eq!(mode(&d.path().join("keys")), 0o700);
 }
 
+#[cfg(unix)]
+#[test]
+fn an_existing_home_root_others_can_write_is_refused() {
+    use ignorarium::home::HomeError;
+    use std::os::unix::fs::PermissionsExt;
+    for m in [0o775, 0o757, 0o1777] {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(m)).unwrap();
+        let e = Home::open_at(d.path()).unwrap_err();
+        assert!(matches!(e, HomeError::Shared(_)), "{m:o}: {e}");
+        assert!(!d.path().join("keys").exists(), "{m:o}");
+    }
+    let p = std::path::PathBuf::from("/srv/x");
+    assert_eq!(
+        HomeError::Shared(p).to_string(),
+        "/srv/x is writable by other users; use a folder only you can write"
+    );
+}
+
 #[test]
 fn time_helper_does_not_panic_at_the_extremes() {
     assert_eq!(
