@@ -1,4 +1,4 @@
-//! Sequential evidence statistics: e-processes, an online false-discovery stream, a tree split for spawned tests and scan p-values.
+//! Sequential evidence statistics: e-processes, online false-discovery control, tree splits and scan p-values.
 //!
 //! The crate does no I/O and has no dependencies. Every random draw comes from an [`rng::Rng`] that the caller seeds.
 #![forbid(unsafe_code)]
