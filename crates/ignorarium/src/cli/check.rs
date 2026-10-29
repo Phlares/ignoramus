@@ -94,9 +94,10 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         estimate: None,
     };
     if !a.has_errors() {
-        let s = Spec::from_value(&a.value)
-            .map_err(|e| CliError::usage(format!("{shown}: spec does not fit the schema: {e}")))?;
-        a.estimate = Some(estimate(&s, &machine, units(&s)));
+        match Spec::from_value(&a.value) {
+            Ok(s) => a.estimate = Some(estimate(&s, &machine, units(&s))),
+            Err(_) => a.diags.push(rules::schema_fault()),
+        }
     }
     Ok(a)
 }

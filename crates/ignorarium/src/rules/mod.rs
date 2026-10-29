@@ -307,6 +307,16 @@ fn parse_interval(s: &str) -> Result<(Bound, Bound), String> {
     Ok((min, max))
 }
 
+/// The E-TYP-001 diagnostic for a spec that passes every rule and still does not fit the typed
+/// model. It sits at `spec` and carries no parser text, which could echo a value.
+pub fn schema_fault() -> crate::diag::Diagnostic {
+    let rule = builtin()
+        .iter()
+        .find(|r| r.code == "E-TYP-001")
+        .expect("E-TYP-001 is in the rule file");
+    generic::diagnostic(rule, "spec".into(), rule.problem.clone())
+}
+
 /// Defaults, then generic, then named checks. Returns the defaulted spec, the
 /// defaults filled, and every diagnostic.
 pub fn check_all(

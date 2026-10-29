@@ -220,7 +220,8 @@ fn unknown_keys(v: &Value, path: &str, wild: &str, known: &HashSet<&str>, out: &
     let Value::Object(m) = v else { return };
     for (k, c) in m {
         let (p, w) = (join_key(path, k), join(wild, k));
-        if !known.contains(w.as_str()) {
+        // A key with `.` or `[` would read as a deeper path.
+        if k.contains(['.', '[']) || !known.contains(w.as_str()) {
             out.push(p);
             continue;
         }

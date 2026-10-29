@@ -144,6 +144,56 @@ fn faults() -> Vec<Fault> {
             Some(json!([])),
             "design.conditions",
         ),
+        ("E-TYP-001", "/outcomes", Some(json!([1])), "outcomes[0]"),
+        (
+            "E-TYP-001",
+            "/question/hypotheses",
+            Some(json!([1])),
+            "question.hypotheses[0]",
+        ),
+        (
+            "E-TYP-001",
+            "/scope/end_of_run/follow_on",
+            Some(json!([1])),
+            "scope.end_of_run.follow_on[0]",
+        ),
+        (
+            "E-TYP-001",
+            "/design/conditions",
+            Some(json!([1])),
+            "design.conditions[0]",
+        ),
+        (
+            "E-TYP-001",
+            "/design/selection/clusters",
+            Some(json!([1])),
+            "design.selection.clusters[0]",
+        ),
+        (
+            "E-TYP-001",
+            "/design/confirmation/clusters",
+            Some(json!([1])),
+            "design.confirmation.clusters[0]",
+        ),
+        ("E-TYP-001", "/inputs", Some(json!([1])), "inputs[0]"),
+        (
+            "E-TYP-001",
+            "/inputs/0/licence/creators",
+            Some(json!([1])),
+            "inputs[0].licence.creators[0]",
+        ),
+        (
+            "E-TYP-001",
+            "/mutations/operators",
+            Some(json!([1])),
+            "mutations.operators[0]",
+        ),
+        (
+            "E-TYP-001",
+            "/mutations/triggers",
+            Some(json!([1])),
+            "mutations.triggers[0]",
+        ),
     ]
 }
 
@@ -277,6 +327,17 @@ fn fat_templates() -> Vec<Value> {
             let mut s = spec_at(&format!("../../templates/{t}.toml"));
             let mut second = s["outcomes"][0].clone();
             second["id"] = json!("second");
+            s["design"]["selection"]["clusters"] = json!(["s1", "s2"]);
+            s["design"]["confirmation"]["clusters"] = json!(["c1", "c2"]);
+            s["inputs"][0]["licence"]["creators"] = json!(["x", "y"]);
+            s["mutations"]["operators"] = json!([
+                { "name": "o1", "type": "int", "range": [1, 2], "acts_on": "a" },
+                { "name": "o2", "type": "int", "range": [1, 2], "acts_on": "a" },
+            ]);
+            s["mutations"]["triggers"] = json!([
+                { "id": "t1", "metric": "ppl-ratio", "threshold_e": 1.0 },
+                { "id": "t2", "metric": "ppl-ratio", "threshold_e": 1.0 },
+            ]);
             s["outcomes"].as_array_mut().unwrap().push(second);
             s["scope"]["end_of_run"]["follow_on"] = json!([
                 { "when": "H1.pass", "spec": "follow/a.toml" },
@@ -646,6 +707,21 @@ fn unknown_keys_report_once_at_the_top_and_inside_array_elements() {
         .map(|x| x.path.as_str())
         .collect();
     assert_eq!(got, ["extra", "outcomes[0].colour"]);
+}
+
+#[test]
+fn a_key_holding_a_dot_or_bracket_is_unknown_and_never_printed() {
+    let mut s = template();
+    s["design.alpha"] = json!(0.1);
+    s["design"]["variance.value"] = json!(1.0);
+    s["outcomes"][0]["a[0]"] = json!(1);
+    let d = rules::check_generic(&s, &v0());
+    let got: Vec<_> = d
+        .iter()
+        .filter(|x| x.code == "E-KEY-001")
+        .map(|x| x.path.as_str())
+        .collect();
+    assert_eq!(got, ["design.<key>", "<key>", "outcomes[0].<key>"]);
 }
 
 #[test]

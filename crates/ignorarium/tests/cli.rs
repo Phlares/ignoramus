@@ -873,3 +873,65 @@ fn check_finds_a_secret_in_a_comment_and_never_echoes_it() {
         ]
     );
 }
+
+#[test]
+fn content_faults_that_break_the_model_exit_1_with_a_code() {
+    let cases: [(fn(String) -> String, &str, &str); 4] = [
+        (
+            |t| {
+                t.replace(
+                    "[design.confirmation]
+clusters = []",
+                    "[design.confirmation]
+clusters = [1]",
+                )
+            },
+            "E-TYP-001",
+            "design.confirmation.clusters[0]",
+        ),
+        (
+            |t| t.replace("creators = []", "creators = [1]"),
+            "E-TYP-001",
+            "inputs[0].licence.creators[0]",
+        ),
+        (
+            |t| {
+                format!(
+                    "\"design.alpha\" = 0.1
+{t}"
+                )
+            },
+            "E-KEY-001",
+            "<key>",
+        ),
+        (
+            |t| {
+                t.replace("operators = []", "operators = [{ name = \"k\", type = \"int\", range = [true], acts_on = \"x\" }]")
+            },
+            "E-TYP-001",
+            "spec",
+        ),
+    ];
+    for (edit, code, path) in cases {
+        let (_d, home, spec) = setup(edit);
+        let a = bin(&home)
+            .arg("check")
+            .arg(&spec)
+            .arg("--json")
+            .assert()
+            .code(1);
+        let v = json_out(&a);
+        let hit = v["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["code"] == code)
+            .unwrap_or_else(|| panic!("{code} missing: {v}"));
+        assert_eq!(hit["path"], path);
+        assert!(!hit["instruction"].as_str().unwrap().is_empty());
+        assert!(v["estimate"].is_null());
+        assert!(stderr(&a).is_empty(), "{}", stderr(&a));
+        let a = bin(&home).arg("review").arg(&spec).assert().code(1);
+        assert!(stdout(&a).contains(code), "{}", stdout(&a));
+    }
+}
