@@ -1,4 +1,5 @@
 //! Deterministic stored zip: same files, same bytes. No times, modes or extras.
+use crate::manifest::each_chunk;
 use crate::tree::{self, Found};
 use crate::{Error, Problem, refuse_any};
 use sha2::{Digest, Sha256};
@@ -75,16 +76,12 @@ fn check_limits(files: &[Found]) -> Result<(), Error> {
 }
 
 fn crc_reader(reader: &mut impl Read) -> io::Result<(u32, u64)> {
-    let mut buf = vec![0u8; 64 * 1024];
-    let (mut crc, mut size) = (!0u32, 0u64);
-    loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 {
-            return Ok((!crc, size));
-        }
-        crc = crc_update(crc, &buf[..n]);
-        size += n as u64;
-    }
+    let mut crc = !0u32;
+    let size = each_chunk(reader, |b| {
+        crc = crc_update(crc, b);
+        Ok(())
+    })?;
+    Ok((!crc, size))
 }
 
 /// Counts and hashes every byte written through it.
@@ -120,13 +117,6 @@ fn too_big<T>(r: Result<T, std::num::TryFromIntError>) -> io::Result<T> {
     r.map_err(|_| io::Error::other("bundle zip field out of range"))
 }
 
-fn changed(name: &str) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("{} changed while the bundle was read", tree::shown(name)),
-    )
-}
-
 /// Writes `dir` as a stored zip at `out`, which must not exist.
 /// Returns the SHA-256 of the zip bytes.
 pub fn pack(dir: &Path, out: &Path) -> Result<String, Error> {
@@ -150,7 +140,7 @@ pub fn pack_files(dir: &Path, files: &[Found], out: &Path) -> Result<String, Err
         let mut src = tree::open(dir, f)?;
         let (crc, counted) = crc_reader(&mut src)?;
         if counted != f.len {
-            return Err(changed(&f.path).into());
+            return Err(tree::changed(&f.path).into());
         }
         src.seek(SeekFrom::Start(0))?;
         let size = too_big(u32::try_from(f.len))?;
@@ -167,7 +157,7 @@ pub fn pack_files(dir: &Path, files: &[Found], out: &Path) -> Result<String, Err
         w.write_all(bytes)?;
         let copied = io::copy(&mut src.take(f.len), &mut w)?;
         if copied != f.len {
-            return Err(changed(&f.path).into());
+            return Err(tree::changed(&f.path).into());
         }
 
         put32(&mut central, 0x0201_4b50)?;

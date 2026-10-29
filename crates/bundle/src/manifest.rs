@@ -3,7 +3,7 @@ use crate::{Error, Problem, refuse_any, tree};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::Path;
 
 pub const NAME: &str = "MANIFEST.sha256";
@@ -15,19 +15,31 @@ pub struct Entry {
     pub size: u64,
 }
 
-/// Hashes a reader in 64 KiB chunks. Returns the hex digest and the byte count.
-pub fn sha256_reader(reader: &mut impl Read) -> io::Result<(String, u64)> {
-    let mut hasher = Sha256::new();
+/// Reads `reader` to its end in 64 KiB chunks and hands each chunk to `each`.
+/// Returns the byte count.
+pub(crate) fn each_chunk(
+    reader: &mut impl Read,
+    mut each: impl FnMut(&[u8]) -> io::Result<()>,
+) -> io::Result<u64> {
     let mut buf = vec![0u8; 64 * 1024];
     let mut size = 0u64;
     loop {
         let n = reader.read(&mut buf)?;
         if n == 0 {
-            break;
+            return Ok(size);
         }
-        hasher.update(&buf[..n]);
+        each(&buf[..n])?;
         size += n as u64;
     }
+}
+
+/// Copies `reader` into `sink`. Returns the hex SHA-256 and the byte count.
+pub fn sha256_copy(reader: &mut impl Read, sink: &mut impl Write) -> io::Result<(String, u64)> {
+    let mut hasher = Sha256::new();
+    let size = each_chunk(reader, |b| {
+        hasher.update(b);
+        sink.write_all(b)
+    })?;
     Ok((hex::encode(hasher.finalize()), size))
 }
 
@@ -42,7 +54,7 @@ pub fn scan(dir: &Path) -> Result<Vec<Entry>, Error> {
     files
         .into_iter()
         .map(|f| {
-            let (sha256, size) = sha256_reader(&mut tree::open(dir, &f)?)?;
+            let (sha256, size) = sha256_copy(&mut tree::open(dir, &f)?, &mut io::sink())?;
             Ok(Entry {
                 path: f.path,
                 sha256,
@@ -87,7 +99,7 @@ pub fn check(dir: &Path) -> Result<String, Error> {
         match listed.remove(path) {
             None => problems.push(mismatch(path, "not in the manifest")),
             Some(hash) => {
-                if sha256_reader(&mut tree::open(dir, found)?)?.0 != hash {
+                if sha256_copy(&mut tree::open(dir, found)?, &mut io::sink())?.0 != hash {
                     problems.push(mismatch(path, "hash differs from the manifest"));
                 }
             }

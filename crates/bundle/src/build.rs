@@ -1,7 +1,7 @@
 //! Builds a study's bundle folder from the study folder, the run facts and the release facts.
 use crate::citation::{self, Release, Tool};
 use crate::licence::Licensing;
-use crate::manifest::{self, Entry, sha256_bytes, sha256_reader};
+use crate::manifest::{self, Entry, sha256_bytes, sha256_copy};
 use crate::profile::{self, Level, Profile};
 use crate::rocrate::{self, Artifact, Crate, Run};
 use crate::tree::{self, Found, name_is_safe, shown};
@@ -165,7 +165,7 @@ fn hash_artifacts(
                 format!("{} is not a regular file", shown(&name)),
             )));
         }
-        let (sha256, size) = sha256_reader(&mut file)?;
+        let (sha256, size) = sha256_copy(&mut file, &mut io::sink())?;
         out.push((Artifact { name, sha256, size }, path.clone()));
     }
     out.sort_by(|a, b| a.0.name.cmp(&b.0.name));
@@ -238,7 +238,7 @@ pub fn build(study: &Path, out: &Path, facts: &Facts, release: &Release) -> Resu
 
     let mut files = Vec::with_capacity(found.len());
     for f in &found {
-        let (sha256, size) = sha256_reader(&mut tree::open(study, f)?)?;
+        let (sha256, size) = sha256_copy(&mut tree::open(study, f)?, &mut io::sink())?;
         files.push(Entry {
             path: f.path.clone(),
             sha256,

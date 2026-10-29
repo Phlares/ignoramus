@@ -72,11 +72,15 @@ pub fn open(dir: &Path, f: &Found) -> io::Result<File> {
     if m.is_file() && Id::of(&m) == f.id && m.len() == f.len {
         Ok(file)
     } else {
-        Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("{} changed while the bundle was read", shown(&f.path)),
-        ))
+        Err(changed(&f.path))
     }
+}
+
+pub(crate) fn changed(path: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("{} changed while the bundle was read", shown(path)),
+    )
 }
 
 /// Lists regular files as `/`-joined relative paths, sorted by bytes.
