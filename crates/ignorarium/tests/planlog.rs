@@ -317,6 +317,20 @@ fn leaf_line_is_canonical_json_of_the_leaf() {
     );
 }
 
+#[test]
+fn a_head_signs_the_canonical_size_root_and_time() {
+    use ed25519_dalek::{Signature, Verifier};
+    let t = tempfile::tempdir().unwrap();
+    let log = PlanLog::open(&t.path().join("pl")).unwrap();
+    let (_, head) = log.append(leaf("plan", 0), &key(1)).unwrap();
+    let signed = format!(
+        "{{\"root\":\"{}\",\"size\":1,\"ts\":\"{}\"}}",
+        head.root, head.ts
+    );
+    let sig = Signature::from_slice(&hex::decode(&head.sig).unwrap()).unwrap();
+    assert!(vk(1).verify(signed.as_bytes(), &sig).is_ok());
+}
+
 #[cfg(unix)]
 #[test]
 fn open_creates_a_private_dir_and_refuses_a_symlink() {
@@ -664,4 +678,35 @@ fn commitment_is_sha256_of_salt_then_spec() {
         commitment(&[0u8; 32], b"{ }"),
         commitment(&[0u8; 32], b"{}")
     );
+}
+
+#[test]
+fn every_consistency_and_inclusion_proof_up_to_33_leaves_verifies() {
+    let leaves: Vec<Vec<u8>> = (0..33u8).map(|i| vec![i]).collect();
+    for new in 1..=leaves.len() {
+        let new_root = root(&leaves[..new]);
+        for old in 1..=new {
+            let proof = consistency_proof(&leaves[..new], old);
+            let old_root = root(&leaves[..old]);
+            assert!(
+                verify_consistency(old as u64, new as u64, &old_root, &new_root, &proof),
+                "{old} -> {new}"
+            );
+            if old < new {
+                // The same proof must not vouch for a different old root.
+                let other = root(&leaves[1..=old]);
+                assert!(
+                    !verify_consistency(old as u64, new as u64, &other, &new_root, &proof),
+                    "{old} -> {new}"
+                );
+            }
+        }
+        for index in 0..new {
+            let proof = inclusion_proof(&leaves[..new], index);
+            assert!(
+                verify_inclusion(&leaves[index], index as u64, new as u64, &proof, &new_root),
+                "{index} in {new}"
+            );
+        }
+    }
 }

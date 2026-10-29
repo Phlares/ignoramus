@@ -266,3 +266,18 @@ allow = ['^bb$']
     assert!(scan::scan_str("abbc", &p).is_empty());
     assert_eq!(scan::scan_str("abbc abc", &p), ["k"]);
 }
+
+#[test]
+fn an_allowed_hit_at_the_end_of_the_text_ends_the_scan() {
+    // `a|$` also matches the empty string at the end, so the scan must step past it.
+    let rx = |s: &str| regex::Regex::new(s).unwrap();
+    let pat = |allow: &str| Pattern {
+        kind: "k".into(),
+        regex: rx("a|$"),
+        allow: vec![rx(allow)],
+    };
+    // Both hits are allowed: nothing is found, and the scan stops at the end.
+    assert!(scan::scan_str("a", &[pat("^(a|)$")]).is_empty());
+    // Only the first hit is allowed: the empty hit at the end is still found.
+    assert_eq!(scan::scan_str("a", &[pat("^a$")]), ["k"]);
+}

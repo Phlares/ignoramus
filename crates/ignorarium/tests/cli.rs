@@ -221,8 +221,10 @@ fn review_of_a_failing_plan_lists_the_errors() {
     let a = bin(&home).arg("review").arg(&spec).assert().code(1);
     let out = stdout(&a);
     let warnings = &out[out.find("## Warnings").unwrap()..];
-    assert!(warnings.contains("### Errors"), "{out}");
-    assert!(warnings.contains("E-OUT-001"));
+    let (errors, rest) = warnings.split_once("### Warnings").expect(&out);
+    assert!(errors.contains("### Errors"), "{out}");
+    assert!(errors.contains("E-OUT-001") && !errors.contains("W-HSH-001"));
+    assert!(rest.contains("W-HSH-001") && !rest.contains("E-OUT-001"));
     assert!(out.contains("## Estimate"));
     assert!(out.contains("not available"));
 }
@@ -316,6 +318,45 @@ fn an_unreadable_plan_log_surfaces_as_a_diagnostic() {
     let out = stdout(&a);
     assert!(out.contains("E-CNF-005"), "{out}");
     assert!(out.contains("cannot be read"), "{out}");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_empty_home_variable_falls_back_to_the_user_home() {
+    let (dir, _, spec) = setup(|t| t);
+    let user = dir.path().join("user");
+    std::fs::create_dir(&user).unwrap();
+    Command::cargo_bin("ignorarium")
+        .unwrap()
+        .env("IGNORARIUM_HOME", "")
+        .env("HOME", &user)
+        .arg("check")
+        .arg(&spec)
+        .output()
+        .unwrap();
+    assert!(user.join(".ignorarium").is_dir());
+}
+
+#[test]
+fn new_reports_a_folder_it_cannot_create_apart_from_one_that_exists() {
+    let dir = TempDir::new().unwrap();
+    let work = dir.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    // 300 characters pass the id rule but exceed a file name limit.
+    let a = bin(&dir.path().join("home"))
+        .current_dir(&work)
+        .args([
+            "new",
+            "--template",
+            "numeric-ablation",
+            "--id",
+            &"a".repeat(300),
+        ])
+        .assert()
+        .code(2);
+    let err = stderr(&a);
+    assert!(err.contains("cannot create the study folder"), "{err}");
+    assert!(!err.contains("already exists"), "{err}");
 }
 
 fn token() -> String {

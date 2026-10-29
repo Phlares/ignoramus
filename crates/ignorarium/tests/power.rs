@@ -78,3 +78,10 @@ fn normalized_hash_ignores_case_and_whitespace_only() {
     assert_ne!(normalized_sha256("a b"), normalized_sha256("ab"));
     assert_ne!(normalized_sha256("a b"), normalized_sha256("a c"));
 }
+
+#[test]
+fn no_prior_use_finds_nothing_and_prior_errors_print_their_text() {
+    use ignorarium::prior::{NoPriorUse, PriorError, PriorUse};
+    assert_eq!(NoPriorUse.used("a", "b"), Ok(None));
+    assert_eq!(PriorError("log is torn".into()).to_string(), "log is torn");
+}

@@ -576,6 +576,8 @@ fn type_rules_accept_and_reject_the_right_values() {
     assert!(bad(&["design", "alpha"], json!("x")));
     assert!(bad(&["design", "repeats"], json!(1.5))); // int rejects float
     assert!(bad(&["design", "repeats"], json!(true)));
+    assert!(!bad(&["design", "repeats"], json!(-1))); // negative and
+    assert!(!bad(&["design", "repeats"], json!(u64::MAX))); // > i64::MAX are still ints
     assert!(bad(&["study", "test_log"], json!("no")));
     assert!(bad(&["study", "id"], json!(3)));
     assert!(bad(&["design", "selection"], json!([])));
@@ -808,6 +810,13 @@ fn bad_targets_are_rejected_with_the_code_and_path() {
         let e = load_text(&rule_text(t)).unwrap_err().to_string();
         assert!(e.contains("rule X-TST-001 at a: "), "{t}: {e}");
     }
+    let e = load_text(&rule_text(
+        "path = \"a\"
+check = \"named:nope\"",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(e.contains("unknown named check \"nope\""), "{e}");
 }
 
 #[test]

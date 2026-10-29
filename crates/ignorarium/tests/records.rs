@@ -602,3 +602,99 @@ fn time_helper_does_not_panic_at_the_extremes() {
         "10000-01-01T00:00:00.000Z"
     );
 }
+
+#[test]
+fn error_texts_name_their_cause() {
+    use ignorarium::home::HomeError;
+    let io = || std::io::Error::other("boom");
+    let p = || std::path::PathBuf::from("/srv/x");
+    for (got, want) in [
+        (
+            HomeError::NoHome.to_string(),
+            "set IGNORARIUM_HOME: no home directory found",
+        ),
+        (
+            HomeError::WindowsMount(p()).to_string(),
+            "/srv/x is on a Windows drive; set IGNORARIUM_HOME to a Linux path",
+        ),
+        (
+            HomeError::Link(p()).to_string(),
+            "/srv/x is a symbolic link",
+        ),
+        (HomeError::Io(io()).to_string(), "I/O failed: boom"),
+        (
+            KeyError::BadLength(7).to_string(),
+            "key file has 7 bytes, expected 32",
+        ),
+        (KeyError::Link.to_string(), "key path is a symbolic link"),
+        (KeyError::Io(io()).to_string(), "I/O failed: boom"),
+        (
+            records::RecordError::CorruptTail.to_string(),
+            "last line of the log is not a whole record",
+        ),
+        (
+            records::RecordError::Io(io()).to_string(),
+            "I/O failed: boom",
+        ),
+        (
+            VerifyError::Parse { line: 4 }.to_string(),
+            "line 4 is not a whole record",
+        ),
+        (
+            VerifyError::BadHash { seq: 2 }.to_string(),
+            "record 2: hash does not match",
+        ),
+        (
+            VerifyError::BadSig { seq: 3 }.to_string(),
+            "record 3: signature does not match",
+        ),
+        (
+            VerifyError::BrokenChain { seq: 5 }.to_string(),
+            "record 5: chain is broken",
+        ),
+        (VerifyError::Io(io()).to_string(), "I/O failed: boom"),
+    ] {
+        assert_eq!(got, want);
+    }
+    assert!(matches!(
+        records::RecordError::from(io()),
+        records::RecordError::Io(_)
+    ));
+    assert!(matches!(VerifyError::from(io()), VerifyError::Io(_)));
+}
+
+#[test]
+fn verify_fails_on_a_log_path_it_cannot_read() {
+    let d = tempfile::tempdir().unwrap();
+    // A directory exists but cannot be read as a file: not the same as an absent log.
+    assert!(matches!(
+        records::verify(d.path(), &key(1).verifying_key()),
+        Err(VerifyError::Io(_))
+    ));
+}
+
+#[test]
+fn timestamps_match_a_day_by_day_calendar() {
+    const DAY: i64 = 86_400_000;
+    let leap = |y: i64| y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let (mut y, mut m, mut d) = (1600i64, 1i64, 1i64);
+    let mut days = -135_140; // 1600-01-01, in days from 1970-01-01
+    while y < 2500 {
+        let want = format!("{y:04}-{m:02}-{d:02}T00:00:00.000Z");
+        assert_eq!(rfc3339_from_unix_millis(days * DAY), want);
+        let len = match m {
+            2 if leap(y) => 29,
+            2 => 28,
+            4 | 6 | 9 | 11 => 30,
+            _ => 31,
+        };
+        days += 1;
+        d += 1;
+        if d > len {
+            (d, m) = (1, m + 1);
+        }
+        if m > 12 {
+            (m, y) = (1, y + 1);
+        }
+    }
+}

@@ -251,6 +251,14 @@ fn machine_bad_file_is_an_error_naming_the_file() {
 }
 
 #[test]
+fn machine_file_that_cannot_be_read_is_an_error_not_the_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("machine.toml")).unwrap();
+    let err = machine::load(dir.path()).unwrap_err().to_string();
+    assert!(err.contains("machine.toml"), "{err}");
+}
+
+#[test]
 fn machine_out_of_range_values_name_the_field() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("machine.toml");

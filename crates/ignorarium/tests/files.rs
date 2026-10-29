@@ -144,3 +144,27 @@ fn racing_same_bytes_one_created_one_same() {
         assert_eq!(data, b"same");
     }
 }
+
+#[test]
+fn write_once_errors_display_their_cause() {
+    assert_eq!(
+        WriteOnceError::Differs.to_string(),
+        "file exists and differs"
+    );
+    assert_eq!(WriteOnceError::Link.to_string(), "path is a symbolic link");
+    let e = WriteOnceError::from(std::io::Error::other("boom"));
+    assert!(matches!(e, WriteOnceError::Io(_)));
+    assert_eq!(e.to_string(), "I/O failed: boom");
+}
+
+#[cfg(unix)]
+#[test]
+fn open_log_names_a_symbolic_link() {
+    let d = tempfile::tempdir().unwrap();
+    let real = d.path().join("real");
+    std::fs::write(&real, "").unwrap();
+    let link = d.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let e = ignorarium::files::open_log(&link).unwrap_err();
+    assert_eq!(e.to_string(), "log path is a symbolic link");
+}
