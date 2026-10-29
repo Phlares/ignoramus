@@ -7,6 +7,7 @@ use ignorarium::backend::level0::Level0;
 use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome, Watch};
 use ignorarium::budget::{Cost, FakeMeter, MeterError};
 use ignorarium::canon::sha256_hex;
+use ignorarium::control::State;
 use ignorarium::planlog::store::PlanLog;
 use ignorarium::prior::{PriorUse, file_hashes};
 use ignorarium::runner::{RunError, RunPlan, RunStatus, prepare, prepare_with, run, up_to};
@@ -236,6 +237,59 @@ fn an_unavailable_backend_pauses_before_the_retry() {
     );
     assert_eq!(*seen.borrow(), vec![0]);
     assert!(rows_of(&lab, "s5c").is_empty());
+}
+
+/// A payload whose row 0 runs `edit`, a shell command, before it writes its result.
+fn edits_in_row_0(edit: &str) -> String {
+    format!(
+        "#!/bin/sh\nif [ \"$IGNORARIUM_ROW\" = 0 ]; then {edit}; fi\n\
+         echo ok > \"$IGNORARIUM_OUT/result\"\n"
+    )
+}
+
+/// Run `id` and check that it pauses for `why` after row 0, with row 1 never started.
+fn pauses_after_row_0(lab: &Lab, id: &str, why: &str) {
+    let dir = lab.home.study_dir(id);
+    let plan = plan_of(lab, id);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Paused(why.into()));
+    assert_eq!(indices(lab, id), vec![0]);
+    assert!(!dir.join("run/rows/1").exists());
+    assert!(kind_of(lab, id, "spend").is_empty());
+    assert_eq!(
+        State::read(&lab.home, id).unwrap(),
+        Some(State::Paused(why.into()))
+    );
+    let ev = events_of(&dir);
+    let pause = named(&ev, "run.pause");
+    assert_eq!(pause.len(), 1);
+    assert_eq!(pause[0]["attrs"]["reason"], why);
+    assert_eq!(named(&ev, "row.start").len(), 1);
+    // The record names the bytes row 0 started with.
+    let row = &rows_of(lab, id)[0];
+    assert_eq!(row.body["payload_sha256"], plan.payload_sha256.as_str());
+}
+
+#[test]
+fn a_payload_edited_mid_run_pauses_before_the_next_row() {
+    let lab = lab();
+    let edit = edits_in_row_0("printf '# edited\n' >> \"$0\"");
+    common::with_payload(&lab, "edit-pay", &edit);
+    pauses_after_row_0(&lab, "edit-pay", "payload/run changed after the run began");
+}
+
+#[test]
+fn an_input_added_mid_run_pauses_before_the_next_row() {
+    let lab = lab();
+    // The one input, data/extra.txt, is absent until row 0 writes it.
+    let extra = |t: String| t.replace("data/example.txt", "data/extra.txt");
+    let edit = edits_in_row_0("printf x > \"$IGNORARIUM_IN/extra.txt\"");
+    let dir = register_study(&lab, "add-input", extra, &[], &edit);
+    std::fs::create_dir_all(dir.join("data")).unwrap();
+    pauses_after_row_0(
+        &lab,
+        "add-input",
+        "data/extra.txt changed after the run began",
+    );
 }
 
 #[test]

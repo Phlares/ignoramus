@@ -31,6 +31,8 @@ const MIN_TIMEOUT: Duration = Duration::from_secs(60);
 const TIMEOUT_FACTOR: f64 = 10.0;
 const PATH_ENV: &str = "/usr/bin:/bin";
 const PAUSE_REQUESTED: &str = "a pause was requested";
+/// The payload, relative to the study folder.
+const PAYLOAD: &str = "payload/run";
 
 pub struct RunPlan {
     pub home: Home,
@@ -40,8 +42,7 @@ pub struct RunPlan {
     pub schedule: Schedule,
     pub backend: Box<dyn Backend>,
     pub key: SigningKey,
-    /// `(exact, normalized)` hashes of the inputs present now.
-    pub data_hashes: Vec<(String, String)>,
+    pub inputs: InputHashes,
     pub payload: PathBuf,
     pub payload_sha256: String,
     /// Cumulative cost, read before each row.
@@ -49,6 +50,10 @@ pub struct RunPlan {
     /// Interval between `heartbeat` events while a row runs.
     pub heartbeat: Duration,
 }
+
+/// Each input path with its `(exact, normalized)` hashes, in spec order; `None` while the
+/// input is absent.
+pub type InputHashes = Vec<(String, Option<(String, String)>)>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunStatus {
@@ -192,10 +197,7 @@ pub fn prepare_with(
         .min_by_key(|b| b.level())
         .ok_or(RunError::NoBackend { need, have })?;
 
-    no_links(&dir, &["payload", "run"])?;
-    let payload = std::path::absolute(dir.join("payload").join("run")).map_err(io)?;
-    let payload_sha256 =
-        sha256_hex(&std::fs::read(&payload).map_err(|e| RunError::NoPayload(e.to_string()))?);
+    let (payload, payload_sha256) = read_payload(&dir)?;
     let pin = spec.pins.payload.trim();
     let pin = pin.strip_prefix("sha256:").unwrap_or(pin);
     if !pin.is_empty() && pin != payload_sha256 {
@@ -214,7 +216,7 @@ pub fn prepare_with(
         }
     };
     let machine = machine::load(&home.root).map_err(io)?;
-    let data_hashes = gate_late_data(home, &spec, log, leaf, &key)?;
+    let inputs = gate_late_data(home, &spec, log, leaf, &key)?;
     let rows = expand_rows(&spec, &spec_hash)?;
     let schedule = Schedule::new(&spec_hash, rows);
     schedule::write_once(&dir, &schedule)?;
@@ -226,12 +228,45 @@ pub fn prepare_with(
         schedule,
         backend,
         key,
-        data_hashes,
+        inputs,
         payload,
         payload_sha256,
         meter: Box::new(HostMeter::new(machine.rate_usd_per_hour)),
         heartbeat: HEARTBEAT,
     })
+}
+
+/// The payload's absolute path and SHA-256. A link at `payload` or `payload/run` is refused.
+fn read_payload(dir: &Path) -> Result<(PathBuf, String), RunError> {
+    no_links(dir, &["payload", "run"])?;
+    let path = std::path::absolute(dir.join(PAYLOAD)).map_err(io)?;
+    let bytes = std::fs::read(&path).map_err(|e| RunError::NoPayload(e.to_string()))?;
+    Ok((path, sha256_hex(&bytes)))
+}
+
+fn input_hashes(dir: &Path, spec: &Spec) -> InputHashes {
+    spec.inputs
+        .iter()
+        .map(|i| {
+            let hashes = input_bytes(dir, &i.path).map(|b| file_hashes(&b));
+            (i.path.clone(), hashes)
+        })
+        .collect()
+}
+
+/// What no longer matches the hashes taken at prepare, as a pause reason. An unreadable or
+/// linked payload counts as changed.
+fn stale(plan: &RunPlan, dir: &Path) -> Option<String> {
+    let mut changed = Vec::new();
+    if read_payload(dir).ok().map(|(_, h)| h).as_ref() != Some(&plan.payload_sha256) {
+        changed.push(PAYLOAD);
+    }
+    for ((path, then), (_, now)) in plan.inputs.iter().zip(input_hashes(dir, &plan.spec)) {
+        if *then != now {
+            changed.push(path);
+        }
+    }
+    (!changed.is_empty()).then(|| format!("{} changed after the run began", changed.join(", ")))
 }
 
 /// The stored spec with defaults filled, its hash bytes, and its hash text.
@@ -309,26 +344,21 @@ fn gate_late_data(
     log_name: &str,
     leaf_index: u64,
     key: &SigningKey,
-) -> Result<Vec<(String, String)>, RunError> {
+) -> Result<InputHashes, RunError> {
     let id = spec.study.id.as_str();
-    let dir = home.study_dir(id);
     let log = PlanLog::open(&home.root.join(log_name))?;
     let registered = log
         .leaf(leaf_index)?
         .ok_or_else(|| RunError::NotRegistered(id.into()))?
         .data_hashes;
-    let mut all = Vec::new();
+    let all = input_hashes(&home.study_dir(id), spec);
     let mut late = Vec::new();
-    for input in &spec.inputs {
-        let Some(bytes) = input_bytes(&dir, &input.path) else {
-            continue;
-        };
-        let hashes = file_hashes(&bytes);
-        all.push(hashes.clone());
-        if matches!(input.role, Role::Selection | Role::Confirmation)
-            && !registered.contains(&hashes)
+    for (input, (path, hashes)) in spec.inputs.iter().zip(&all) {
+        if let Some(hashes) = hashes
+            && matches!(input.role, Role::Selection | Role::Confirmation)
+            && !registered.contains(hashes)
         {
-            late.push((input.path.clone(), hashes));
+            late.push((path.clone(), hashes.clone()));
         }
     }
     let own = own_label(id);
@@ -461,7 +491,7 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
         if let Some(h) = at_boundary(&control) {
             return halt(plan, &dir, lock, h);
         }
-        if let Some(h) = books.gate(plan, &dir)? {
+        if let Some(h) = gate(plan, &dir, &mut books)? {
             return halt(plan, &dir, lock, h);
         }
         if let Some(h) = run_row(plan, row, &dir, &log, &mut books, &watch)? {
@@ -470,6 +500,15 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
     }
     State::Done.write(&plan.home, &plan.study_id).map_err(io)?;
     Ok(RunStatus::Done)
+}
+
+/// Before each attempt: the budget has room, and the payload and inputs are the bytes the
+/// run began with. Otherwise the run pauses and the attempt never starts.
+fn gate(plan: &RunPlan, dir: &Path, books: &mut Books) -> Result<Option<Halt>, RunError> {
+    Ok(match books.check(plan, dir)? {
+        Some(h) => Some(h),
+        None => stale(plan, dir).map(Halt::Pause),
+    })
 }
 
 /// This session's spend: the signed records' tally, the alerts already fired, and the row
@@ -496,9 +535,9 @@ impl Books {
         }
     }
 
-    /// Before each attempt: read the meter, emit the alerts it crossed, and pause when a
-    /// cap is reached or the attempt would reach one.
-    fn gate(&mut self, plan: &RunPlan, dir: &Path) -> Result<Option<Halt>, RunError> {
+    /// Read the meter, emit the alerts it crossed, and pause when a cap is reached or the
+    /// next attempt would reach one.
+    fn check(&mut self, plan: &RunPlan, dir: &Path) -> Result<Option<Halt>, RunError> {
         let budget = &plan.spec.scope.budget;
         let sampled = plan.meter.sample();
         let now = sampled.clone().unwrap_or_default();
@@ -808,7 +847,7 @@ fn attempt_row(
         )?;
         let halt = match plan.backend.probe() {
             Probe::Unavailable(why) => Some(Halt::Pause(format!("backend unavailable: {why}"))),
-            Probe::Available => books.gate(plan, dir)?,
+            Probe::Available => gate(plan, dir, books)?,
         };
         if let Some(h) = halt {
             return Ok((h.exit().into(), Some(h)));
@@ -827,7 +866,7 @@ fn attempt_row(
         "seed": row.seed_hex,
         "isolation": plan.backend.level(),
         "payload_sha256": plan.payload_sha256,
-        "data_hashes": plan.data_hashes,
+        "data_hashes": plan.inputs.iter().filter_map(|(_, h)| h.as_ref()).collect::<Vec<_>>(),
         "cpu_seconds": outcome.cpu_seconds,
         "wall_seconds": outcome.wall_seconds,
         "output_hash": outcome.output_hash,
