@@ -1,5 +1,7 @@
 //! Alpha split over a study tree's declared hypotheses, with return of the share of
-//! hypotheses that never ran (Choodari-Oskooei et al., arXiv:1902.05336).
+//! hypotheses that never ran. The validity argument is this crate's own: the union bound
+//! and Markov's inequality, given that the set of hypotheses that ran does not depend on
+//! report data. Choodari-Oskooei et al. (arXiv:1902.05336) give context on adding arms.
 use crate::Error;
 
 /// Outcome of one tree decision.

@@ -126,7 +126,7 @@ fn tiny_weight_share_does_not_make_a_nan_e_value() {
 #[test]
 fn huge_weights_keep_the_mean_finite() {
     let v = decide(1e-12, &[1e300, 1e300], &[Some(1e10), Some(0.0)]).unwrap();
-    assert!((v.e_value / 5e9 - 1.0).abs() <= 1e-6, "{}", v.e_value);
+    assert_eq!(v.e_value, 5e9);
     assert_eq!(v.rejected, vec![false, false]);
 }
 

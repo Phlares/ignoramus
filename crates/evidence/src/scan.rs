@@ -58,8 +58,9 @@ pub fn sign_flip(
     if n == 0 || diffs.iter().any(|c| c.len() != n) {
         return Err(Error::Parameter("diffs"));
     }
-    // The statistic is scale-free. Dividing by the largest |d| keeps every square in
-    // range; the MIN_POSITIVE floor leaves an all-zero condition at 0. A non-finite
+    // The statistic is scale-free. After dividing by the largest |d|, the sum of squares
+    // of a non-zero condition lies in [1, n], so the norm neither overflows nor reaches 0.
+    // The MIN_POSITIVE floor leaves an all-zero condition at 0. A non-finite
     // difference makes its condition's norm NaN, which `from_null` refuses.
     let diffs: Vec<Vec<f64>> = diffs
         .iter()

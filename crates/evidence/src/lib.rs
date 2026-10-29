@@ -17,6 +17,7 @@ pub enum Error {
     /// A parameter is invalid; the string names it.
     Parameter(&'static str),
     /// An observation, a difference or a null statistic is NaN or infinite.
+    /// The message says "observation" for any of these.
     NotFinite,
     /// An observation lies outside the bounds of a `Bounded` score.
     OutOfBounds,
