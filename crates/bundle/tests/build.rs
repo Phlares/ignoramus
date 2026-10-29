@@ -1,10 +1,9 @@
 mod common;
-use bundle::citation::{self, Citation};
 use bundle::licence::Kind;
 use bundle::manifest::{self, sha256_bytes};
 use bundle::profile::{self, Level};
-use bundle::{Error, Problem, build, yaml, zip, zip_name};
-use common::{INPUT, facts, fixture, release, tool};
+use bundle::{Error, Problem, build, zip, zip_name};
+use common::{INPUT, facts, fixture, release};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -109,13 +108,10 @@ fn fixture_bundle_builds_and_verifies() {
     assert!(built.artifacts.is_empty());
     assert_eq!(built.profile.name, "exploratory");
 
-    let c: Citation = citation::load(&fixture().join("citation.toml")).unwrap();
-    let want_cff = yaml::block(&citation::cff(&c, &release(), &tool(), "CC0-1.0"));
-    let cff = fs::read_to_string(out.join("CITATION.cff")).unwrap();
-    assert_eq!(cff, want_cff);
-    assert!(cff.starts_with(
-        "abstract: \"A fixture for the bundle tests. Two conditions, one outcome.\"\n"
-    ));
+    assert_eq!(
+        fs::read_to_string(out.join("CITATION.cff")).unwrap(),
+        include_str!("fixtures/expected/CITATION.cff")
+    );
     assert_eq!(
         json(&out.join("datacite.json"))["doi"],
         "10.5072/zenodo.123456"
