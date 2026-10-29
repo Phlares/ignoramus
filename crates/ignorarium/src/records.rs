@@ -1,11 +1,10 @@
 //! Signed, hash-chained record log: one JSON line per record.
 use crate::canon::{sha256_hex, to_canonical};
-use crate::files::open_log;
+use crate::files::{Tail, locked_append};
 use crate::time::now_rfc3339;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io;
 use std::path::Path;
 
 const GENESIS_PREV: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -108,49 +107,43 @@ fn record_bytes(r: &Record) -> io::Result<Vec<u8>> {
 }
 
 fn parse_line(line: &[u8]) -> Option<Stored> {
-    let s: Stored = serde_json::from_slice(line.strip_suffix(b"\n")?).ok()?;
-    Some(s)
+    serde_json::from_slice(line.strip_suffix(b"\n")?).ok()
 }
 
 /// Append one record under an exclusive lock. Returns the stored record.
 pub fn append(path: &Path, key: &SigningKey, d: RecordDraft) -> Result<Record, RecordError> {
-    let mut f = open_log(path)?;
-    f.lock()?;
-    let (seq, prev) = tail(&mut f)?;
-    let record = Record {
-        seq,
-        prev,
-        study: d.study,
-        row: d.row,
-        kind: d.kind,
-        body: d.body,
-        ts: now_rfc3339(),
-    };
-    let bytes = record_bytes(&record)?;
-    let stored = Stored {
-        hash: sha256_hex(&bytes),
-        sig: hex::encode(key.sign(&bytes).to_bytes()),
-        record,
-    };
-    let mut line = to_canonical(&serde_json::to_value(&stored).map_err(io::Error::other)?)
-        .map_err(io::Error::other)?;
-    line.push(b'\n');
-    f.write_all(&line)?;
-    f.sync_all()?;
-    Ok(stored.record)
-}
-
-/// Next `seq` and `prev` from the last line of the locked log.
-fn tail(f: &mut File) -> Result<(u64, String), RecordError> {
-    let mut buf = Vec::new();
-    f.read_to_end(&mut buf)?;
-    if buf.is_empty() {
-        return Ok((0, GENESIS_PREV.to_string()));
-    }
-    let body = &buf[..buf.len() - 1];
-    let start = body.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
-    let last = parse_line(&buf[start..]).ok_or(RecordError::CorruptTail)?;
-    Ok((last.record.seq + 1, last.hash))
+    let mut out = None;
+    locked_append(path, |tail| {
+        let (seq, prev) = match tail {
+            Tail::Empty => (0, GENESIS_PREV.to_string()),
+            Tail::Line(l) => {
+                let last = parse_line(&l).ok_or(RecordError::CorruptTail)?;
+                (last.record.seq + 1, last.hash)
+            }
+            Tail::Partial(_) => return Err(RecordError::CorruptTail),
+        };
+        let record = Record {
+            seq,
+            prev,
+            study: d.study,
+            row: d.row,
+            kind: d.kind,
+            body: d.body,
+            ts: now_rfc3339(),
+        };
+        let bytes = record_bytes(&record)?;
+        let stored = Stored {
+            hash: sha256_hex(&bytes),
+            sig: hex::encode(key.sign(&bytes).to_bytes()),
+            record,
+        };
+        let mut line = to_canonical(&serde_json::to_value(&stored).map_err(io::Error::other)?)
+            .map_err(io::Error::other)?;
+        line.push(b'\n');
+        out = Some(stored.record);
+        Ok(line)
+    })?;
+    out.ok_or_else(|| io::Error::other("no record built").into())
 }
 
 /// Check every line in order. Returns the number of records.

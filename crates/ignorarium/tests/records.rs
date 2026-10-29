@@ -429,3 +429,155 @@ fn concurrent_key_creation_agrees() {
     });
     assert!(got.windows(2).all(|w| w[0] == w[1]));
 }
+
+#[test]
+fn emit_after_truncated_line_keeps_the_new_line_parseable() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("ev.jsonl");
+    events::emit(&p, event("first")).unwrap();
+    let bytes = std::fs::read(&p).unwrap();
+    std::fs::write(&p, &bytes[..bytes.len() - 10]).unwrap();
+    events::emit(&p, event("second")).unwrap();
+    let v = lines(&p);
+    assert_eq!(v.len(), 2);
+    assert!(serde_json::from_str::<Value>(&v[0]).is_err());
+    let last: Value = serde_json::from_str(&v[1]).unwrap();
+    assert_eq!(last["name"], "second");
+}
+
+#[test]
+fn append_refuses_complete_json_without_lf() {
+    let d = tempfile::tempdir().unwrap();
+    let k = key(1);
+    let p = three(d.path(), &k);
+    let bytes = std::fs::read(&p).unwrap();
+    std::fs::write(&p, &bytes[..bytes.len() - 1]).unwrap();
+    assert!(matches!(
+        records::append(&p, &k, draft(3)),
+        Err(records::RecordError::CorruptTail)
+    ));
+}
+
+struct Counting<R> {
+    inner: R,
+    read: usize,
+}
+impl<R: std::io::Read> std::io::Read for Counting<R> {
+    fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(b)?;
+        self.read += n;
+        Ok(n)
+    }
+}
+impl<R: std::io::Seek> std::io::Seek for Counting<R> {
+    fn seek(&mut self, p: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(p)
+    }
+}
+
+#[test]
+fn tail_reader_reads_a_bounded_number_of_bytes() {
+    use ignorarium::files::{Tail, read_tail};
+    let mut data = Vec::new();
+    for n in 0..1000 {
+        data.extend_from_slice(
+            format!(
+                "{{\"n\":{n}}}{}
+",
+                " ".repeat(90)
+            )
+            .as_bytes(),
+        );
+    }
+    let mut c = Counting {
+        inner: std::io::Cursor::new(data.clone()),
+        read: 0,
+    };
+    let t = read_tail(&mut c).unwrap();
+    let want = format!(
+        "{{\"n\":999}}{}
+",
+        " ".repeat(90)
+    );
+    assert!(matches!(&t, Tail::Line(l) if l == want.as_bytes()));
+    assert!(c.read <= 2 * ignorarium::files::TAIL_CHUNK, "{}", c.read);
+    assert!(data.len() > 10 * c.read);
+
+    data.extend_from_slice(b"{\"n\":10");
+    let t = read_tail(&mut std::io::Cursor::new(data)).unwrap();
+    assert!(matches!(&t, Tail::Partial(l) if l == b"{\"n\":10"));
+    assert!(matches!(
+        read_tail(&mut std::io::Cursor::new(Vec::new())).unwrap(),
+        Tail::Empty
+    ));
+    let one = read_tail(&mut std::io::Cursor::new(b"abc".to_vec())).unwrap();
+    assert!(matches!(&one, Tail::Partial(l) if l == b"abc"));
+    let one = read_tail(&mut std::io::Cursor::new(b"\n".to_vec())).unwrap();
+    assert!(matches!(&one, Tail::Line(l) if l == b"\n"));
+    let long = vec![b'x'; 3 * ignorarium::files::TAIL_CHUNK + 5];
+    let mut with_lf = b"a\n".to_vec();
+    with_lf.extend_from_slice(&long);
+    with_lf.push(b'\n');
+    let t = read_tail(&mut std::io::Cursor::new(with_lf)).unwrap();
+    assert!(matches!(&t, Tail::Line(l) if l.len() == long.len() + 1));
+}
+
+#[test]
+fn refuse_mount_cases() {
+    use ignorarium::home::refuse_mount;
+    let wsl = "5.15.0-microsoft-standard-WSL2";
+    let plain = "6.1.0-generic";
+    assert!(refuse_mount(wsl, Path::new("/mnt/c/x")));
+    assert!(!refuse_mount(plain, Path::new("/mnt/c/x")));
+    assert!(refuse_mount("5.15.0-Microsoft", Path::new("/mnt/c/x")));
+    assert!(refuse_mount(wsl, Path::new("/srv/x/../../mnt/c/y")));
+    assert!(!refuse_mount(wsl, Path::new("/mnt/cdrom/x")));
+    assert!(!refuse_mount(wsl, Path::new("/srv/data")));
+    assert!(!refuse_mount(wsl, Path::new("relative/dir")));
+    assert!(!refuse_mount(wsl, Path::new("/mnt/c/../d2/x")));
+    assert!(refuse_mount(wsl, Path::new("/mnt/c/../d/x")));
+}
+
+#[cfg(unix)]
+#[test]
+fn home_refuses_symlinked_root_and_subdir() {
+    let d = tempfile::tempdir().unwrap();
+    let real = d.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let link = d.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    assert!(Home::open_at(&link).is_err());
+
+    let root = d.path().join("box");
+    std::fs::create_dir(&root).unwrap();
+    std::os::unix::fs::symlink(&real, root.join("keys")).unwrap();
+    assert!(Home::open_at(&root).is_err());
+    assert_eq!(std::fs::read_dir(&real).unwrap().count(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn home_root_is_created_0700() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("box");
+    Home::open_at(&root).unwrap();
+    let m = std::fs::metadata(&root).unwrap().permissions().mode();
+    assert_eq!(m & 0o777, 0o700);
+}
+
+#[test]
+fn time_helper_does_not_panic_at_the_extremes() {
+    assert_eq!(
+        rfc3339_from_unix_millis(i64::MAX),
+        "292278994-08-17T07:12:55.807Z"
+    );
+    assert_eq!(
+        rfc3339_from_unix_millis(i64::MIN),
+        "-292275055-05-16T16:47:04.192Z"
+    );
+    assert_eq!(
+        rfc3339_from_unix_millis(253_402_300_800_000),
+        "10000-01-01T00:00:00.000Z"
+    );
+}
