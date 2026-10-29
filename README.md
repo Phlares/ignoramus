@@ -13,6 +13,6 @@ ignorarium --version
 
 Status: v0 in development.
 
-Licence: Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+License: Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 Contributions: see [CONTRIBUTING.md](CONTRIBUTING.md). PRs are invite-only for now.

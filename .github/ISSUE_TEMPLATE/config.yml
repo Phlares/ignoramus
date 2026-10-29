@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security problem
-    url: https://github.com/Phlares/ignorarium/security/advisories/new
+    url: https://github.com/Phlares/ignoramus/security/advisories/new
     about: Report a vulnerability privately. Do not open a public issue.
