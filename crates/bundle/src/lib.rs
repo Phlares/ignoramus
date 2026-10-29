@@ -5,6 +5,7 @@
 use std::fmt;
 
 pub mod citation;
+pub mod licence;
 pub mod manifest;
 pub mod tree;
 pub mod yaml;
