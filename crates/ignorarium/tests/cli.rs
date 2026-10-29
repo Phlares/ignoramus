@@ -642,6 +642,26 @@ fn import_history_refuses_a_bad_file_before_appending() {
     assert!(leaf_lines(&home, "planlog").is_empty());
 }
 
+#[test]
+fn import_history_refuses_a_phase_in_the_form_of_a_studys_own_label() {
+    let (d, home, _) = setup(|t| t);
+    let file = d.path().join("rows.csv");
+    std::fs::write(&file, "x").unwrap();
+    let a = bin(&home)
+        .args(["import-history", "--phase", "study:pilot"])
+        .arg(&file)
+        .assert()
+        .code(2);
+    assert!(stderr(&a).contains("study:"), "{}", stderr(&a));
+    assert!(leaf_lines(&home, "planlog").is_empty());
+    // A colon elsewhere is a plain phase name.
+    bin(&home)
+        .args(["import-history", "--phase", "pilot:study:1"])
+        .arg(&file)
+        .assert()
+        .code(0);
+}
+
 /// Register the template through the library, then return the box.
 fn registered() -> (TempDir, PathBuf, PathBuf) {
     let (d, home, spec) = setup(|t| t);

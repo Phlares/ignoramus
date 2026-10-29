@@ -332,12 +332,14 @@ fn gate_late_data(
             late.push((input.path.clone(), hashes));
         }
     }
+    let own = own_label(id);
     let mut new = Vec::new();
     for (path, hashes) in late {
         let uses = log.uses(&hashes.0, &hashes.1)?;
-        if let Some((i, leaf)) = uses.iter().find(|(_, l)| !is_own(l, id)) {
-            let label = match leaf.kind.as_str() {
-                "legacy" => format!("study {}", leaf.label),
+        if let Some((i, leaf)) = uses.iter().find(|(_, l)| !is_own(l, &own)) {
+            let label = match (leaf.kind.as_str(), leaf.label.strip_prefix(OWN_PREFIX)) {
+                ("legacy", Some(study)) => format!("study {study}"),
+                ("legacy", None) => format!("phase {}", leaf.label),
                 _ => format!("registered plan, leaf {i}"),
             };
             return Err(RunError::DataReused { path, label });
@@ -347,14 +349,22 @@ fn gate_late_data(
         }
     }
     if !new.is_empty() {
-        log.append_legacy(id, new, key)?;
+        log.append_legacy(&own, new, key)?;
     }
     Ok(all)
 }
 
+/// The label of the late-data leaves a study appends. A study id holds no `:`, and
+/// `import-history` refuses a phase name with this prefix, so no other leaf has it.
+pub const OWN_PREFIX: &str = "study:";
+
+fn own_label(id: &str) -> String {
+    format!("{OWN_PREFIX}{id}")
+}
+
 /// A late-data leaf this study appended. A plan leaf is never its own use.
-fn is_own(leaf: &Leaf, id: &str) -> bool {
-    leaf.kind == "legacy" && leaf.label == id
+fn is_own(leaf: &Leaf, own: &str) -> bool {
+    leaf.kind == "legacy" && leaf.label == own
 }
 
 /// Refuse a symbolic link at any step of `parts` below `base`. Steps that do not exist yet are fine.

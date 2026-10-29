@@ -3,12 +3,18 @@ use super::{CliError, Ctx, Done, Run, out};
 use crate::keys;
 use crate::planlog::store::PlanLog;
 use crate::prior::file_hashes;
+use crate::runner::OWN_PREFIX;
 use std::path::PathBuf;
 
 pub fn run(ctx: &Ctx, phase: &str, files: &[PathBuf]) -> Run {
     let home = ctx.home()?;
     if phase.is_empty() {
         return Err(CliError::usage("--phase needs a name"));
+    }
+    if phase.starts_with(OWN_PREFIX) {
+        return Err(CliError::usage(format!(
+            "--phase cannot start with {OWN_PREFIX}, which marks the data a study recorded itself"
+        )));
     }
     // Every file is read before the log changes, so a bad file adds nothing.
     let mut data_hashes = Vec::new();

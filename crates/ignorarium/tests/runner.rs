@@ -268,6 +268,39 @@ fn late_confirmation_data_used_before_is_refused() {
 }
 
 #[test]
+fn an_imported_phase_named_like_the_study_is_an_earlier_use() {
+    let lab = lab();
+    // An informal run of the same name used the confirmation file, then the study registers.
+    let earlier = lab.root.join("conf.csv");
+    std::fs::write(&earlier, "held-out rows").unwrap();
+    assert_cmd::Command::cargo_bin("ignorarium")
+        .unwrap()
+        .env("IGNORARIUM_HOME", &lab.home.root)
+        .args(["import-history", "--phase", "mnist-ablation"])
+        .arg(&earlier)
+        .assert()
+        .code(0);
+    let dir = register_study(&lab, "mnist-ablation", conf_input, &[], PAYLOAD);
+    std::fs::create_dir_all(dir.join("data")).unwrap();
+    std::fs::write(dir.join("data/conf.txt"), "held-out rows").unwrap();
+    let err = err_of(&lab, "mnist-ablation");
+    assert!(err.to_string().starts_with("E-CNF-005: "), "{err}");
+    match err {
+        RunError::DataReused { path, label } => {
+            assert_eq!(path, "data/conf.txt");
+            assert_eq!(label, "phase mnist-ablation");
+        }
+        e => panic!("{e}"),
+    }
+    // The imported leaf keeps the plain phase label.
+    let (exact, norm) = file_hashes(b"held-out rows");
+    let log = PlanLog::open(&lab.home.root.join("planlog")).unwrap();
+    let uses = log.uses(&exact, &norm).unwrap();
+    assert_eq!(uses.len(), 1);
+    assert_eq!(uses[0].1.label, "mnist-ablation");
+}
+
+#[test]
 fn late_data_lands_in_the_plan_log_once() {
     let lab = lab();
     let dir = register_study(&lab, "late", conf_input, &[], PAYLOAD);
@@ -281,7 +314,7 @@ fn late_data_lands_in_the_plan_log_once() {
     assert!(hit.is_some_and(|h| h.contains("legacy")));
     let uses = log.uses(&exact, &norm).unwrap();
     assert_eq!(uses.len(), 1);
-    assert_eq!(uses[0].1.label, "late");
+    assert_eq!(uses[0].1.label, "study:late");
     // Resume runs prepare again: it neither refuses itself nor appends again.
     plan_of(&lab, "late");
     assert_eq!(log.uses(&exact, &norm).unwrap().len(), 1);
