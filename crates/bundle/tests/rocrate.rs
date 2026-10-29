@@ -302,7 +302,7 @@ fn graph_order_follows_the_spec() {
     let v = build(&fixture());
     let u1 = format!("urn:uuid:{}", run_uuid("fixture-numeric", "row-1"));
     let u2 = format!("urn:uuid:{}", run_uuid("fixture-numeric", "row-2"));
-    let env = format!("#env-{}", &sha256_bytes(b"LANG C")[..12]);
+    let env = format!("#env-{}", &sha256_bytes(b"LANG\0C")[..12]);
     let sha2 = format!("#sha256-{H2}");
     let image = format!("#image-{H1}");
     assert_eq!(
@@ -380,7 +380,7 @@ fn runs_record_status_image_and_environment() {
     let v = build(&fixture());
     let u1 = format!("urn:uuid:{}", run_uuid("fixture-numeric", "row-1"));
     let u2 = format!("urn:uuid:{}", run_uuid("fixture-numeric", "row-2"));
-    let env = format!("#env-{}", &sha256_bytes(b"LANG C")[..12]);
+    let env = format!("#env-{}", &sha256_bytes(b"LANG\0C")[..12]);
     assert_eq!(
         entity(&v, &u1),
         &json!({
