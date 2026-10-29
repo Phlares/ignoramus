@@ -58,6 +58,16 @@ fn crossed_lists_each_fraction_between_prev_and_now() {
 }
 
 #[test]
+fn crossed_measures_both_readings_as_shares_of_the_cap() {
+    let two = Budget {
+        wall_hours: 2.0,
+        ..CAP
+    };
+    // 1.2 h then 1.7 h of a 2 h cap: 60 % then 85 %.
+    assert_eq!(crossed(&wall(1.2), &wall(1.7), &two), vec![('w', 0.8)]);
+}
+
+#[test]
 fn crossed_names_each_dimension() {
     let b = Budget {
         cpu_hours: 1.0,
@@ -195,11 +205,13 @@ fn a_reading_that_is_not_a_number_pauses() {
     assert!(internal(decide(&inf, &zero, &CAP, ok())));
     assert!(internal(decide(&usd(-1.0), &zero, &CAP, ok())));
     assert!(internal(decide(&zero, &nan, &CAP, ok())));
-    let cap_bad = Budget {
-        wall_hours: f64::NAN,
-        ..CAP
-    };
-    assert!(internal(decide(&zero, &zero, &cap_bad, ok())));
+    for cap in [f64::NAN, f64::INFINITY, -1.0] {
+        let cap_bad = Budget {
+            wall_hours: cap,
+            ..CAP
+        };
+        assert!(internal(decide(&zero, &zero, &cap_bad, ok())), "{cap}");
+    }
 }
 
 #[test]
@@ -222,6 +234,7 @@ fn pause_reasons_read_plainly() {
         s(PauseReason::InternalCheck("y".into())),
         "an internal check failed: y"
     );
+    assert_eq!(MeterError("no reading".into()).to_string(), "no reading");
 }
 
 #[test]

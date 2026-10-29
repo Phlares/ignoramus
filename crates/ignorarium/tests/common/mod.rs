@@ -69,10 +69,15 @@ pub fn plain(lab: &Lab, id: &str) -> PathBuf {
 
 /// `plain` with another payload.
 pub fn with_payload(lab: &Lab, id: &str, payload: &str) -> PathBuf {
+    edited(lab, id, |t| t, payload)
+}
+
+/// `with_payload` with the spec text changed by `edit` before registration.
+pub fn edited(lab: &Lab, id: &str, edit: impl Fn(String) -> String, payload: &str) -> PathBuf {
     let dir = register_study(
         lab,
         id,
-        |t| t,
+        edit,
         &[("data/example.txt", "calibration")],
         payload,
     );

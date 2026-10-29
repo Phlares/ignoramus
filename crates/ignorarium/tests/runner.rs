@@ -111,7 +111,15 @@ fn run_writes_one_record_per_row_in_order() {
             format!("{} {} {}", row.condition, row.unit, row.repeat)
         );
     }
-    assert!(dir.join("schedule.json").is_file());
+    // The schedule and every event name the registered spec hash.
+    let hash = kind_of(&lab, "s1", "register")[0].body["spec_hash"].clone();
+    let schedule: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("schedule.json")).unwrap()).unwrap();
+    assert_eq!(schedule["spec_hash"], hash);
+    let trace = &hash.as_str().unwrap()["sha256:".len()..][..32];
+    let events = events_of(&dir);
+    assert!(!events.is_empty());
+    assert!(events.iter().all(|e| e["trace_id"] == trace));
     // A second run has nothing left to do.
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
     assert_eq!(rows_of(&lab, "s1").len(), 6);
@@ -560,12 +568,16 @@ fn a_plan_leaf_labelled_like_the_study_is_not_its_own_use() {
     ));
 }
 
-fn cost(cpu: f64, wall: f64) -> Result<Cost, MeterError> {
+fn spent(cpu_seconds: f64, wall_seconds: f64, usd: f64) -> Result<Cost, MeterError> {
     Ok(Cost {
-        cpu_seconds: cpu,
-        wall_seconds: wall,
-        usd: 0.0,
+        cpu_seconds,
+        wall_seconds,
+        usd,
     })
+}
+
+fn cost(cpu: f64, wall: f64) -> Result<Cost, MeterError> {
+    spent(cpu, wall, 0.0)
 }
 
 #[test]
@@ -766,6 +778,87 @@ fn the_next_row_costs_the_larger_of_the_estimate_and_the_recorded_mean() {
     assert_eq!(
         run(&plan).unwrap(),
         RunStatus::Paused("the next row would reach the wall cap".into())
+    );
+    assert_eq!(*seen.borrow(), vec![0, 1, 2]);
+}
+
+#[test]
+fn the_recorded_mean_counts_cpu_as_well_as_wall() {
+    let lab = lab();
+    plain(&lab, "b6c");
+    let mut plan = plan_of(&lab, "b6c");
+    // Rows take 500 cpu seconds. After two rows 3200 s are spent and the mean says the
+    // third reaches 3700 s, past the 3600 s cap.
+    plan.meter = Box::new(FakeMeter::new(vec![
+        cost(0.0, 0.0),
+        cost(500.0, 0.0),
+        cost(3200.0, 0.0),
+    ]));
+    let (mut b, seen) = fake(vec![]);
+    b.wall = Some(1000.0);
+    plan.backend = Box::new(b);
+    assert_eq!(
+        run(&plan).unwrap(),
+        RunStatus::Paused("the next row would reach the cpu cap".into())
+    );
+    assert_eq!(*seen.borrow(), vec![0, 1]);
+}
+
+/// `plain` with a 10 USD cap, on a machine that charges 36 USD an hour. A row then
+/// estimates 60 cpu seconds, 60 wall seconds and 0.60 USD.
+fn priced(lab: &Lab, id: &str) {
+    let edit = |t: String| t.replace("money_usd = 0.0", "money_usd = 10.0");
+    common::edited(lab, id, edit, PAYLOAD);
+    std::fs::write(
+        lab.home.root.join("machine.toml"),
+        "max_level = 1\nrate_usd_per_hour = 36.0\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn the_first_row_is_held_to_its_share_of_the_spec_estimate() {
+    let lab = lab();
+    // Each dimension just under and just over its cap minus one row's estimate.
+    let cases = [
+        ("cpu-room", spent(3500.0, 0.0, 0.0), None),
+        ("cpu-full", spent(3560.0, 0.0, 0.0), Some("cpu")),
+        ("wall-room", spent(0.0, 3500.0, 0.0), None),
+        ("wall-full", spent(0.0, 3560.0, 0.0), Some("wall")),
+        ("usd-room", spent(0.0, 0.0, 9.3), None),
+        ("usd-full", spent(0.0, 0.0, 9.5), Some("money")),
+    ];
+    for (id, reading, cap) in cases {
+        priced(&lab, id);
+        let mut plan = plan_of(&lab, id);
+        plan.meter = Box::new(FakeMeter::new(vec![reading]));
+        let want = match cap {
+            None => RunStatus::Done,
+            Some(d) => RunStatus::Paused(format!("the next row would reach the {d} cap")),
+        };
+        assert_eq!(run(&plan).unwrap(), want, "{id}");
+    }
+}
+
+#[test]
+fn the_recorded_mean_prices_wall_time_at_the_machine_rate() {
+    let lab = lab();
+    priced(&lab, "usd-mean");
+    let mut plan = plan_of(&lab, "usd-mean");
+    // Rows take 100 s of wall: 1.00 USD each at 36 USD an hour, over the 0.60 estimate.
+    // After two rows 8.00 fits the 10 USD cap; after three, 9.20 + 1.00 does not.
+    plan.meter = Box::new(FakeMeter::new(vec![
+        spent(0.0, 0.0, 0.0),
+        spent(0.0, 0.0, 1.0),
+        spent(0.0, 0.0, 7.0),
+        spent(0.0, 0.0, 9.2),
+    ]));
+    let (mut b, seen) = fake(vec![]);
+    b.wall = Some(100.0);
+    plan.backend = Box::new(b);
+    assert_eq!(
+        run(&plan).unwrap(),
+        RunStatus::Paused("the next row would reach the money cap".into())
     );
     assert_eq!(*seen.borrow(), vec![0, 1, 2]);
 }
