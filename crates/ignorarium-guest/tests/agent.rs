@@ -4,13 +4,17 @@ use common::write_exec;
 use ignorarium_guest::agent::gate;
 use ignorarium_guest::agent::payload::{self, Ran};
 use ignorarium_guest::agent::selftest::{self, route_blocked};
-use ignorarium_guest::agent::steps::{disk_by_serial, mix_seed, now_nanos, set_clock};
+use ignorarium_guest::agent::steps::{disk_by_serial, disk_bytes, mix_seed, now_nanos, set_clock};
 use ignorarium_guest::proto::{End, Job, SEED_ENV, SelfTest};
+use ignorarium_guest::sys::kill_all_others;
+use rustix::process::{Pid, Signal, kill_process_group};
 use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
+use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::Path;
+use std::process::Command;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -78,6 +82,28 @@ fn disk_by_serial_finds_the_device() {
     assert!(err.to_string().contains("ign-out"), "{err}");
 }
 
+#[test]
+fn disk_bytes_counts_512_byte_sectors() {
+    let d = tempfile::tempdir().unwrap();
+    fs::create_dir(d.path().join("vdc")).unwrap();
+    fs::write(d.path().join("vdc/size"), "16384\n").unwrap();
+    assert_eq!(
+        disk_bytes(d.path(), Path::new("/dev/vdc")).unwrap(),
+        16384 * 512
+    );
+    assert!(disk_bytes(d.path(), Path::new("/dev/vdd")).is_err());
+}
+
+#[test]
+fn kill_all_others_refuses_outside_pid_1() {
+    let mut sleeper = Command::new("/bin/sleep").arg("5").spawn().unwrap();
+    let err = kill_all_others().unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    assert!(sleeper.try_wait().unwrap().is_none(), "the sleeper died");
+    sleeper.kill().unwrap();
+    sleeper.wait().unwrap();
+}
+
 fn net_with(names: &[&str]) -> tempfile::TempDir {
     let d = tempfile::tempdir().unwrap();
     for n in names {
@@ -93,6 +119,7 @@ fn selftest_only_loopback() {
     };
     assert!(only(&["lo"]));
     assert!(!only(&["lo", "eth0"]));
+    assert!(!only(&["eth0"]));
     assert!(!only(&[]));
 }
 
@@ -109,6 +136,16 @@ fn selftest_host_path() {
 #[test]
 fn route_is_open_on_a_networked_host() {
     assert!(!route_blocked());
+}
+
+#[test]
+fn a_bind_that_fails_for_another_reason_is_not_blocked() {
+    // A documentation address that no host owns: bind fails with EADDRNOTAVAIL.
+    let local = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 77), 0));
+    let remote = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), 9));
+    let err = UdpSocket::bind(local).unwrap_err();
+    assert_eq!(err.raw_os_error(), Some(libc::EADDRNOTAVAIL));
+    assert!(!selftest::blocked(local, remote));
 }
 
 #[test]
@@ -158,6 +195,25 @@ fn payload_times_out() {
     let mut j = sh("exec /bin/sleep 30", d.path());
     j.timeout_ms = 200;
     let ran = payload::run(&j).unwrap();
+    assert_eq!(ran.end, End::Timeout);
+    assert!(ran.wall < Duration::from_secs(2), "{:?}", ran.wall);
+}
+
+#[test]
+fn a_leader_that_leaves_its_group_cannot_hang_the_timeout() {
+    let d = tempfile::tempdir().unwrap();
+    // The leader puts its child in a new group and joins that group, so a kill of its
+    // first group reaches neither of them.
+    let script = r#"$c = fork // die; if (!$c) { sleep 5; exit }
+        setpgrp($c, $c) or die; setpgrp(0, $c) or die;
+        open my $f, '>', "$ENV{OUT}/pg" or die; print $f $c; close $f; sleep 5"#;
+    let out = d.path().to_str().unwrap();
+    let ran = payload::run(&job(&["/usr/bin/perl", "-e", script], &[("OUT", out)], 300)).unwrap();
+    let pg: i32 = fs::read_to_string(d.path().join("pg"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let _ = kill_process_group(Pid::from_raw(pg).unwrap(), Signal::KILL);
     assert_eq!(ran.end, End::Timeout);
     assert!(ran.wall < Duration::from_secs(2), "{:?}", ran.wall);
 }

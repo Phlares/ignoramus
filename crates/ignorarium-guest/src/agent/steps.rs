@@ -11,7 +11,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub fn mix_seed(seed: &[u8; 32], random: &File) -> io::Result<()> {
     let mut f = random;
     f.write_all(seed)?;
-    sys::reseed_crng(random.as_fd())
+    reseeded(sys::reseed_crng(random.as_fd()))
+}
+
+/// The kernel refuses a reseed with `ENODATA` while its generator is not ready yet. The seed
+/// is in the input pool by then and goes into the first seeding, so that counts as done.
+fn reseeded(r: io::Result<()>) -> io::Result<()> {
+    match r {
+        Err(e) if e.raw_os_error() == Some(libc::ENODATA) => Ok(()),
+        r => r,
+    }
 }
 
 pub fn set_clock(unix_nanos: u64) -> io::Result<()> {
@@ -26,6 +35,17 @@ pub fn now_nanos() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos() as u64)
+}
+
+/// Size of the disk `/dev/<name>`. Sysfs gives it in 512-byte sectors whatever the block size.
+pub fn disk_bytes(sys_block: &Path, dev: &Path) -> io::Result<u64> {
+    let name = dev.file_name().unwrap_or_default();
+    let text = fs::read_to_string(sys_block.join(name).join("size"))?;
+    let sectors: u64 = text
+        .trim()
+        .parse()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("disk size: {e}")))?;
+    Ok(sectors * 512)
 }
 
 /// Finds the block device whose `serial` file holds `serial`.
@@ -43,4 +63,19 @@ pub fn disk_by_serial(sys_block: &Path, serial: &str) -> io::Result<PathBuf> {
         io::ErrorKind::NotFound,
         format!("no disk with serial {serial}"),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reseeded;
+    use std::io;
+
+    #[test]
+    fn a_reseed_before_the_generator_is_ready_counts_as_done() {
+        let err = |n| Err(io::Error::from_raw_os_error(n));
+        assert!(reseeded(err(libc::ENODATA)).is_ok());
+        let e = reseeded(err(libc::ENOTTY)).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(libc::ENOTTY));
+        assert!(reseeded(Ok(())).is_ok());
+    }
 }

@@ -53,3 +53,19 @@ pub fn children_cpu_seconds() -> io::Result<f64> {
     let secs = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 / 1e6;
     Ok(secs(ru.ru_utime) + secs(ru.ru_stime))
 }
+
+/// Sends SIGKILL to every process but this one. Only PID 1 may call it: there it reaches
+/// every other process of the guest, and outside a guest it would reach far more.
+pub fn kill_all_others() -> io::Result<()> {
+    if std::process::id() != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "only PID 1 may kill all other processes",
+        ));
+    }
+    // SAFETY: kill(2) takes no pointers.
+    match check(unsafe { libc::kill(-1, libc::SIGKILL) }) {
+        Err(e) if e.raw_os_error() == Some(libc::ESRCH) => Ok(()),
+        r => r.map(drop),
+    }
+}

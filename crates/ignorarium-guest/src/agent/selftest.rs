@@ -29,7 +29,7 @@ pub fn route_blocked() -> bool {
     blocked((Ipv4Addr::UNSPECIFIED, 0).into(), v4) && blocked((Ipv6Addr::UNSPECIFIED, 0).into(), v6)
 }
 
-fn blocked(local: SocketAddr, remote: SocketAddr) -> bool {
+pub fn blocked(local: SocketAddr, remote: SocketAddr) -> bool {
     match UdpSocket::bind(local) {
         // The guest kernel has no IPv6, so that family cannot be used at all.
         Err(e) => e.raw_os_error() == Some(libc::EAFNOSUPPORT),

@@ -42,8 +42,10 @@ pub fn run(job: &Job) -> io::Result<Ran> {
         sleep(Duration::from_millis(10));
     };
     // The leader is not reaped yet (a zombie if it exited), so its pid still names our group
-    // and cannot be reused by an unrelated one.
+    // and cannot be reused by an unrelated one. A leader that moved to another group is
+    // not in it, so it is killed by pid too.
     let _ = kill_process_group(pid, Signal::KILL);
+    let _ = child.kill();
     let status = child.wait()?;
     let wall = start.elapsed();
     let end = if timed_out {
