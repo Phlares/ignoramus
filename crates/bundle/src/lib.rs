@@ -7,6 +7,7 @@ use std::fmt;
 pub mod citation;
 pub mod licence;
 pub mod manifest;
+pub mod rocrate;
 pub mod tree;
 pub mod yaml;
 pub mod zip;
