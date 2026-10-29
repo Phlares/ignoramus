@@ -148,13 +148,25 @@ fn render_json(a: &Assessed) -> Result<String, CliError> {
 }
 
 pub fn run(ctx: &Ctx, spec_path: &Path, json: bool) -> Run {
-    let a = assess(ctx, spec_path)?;
+    let a = match assess(ctx, spec_path) {
+        Err(e) if json => {
+            let v = json!({ "diagnostics": [], "error": e.msg, "hash": null });
+            let text =
+                serde_json::to_string_pretty(&v).map_err(|e| CliError::usage(e.to_string()))?;
+            out(&format!("{text}\n"))?;
+            return Ok(Done {
+                code: e.code,
+                spec_hash: None,
+            });
+        }
+        other => other?,
+    };
     let text = if json {
         render_json(&a)? + "\n"
     } else {
         render(&a)
     };
-    out(&text);
+    out(&text)?;
     Ok(Done {
         code: a.exit_code(),
         spec_hash: Some(a.hash),

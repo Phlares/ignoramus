@@ -45,13 +45,13 @@ command = "ignorarium register studies/<id>/spec.toml"
 [[step]]
 id = "run"
 title = "Run the plan"
-does = "Runs the registered plan: available from Plan 2/3."
-produces = "Run records: available from Plan 2/3."
+does = "Runs the registered plan: not available yet."
+produces = "Run records: not available yet."
 command = "not available yet"
 
 [[step]]
 id = "report"
 title = "Write the report"
-does = "Turns the run records into a report: available from Plan 2/3."
-produces = "A report: available from Plan 2/3."
+does = "Turns the run records into a report: not available yet."
+produces = "A report: not available yet."
 command = "not available yet"

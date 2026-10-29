@@ -14,9 +14,6 @@ Lower scope.min_isolation, or run the plan on a machine that offers the level.
 
 Running at a lower level than the plan asks for would break the plan's own safety terms.
 
-## Sources
-
-
 ## Applies to
 
 - `scope.min_isolation` (named:isolation-reachable)

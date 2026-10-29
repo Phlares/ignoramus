@@ -14,9 +14,6 @@ Set design.test to paired-mean.
 
 v0 confirms only with the paired-mean test. Other tests have no power gate yet.
 
-## Sources
-
-
 ## Applies to
 
 - `design.test` (named:confirmatory-test-allowed), when mode = confirmatory

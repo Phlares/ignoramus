@@ -55,9 +55,18 @@ impl Ctx {
     }
 }
 
-/// Write to stdout. A closed pipe is not an error worth a panic.
-fn out(text: &str) {
-    let _ = std::io::stdout().write_all(text.as_bytes());
+/// Write to stdout. A closed pipe is not an error; any other failure is.
+fn out(text: &str) -> Result<(), CliError> {
+    let mut stdout = std::io::stdout().lock();
+    match stdout
+        .write_all(text.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => {
+            Err(CliError::usage(format!("cannot write to stdout: {e}")))
+        }
+        _ => Ok(()),
+    }
 }
 
 #[derive(Parser)]

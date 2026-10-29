@@ -29,22 +29,23 @@ fn id_is_valid(id: &str) -> Result<bool, CliError> {
         .ok_or_else(|| CliError::usage("rule E-FMT-001 for study.id is missing"))
 }
 
-/// Sets the first `id = "..."` line, which is `study.id`, and keeps its comment.
+/// Sets `id` inside the `[study]` table and keeps its comment. The templates
+/// are ours: a table header is a line that starts with `[`.
 fn with_id(template: &str, id: &str) -> String {
-    let mut done = false;
+    let mut in_study = false;
     template
         .replace("\r\n", "\n")
         .split_inclusive('\n')
         .map(|line| {
+            if line.starts_with('[') {
+                in_study = line.trim_end().split('#').next().map(str::trim_end) == Some("[study]");
+            }
             let tail = line
                 .strip_prefix("id = \"")
                 .and_then(|r| r.split_once('"'))
                 .map(|(_, tail)| tail);
             match tail {
-                Some(tail) if !done => {
-                    done = true;
-                    format!("id = \"{id}\"{tail}")
-                }
+                Some(tail) if in_study => format!("id = \"{id}\"{tail}"),
                 _ => line.to_string(),
             }
         })
@@ -83,9 +84,23 @@ pub fn run(template: &str, id: &str) -> Run {
         WriteOnceError::Io(e) => io(e),
         other => CliError::usage(format!("cannot write {}: {other}", file.display())),
     })?;
-    out(&format!("created {}\n", file.display()));
+    out(&format!("created {}\n", file.display()))?;
     Ok(Done {
         code: 0,
         spec_hash: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::with_id;
+
+    #[test]
+    fn only_id_inside_the_study_table_changes() {
+        let text = "id = \"top\"\n[other]\nid = \"keep\"\n[study]\nid = \"my-study\" # c\n[[x]]\nid = \"H1\"\n[study.sub]\nid = \"s\"\n";
+        assert_eq!(
+            with_id(text, "new-one"),
+            "id = \"top\"\n[other]\nid = \"keep\"\n[study]\nid = \"new-one\" # c\n[[x]]\nid = \"H1\"\n[study.sub]\nid = \"s\"\n"
+        );
+    }
 }

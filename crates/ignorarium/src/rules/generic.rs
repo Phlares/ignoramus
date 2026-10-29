@@ -118,6 +118,17 @@ pub(super) fn join(prefix: &str, key: &str) -> String {
     }
 }
 
+/// `join` for a key read from the spec. A key that is not 1 to 40 of
+/// `a-z 0-9 _ -` shows as `<key>`: a secret pasted as a key must not
+/// reach any output. Paths from this function are for display only.
+pub(super) fn join_key(prefix: &str, key: &str) -> String {
+    let safe = (1..=40).contains(&key.len())
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
+    join(prefix, if safe { key } else { "<key>" })
+}
+
 /// Nodes a path selects, as (concrete path, value). `None` marks a missing key.
 /// A missing or non-table parent selects nothing: its own rule reports it.
 /// `**` selects every value at any depth.
@@ -157,7 +168,7 @@ fn all_nodes<'a>(v: &'a Value, path: &str, out: &mut Vec<(String, Option<&'a Val
     match v {
         Value::Object(m) => {
             for (k, c) in m {
-                let p = join(path, k);
+                let p = join_key(path, k);
                 out.push((p.clone(), Some(c)));
                 all_nodes(c, &p, out);
             }
@@ -178,7 +189,7 @@ fn all_nodes<'a>(v: &'a Value, path: &str, out: &mut Vec<(String, Option<&'a Val
 fn unknown_keys(v: &Value, path: &str, wild: &str, known: &HashSet<&str>, out: &mut Vec<String>) {
     let Value::Object(m) = v else { return };
     for (k, c) in m {
-        let (p, w) = (join(path, k), join(wild, k));
+        let (p, w) = (join_key(path, k), join(wild, k));
         if !known.contains(w.as_str()) {
             out.push(p);
             continue;

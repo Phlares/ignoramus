@@ -943,3 +943,34 @@ fn cost_inputs_are_range_checked_at_their_edges() {
         assert_eq!(rng_codes(&with(&path, v.clone())), want, "{path:?} = {v}");
     }
 }
+
+#[test]
+fn an_unsafe_key_renders_as_a_placeholder_in_every_output() {
+    let token = format!("AKIA{}", "ABCDEFGHIJKLMNOP");
+    let mut s = template();
+    s["study"][&token] = json!("x");
+    let d = rules::check_generic(&s, &v0());
+    let key: Vec<_> = d.iter().filter(|x| x.code == "E-KEY-001").collect();
+    assert_eq!(key.len(), 1);
+    assert_eq!(key[0].path, "study.<key>");
+    for shown in [render_human(&d), render_json(&d), format!("{d:?}")] {
+        assert!(!shown.contains(&token), "{shown}");
+    }
+}
+
+#[test]
+fn key_safety_boundary_is_one_to_forty_of_lowercase_digit_underscore_hyphen() {
+    let path_of = |key: &str| {
+        let mut s = template();
+        s["study"][key] = json!(1);
+        let d = rules::check_generic(&s, &v0());
+        d.into_iter().find(|x| x.code == "E-KEY-001").unwrap().path
+    };
+    let ok = "a0_-".repeat(10);
+    assert_eq!(path_of(&ok), format!("study.{ok}"));
+    assert_eq!(path_of(&format!("{ok}a")), "study.<key>");
+    assert_eq!(path_of("Ab"), "study.<key>");
+    assert_eq!(path_of("a.b"), "study.<key>");
+    assert_eq!(path_of(""), "study.<key>");
+    assert_eq!(path_of("\u{e9}"), "study.<key>");
+}

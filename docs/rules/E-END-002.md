@@ -14,9 +14,6 @@ Create the file under the study folder, or fix the spec path.
 
 The run would reach the follow-on step and find nothing to run.
 
-## Sources
-
-
 ## Applies to
 
 - `scope.end_of_run.follow_on[*].spec` (named:follow-on-exists)

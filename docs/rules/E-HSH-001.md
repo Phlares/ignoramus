@@ -14,9 +14,6 @@ Fix the path, or update the sha256 if the file was changed on purpose.
 
 The pin says which bytes the plan was approved on. A different file is a different study.
 
-## Sources
-
-
 ## Applies to
 
 - `inputs[*].sha256` (named:input-hash-matches)

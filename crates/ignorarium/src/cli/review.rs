@@ -52,10 +52,23 @@ fn problems(diags: &[Diagnostic]) -> String {
     if s.is_empty() { "None.\n".into() } else { s }
 }
 
+/// The spec with each value that E-SEC-001 flagged replaced by a marker.
+/// Diagnostic paths use dots and `[i]`; a path with a `<key>` segment matches nothing.
+fn withheld(a: &Assessed) -> Value {
+    let mut v = a.value.clone();
+    for d in a.diags.iter().filter(|d| d.code == "E-SEC-001") {
+        let pointer = format!("/{}", d.path.replace(['.', '['], "/").replace(']', ""));
+        if let Some(node) = v.pointer_mut(&pointer) {
+            *node = Value::String(format!("(withheld: {})", d.code));
+        }
+    }
+    v
+}
+
 const NO_ESTIMATE: &str = "Not available: the plan has errors.\n";
 
 fn page(a: &Assessed) -> String {
-    let v = &a.value;
+    let v = &withheld(a);
     let est = a.estimate.as_ref();
     let hypotheses = items(v, "/question/hypotheses").iter().map(|h| {
         format!(
@@ -133,7 +146,7 @@ fn page(a: &Assessed) -> String {
 
 pub fn run(ctx: &Ctx, spec: &Path) -> Run {
     let a = check::assess(ctx, spec)?;
-    out(&page(&a));
+    out(&page(&a))?;
     Ok(Done {
         code: a.exit_code(),
         spec_hash: Some(a.hash),

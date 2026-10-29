@@ -23,7 +23,7 @@ pub fn run(json: bool) -> Run {
     if json {
         let text =
             serde_json::to_string_pretty(&file.step).map_err(|e| CliError::usage(e.to_string()))?;
-        out(&format!("{text}\n"));
+        out(&format!("{text}\n"))?;
     } else {
         for (i, s) in file.step.iter().enumerate() {
             out(&format!(
@@ -34,7 +34,7 @@ pub fn run(json: bool) -> Run {
                 s.does,
                 s.produces,
                 s.command
-            ));
+            ))?;
         }
     }
     Ok(Done {

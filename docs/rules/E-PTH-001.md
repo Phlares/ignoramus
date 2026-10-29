@@ -14,9 +14,6 @@ Write the path from the study folder with no `.` or `..` segment, no `:` or `\`,
 
 The checker reads only files inside the study folder. It never follows links, so a spec cannot point it at other files.
 
-## Sources
-
-
 ## Applies to
 
 - `inputs[*].path` (named:input-path-safe)

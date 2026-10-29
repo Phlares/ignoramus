@@ -423,7 +423,7 @@ fn secret_scan(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
                 .into_iter()
                 .map(move |kind| Hit {
                     path: p.clone(),
-                    detail: Some(format!("{kind}.")),
+                    detail: Some(format!("Kind: {kind}.")),
                 })
         })
         .collect()

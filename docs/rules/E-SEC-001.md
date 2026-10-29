@@ -4,7 +4,7 @@ Severity: error
 
 ## Problem
 
-A string looks like a secret or personal data, of kind
+A string looks like a secret or personal data; the diagnostic names the kind.
 
 ## Fix
 

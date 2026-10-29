@@ -204,11 +204,7 @@ fn planted_secret_is_one_diagnostic_at_its_path() {
     let d = run(&s);
     assert_eq!(d.len(), 1);
     assert_eq!(d[0].path, "question.population");
-    assert!(
-        d[0].problem.ends_with("of kind aws-key."),
-        "{}",
-        d[0].problem
-    );
+    assert!(d[0].problem.ends_with("Kind: aws-key."), "{}", d[0].problem);
     let shown = render_human(&d);
     assert!(!shown.contains(&secret));
     assert!(!format!("{d:?}").contains(&secret));

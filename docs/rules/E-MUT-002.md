@@ -14,9 +14,6 @@ Give spawn and report seed prefixes where neither is a prefix of the other, for 
 
 Overlapping seeds would let spawned runs reuse the draws that the report runs use.
 
-## Sources
-
-
 ## Applies to
 
 - `mutations.seeds` (named:seed-sets-disjoint)

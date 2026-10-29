@@ -65,12 +65,7 @@ fn guide_json_lists_every_step_with_its_output() {
     }
     for id in ["run", "report"] {
         let s = steps.iter().find(|s| s["id"] == id).unwrap();
-        assert!(
-            s["does"]
-                .as_str()
-                .unwrap()
-                .contains("available from Plan 2/3")
-        );
+        assert!(s["does"].as_str().unwrap().contains("not available yet"));
     }
 }
 
@@ -321,4 +316,155 @@ fn an_unreadable_plan_log_surfaces_as_a_diagnostic() {
     let out = stdout(&a);
     assert!(out.contains("E-CNF-005"), "{out}");
     assert!(out.contains("cannot be read"), "{out}");
+}
+
+fn token() -> String {
+    format!("AKIA{}", "ABCDEFGHIJKLMNOP")
+}
+
+#[test]
+fn review_withholds_a_flagged_value() {
+    let t = token();
+    let (_d, home, spec) =
+        setup(|s| s.replace("population = \"\"", &format!("population = \"key {t}\"")));
+    let a = bin(&home).arg("review").arg(&spec).assert().code(1);
+    let out = stdout(&a);
+    assert!(!out.contains(&t), "{out}");
+    assert!(out.contains("Population: (withheld: E-SEC-001)"), "{out}");
+}
+
+#[test]
+fn an_unknown_key_that_looks_like_a_token_is_never_printed() {
+    let t = token();
+    let (_d, home, spec) = setup(|s| {
+        s.replace(
+            "test_log = false",
+            &format!("test_log = false\n\"{t}\" = 1"),
+        )
+    });
+    for args in [vec!["check"], vec!["check", "--json"], vec!["review"]] {
+        let mut c = bin(&home);
+        c.args(&args).arg(&spec);
+        let a = c.assert().code(1);
+        let out = stdout(&a);
+        assert!(!out.contains(&t), "{args:?}: {out}");
+        assert!(!stderr(&a).contains(&t));
+        assert!(out.contains("study.<key>"), "{args:?}: {out}");
+    }
+}
+
+#[test]
+fn new_changes_only_the_study_id_and_the_result_checks() {
+    for name in ["numeric-ablation", "planted-spawn"] {
+        let dir = TempDir::new().unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(home.join("machine.toml"), "max_level = 1\n").unwrap();
+        bin(&home)
+            .current_dir(&work)
+            .args(["new", "--template", name, "--id", "zz-1"])
+            .assert()
+            .code(0);
+        let spec = work.join("studies/zz-1/spec.toml");
+        let made = std::fs::read_to_string(&spec).unwrap();
+        let orig = std::fs::read_to_string(format!("../../templates/{name}.toml")).unwrap();
+        let diff: Vec<(&str, &str)> = orig
+            .lines()
+            .zip(made.lines())
+            .filter(|(a, b)| a != b)
+            .collect();
+        assert_eq!(orig.lines().count(), made.lines().count());
+        assert_eq!(diff.len(), 1, "{diff:?}");
+        assert!(diff[0].1.starts_with("id = \"zz-1\""));
+        assert!(made.contains("id = \"H1\"") && made.contains("id = \"exact\""));
+        bin(&home).arg("check").arg(&spec).assert().code(0);
+    }
+}
+
+#[test]
+fn check_resolves_inputs_from_a_bare_filename() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(home.join("machine.toml"), "max_level = 1\n").unwrap();
+    std::fs::create_dir(dir.path().join("data")).unwrap();
+    std::fs::write(dir.path().join("data/example.txt"), "hello").unwrap();
+    let text = std::fs::read_to_string(TEMPLATE).unwrap();
+    let write = |sha: &str| {
+        std::fs::write(
+            dir.path().join("spec.toml"),
+            text.replace("sha256 = \"\"", &format!("sha256 = \"{sha}\"")),
+        )
+        .unwrap();
+    };
+    write(&ignorarium::canon::sha256_hex(b"hello"));
+    let a = bin(&home)
+        .current_dir(dir.path())
+        .args(["check", "spec.toml"])
+        .assert()
+        .code(0);
+    assert!(!stdout(&a).contains("E-HSH-001"));
+    // A wrong pin fails with the same call: the file was found and hashed.
+    write(&"0".repeat(64));
+    let a = bin(&home)
+        .current_dir(dir.path())
+        .args(["check", "spec.toml"])
+        .assert()
+        .code(1);
+    assert!(stdout(&a).contains("E-HSH-001"));
+}
+
+#[test]
+fn check_json_reports_a_load_failure_as_one_object() {
+    let (_d, home, spec) = setup(|_| "[study\n".into());
+    let a = bin(&home)
+        .arg("check")
+        .arg(&spec)
+        .arg("--json")
+        .assert()
+        .code(1);
+    let v = json_out(&a);
+    assert_eq!(v["diagnostics"].as_array().unwrap().len(), 0);
+    assert!(v["error"].as_str().unwrap().contains("TOML error at 1:"));
+    assert!(v["hash"].is_null());
+    assert!(v.get("estimate").is_none());
+    let a = bin(&home)
+        .args(["check", "--json", "missing.toml"])
+        .assert()
+        .code(2);
+    assert!(
+        json_out(&a)["error"]
+            .as_str()
+            .unwrap()
+            .contains("missing.toml")
+    );
+}
+
+#[test]
+fn guide_wording_is_public() {
+    let dir = TempDir::new().unwrap();
+    let a = bin(dir.path()).arg("guide").assert().success();
+    let out = stdout(&a);
+    assert!(!out.contains("Plan 2"));
+    assert!(out.matches("not available yet").count() >= 2);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_stdout_write_error_other_than_a_closed_pipe_exits_2() {
+    let dir = TempDir::new().unwrap();
+    let full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .unwrap();
+    let st = std::process::Command::new(env!("CARGO_BIN_EXE_ignorarium"))
+        .env("IGNORARIUM_HOME", dir.path())
+        .arg("guide")
+        .stdout(full)
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert_eq!(st.code(), Some(2));
 }

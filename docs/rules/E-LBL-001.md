@@ -14,9 +14,6 @@ Set label to signal, or change the mode to confirmatory.
 
 Only a confirmatory study with a registered test can earn a stronger label. Exploratory results are leads.
 
-## Sources
-
-
 ## Applies to
 
 - `study.label` (named:label-allowed-for-mode), when mode = exploratory

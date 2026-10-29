@@ -14,9 +14,6 @@ Pin the input: add its SHA-256, 64 lowercase hex characters.
 
 Without a pin the run cannot tell if the file changed after the plan was approved. The run itself still starts.
 
-## Sources
-
-
 ## Applies to
 
 - `inputs[*].sha256` (non-empty)

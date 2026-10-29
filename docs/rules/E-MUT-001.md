@@ -14,9 +14,6 @@ Set mutations.depth_cap to 2 or less.
 
 Each spawn level multiplies the number of runs and the chances of a chance finding. The cap is 2.
 
-## Sources
-
-
 ## Applies to
 
 - `mutations.depth_cap` (named:depth-cap)
