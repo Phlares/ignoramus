@@ -150,6 +150,19 @@ fn curl_failure_is_a_transport_error() {
 }
 
 #[test]
+fn curl_error_text_is_escaped() {
+    let dir = TempDir::new().unwrap();
+    let curl = Curl::with_program(fake(dir.path(), r"printf 'bad\033[31m\nred\n' >&2; exit 6"));
+    match curl
+        .send(&req("https://h/x", None, Body::None, true))
+        .unwrap_err()
+    {
+        Error::Transport(m) => assert_eq!(m, r"curl exited with 6: bad\u{1b}[31m\nred"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn short_or_bad_tail_is_a_transport_error() {
     for out in ["20", "abc\\n2x1"] {
         let dir = TempDir::new().unwrap();

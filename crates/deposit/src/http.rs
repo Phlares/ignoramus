@@ -201,7 +201,7 @@ impl Transport for Curl {
                 .map_or("a signal".to_string(), |c| c.to_string());
             return Err(Error::Transport(format!(
                 "curl exited with {code}: {}",
-                String::from_utf8_lossy(&stderr).trim()
+                String::from_utf8_lossy(&stderr).trim().escape_debug()
             )));
         }
         // At most 3 bytes follow the newline, so only 100 to 599 written as three digits passes.
