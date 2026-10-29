@@ -177,6 +177,86 @@ fn build_fails_on_a_bad_engine_or_a_missing_recipe() {
     assert!(matches!(build(&b, &empty, &store), Err(EnvError::Io(_))));
 }
 
+/// An engine whose build prints `stderr`, with no final newline, and fails.
+fn failing(dir: &Path, stderr: &str) -> Builder {
+    let p = dir.join("failing");
+    common::write_exec(
+        &p,
+        &format!("#!/bin/sh\nprintf '%s' '{stderr}' >&2\nexit 1\n"),
+    );
+    Builder::with_program(&p)
+}
+
+#[test]
+fn a_failed_build_keeps_the_last_2000_characters_of_its_errors() {
+    let t = tempfile::tempdir().unwrap();
+    let dir = recipe_dir(t.path());
+    let store = store_in(t.path());
+    let long = format!("{}{}", "x".repeat(10), "y".repeat(2000));
+    for (stderr, want) in [
+        (" boom ".to_string(), "boom".to_string()),
+        (long, "y".repeat(2000)),
+    ] {
+        match build(&failing(t.path(), &stderr), &dir, &store) {
+            Err(EnvError::Build(m)) => {
+                assert_eq!(m.len(), want.len());
+                assert_eq!(m, want);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+#[test]
+fn env_errors_read_as_plain_text() {
+    assert_eq!(
+        EnvError::NoBuilder.to_string(),
+        "neither docker nor podman is on PATH"
+    );
+    assert_eq!(
+        EnvError::Build("boom".into()).to_string(),
+        "image build failed: boom"
+    );
+    assert_eq!(
+        EnvError::Io(std::io::Error::other("gone")).to_string(),
+        "I/O failed: gone"
+    );
+}
+
+#[test]
+fn detect_takes_docker_then_podman_from_path() {
+    const NAME: &str = "detect_takes_docker_then_podman_from_path";
+    if common::is_child(NAME) {
+        let want = match std::env::var("WANT").unwrap().as_str() {
+            "docker" => Some(Builder::docker()),
+            "podman" => Some(Builder::podman()),
+            _ => None,
+        };
+        let shown = |b: Option<Builder>| b.map(|b| format!("{b:?}"));
+        assert_eq!(shown(Builder::detect()), shown(want));
+        return;
+    }
+    let t = tempfile::tempdir().unwrap();
+    let at = |name: &str| t.path().join(name);
+    for d in ["both", "podman-only", "neither"] {
+        std::fs::create_dir(at(d)).unwrap();
+    }
+    std::fs::write(at("both/docker"), "").unwrap();
+    std::fs::write(at("both/podman"), "").unwrap();
+    std::fs::write(at("podman-only/podman"), "").unwrap();
+    // A folder with the engine's name is not the engine.
+    std::fs::create_dir(at("neither/docker")).unwrap();
+    for (d, want) in [
+        ("both", "docker"),
+        ("podman-only", "podman"),
+        ("neither", "none"),
+    ] {
+        let envs = [("PATH", at(d).into_os_string()), ("WANT", want.into())];
+        let envs: Vec<_> = envs.iter().map(|(k, v)| (*k, v.as_os_str())).collect();
+        assert!(common::in_child(NAME, t.path(), &envs), "{d}");
+    }
+}
+
 #[test]
 fn rebuild_rate_is_the_fraction_equal_to_the_first() {
     let t = tempfile::tempdir().unwrap();

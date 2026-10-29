@@ -175,7 +175,7 @@ fn read_nofollow(p: &Path) -> io::Result<String> {
 
 fn tail(bytes: &[u8]) -> String {
     let s = String::from_utf8_lossy(bytes);
-    let start = s.char_indices().rev().nth(TAIL).map_or(0, |(i, _)| i);
+    let start = s.char_indices().rev().nth(TAIL - 1).map_or(0, |(i, _)| i);
     s[start..].trim().to_string()
 }
 

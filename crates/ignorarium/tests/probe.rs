@@ -1,3 +1,4 @@
+mod common;
 use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome, Watch, level0::Level0};
 use ignorarium::files::replace_atomic;
 use ignorarium::machine::{self, Machine};
@@ -39,6 +40,12 @@ fn probe_reports_the_highest_available_level() {
 #[test]
 fn probe_fills_host_facts() {
     let d = tempfile::tempdir().unwrap();
+    // Host facts in an existing file give way to what the probe measures.
+    std::fs::write(
+        d.path().join("machine.toml"),
+        "name = \"kept\"\ncpus = 999\nmem_gib = 4096\n",
+    )
+    .unwrap();
     let b: Vec<Box<dyn Backend>> = vec![Box::new(Level0)];
     let m = machine::probe(d.path(), &b).unwrap();
     let host = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap();
@@ -47,7 +54,8 @@ fn probe_fills_host_facts() {
         m.cpus as usize,
         std::thread::available_parallelism().unwrap().get()
     );
-    assert!(m.mem_gib >= 1);
+    let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap();
+    assert_eq!(Some(m.mem_gib), machine::mem_gib_of(&meminfo));
     let def = Machine::default();
     assert_eq!(m.rate_usd_per_hour, def.rate_usd_per_hour);
     assert_eq!(m.long_job_minutes, def.long_job_minutes);
@@ -139,6 +147,18 @@ fn replace_atomic_leaves_no_temp_on_failure() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     assert_eq!(names, vec!["sub".to_string()]);
+}
+
+#[test]
+fn replace_atomic_takes_a_bare_file_name() {
+    const NAME: &str = "replace_atomic_takes_a_bare_file_name";
+    if common::is_child(NAME) {
+        replace_atomic(std::path::Path::new("f"), b"bare", 0o600).unwrap();
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    assert!(common::in_child(NAME, d.path(), &[]));
+    assert_eq!(std::fs::read(d.path().join("f")).unwrap(), b"bare");
 }
 
 #[test]

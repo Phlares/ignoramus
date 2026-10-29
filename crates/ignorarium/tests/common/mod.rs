@@ -120,6 +120,26 @@ pub fn named<'a>(events: &'a [serde_json::Value], name: &str) -> Vec<&'a serde_j
     events.iter().filter(|e| e["name"] == name).collect()
 }
 
+const CHILD: &str = "IGNORARIUM_TEST_CHILD";
+
+/// True inside the child that `in_child(name, ..)` starts.
+pub fn is_child(name: &str) -> bool {
+    std::env::var_os(CHILD).is_some_and(|v| v == name)
+}
+
+/// Run test `name` of this test binary again in a child process with `cwd` and `envs`.
+/// Process-wide state such as `PATH` or the working folder then changes for that test
+/// alone. True when the one test ran and passed.
+pub fn in_child(name: &str, cwd: &Path, envs: &[(&str, &std::ffi::OsStr)]) -> bool {
+    let mut c = std::process::Command::new(std::env::current_exe().unwrap());
+    c.args([name, "--exact"]).current_dir(cwd).env(CHILD, name);
+    for (k, v) in envs {
+        c.env(k, v);
+    }
+    let out = c.output().unwrap();
+    out.status.success() && String::from_utf8_lossy(&out.stdout).contains(" 1 passed")
+}
+
 /// Write an executable file without this process holding a write descriptor to it.
 /// A thread that forks while such a descriptor is open hands it to its child, and an
 /// `exec` of the file then fails with ETXTBSY. A child process writes the file instead.
