@@ -32,6 +32,7 @@ const TIMEOUT_FACTOR: f64 = 10.0;
 const PATH_ENV: &str = "/usr/bin:/bin";
 const PAUSE_REQUESTED: &str = "a pause was requested";
 const INTERRUPTED: &str = "interrupted by a signal";
+const REAPED: &str = "SIGCHLD is ignored; the box cannot see a row end";
 /// The payload, relative to the study folder.
 const PAYLOAD: &str = "payload/run";
 
@@ -507,13 +508,25 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
 }
 
 /// Before each attempt: the budget has room, the payload and inputs are the bytes the run
-/// began with, and no signal arrived. Otherwise the run pauses and the attempt never starts.
-/// The signal comes last, so one that lands during the re-hash still counts.
+/// began with, the box can see a child end, and no signal arrived. Otherwise the run pauses
+/// and the attempt never starts. The signal comes last, so one that lands during the
+/// re-hash still counts.
 fn gate(plan: &RunPlan, dir: &Path, books: &mut Books) -> Result<Option<Halt>, RunError> {
     let budget = books.check(plan, dir)?;
     Ok(budget
         .or_else(|| stale(plan, dir).map(Halt::Pause))
+        .or_else(|| blind_to_exits().map(Halt::Pause))
         .or_else(|| sys::interrupted().then(|| Halt::Pause(INTERRUPTED.into()))))
+}
+
+/// Why the box cannot see a row end, when it cannot. The library reads the SIGCHLD action and
+/// leaves it as its caller set it.
+fn blind_to_exits() -> Option<String> {
+    match sys::sigchld_ignored() {
+        Ok(false) => None,
+        Ok(true) => Some(REAPED.into()),
+        Err(e) => Some(format!("cannot read the SIGCHLD action: {e}")),
+    }
 }
 
 /// This session's spend: the signed records' tally, the alerts already fired, and the row

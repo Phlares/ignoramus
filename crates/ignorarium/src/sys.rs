@@ -30,6 +30,13 @@ pub fn catch_interrupts() -> io::Result<()> {
     set_action(libc::SIGCHLD, libc::SIG_DFL, 0)
 }
 
+/// True when the kernel reaps this process's children on its own: SIGCHLD is ignored, or
+/// its action asks for no zombies. A child then vanishes before `has_exited` can see it end.
+pub fn sigchld_ignored() -> io::Result<bool> {
+    let a = action_of(libc::SIGCHLD)?;
+    Ok(a.sa_sigaction == libc::SIG_IGN || a.sa_flags & libc::SA_NOCLDWAIT != 0)
+}
+
 /// The action installed for `sig` now.
 fn action_of(sig: libc::c_int) -> io::Result<libc::sigaction> {
     // SAFETY: an all-zero `sigaction` is a valid value for this plain C struct.

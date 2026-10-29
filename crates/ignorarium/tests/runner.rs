@@ -432,6 +432,46 @@ fn a_signal_during_a_failed_attempt_stops_the_retry() {
     assert_eq!(spend[0].body["reason"], "infrastructure fault: box fault");
 }
 
+const REAPED: &str = "SIGCHLD is ignored; the box cannot see a row end";
+
+/// Runs only as the child of the SIGCHLD test: a library run of a prepared study.
+#[test]
+fn sigchld_ignored_child() {
+    let (Some(root), Some(id)) = (
+        std::env::var_os("SIGCHLD_HOME"),
+        std::env::var("SIGCHLD_STUDY").ok(),
+    ) else {
+        return;
+    };
+    let home = ignorarium::home::Home::open_at(std::path::Path::new(&root)).unwrap();
+    let plan = prepare_with(&home, &id, vec![Box::new(Level0)]).unwrap();
+    assert_eq!(run(&plan).unwrap(), RunStatus::Paused(REAPED.into()));
+}
+
+#[test]
+fn a_library_run_with_sigchld_ignored_pauses_before_row_0() {
+    let lab = lab();
+    let dir = plain(&lab, "reaped");
+    // The study is set up here; only the run happens in a process that ignores SIGCHLD.
+    let out = std::process::Command::new("env")
+        .arg("--ignore-signal=CHLD")
+        .arg(std::env::current_exe().unwrap())
+        .args(["--exact", "sigchld_ignored_child"])
+        .env("SIGCHLD_HOME", &lab.home.root)
+        .env("SIGCHLD_STUDY", "reaped")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && text.contains(" 1 passed"), "{text}");
+    assert!(rows_of(&lab, "reaped").is_empty());
+    assert!(kind_of(&lab, "reaped", "spend").is_empty());
+    assert!(!dir.join("run/rows").exists());
+    assert_eq!(
+        State::read(&lab.home, "reaped").unwrap(),
+        Some(State::Paused(REAPED.into()))
+    );
+}
+
 /// The signal mask `field` (`SigCgt`, `SigIgn`) of this process, from `/proc/self/status`.
 fn signal_mask(field: &str) -> u64 {
     let status = std::fs::read_to_string("/proc/self/status").unwrap();
