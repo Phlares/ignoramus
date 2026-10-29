@@ -244,7 +244,65 @@ fn machine_bad_file_is_an_error_naming_the_file() {
         std::fs::write(&file, text).unwrap();
         let err = machine::load(dir.path()).unwrap_err().to_string();
         assert!(err.contains("machine.toml"), "{err}");
-        assert!(err.contains("line 1"), "{err}");
+        assert!(err.contains("line"), "{err}");
+        assert!(err.contains("column"), "{err}");
+    }
+}
+
+#[test]
+fn machine_out_of_range_values_name_the_field() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("machine.toml");
+    let cases = [
+        ("rate_usd_per_hour = -0.01", "rate_usd_per_hour"),
+        ("rate_usd_per_hour = inf", "rate_usd_per_hour"),
+        ("rate_usd_per_hour = nan", "rate_usd_per_hour"),
+        ("cpus = 0", "cpus"),
+        ("long_job_minutes = 0", "long_job_minutes"),
+    ];
+    for (text, field) in cases {
+        std::fs::write(&file, text).unwrap();
+        let err = machine::load(dir.path()).unwrap_err().to_string();
+        assert!(
+            err.contains("machine.toml") && err.contains(field),
+            "{text}: {err}"
+        );
+    }
+    for ok in ["rate_usd_per_hour = 0", "cpus = 1", "long_job_minutes = 1"] {
+        std::fs::write(&file, ok).unwrap();
+        machine::load(dir.path()).unwrap();
+    }
+}
+
+#[test]
+fn blind_default_is_false_without_a_usable_mode() {
+    for mut v in [json!({}), json!({ "study": { "mode": 5 } })] {
+        let filled = apply_defaults(&mut v);
+        assert!(filled.contains(&("access.blind".to_string(), json!(false))));
+        assert_eq!(v["access"]["blind"], json!(false));
+    }
+}
+
+#[test]
+fn defaults_table_matches_the_templates() {
+    for t in ["numeric-ablation", "planted-spawn"] {
+        let full = ignorarium::spec::load(Path::new(&format!("../../templates/{t}.toml")))
+            .unwrap()
+            .value;
+        for ptr in [
+            "/design/alpha",
+            "/design/power",
+            "/design/repeats",
+            "/mutations/depth_cap",
+            "/scope/min_isolation",
+            "/access/blind",
+        ] {
+            let mut v = full.clone();
+            remove(&mut v, ptr);
+            let filled = apply_defaults(&mut v);
+            assert_eq!(filled.len(), 1, "{t} {ptr}");
+            assert_eq!(v, full, "{t} {ptr}");
+        }
     }
 }
 

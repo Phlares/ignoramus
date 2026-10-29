@@ -55,8 +55,22 @@ pub fn load(home: &Path) -> Result<Machine, MachineError> {
             });
         }
     };
-    toml::from_str(&text).map_err(|e| MachineError {
-        file,
+    let m: Machine = toml::from_str(&text).map_err(|e| MachineError {
+        file: file.clone(),
         msg: e.to_string(),
-    })
+    })?;
+    let bad = |field: &str, need: &str| MachineError {
+        file: file.clone(),
+        msg: format!("{field} must be {need}"),
+    };
+    if !m.rate_usd_per_hour.is_finite() || m.rate_usd_per_hour < 0.0 {
+        return Err(bad("rate_usd_per_hour", "a finite number, 0 or more"));
+    }
+    if m.cpus == 0 {
+        return Err(bad("cpus", "at least 1"));
+    }
+    if m.long_job_minutes == 0 {
+        return Err(bad("long_job_minutes", "at least 1"));
+    }
+    Ok(m)
 }

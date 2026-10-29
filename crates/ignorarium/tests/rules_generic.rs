@@ -860,3 +860,64 @@ fn budget_values_of_zero_pass_the_range_and_negatives_do_not() {
         assert_eq!(rng_codes(&neg), [format!("scope.budget.{k}")]);
     }
 }
+
+#[test]
+fn cost_inputs_are_range_checked_at_their_edges() {
+    let trig = |e: Value| json!([{ "id": "T1", "metric": "m", "threshold_e": e }]);
+    let cases: Vec<(Vec<&str>, Value, Vec<String>)> = vec![
+        (
+            vec!["design", "row_seconds"],
+            json!(0.0),
+            vec!["design.row_seconds".into()],
+        ),
+        (
+            vec!["design", "row_seconds"],
+            json!(-1.0),
+            vec!["design.row_seconds".into()],
+        ),
+        (vec!["design", "row_seconds"], json!(1e-9), vec![]),
+        (
+            vec!["design", "units_per_cluster"],
+            json!(0),
+            vec!["design.units_per_cluster".into()],
+        ),
+        (
+            vec!["design", "units_per_cluster"],
+            json!(-3),
+            vec!["design.units_per_cluster".into()],
+        ),
+        (vec!["design", "units_per_cluster"], json!(1), vec![]),
+        (
+            vec!["design", "variance", "value"],
+            json!(-1e-9),
+            vec!["design.variance.value".into()],
+        ),
+        (vec!["design", "variance", "value"], json!(0.0), vec![]),
+        (
+            vec!["design", "sesoi"],
+            json!(-1e-9),
+            vec!["design.sesoi".into()],
+        ),
+        (vec!["design", "sesoi"], json!(0.0), vec![]),
+        (
+            vec!["mutations", "depth_cap"],
+            json!(-1),
+            vec!["mutations.depth_cap".into()],
+        ),
+        (vec!["mutations", "depth_cap"], json!(0), vec![]),
+        (
+            vec!["mutations", "triggers"],
+            trig(json!(0.0)),
+            vec!["mutations.triggers[0].threshold_e".into()],
+        ),
+        (
+            vec!["mutations", "triggers"],
+            trig(json!(-1.0)),
+            vec!["mutations.triggers[0].threshold_e".into()],
+        ),
+        (vec!["mutations", "triggers"], trig(json!(1e-9)), vec![]),
+    ];
+    for (path, v, want) in cases {
+        assert_eq!(rng_codes(&with(&path, v.clone())), want, "{path:?} = {v}");
+    }
+}

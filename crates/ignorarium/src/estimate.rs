@@ -82,8 +82,10 @@ pub fn estimate(spec: &Spec, machine: &Machine, units: u64) -> Estimate {
         .map(|c| (c.id.clone(), per_condition))
         .collect();
     let rows = (d.conditions.len() as u64).saturating_mul(per_condition);
-    let cpu_hours = rows as f64 * d.row_seconds / 3600.0;
-    let wall_hours = cpu_hours / f64::from(machine.cpus.max(1));
+    let cpu_seconds = rows as f64 * d.row_seconds;
+    let cpus = f64::from(machine.cpus.max(1));
+    let cpu_hours = cpu_seconds / 3600.0;
+    let wall_hours = cpu_hours / cpus;
     Estimate {
         rows,
         rows_per_condition,
@@ -95,6 +97,6 @@ pub fn estimate(spec: &Spec, machine: &Machine, units: u64) -> Estimate {
             Mode::Confirmatory => "confirmed",
         }
         .into(),
-        is_long_job: wall_hours * 60.0 > f64::from(machine.long_job_minutes),
+        is_long_job: cpu_seconds / cpus > f64::from(machine.long_job_minutes) * 60.0,
     }
 }
