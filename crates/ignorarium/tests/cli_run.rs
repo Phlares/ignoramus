@@ -281,9 +281,12 @@ if [ "$IGNORARIUM_ROW" = 0 ]; then
 fi
 "#;
 
-/// `ignorarium run <id>` in the background.
-fn start_run(lab: &Lab, id: &str) -> std::process::Child {
-    std::process::Command::new(assert_cmd::cargo::cargo_bin("ignorarium"))
+/// `ignorarium run <id>` in the background, through `env` with `env_args`, which `env`
+/// applies before it runs the box in its own place (same process id).
+fn start_run(lab: &Lab, id: &str, env_args: &[&str]) -> std::process::Child {
+    std::process::Command::new("env")
+        .args(env_args)
+        .arg(assert_cmd::cargo::cargo_bin("ignorarium"))
         .args(["run", id])
         .env("IGNORARIUM_HOME", &lab.home.root)
         .stdin(std::process::Stdio::null())
@@ -342,19 +345,25 @@ fn live_in_group(pgid: u64) -> Vec<u64> {
         .collect()
 }
 
-/// Send `sig` to a box whose row 0 runs: the row's group dies, its spend is recorded, and
-/// the run pauses with exit 1.
-fn a_signal_pauses_the_run(sig: &str) {
-    let lab = lab();
-    let id = "sig";
-    let dir = with_payload(&lab, id, SLEEPY_ROW_0);
-    let child = start_run(&lab, id);
-    let row = row_0_file(&dir);
+fn send(sig: &str, pid: u32) {
     let sent = std::process::Command::new("kill")
-        .args([format!("-{sig}"), child.id().to_string()])
+        .args([format!("-{sig}"), pid.to_string()])
         .status()
         .unwrap();
     assert!(sent.success());
+}
+
+/// Send `sig` `times` times to a box whose row 0 runs: the row's group dies, its spend is
+/// recorded once, and the run pauses with exit 1.
+fn a_signal_pauses_the_run(sig: &str, times: usize) {
+    let lab = lab();
+    let id = "sig";
+    let dir = with_payload(&lab, id, SLEEPY_ROW_0);
+    let child = start_run(&lab, id, &[]);
+    let row = row_0_file(&dir);
+    for _ in 0..times {
+        send(sig, child.id());
+    }
     let (code, stderr) = ended(child);
     let why = "interrupted by a signal";
     assert_eq!(code.code(), Some(1), "{code:?} {stderr}");
@@ -385,17 +394,17 @@ fn a_signal_pauses_the_run(sig: &str) {
 
 #[test]
 fn sigint_kills_the_row_records_its_spend_and_pauses() {
-    a_signal_pauses_the_run("INT");
+    a_signal_pauses_the_run("INT", 1);
 }
 
 #[test]
 fn sigterm_kills_the_row_records_its_spend_and_pauses() {
-    a_signal_pauses_the_run("TERM");
+    a_signal_pauses_the_run("TERM", 1);
 }
 
 #[test]
 fn sighup_kills_the_row_records_its_spend_and_pauses() {
-    a_signal_pauses_the_run("HUP");
+    a_signal_pauses_the_run("HUP", 1);
 }
 
 #[test]
@@ -403,7 +412,7 @@ fn stop_sends_its_request_before_it_reads_a_torn_log() {
     let lab = lab();
     let id = "torn";
     let dir = with_payload(&lab, id, SLEEPY_ROW_0);
-    let child = start_run(&lab, id);
+    let child = start_run(&lab, id, &[]);
     let row = row_0_file(&dir);
     // A torn last line, as a crash in mid-write leaves it.
     let log = dir.join("records.jsonl");
@@ -434,19 +443,43 @@ fn stop_sends_its_request_before_it_reads_a_torn_log() {
 }
 
 #[test]
+fn two_sighups_in_a_row_still_end_in_one_pause() {
+    // A closing terminal sends SIGHUP twice: from the shell, then from the kernel.
+    a_signal_pauses_the_run("HUP", 2);
+}
+
+/// Row 0 marks itself started, then takes a second.
+const SLOW_ROW_0: &str = r#"#!/bin/sh
+if [ "$IGNORARIUM_ROW" = 0 ]; then
+  echo started > "$IGNORARIUM_OUT/started"
+  sleep 1
+fi
+"#;
+
+#[test]
+fn a_box_started_with_sighup_ignored_runs_on_through_a_sighup() {
+    let lab = lab();
+    let id = "nohup";
+    let dir = with_payload(&lab, id, SLOW_ROW_0);
+    // As `nohup` starts it.
+    let child = start_run(&lab, id, &["--ignore-signal=HUP"]);
+    row_0_file(&dir);
+    send("HUP", child.id());
+    let (code, stderr) = ended(child);
+    assert_eq!(code.code(), Some(0), "{code:?} {stderr}");
+    assert_eq!(kind_of(&lab, id, "row").len(), 6);
+    assert!(kind_of(&lab, id, "spend").is_empty());
+    assert_eq!(status(&lab, id)["state"], "done");
+}
+
+#[test]
 fn a_box_started_with_sigchld_ignored_still_sees_each_row_end() {
     let lab = lab();
     plain(&lab, "chld");
     // An ignored SIGCHLD lets the kernel reap children before the box can look at them.
-    let out = std::process::Command::new("env")
-        .arg("--ignore-signal=CHLD")
-        .arg(assert_cmd::cargo::cargo_bin("ignorarium"))
-        .args(["run", "chld"])
-        .env("IGNORARIUM_HOME", &lab.home.root)
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let child = start_run(&lab, "chld", &["--ignore-signal=CHLD"]);
+    let (code, stderr) = ended(child);
+    assert_eq!(code.code(), Some(0), "{stderr}");
     let rows = kind_of(&lab, "chld", "row");
     assert_eq!(rows.len(), 6);
     for r in &rows {

@@ -10,16 +10,35 @@ extern "C" fn note_interrupt(_: libc::c_int) {
     INTERRUPTED.store(true, Ordering::SeqCst);
 }
 
-/// SIGINT, SIGTERM and SIGHUP only set the flag `interrupted` reads. Each handler runs once:
-/// a second signal of the same kind ends the process the default way. SIGCHLD goes back to
-/// its default, since an inherited "ignore" lets the kernel reap a child before `has_exited`
-/// sees it.
+/// SIGINT, SIGTERM and SIGHUP only set the flag `interrupted` reads. A signal ignored on
+/// entry stays ignored, as `nohup` and a shell's `&` ask. The SIGINT handler runs once, so a
+/// second Ctrl-C ends the process the default way; SIGTERM and SIGHUP stay caught, since a
+/// closing terminal sends SIGHUP twice. SIGCHLD goes back to its default, since an
+/// inherited "ignore" lets the kernel reap a child before `has_exited` sees it.
 pub fn catch_interrupts() -> io::Result<()> {
     let note = note_interrupt as extern "C" fn(libc::c_int) as libc::sighandler_t;
-    for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
-        set_action(sig, note, libc::SA_RESTART | libc::SA_RESETHAND)?;
+    let actions = [
+        (libc::SIGINT, libc::SA_RESETHAND),
+        (libc::SIGTERM, 0),
+        (libc::SIGHUP, 0),
+    ];
+    for (sig, reset) in actions {
+        if action_of(sig)?.sa_sigaction != libc::SIG_IGN {
+            set_action(sig, note, libc::SA_RESTART | reset)?;
+        }
     }
     set_action(libc::SIGCHLD, libc::SIG_DFL, 0)
+}
+
+/// The action installed for `sig` now.
+fn action_of(sig: libc::c_int) -> io::Result<libc::sigaction> {
+    // SAFETY: an all-zero `sigaction` is a valid value for this plain C struct.
+    let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: a null new action only reads the current one into `old`, a live local.
+    if unsafe { libc::sigaction(sig, std::ptr::null(), &mut old) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(old)
 }
 
 /// True once SIGINT, SIGTERM or SIGHUP arrived after `catch_interrupts`.
@@ -129,34 +148,43 @@ mod tests {
     use std::os::unix::thread::JoinHandleExt;
     use std::time::Duration;
 
-    /// The action installed for `sig`.
-    fn action_of(sig: libc::c_int) -> libc::sigaction {
-        // SAFETY: an all-zero `sigaction` is a valid value for this plain C struct.
-        let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
-        // SAFETY: a null new action only reads the current one into `old`.
-        assert_eq!(
-            unsafe { libc::sigaction(sig, std::ptr::null(), &mut old) },
-            0
-        );
-        old
+    fn handler(sig: libc::c_int) -> libc::sighandler_t {
+        action_of(sig).unwrap().sa_sigaction
     }
 
+    fn flags(sig: libc::c_int) -> libc::c_int {
+        action_of(sig).unwrap().sa_flags
+    }
+
+    /// One test, in order, since signal dispositions are process-wide.
     #[test]
-    fn interrupt_handlers_set_the_flag_once_then_fall_back_to_the_default() {
-        catch_interrupts().unwrap();
+    fn interrupt_handlers_keep_an_ignore_and_only_sigint_falls_back() {
         let note = note_interrupt as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        // A signal ignored on entry, as `nohup` leaves SIGHUP, stays ignored.
+        set_action(libc::SIGHUP, libc::SIG_IGN, 0).unwrap();
+        catch_interrupts().unwrap();
+        assert_eq!(handler(libc::SIGHUP), libc::SIG_IGN);
+        assert_eq!(handler(libc::SIGINT), note);
+        assert_eq!(handler(libc::SIGTERM), note);
+        assert_eq!(handler(libc::SIGCHLD), libc::SIG_DFL);
+        set_action(libc::SIGHUP, libc::SIG_DFL, 0).unwrap();
+        catch_interrupts().unwrap();
+        assert_eq!(handler(libc::SIGHUP), note);
         for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
-            let a = action_of(sig);
-            assert_eq!(a.sa_sigaction, note, "{sig}");
-            assert_ne!(a.sa_flags & libc::SA_RESTART, 0, "{sig}");
-            assert_ne!(a.sa_flags & libc::SA_RESETHAND, 0, "{sig}");
+            assert_ne!(flags(sig) & libc::SA_RESTART, 0, "{sig}");
         }
-        assert_eq!(action_of(libc::SIGCHLD).sa_sigaction, libc::SIG_DFL);
+        assert_ne!(flags(libc::SIGINT) & libc::SA_RESETHAND, 0);
+        assert_eq!(flags(libc::SIGTERM) & libc::SA_RESETHAND, 0);
+        assert_eq!(flags(libc::SIGHUP) & libc::SA_RESETHAND, 0);
         assert!(!interrupted());
-        // SAFETY: the handler for SIGHUP only stores to an atomic.
+        // SAFETY: the handlers for SIGHUP and SIGINT only store to an atomic.
         assert_eq!(unsafe { libc::raise(libc::SIGHUP) }, 0);
         assert!(interrupted());
-        assert_eq!(action_of(libc::SIGHUP).sa_sigaction, libc::SIG_DFL);
+        // A second SIGHUP finds the handler still there.
+        assert_eq!(handler(libc::SIGHUP), note);
+        // SAFETY: as above.
+        assert_eq!(unsafe { libc::raise(libc::SIGINT) }, 0);
+        assert_eq!(handler(libc::SIGINT), libc::SIG_DFL);
     }
 
     extern "C" fn ignore(_: libc::c_int) {}
