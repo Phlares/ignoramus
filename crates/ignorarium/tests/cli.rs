@@ -806,3 +806,52 @@ fn verify_reports_every_failure_even_for_an_unknown_study() {
     let err = stderr(&a);
     assert!(err.contains("planlog") && err.contains("nope"), "{err}");
 }
+
+#[test]
+fn check_finds_a_secret_in_a_comment_and_never_echoes_it() {
+    let token = format!("ghp_{}", "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8");
+    let edit = |t: String| {
+        let t = t.replacen(
+            "cpu_hours = 1.0",
+            &format!("cpu_hours = 1.0  # see {token}"),
+            1,
+        );
+        format!(
+            "{t}
+# old = \"{token}\"
+"
+        )
+    };
+    let (_d, home, spec) = setup(edit);
+    let text = std::fs::read_to_string(&spec).unwrap();
+    let line = |needle: &str| 1 + text.lines().position(|l| l.contains(needle)).unwrap();
+    let a = bin(&home)
+        .arg("check")
+        .arg(&spec)
+        .arg("--json")
+        .assert()
+        .code(1);
+    assert!(!stdout(&a).contains(&token));
+    let got: Vec<_> = json_out(&a)["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["code"] == "E-SEC-001")
+        .map(|d| {
+            (
+                d["code"].as_str().unwrap().to_string(),
+                d["path"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (
+                "E-SEC-001".to_string(),
+                format!("line {}", line("cpu_hours"))
+            ),
+            ("E-SEC-001".to_string(), format!("line {}", line("old ="))),
+        ]
+    );
+}

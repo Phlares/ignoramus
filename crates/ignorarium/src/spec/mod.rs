@@ -10,6 +10,8 @@ pub struct RawSpec {
     pub value: Value,
     /// `"sha256:"` followed by the hex digest of the canonical JSON.
     pub hash: String,
+    /// The text that was parsed: no BOM, LF line endings.
+    pub text: String,
 }
 
 #[derive(Debug)]
@@ -67,7 +69,7 @@ pub fn parse(bytes: &[u8]) -> Result<RawSpec, LoadError> {
         "sha256:{}",
         canon::sha256_hex(&canon::to_canonical(&value).map_err(LoadError::Canon)?)
     );
-    Ok(RawSpec { value, hash })
+    Ok(RawSpec { value, hash, text })
 }
 
 /// Integer vs float and the sign of zero are part of the hash (`1` and `1.0` differ).

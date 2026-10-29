@@ -78,7 +78,9 @@ pub fn distinct<T: Ord>(ids: impl IntoIterator<Item = T>) -> u64 {
 pub fn units(spec: &Spec) -> u64 {
     let d = &spec.design;
     let clusters = distinct(d.selection.clusters.iter().chain(&d.confirmation.clusters));
-    clusters.max(1).saturating_mul(u64::from(d.units_per_cluster))
+    clusters
+        .max(1)
+        .saturating_mul(u64::from(d.units_per_cluster))
 }
 
 pub fn estimate(spec: &Spec, machine: &Machine, units: u64) -> Estimate {

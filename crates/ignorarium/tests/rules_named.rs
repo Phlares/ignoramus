@@ -26,6 +26,7 @@ fn ctx_with(dir: &Path, prior: Box<dyn PriorUse>) -> CheckCtx {
         study_dir: dir.to_path_buf(),
         prior,
         machine_max_level: 2,
+        spec_text: String::new(),
     }
 }
 
@@ -172,12 +173,14 @@ fn faults() -> Vec<Fault> {
                 ("/design/units_per_cluster", j(json!(1))),
                 (
                     "/design/confirmation/clusters",
-                    j(json!(ids("c", 30)
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .chain(ids("c", 30).as_array().unwrap())
-                        .collect::<Vec<_>>())),
+                    j(json!(
+                        ids("c", 30)
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .chain(ids("c", 30).as_array().unwrap())
+                            .collect::<Vec<_>>()
+                    )),
                 ),
             ],
             vec![("E-CNF-002", "design.confirmation.clusters")],
@@ -345,12 +348,14 @@ fn faults() -> Vec<Fault> {
         f(
             vec![(
                 "/design/confirmation/clusters",
-                j(json!(ids("c", 11)
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .chain(&[json!([])])
-                    .collect::<Vec<_>>())),
+                j(json!(
+                    ids("c", 11)
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .chain(&[json!([])])
+                        .collect::<Vec<_>>()
+                )),
             )],
             vec![],
         ),

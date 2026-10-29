@@ -82,6 +82,7 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         study_dir: study_dir(spec_path),
         prior,
         machine_max_level: machine.max_level,
+        spec_text: raw.text,
     };
     let (value, filled, diags) = rules::check_all(&raw.value, rules::builtin(), &cc);
     let mut a = Assessed {

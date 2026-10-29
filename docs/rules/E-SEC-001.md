@@ -21,3 +21,4 @@ A registered plan is kept and shared. A secret or personal detail in it cannot b
 ## Applies to
 
 - `**` (named:secret-scan)
+- `comments` (named:comment-scan)

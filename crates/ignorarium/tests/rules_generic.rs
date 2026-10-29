@@ -1041,8 +1041,11 @@ fn the_documented_codes_are_exactly_the_register_refusals() {
 
 #[test]
 fn unique_reports_each_repeat_at_its_element_and_skips_non_strings() {
-    let r = one_rule("", "path = \"a\"
-check = \"unique\"");
+    let r = one_rule(
+        "",
+        "path = \"a\"
+check = \"unique\"",
+    );
     for ok in [
         json!({}),
         json!({"a": "x"}),
@@ -1061,9 +1064,12 @@ check = \"unique\"");
 
 #[test]
 fn unique_with_a_key_compares_that_field_of_each_table() {
-    let r = one_rule("", "path = \"a\"
+    let r = one_rule(
+        "",
+        "path = \"a\"
 check = \"unique\"
-key = \"id\"");
+key = \"id\"",
+    );
     for ok in [
         json!({"a": [{"id": "x"}, {"id": "y"}]}),
         json!({"a": [{"id": 1}, {"id": 1}]}),

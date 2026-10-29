@@ -324,6 +324,7 @@ fn ctx(dir: &Path) -> CheckCtx {
         study_dir: dir.to_path_buf(),
         prior: Box::new(NoPriorUse),
         machine_max_level: 2,
+        spec_text: String::new(),
     }
 }
 

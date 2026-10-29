@@ -18,6 +18,8 @@ pub struct CheckCtx {
     pub prior: Box<dyn PriorUse>,
     /// The highest isolation level this machine offers.
     pub machine_max_level: u8,
+    /// The spec text the loader parsed, for checks that read comments.
+    pub spec_text: String,
 }
 
 /// Where a check fired, and text for the end of the rule's problem sentence.
@@ -57,6 +59,7 @@ const NAMED: &[(&str, NamedFn)] = &[
     ("input-path-safe", input_path_safe),
     ("input-hash-matches", input_hash_matches),
     ("secret-scan", secret_scan),
+    ("comment-scan", comment_scan),
 ];
 
 fn lookup(name: &str) -> Option<NamedFn> {
@@ -306,7 +309,8 @@ fn power_met(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
         let detail = if variance <= 0.0 {
             "The variance must be > 0.".to_string()
         } else {
-            let have = distinct(clusters.iter().filter_map(Value::as_str)).saturating_mul(per.unsigned_abs());
+            let have = distinct(clusters.iter().filter_map(Value::as_str))
+                .saturating_mul(per.unsigned_abs());
             let need = required_units(alpha, power, variance.sqrt(), sesoi, m, icc);
             if have >= need {
                 continue;
@@ -413,19 +417,32 @@ fn trigger_declared(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
 
 // ---- secrets ----
 
-/// One hit per finding, at the string's path. The detail names the kind, never the text.
+/// One hit per finding at `path`. The detail names the kind, never the text.
+fn secret_hits(path: &str, text: &str) -> Vec<Hit> {
+    crate::scan::scan_str(text, crate::scan::builtin())
+        .into_iter()
+        .map(|kind| Hit {
+            path: path.to_string(),
+            detail: Some(format!("Kind: {kind}.")),
+        })
+        .collect()
+}
+
 fn secret_scan(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
-    let patterns = crate::scan::builtin();
     nodes(spec, pat)
         .into_iter()
         .filter_map(|(p, v)| Some((p, v.as_str()?)))
-        .flat_map(|(p, s)| {
-            crate::scan::scan_str(s, patterns)
-                .into_iter()
-                .map(move |kind| Hit {
-                    path: p.clone(),
-                    detail: Some(format!("Kind: {kind}.")),
-                })
-        })
+        .flat_map(|(p, s)| secret_hits(&p, s))
+        .collect()
+}
+
+/// Each line from its first `#` on, at `line N`. The frozen copy keeps comments. A `#` inside
+/// a string can only repeat a report of a value `secret_scan` already flags.
+fn comment_scan(_: &Value, ctx: &CheckCtx, _: &str) -> Vec<Hit> {
+    ctx.spec_text
+        .lines()
+        .enumerate()
+        .filter_map(|(i, l)| Some((i + 1, &l[l.find('#')?..])))
+        .flat_map(|(n, comment)| secret_hits(&format!("line {n}"), comment))
         .collect()
 }

@@ -36,10 +36,16 @@ fn v0() -> &'static [Rule] {
 }
 
 fn run(spec: &Value) -> Vec<Diagnostic> {
+    run_text(spec, "")
+}
+
+/// `text` is the spec source the comment scan reads.
+fn run_text(spec: &Value, text: &str) -> Vec<Diagnostic> {
     let ctx = CheckCtx {
         study_dir: ".".into(),
         prior: Box::new(NoPriorUse),
         machine_max_level: 2,
+        spec_text: text.into(),
     };
     let (_, _, d) = rules::check_all(spec, v0(), &ctx);
     d.into_iter().filter(|d| d.code == "E-SEC-001").collect()
@@ -280,4 +286,47 @@ fn an_allowed_hit_at_the_end_of_the_text_ends_the_scan() {
     assert!(scan::scan_str("a", &[pat("^(a|)$")]).is_empty());
     // Only the first hit is allowed: the empty hit at the end is still found.
     assert_eq!(scan::scan_str("a", &[pat("^a$")]), ["k"]);
+}
+
+#[test]
+fn a_secret_in_a_comment_is_reported_at_its_line_and_never_echoed() {
+    let (secret, other) = (gh(), aws());
+    let text = format!(
+        "a = 1
+b = 2  # see {secret}
+
+# old = \"{other}\"
+c = 3 # note # {}
+",
+        key_header()
+    );
+    let d = run_text(&template(), &text);
+    let got: Vec<_> = d
+        .iter()
+        .map(|d| (d.path.as_str(), d.problem.as_str()))
+        .collect();
+    assert_eq!(got.len(), 3, "{got:?}");
+    assert_eq!(got[0].0, "line 2");
+    assert!(got[0].1.ends_with("Kind: github-token."), "{}", got[0].1);
+    assert_eq!(got[1].0, "line 4");
+    assert!(got[1].1.ends_with("Kind: aws-key."), "{}", got[1].1);
+    assert_eq!(got[2].0, "line 5");
+    assert!(got[2].1.ends_with("Kind: private-key."), "{}", got[2].1);
+    let shown = format!("{}{d:?}", render_human(&d));
+    assert!(!shown.contains(&secret) && !shown.contains(&other));
+}
+
+#[test]
+fn the_comment_scan_reads_only_from_the_first_hash() {
+    let secret = gh();
+    // A secret before any `#` is a value; the string scan owns it. A clean comment is clean.
+    let text = format!(
+        "a = \"{secret}\"
+b = 1  # fine
+  # also fine
+
+"
+    );
+    assert!(run_text(&template(), &text).is_empty());
+    assert!(run_text(&template(), "").is_empty());
 }

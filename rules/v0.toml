@@ -547,6 +547,7 @@ why = "A registered plan is kept and shared. A secret or personal detail in it c
 sources = ["https://github.com/gitleaks/gitleaks"]
 target = [
   { path = "**", check = "named:secret-scan" },
+  { path = "comments", check = "named:comment-scan" },
 ]
 
 [[rule]]
