@@ -1,10 +1,10 @@
 //! The run schedule: one row per (unit, condition, repeat), written once.
 use crate::canon;
+use crate::files::{self, WriteOnceError};
 use crate::seed::seed;
 use crate::spec::model::Spec;
 use serde::Serialize;
 use std::fmt;
-use std::io::Write;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -27,9 +27,10 @@ pub struct Schedule {
 }
 
 impl Schedule {
-    pub fn new(spec_hash: String, rows: Vec<Row>) -> Schedule {
+    /// Stored as `"sha256:<hex>"`, the form of `RawSpec.hash`.
+    pub fn new(spec_hash: &[u8; 32], rows: Vec<Row>) -> Schedule {
         Schedule {
-            spec_hash,
+            spec_hash: format!("sha256:{}", hex::encode(spec_hash)),
             box_version: env!("CARGO_PKG_VERSION").to_string(),
             rows,
         }
@@ -131,32 +132,18 @@ impl fmt::Display for ScheduleError {
 
 impl std::error::Error for ScheduleError {}
 
-impl From<std::io::Error> for ScheduleError {
-    fn from(e: std::io::Error) -> Self {
-        ScheduleError::Io(e)
+impl From<WriteOnceError> for ScheduleError {
+    fn from(e: WriteOnceError) -> Self {
+        match e {
+            WriteOnceError::Differs => ScheduleError::Differs,
+            WriteOnceError::Link => ScheduleError::Symlink,
+            WriteOnceError::Io(e) => ScheduleError::Io(e),
+        }
     }
 }
 
 /// Write `dir/schedule.json` once. The same bytes again is `Ok`.
 pub fn write_once(dir: &Path, s: &Schedule) -> Result<(), ScheduleError> {
-    let bytes = s.to_bytes()?;
-    let path = dir.join("schedule.json");
-    match std::fs::symlink_metadata(&path) {
-        Ok(m) if m.file_type().is_symlink() => return Err(ScheduleError::Symlink),
-        Ok(_) => {
-            return if std::fs::read(&path)? == bytes {
-                Ok(())
-            } else {
-                Err(ScheduleError::Differs)
-            };
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.into()),
-    }
-    let tmp = dir.join("schedule.json.tmp");
-    let mut f = std::fs::File::create(&tmp)?;
-    f.write_all(&bytes)?;
-    f.sync_all()?;
-    std::fs::rename(&tmp, &path)?;
+    files::write_once(&dir.join("schedule.json"), &s.to_bytes()?, 0o644)?;
     Ok(())
 }

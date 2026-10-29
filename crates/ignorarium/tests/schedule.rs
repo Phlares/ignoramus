@@ -131,7 +131,7 @@ fn huge_repeats_with_no_units_do_not_overflow() {
 
 fn sched(n: usize) -> Schedule {
     let rows: Vec<Row> = expand(&spec(&["r"], "r", 1), &hash(), &units(n)).unwrap();
-    Schedule::new(H.into(), rows)
+    Schedule::new(&hash(), rows)
 }
 
 #[test]
@@ -162,7 +162,7 @@ fn schedule_file_is_canonical_json_with_one_trailing_lf() {
     assert_ne!(bytes[bytes.len() - 2], b'\n');
     let v: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(v["box_version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(v["spec_hash"], H);
+    assert_eq!(v["spec_hash"], format!("sha256:{H}"));
     assert_eq!(v["rows"][0]["seed_hex"], s.rows[0].seed_hex);
     let mut canon = ignorarium::canon::to_canonical(&v).unwrap();
     canon.push(b'\n');
@@ -181,4 +181,14 @@ fn symlinked_schedule_is_refused() {
         Err(ScheduleError::Symlink)
     ));
     assert_eq!(std::fs::read(&target).unwrap(), b"x");
+}
+
+#[test]
+fn schedule_spec_hash_matches_the_raw_spec_hash() {
+    let raw = ignorarium::spec::load(Path::new("../../templates/numeric-ablation.toml")).unwrap();
+    let digest: [u8; 32] = hex::decode(raw.hash.strip_prefix("sha256:").unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(Schedule::new(&digest, vec![]).spec_hash, raw.hash);
 }
