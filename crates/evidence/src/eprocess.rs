@@ -8,9 +8,9 @@ pub const MAX_BET: f64 = 0.5;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Score {
     /// The nulls are stated for Upper. Lower reverses the inequality. Both needs equality
-    /// (P(x > 0) = P(x < 0), symmetry, or E[x | past] = mean).
+    /// (P(x > 0 | past) = P(x < 0 | past), symmetry, or E[x | past] = mean).
     ///
-    /// s = sign(x). Null: P(x > 0) <= P(x < 0).
+    /// s = sign(x). Null: P(x > 0 | past) <= P(x < 0 | past).
     Sign,
     /// s = clamp(x / scale, -1, 1). Null: x is symmetric about 0 given the past.
     Clip { scale: f64 },
@@ -71,9 +71,6 @@ impl EProcess {
         if !x.is_finite() {
             return Err(Error::NotFinite);
         }
-        if self.stopped {
-            return Ok(());
-        }
         let s = match self.score {
             Score::Sign => {
                 if x > 0.0 {
@@ -92,6 +89,9 @@ impl EProcess {
                 (x - mean) / (hi - mean).max(mean - lo)
             }
         };
+        if self.stopped {
+            return Ok(());
+        }
         for (w, &sigma) in self.log_wealth.iter_mut().zip(self.sides) {
             let bet = (sigma * self.s_sum / (1.0 + self.q_sum)).clamp(0.0, MAX_BET);
             *w += (bet * (sigma * s)).ln_1p();

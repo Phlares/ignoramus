@@ -6,6 +6,8 @@ pub struct Rng {
 }
 
 impl Rng {
+    /// The seed must be high-entropy bytes, such as a SHA-256 digest. A sparse seed
+    /// (mostly zero bytes) gives near-zero first outputs.
     pub fn from_seed(seed: [u8; 32]) -> Rng {
         let mut s = [0u64; 4];
         for (w, c) in s.iter_mut().zip(seed.as_chunks::<8>().0) {

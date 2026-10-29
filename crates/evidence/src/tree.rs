@@ -14,12 +14,12 @@ pub struct Verdict {
 }
 
 /// `weights` cover every hypothesis the tree declares. `None` in `e_values` means the
-/// hypothesis never ran. A hypothesis that ran gets level `alpha * w / W_ran`; one
+/// hypothesis never ran. A hypothesis that ran gets level `alpha * (w / W_ran)`; one
 /// that did not gets 0. `e_value` is the weighted mean of the e-values that ran.
 ///
-/// Validity needs one condition: whether a hypothesis ran must not depend on the data
-/// its e-value comes from. For example, decide which hypotheses run from one set of
-/// seeds and compute their e-values from a disjoint set.
+/// Validity needs one condition: the set of hypotheses that ran must not depend on the
+/// data any of their e-values come from. For example, decide which hypotheses run from
+/// one set of seeds and compute every e-value from a disjoint set.
 pub fn decide(alpha: f64, weights: &[f64], e_values: &[Option<f64>]) -> Result<Verdict, Error> {
     if !(0.0..=1.0).contains(&alpha) {
         return Err(Error::Parameter("alpha"));
@@ -48,28 +48,30 @@ pub fn decide(alpha: f64, weights: &[f64], e_values: &[Option<f64>]) -> Result<V
             e_value: 1.0,
         });
     }
+    // Each share w / W_ran is in [0, 1], so neither product below overflows; a share
+    // that underflows to 0 only lowers a level.
+    let share = |w: f64| w / ran_weight;
     let levels: Vec<f64> = weights
         .iter()
         .zip(e_values)
-        .map(|(w, e)| {
-            if e.is_some() {
-                alpha * w / ran_weight
-            } else {
-                0.0
-            }
-        })
+        .map(|(&w, e)| if e.is_some() { alpha * share(w) } else { 0.0 })
         .collect();
     let rejected: Vec<bool> = levels
         .iter()
         .zip(e_values)
         .map(|(&l, e)| l > 0.0 && e.is_some_and(|e| e >= 1.0 / l))
         .collect();
-    let e_value = weights
-        .iter()
-        .zip(e_values)
-        .filter_map(|(w, e)| e.map(|e| w * e))
-        .sum::<f64>()
-        / ran_weight;
+    // A ran weight is positive, so an infinite e-value makes the mean infinite even
+    // when its share underflows to 0.
+    let e_value = if e_values.iter().flatten().any(|e| e.is_infinite()) {
+        f64::INFINITY
+    } else {
+        weights
+            .iter()
+            .zip(e_values)
+            .filter_map(|(&w, e)| e.map(|e| share(w) * e))
+            .sum()
+    };
     // Rounding: in exact arithmetic the mean already reaches 1/alpha when any
     // hypothesis is rejected; the clamp only fixes the last bit.
     let e_value = if rejected.iter().any(|&r| r) {

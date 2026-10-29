@@ -151,6 +151,72 @@ fn scan_holds_its_level_under_the_null() {
 }
 
 #[test]
+fn scale_does_not_change_the_scan() {
+    let mut r = rng(10);
+    let a: Vec<f64> = (0..30).map(|_| r.normal() + 0.4).collect();
+    let b: Vec<f64> = (0..30).map(|_| r.normal() + 0.2).collect();
+    // A power of two keeps the scaled values exact.
+    let big: Vec<f64> = b.iter().map(|d| 1024.0 * d).collect();
+    for tail in [Tail::Upper, Tail::Lower, Tail::Both] {
+        let base = sign_flip(&[a.clone(), b.clone()], tail, 300, &mut rng(11)).unwrap();
+        let scaled = sign_flip(&[a.clone(), big.clone()], tail, 300, &mut rng(11));
+        assert_eq!(scaled, Ok(base), "{tail:?}");
+    }
+}
+
+#[test]
+fn global_p_uses_the_sum_over_the_norm_of_each_condition() {
+    // The flat condition's norm is large next to its largest |d|; the spiky one's is
+    // not. A statistic not divided by its own norm lets the flat condition hold the
+    // maximum of most draws.
+    let conds = vec![
+        vec![2.0, 1.0, -1.0, 0.5, 1.0, 1.0, 0.25, -0.5],
+        vec![1.0; 8],
+    ];
+    let z = |c: &[f64], bits: u64| {
+        let sum: f64 = (c.iter().enumerate())
+            .map(|(i, &d)| if (bits >> i) & 1 == 1 { d } else { -d })
+            .sum();
+        sum / c.iter().map(|d| d * d).sum::<f64>().sqrt()
+    };
+    let draws = 50;
+    for (tail, orient) in [
+        (Tail::Upper, (|z| z) as fn(f64) -> f64),
+        (Tail::Lower, |z: f64| -z),
+        (Tail::Both, f64::abs),
+    ] {
+        let mut probe = rng(14);
+        let null: Vec<Vec<f64>> = (0..draws)
+            .map(|_| {
+                let bits = probe.next_u64();
+                conds.iter().map(|c| orient(z(c, bits))).collect()
+            })
+            .collect();
+        let observed: Vec<f64> = conds.iter().map(|c| orient(z(c, u64::MAX))).collect();
+        let want = from_null(&observed, &null);
+        assert_eq!(
+            sign_flip(&conds, tail, draws, &mut rng(14)),
+            want,
+            "{tail:?}"
+        );
+    }
+}
+
+#[test]
+fn huge_and_tiny_conditions_match_scale_one() {
+    let mut r = rng(12);
+    let d: Vec<f64> = (0..25).map(|_| r.normal() + 0.3).collect();
+    let base = sign_flip(std::slice::from_ref(&d), Tail::Both, 300, &mut rng(13)).unwrap();
+    assert!(base.local[0] < 1.0, "{base:?}");
+    // 1e200 squared overflows and 1e-200 squared underflows.
+    for scale in [1e200, 1e-200] {
+        let c: Vec<f64> = d.iter().map(|x| x * scale).collect();
+        let got = sign_flip(&[c], Tail::Both, 300, &mut rng(13));
+        assert_eq!(got, Ok(base.clone()), "{scale:e}");
+    }
+}
+
+#[test]
 fn rejects_bad_inputs() {
     let t = Tail::Both;
     let mut r = rng(9);
@@ -161,6 +227,7 @@ fn rejects_bad_inputs() {
     assert_eq!(sign_flip(&[vec![1.0], vec![1.0, 2.0]], t, 10, &mut r), bad);
     let nf = Err(Error::NotFinite);
     assert_eq!(sign_flip(&[vec![1.0, f64::NAN]], t, 10, &mut r), nf);
+    assert_eq!(sign_flip(&[vec![0.0, f64::NAN]], t, 0, &mut r), nf);
     assert_eq!(sign_flip(&[vec![f64::INFINITY]], t, 10, &mut r), nf);
-    assert_eq!(sign_flip(&[vec![1e200, 1e200]], t, 10, &mut r), nf);
+    assert_eq!(sign_flip(&[vec![1.0, f64::NEG_INFINITY]], t, 0, &mut r), nf);
 }

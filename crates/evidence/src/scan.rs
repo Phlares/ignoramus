@@ -58,13 +58,20 @@ pub fn sign_flip(
     if n == 0 || diffs.iter().any(|c| c.len() != n) {
         return Err(Error::Parameter("diffs"));
     }
+    // The statistic is scale-free. Dividing by the largest |d| keeps every square in
+    // range; the MIN_POSITIVE floor leaves an all-zero condition at 0. A non-finite
+    // difference makes its condition's norm NaN, which `from_null` refuses.
+    let diffs: Vec<Vec<f64>> = diffs
+        .iter()
+        .map(|c| {
+            let top = c.iter().fold(f64::MIN_POSITIVE, |m, d| m.max(d.abs()));
+            c.iter().map(|d| d / top).collect()
+        })
+        .collect();
     let norms: Vec<f64> = diffs
         .iter()
         .map(|c| c.iter().map(|d| d * d).sum::<f64>().sqrt())
         .collect();
-    if norms.iter().any(|v| !v.is_finite()) {
-        return Err(Error::NotFinite);
-    }
     let stat = |c: &[f64], norm: f64, plus: &dyn Fn(usize) -> bool| {
         let z = if norm == 0.0 {
             0.0

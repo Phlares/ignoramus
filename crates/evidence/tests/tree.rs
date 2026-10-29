@@ -1,4 +1,5 @@
 use evidence::Error;
+use evidence::rng::Rng;
 use evidence::tree::decide;
 
 const ALPHA: f64 = 0.0625;
@@ -110,19 +111,77 @@ fn rejects_bad_inputs() {
 
 #[test]
 fn tiny_weight_share_does_not_make_a_nan_e_value() {
+    // The share 5e-324 / 1e300 rounds to 0, and 0 * inf is NaN.
     let v = decide(
         ALPHA,
         &[5e-324, 1e300, 1.0],
         &[Some(f64::INFINITY), Some(1.0), Some(1.0)],
     )
     .unwrap();
+    assert_eq!(v.levels[0], 0.0);
+    assert_eq!(v.rejected, vec![false; 3]);
     assert_eq!(v.e_value, f64::INFINITY);
+}
+
+#[test]
+fn huge_weights_keep_the_mean_finite() {
+    let v = decide(1e-12, &[1e300, 1e300], &[Some(1e10), Some(0.0)]).unwrap();
+    assert!((v.e_value / 5e9 - 1.0).abs() <= 1e-6, "{}", v.e_value);
+    assert_eq!(v.rejected, vec![false, false]);
+}
+
+#[test]
+fn a_tiny_lone_weight_keeps_its_level_and_e_value() {
+    let v = decide(0.5, &[5e-324], &[Some(1.5)]).unwrap();
+    assert_eq!(v.levels, vec![0.5]);
+    assert_eq!(v.rejected, vec![false]);
+    assert_eq!(v.e_value, 1.5);
+}
+
+/// Both hypotheses are null. A always runs; B is a fallback that runs only when A is weak,
+/// so the ran set depends on A's e-value. The return then gives A the whole level exactly
+/// when A is strong: FWER = alpha + (1 - alpha) alpha / 2, about 0.074 at alpha = 0.05.
+#[test]
+fn a_fallback_child_on_a_weak_primary_breaks_the_condition() {
+    let alpha = 0.05;
+    let trials = 200_000;
+    let mut rng = Rng::from_seed([11; 32]);
+    let (mut fallback, mut fixed) = (0, 0);
+    for _ in 0..trials {
+        let e_a = if rng.uniform() <= alpha {
+            1.0 / alpha
+        } else {
+            0.0
+        };
+        let e_b = if rng.uniform() <= alpha / 2.0 {
+            2.0 / alpha
+        } else {
+            0.0
+        };
+        let b_ran = (e_a < 1.0 / alpha).then_some(e_b);
+        let any = |e: &[Option<f64>]| {
+            decide(alpha, &[1.0, 1.0], e)
+                .unwrap()
+                .rejected
+                .contains(&true)
+        };
+        fallback += usize::from(any(&[Some(e_a), b_ran]));
+        fixed += usize::from(any(&[Some(e_a), Some(e_b)]));
+    }
+    let (fallback, fixed) = (
+        fallback as f64 / trials as f64,
+        fixed as f64 / trials as f64,
+    );
+    assert!(fallback > alpha, "{fallback}");
+    assert!((fallback - 0.07375).abs() < 0.003, "{fallback}");
+    assert!(fixed <= alpha, "{fixed}");
+    assert!((fixed - 0.025).abs() < 0.002, "{fixed}");
 }
 
 #[test]
 fn a_rejection_always_reaches_one_over_alpha() {
     let alpha = 0.05;
-    let level = alpha * 1.0 / 3.0;
+    let level = alpha * (1.0 / 3.0);
     let v = decide(alpha, &[1.0; 3], &[Some(1.0 / level), Some(0.0), Some(0.0)]).unwrap();
     assert!(v.rejected[0]);
     assert!(v.e_value >= 1.0 / 0.05, "{}", v.e_value);
@@ -132,7 +191,7 @@ fn a_rejection_always_reaches_one_over_alpha() {
             let total: f64 = w.iter().sum();
             for k in 0..3 {
                 let mut e = [Some(0.0); 3];
-                e[k] = Some(1.0 / (alpha * w[k] / total));
+                e[k] = Some(1.0 / (alpha * (w[k] / total)));
                 let v = decide(alpha, &w, &e).unwrap();
                 assert!(v.rejected[k], "{alpha} {w:?} {k}");
                 assert!(v.e_value >= 1.0 / alpha, "{alpha} {w:?} {k}: {}", v.e_value);

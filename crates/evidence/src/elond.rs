@@ -55,6 +55,12 @@ impl Slot {
 }
 
 /// An online FDR stream. It is not `Clone`: a slot belongs to the stream that opened it.
+///
+/// FDR stays at or below alpha when each null slot's e-value has expected value at most
+/// 1, counting any way that e-value depends on the slot's level. A fixed-size test meets
+/// this under any dependence between trees. A stop that depends on the level, such as
+/// stop at 1/level, meets it only when the tree's data are independent of the other
+/// trees' results, because those results set the level.
 #[derive(Debug)]
 pub struct Stream {
     alpha: f64,
@@ -79,8 +85,9 @@ impl Stream {
         })
     }
 
-    /// The level counts only discoveries closed before the slot opened, which keeps
-    /// FDR at or below alpha in any closing order.
+    /// The level counts only discoveries closed before the slot opened. Under the
+    /// e-value condition on [`Stream`], FDR then stays at or below alpha in any
+    /// closing order.
     pub fn open(&mut self) -> Slot {
         self.opened += 1;
         let level = self.alpha * self.gamma.at(self.opened) * (self.discoveries + 1) as f64;
@@ -90,7 +97,8 @@ impl Stream {
         }
     }
 
-    /// The slot is consumed even when `e` is invalid. `+inf` is allowed.
+    /// `e` must meet the e-value condition on [`Stream`]. The slot is consumed even
+    /// when `e` is invalid. `+inf` is allowed.
     pub fn close(&mut self, slot: Slot, e: f64) -> Result<bool, Error> {
         if e.is_nan() || e < 0.0 {
             return Err(Error::Parameter("e-value"));

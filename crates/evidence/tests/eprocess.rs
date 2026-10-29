@@ -169,6 +169,36 @@ fn rejects_bad_parameters_and_observations() {
 }
 
 #[test]
+fn a_stopped_process_still_refuses_bad_observations() {
+    let s = Score::Bounded {
+        lo: 0.0,
+        hi: 1.0,
+        mean: 0.5,
+    };
+    let mut p = EProcess::new(s, Tail::Upper, 1.1).unwrap();
+    run(&mut p, &[1.0, 1.0]);
+    assert!(p.stopped());
+    assert_eq!(p.observe(1.5), Err(Error::OutOfBounds));
+    assert_eq!(p.observe(-0.1), Err(Error::OutOfBounds));
+    assert_eq!(p.observe(f64::NAN), Err(Error::NotFinite));
+    assert_eq!(p.observe(1.0), Ok(()));
+    assert_eq!(p.observed(), 2);
+}
+
+#[test]
+fn error_messages_name_the_cause() {
+    assert_eq!(
+        Error::Parameter("alpha").to_string(),
+        "invalid parameter: alpha"
+    );
+    assert_eq!(Error::NotFinite.to_string(), "observation is not finite");
+    assert_eq!(
+        Error::OutOfBounds.to_string(),
+        "observation is outside the declared bounds"
+    );
+}
+
+#[test]
 fn long_runs_stay_finite_or_infinite_never_nan() {
     let mut p = EProcess::new(Score::Sign, Tail::Both, f64::INFINITY).unwrap();
     for _ in 0..20_000 {
@@ -176,6 +206,9 @@ fn long_runs_stay_finite_or_infinite_never_nan() {
     }
     assert!(!p.value().is_nan());
     assert!(p.value() >= 1e6);
+    // An infinite stop never fires, even once the value reaches +inf.
+    assert!(!p.stopped());
+    assert_eq!(p.observed(), 20_000);
     assert!(p.p_value() >= 0.0 && p.p_value() <= 1e-6);
 
     let mut q = EProcess::new(Score::Sign, Tail::Both, f64::INFINITY).unwrap();
