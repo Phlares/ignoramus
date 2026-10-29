@@ -686,6 +686,11 @@ fn import_history_refuses_a_phase_in_the_form_of_a_studys_own_label() {
         .arg(&file)
         .assert()
         .code(0);
+    let help = bin(&home)
+        .args(["import-history", "--help"])
+        .assert()
+        .success();
+    assert!(stdout(&help).contains("Must not start with `study:`"));
 }
 
 /// Register the template through the library, then return the box.

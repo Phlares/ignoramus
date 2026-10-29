@@ -260,7 +260,7 @@ fn input_hashes(dir: &Path, spec: &Spec) -> InputHashes {
 /// linked payload counts as changed.
 fn stale(plan: &RunPlan, dir: &Path) -> Option<String> {
     let mut changed = Vec::new();
-    if read_payload(dir).ok().map(|(_, h)| h).as_ref() != Some(&plan.payload_sha256) {
+    if !read_payload(dir).is_ok_and(|(_, h)| h == plan.payload_sha256) {
         changed.push(PAYLOAD);
     }
     for ((path, then), (_, now)) in plan.inputs.iter().zip(input_hashes(dir, &plan.spec)) {
@@ -355,12 +355,12 @@ fn gate_late_data(
         .data_hashes;
     let all = input_hashes(&home.study_dir(id), spec);
     let mut late = Vec::new();
-    for (input, (path, hashes)) in spec.inputs.iter().zip(&all) {
+    for (input, (_, hashes)) in spec.inputs.iter().zip(&all) {
         if let Some(hashes) = hashes
             && matches!(input.role, Role::Selection | Role::Confirmation)
             && !registered.contains(hashes)
         {
-            late.push((path.clone(), hashes.clone()));
+            late.push((input.path.clone(), hashes.clone()));
         }
     }
     let own = own_label(id);

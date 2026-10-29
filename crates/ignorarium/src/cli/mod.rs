@@ -139,7 +139,7 @@ enum Verb {
     },
     /// Record the hashes of earlier data files, so later plans cannot reuse them.
     ImportHistory {
-        /// Name of the earlier phase, kept as the leaf label.
+        /// Name of the earlier phase, kept as the leaf label. Must not start with `study:`.
         #[arg(long)]
         phase: String,
         /// The data files.
