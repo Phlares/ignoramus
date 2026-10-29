@@ -112,9 +112,9 @@ pub fn run(
         writeln!(output, "{}", render_human(&a.diags)).map_err(say)?;
     }
     let done = |code, leaf| Done {
-        code,
         spec_hash: Some(a.hash.clone()),
         leaf,
+        ..Done::exit(code)
     };
     if a.has_errors() {
         return Ok(done(1, None));

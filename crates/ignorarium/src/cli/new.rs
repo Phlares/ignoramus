@@ -17,7 +17,7 @@ const TEMPLATES: &[(&str, &str)] = &[
 ];
 
 /// The id format is the one rule E-FMT-001 checks on `study.id`.
-fn id_is_valid(id: &str) -> Result<bool, CliError> {
+pub(super) fn id_is_valid(id: &str) -> Result<bool, CliError> {
     rules::builtin()
         .iter()
         .find_map(|r| match &r.check {

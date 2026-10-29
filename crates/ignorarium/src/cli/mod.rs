@@ -12,8 +12,14 @@ mod docs;
 mod guide;
 mod history;
 mod new;
+mod pause;
+mod probe;
 pub mod register;
+mod resume;
 mod review;
+mod run;
+pub mod status;
+pub mod stop;
 mod verify;
 
 /// A verb failed. `code` is the exit code: 1 for a refusal, 2 for a usage or I/O error.
@@ -46,6 +52,8 @@ pub struct Done {
     pub code: i32,
     pub spec_hash: Option<String>,
     pub leaf: Option<u64>,
+    /// Extra attributes for the verb's event.
+    pub attrs: Option<Value>,
 }
 
 impl Done {
@@ -55,6 +63,7 @@ impl Done {
             code,
             spec_hash: None,
             leaf: None,
+            attrs: None,
         }
     }
 }
@@ -143,6 +152,42 @@ enum Verb {
         #[arg(long)]
         study: Option<String>,
     },
+    /// Measure this machine and write machine.toml. Run it before `check`.
+    Probe,
+    /// Run a registered study. Rows with a signed record are skipped.
+    Run {
+        /// Study id.
+        study: String,
+        /// Use no backend above this isolation level.
+        #[arg(long)]
+        max_level: Option<u8>,
+    },
+    /// Show how far a study has run and what it has spent.
+    Status {
+        /// Study id.
+        study: String,
+        /// Print one JSON object instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Ask a run to pause at the next row boundary.
+    Pause {
+        /// Study id.
+        study: String,
+    },
+    /// Clear a pause and run the remaining rows.
+    Resume {
+        /// Study id.
+        study: String,
+    },
+    /// End a study for good and record why. Works on a paused or idle study.
+    Stop {
+        /// Study id.
+        study: String,
+        /// Why the study stops.
+        #[arg(long)]
+        reason: String,
+    },
     #[command(hide = true, subcommand)]
     Dev(Dev),
 }
@@ -167,6 +212,12 @@ impl Verb {
             Verb::Register { .. } => "register",
             Verb::ImportHistory { .. } => "import-history",
             Verb::Verify { .. } => "verify",
+            Verb::Probe => "probe",
+            Verb::Run { .. } => "run",
+            Verb::Status { .. } => "status",
+            Verb::Pause { .. } => "pause",
+            Verb::Resume { .. } => "resume",
+            Verb::Stop { .. } => "stop",
             Verb::Dev(Dev::GenRuleDocs { .. }) => "dev.gen-rule-docs",
         }
     }
@@ -180,6 +231,12 @@ impl Verb {
             Verb::Register { spec } => register::run_stdio(ctx, &spec),
             Verb::ImportHistory { phase, files } => history::run(ctx, &phase, &files),
             Verb::Verify { study } => verify::run(ctx, study.as_deref()),
+            Verb::Probe => probe::run(ctx),
+            Verb::Run { study, max_level } => run::run(ctx, &study, max_level),
+            Verb::Status { study, json } => status::run(ctx, &study, json),
+            Verb::Pause { study } => pause::run(ctx, &study),
+            Verb::Resume { study } => resume::run(ctx, &study),
+            Verb::Stop { study, reason } => stop::run(ctx, &study, &reason),
             Verb::Dev(Dev::GenRuleDocs { out }) => docs::run(&out),
         }
     }
@@ -222,6 +279,9 @@ fn emit(ctx: &Ctx, name: &str, done: &Done) -> Result<(), String> {
         if let Some(i) = done.leaf {
             map.insert("leaf".into(), Value::from(i));
         }
+        if let Some(Value::Object(extra)) = &done.attrs {
+            map.extend(extra.clone());
+        }
     }
     events::emit(
         &home.root.join("events.jsonl"),
@@ -235,4 +295,44 @@ fn emit(ctx: &Ctx, name: &str, done: &Done) -> Result<(), String> {
         },
     )
     .map_err(|e| e.to_string())
+}
+
+/// A registered study: the box key and the study's verified records.
+/// Refuses an id that is not a study id, and a study with no `register` record.
+fn registered<'a>(
+    ctx: &'a Ctx,
+    id: &str,
+) -> Result<
+    (
+        &'a Home,
+        ed25519_dalek::SigningKey,
+        Vec<crate::records::Record>,
+    ),
+    CliError,
+> {
+    let home = ctx.home()?;
+    if !new::id_is_valid(id)? {
+        return Err(CliError::refuse(format!("{id} is not a study id")));
+    }
+    let unknown = || CliError::refuse(format!("study {id} is not registered"));
+    let key = crate::keys::load(home)
+        .map_err(|e| CliError::usage(format!("box key: {e}")))?
+        .ok_or_else(unknown)?;
+    let log = home.study_dir(id).join("records.jsonl");
+    if !log.is_file() {
+        return Err(unknown());
+    }
+    let all = crate::records::read_all(&log, &key.verifying_key())
+        .map_err(|e| CliError::usage(format!("records of {id}: {e}")))?;
+    if !all.iter().any(|r| r.kind == "register") {
+        return Err(unknown());
+    }
+    Ok((home, key, all))
+}
+
+/// The reason in the study's stop record, when it has one.
+fn stopped_why(all: &[crate::records::Record]) -> Option<String> {
+    all.iter()
+        .find(|r| r.kind == "stop")
+        .map(|r| r.body["why"].as_str().unwrap_or_default().to_string())
 }

@@ -55,7 +55,7 @@ fn guide_json_lists_every_step_with_its_output() {
     assert_eq!(
         ids,
         [
-            "brief", "template", "fill", "check", "review", "register", "run", "report"
+            "brief", "template", "fill", "check", "review", "register", "run", "status", "report"
         ]
     );
     for s in steps {
@@ -63,10 +63,13 @@ fn guide_json_lists_every_step_with_its_output() {
             assert!(!s[key].as_str().unwrap().is_empty(), "{s}");
         }
     }
-    for id in ["run", "report"] {
-        let s = steps.iter().find(|s| s["id"] == id).unwrap();
-        assert!(s["does"].as_str().unwrap().contains("not available yet"));
-    }
+    let report = steps.iter().find(|s| s["id"] == "report").unwrap();
+    assert!(
+        report["does"]
+            .as_str()
+            .unwrap()
+            .contains("not available yet")
+    );
 }
 
 #[test]
@@ -489,7 +492,7 @@ fn guide_wording_is_public() {
     let a = bin(dir.path()).arg("guide").assert().success();
     let out = stdout(&a);
     assert!(!out.contains("Plan 2"));
-    assert!(out.matches("not available yet").count() >= 2);
+    assert_eq!(out.matches("not available yet").count(), 3);
 }
 
 #[cfg(target_os = "linux")]
