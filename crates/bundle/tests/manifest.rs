@@ -60,12 +60,15 @@ fn walk_sorts_by_bytes() {
 
 #[test]
 fn walk_refuses_unsafe_names() {
-    for name in ["x\ny", "x\ry", "x\\y", "x\u{1}y", "x\u{7f}y"] {
+    let names = ["x\ny", "x\ry", "x\\y", "x\u{1}y", "x\u{7f}y"];
+    let mut made = 0;
+    for name in names {
         let t = tempfile::tempdir().unwrap();
         fs::write(t.path().join("ok.txt"), "").unwrap();
         if fs::write(t.path().join(name), "").is_err() {
             continue;
         }
+        made += 1;
         let (files, problems) = tree::walk(t.path()).unwrap();
         assert_eq!(paths(&files), ["ok.txt"], "{name:?}");
         assert_eq!(problems.len(), 1, "{name:?}");
@@ -76,6 +79,9 @@ fn walk_refuses_unsafe_names() {
             problems[0].instruction,
             "Replace links and special files with regular files, and rename files to UTF-8 names without control characters or backslashes."
         );
+    }
+    if cfg!(target_os = "linux") {
+        assert_eq!(made, names.len());
     }
 }
 
@@ -161,16 +167,21 @@ fn refused_names_are_shown_escaped() {
         ("a\u{202e}b", "a\\u{202e}b"),
         ("a\u{85}b", "a\\u{85}b"),
     ];
+    let mut made = 0;
     for (name, shown) in cases {
         let t = tempfile::tempdir().unwrap();
         if fs::write(t.path().join(name), "").is_err() {
             continue;
         }
+        made += 1;
         let (files, problems) = tree::walk(t.path()).unwrap();
         assert!(paths(&files).is_empty(), "{shown}");
         assert_eq!(problems.len(), 1, "{shown}");
         assert_eq!(problems[0].code, "E-PUB-001");
         assert_eq!(problems[0].path, shown);
+    }
+    if cfg!(target_os = "linux") {
+        assert_eq!(made, cases.len());
     }
 }
 
