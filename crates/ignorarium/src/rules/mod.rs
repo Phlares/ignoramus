@@ -3,6 +3,7 @@ use crate::diag::Severity;
 use regex::Regex;
 use serde::Deserialize;
 use std::path::Path;
+use std::sync::OnceLock;
 
 mod generic;
 mod named;
@@ -140,8 +141,19 @@ struct Target {
 
 /// Flattens the file to one `Rule` per target; targets of one code share its text.
 pub fn load(path: &Path) -> Result<Vec<Rule>, RulesError> {
-    let text = std::fs::read_to_string(path).map_err(RulesError::Io)?;
-    let file: File = toml::from_str(&text).map_err(|e| match failing_code(&text) {
+    parse(&std::fs::read_to_string(path).map_err(RulesError::Io)?)
+}
+
+/// The rules in `rules/v0.toml`, compiled once.
+pub fn builtin() -> &'static [Rule] {
+    static BUILTIN: OnceLock<Vec<Rule>> = OnceLock::new();
+    BUILTIN.get_or_init(|| {
+        parse(include_str!("../../../../rules/v0.toml")).expect("embedded v0.toml is valid")
+    })
+}
+
+fn parse(text: &str) -> Result<Vec<Rule>, RulesError> {
+    let file: File = toml::from_str(text).map_err(|e| match failing_code(text) {
         Some(code) => RulesError::Toml(format!("rule {code}: {e}")),
         None => RulesError::Toml(e.to_string()),
     })?;

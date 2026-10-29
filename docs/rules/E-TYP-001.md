@@ -1,0 +1,109 @@
+# E-TYP-001
+
+Severity: error
+
+## Problem
+
+A field has the wrong type.
+
+## Fix
+
+Use the type the template shows for this field.
+
+## Why
+
+A wrong type changes what the value means, and later checks cannot read it.
+
+## Sources
+
+- <https://toml.io/en/v1.0.0>
+
+## Applies to
+
+- `study` (type)
+- `study.id` (type)
+- `study.template` (type)
+- `study.mode` (type)
+- `study.label` (type)
+- `study.test_log` (type)
+- `question` (type)
+- `question.population` (type)
+- `question.intervention` (type)
+- `question.comparator` (type)
+- `question.negative_control` (type)
+- `question.hypotheses` (type)
+- `question.hypotheses[*].id` (type)
+- `question.hypotheses[*].statement` (type)
+- `question.hypotheses[*].rival` (type)
+- `outcomes` (type)
+- `outcomes[*].id` (type)
+- `outcomes[*].unit` (type)
+- `outcomes[*].direction` (type)
+- `outcomes[*].registered` (type)
+- `scope` (type)
+- `scope.min_isolation` (type)
+- `scope.stop_rule` (type)
+- `scope.budget` (type)
+- `scope.budget.cpu_hours` (type)
+- `scope.budget.wall_hours` (type)
+- `scope.budget.money_usd` (type)
+- `scope.end_of_run` (type)
+- `scope.end_of_run.route` (type)
+- `scope.end_of_run.follow_on` (type)
+- `scope.end_of_run.follow_on[*].when` (type)
+- `scope.end_of_run.follow_on[*].spec` (type)
+- `design` (type)
+- `design.unit` (type)
+- `design.cluster` (type)
+- `design.stratum` (type)
+- `design.reference` (type)
+- `design.repeats` (type)
+- `design.row_seconds` (type)
+- `design.test` (type)
+- `design.alpha` (type)
+- `design.power` (type)
+- `design.sesoi` (type)
+- `design.icc` (type)
+- `design.units_per_cluster` (type)
+- `design.variance` (type)
+- `design.variance.value` (type)
+- `design.variance.source` (type)
+- `design.conditions` (type)
+- `design.conditions[*].id` (type)
+- `design.selection` (type)
+- `design.selection.clusters` (type)
+- `design.confirmation` (type)
+- `design.confirmation.clusters` (type)
+- `inputs` (type)
+- `inputs[*].path` (type)
+- `inputs[*].sha256` (type)
+- `inputs[*].role` (type)
+- `inputs[*].licence` (type)
+- `inputs[*].licence.spdx` (type)
+- `inputs[*].licence.type` (type)
+- `inputs[*].licence.source` (type)
+- `inputs[*].licence.creators` (type)
+- `pins` (type)
+- `pins.environment` (type)
+- `pins.payload` (type)
+- `pins.rule_base` (type)
+- `mutations` (type)
+- `mutations.depth_cap` (type)
+- `mutations.operators` (type)
+- `mutations.operators[*].name` (type)
+- `mutations.operators[*].type` (type)
+- `mutations.operators[*].range` (type)
+- `mutations.operators[*].acts_on` (type)
+- `mutations.triggers` (type)
+- `mutations.triggers[*].id` (type)
+- `mutations.triggers[*].metric` (type)
+- `mutations.triggers[*].threshold_e` (type)
+- `mutations.seeds` (type)
+- `mutations.seeds.spawn` (type)
+- `mutations.seeds.report` (type)
+- `access` (type)
+- `access.blind` (type)
+- `report` (type)
+- `report.licence_code` (type)
+- `report.licence_data` (type)
+- `report.publish` (type)

@@ -1,5 +1,6 @@
 //! ignorarium library crate.
 pub mod canon;
+pub mod cli;
 pub mod diag;
 pub mod estimate;
 pub mod events;

@@ -1,0 +1,141 @@
+//! `review`: one Markdown page for a person to read before approving a plan.
+//! It reads the spec as plain values, so it also renders a plan that fails check.
+use super::check::{self, Assessed};
+use super::{Ctx, Done, Run, out};
+use crate::diag::{Diagnostic, Severity};
+use serde_json::Value;
+use std::path::Path;
+
+fn at(v: &Value, pointer: &str) -> String {
+    match v.pointer(pointer) {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => "(missing)".into(),
+    }
+}
+
+fn items<'a>(v: &'a Value, pointer: &str) -> &'a [Value] {
+    v.pointer(pointer)
+        .and_then(Value::as_array)
+        .map_or(&[], Vec::as_slice)
+}
+
+fn bullets(lines: impl IntoIterator<Item = String>) -> String {
+    let mut s: String = lines.into_iter().map(|l| format!("- {l}\n")).collect();
+    if s.is_empty() {
+        s.push_str("- none\n");
+    }
+    s
+}
+
+fn diag_bullet(d: &Diagnostic) -> String {
+    format!(
+        "{} at `{}`: {} Fix: {} See: {}",
+        d.code, d.path, d.problem, d.instruction, d.doc
+    )
+}
+
+fn problems(diags: &[Diagnostic]) -> String {
+    let of = |sev: Severity, title: &str| {
+        let list: Vec<String> = diags
+            .iter()
+            .filter(|d| d.severity == sev)
+            .map(diag_bullet)
+            .collect();
+        if list.is_empty() {
+            String::new()
+        } else {
+            format!("### {title}\n\n{}\n", bullets(list))
+        }
+    };
+    let s = of(Severity::Error, "Errors") + &of(Severity::Warning, "Warnings");
+    if s.is_empty() { "None.\n".into() } else { s }
+}
+
+const NO_ESTIMATE: &str = "Not available: the plan has errors.\n";
+
+fn page(a: &Assessed) -> String {
+    let v = &a.value;
+    let est = a.estimate.as_ref();
+    let hypotheses = items(v, "/question/hypotheses").iter().map(|h| {
+        format!(
+            "{}: {} (rival: {})",
+            at(h, "/id"),
+            at(h, "/statement"),
+            at(h, "/rival")
+        )
+    });
+    let outcomes = items(v, "/outcomes").iter().map(|o| {
+        format!(
+            "{} ({}, {} is better)",
+            at(o, "/id"),
+            at(o, "/unit"),
+            at(o, "/direction")
+        )
+    });
+    let conditions: Vec<String> = match est {
+        Some(e) => check::condition_lines(e),
+        None => items(v, "/design/conditions")
+            .iter()
+            .map(|c| at(c, "/id"))
+            .collect(),
+    };
+    let inputs = items(v, "/inputs").iter().map(|i| {
+        format!(
+            "`{}`, role {}, sha256 {}, licence {} ({}), source {}",
+            at(i, "/path"),
+            at(i, "/role"),
+            at(i, "/sha256"),
+            at(i, "/licence/spdx"),
+            at(i, "/licence/type"),
+            at(i, "/licence/source")
+        )
+    });
+    let mut s = format!(
+        "# Plan review: {}\n\nSpec hash: {}\n\n## Plan\n\n",
+        at(v, "/study/id"),
+        a.hash
+    );
+    s.push_str(&bullets([
+        format!(
+            "Study: {} ({}, template {})",
+            at(v, "/study/id"),
+            at(v, "/study/mode"),
+            at(v, "/study/template")
+        ),
+        format!("Population: {}", at(v, "/question/population")),
+        format!("Intervention: {}", at(v, "/question/intervention")),
+        format!("Comparator: {}", at(v, "/question/comparator")),
+        format!("Negative control: {}", at(v, "/question/negative_control")),
+    ]));
+    s.push_str(&format!("\nHypotheses:\n\n{}", bullets(hypotheses)));
+    s.push_str(&format!("\nOutcomes:\n\n{}", bullets(outcomes)));
+    s.push_str(&format!("\n## Conditions\n\n{}", bullets(conditions)));
+    s.push_str("\n## Estimate\n\n");
+    s.push_str(&est.map_or(NO_ESTIMATE.into(), |e| bullets(check::figure_lines(e))));
+    s.push_str(&format!(
+        "\n## Claim label\n\n{}",
+        bullets([
+            format!("Declared: {}", at(v, "/study/label")),
+            est.map_or("Earnable: not available".into(), |e| {
+                format!("Earnable: {}", e.label_earnable)
+            }),
+        ])
+    ));
+    s.push_str(&format!(
+        "\n## Defaults\n\n{}",
+        bullets(check::default_lines(a))
+    ));
+    s.push_str(&format!("\n## Warnings\n\n{}", problems(&a.diags)));
+    s.push_str(&format!("\n## Inputs and licences\n\n{}", bullets(inputs)));
+    s
+}
+
+pub fn run(ctx: &Ctx, spec: &Path) -> Run {
+    let a = check::assess(ctx, spec)?;
+    out(&page(&a));
+    Ok(Done {
+        code: a.exit_code(),
+        spec_hash: Some(a.hash),
+    })
+}
