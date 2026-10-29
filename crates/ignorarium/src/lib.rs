@@ -2,11 +2,16 @@
 pub mod canon;
 pub mod diag;
 pub mod estimate;
+pub mod events;
 pub mod files;
+pub mod home;
+pub mod keys;
 pub mod machine;
 pub mod power;
 pub mod prior;
+pub mod records;
 pub mod rules;
 pub mod schedule;
 pub mod seed;
 pub mod spec;
+pub mod time;

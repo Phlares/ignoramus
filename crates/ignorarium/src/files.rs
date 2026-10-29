@@ -89,3 +89,21 @@ fn compare(path: &Path, bytes: &[u8]) -> Result<Written, WriteOnceError> {
         Err(WriteOnceError::Differs)
     }
 }
+
+/// Open an append-only log for reading and appending, creating it if
+/// absent. Fails if `path` is a symbolic link.
+pub fn open_log(path: &Path) -> io::Result<fs::File> {
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => {
+            return Err(io::Error::other("log path is a symbolic link"));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let mut opts = OpenOptions::new();
+    opts.read(true).append(true).create(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    opts.open(path)
+}
