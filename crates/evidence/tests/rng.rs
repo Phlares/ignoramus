@@ -36,10 +36,47 @@ fn matches_reference_vectors() {
 }
 
 #[test]
-fn zero_seed_still_draws() {
+fn zero_seed_uses_the_fallback_state() {
     let mut r = Rng::from_seed([0; 32]);
-    let v: Vec<u64> = (0..4).map(|_| r.next_u64()).collect();
-    assert!(v.iter().any(|x| *x != v[0]));
+    let got: Vec<u64> = (0..4).map(|_| r.next_u64()).collect();
+    assert_eq!(
+        got,
+        [
+            0,
+            16155200969329072355,
+            16155200969329072355,
+            11268428918147242265
+        ]
+    );
+}
+
+#[test]
+fn uniform_maps_the_top_53_bits_to_zero_exclusive_one_inclusive() {
+    let mut a = Rng::from_seed(seq_seed());
+    let mut b = Rng::from_seed(seq_seed());
+    for _ in 0..1000 {
+        let want = ((b.next_u64() >> 11) + 1) as f64 / 9007199254740992.0;
+        assert_eq!(a.uniform(), want);
+    }
+    // Reference seed 1,2,3,4: the second raw draw is 0, so uniform must be 2^-53.
+    let mut s = [0u8; 32];
+    for (i, w) in [1u8, 2, 3, 4].iter().enumerate() {
+        s[i * 8] = *w;
+    }
+    let mut r = Rng::from_seed(s);
+    r.next_u64();
+    assert_eq!(r.uniform(), 1.0 / 9007199254740992.0);
+}
+
+#[test]
+fn normal_is_box_muller_of_two_uniforms() {
+    let mut a = Rng::from_seed(seq_seed());
+    let mut b = Rng::from_seed(seq_seed());
+    for _ in 0..10 {
+        let (u1, u2) = (b.uniform(), b.uniform());
+        let want = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+        assert!((a.normal() - want).abs() < 1e-12);
+    }
 }
 
 #[test]
