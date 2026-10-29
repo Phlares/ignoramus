@@ -1,0 +1,37 @@
+# Patterns for the secret and personal-data scan. Practice follows gitleaks.
+# `allow` entries are regexes. A match is dropped when any entry matches the
+# matched text (the first capture group when the pattern has one).
+
+[[pattern]]
+kind = "private-key"
+regex = '-----BEGIN [A-Z ]*PRIVATE KEY-----'
+
+[[pattern]]
+kind = "aws-key"
+regex = 'AKIA[0-9A-Z]{16}'
+
+[[pattern]]
+kind = "github-token"
+regex = 'gh[pousr]_[A-Za-z0-9]{36,}'
+
+[[pattern]]
+kind = "generic-secret"
+regex = '(?i)(api[_-]?key|secret|token|password)\s*[:=]\s*\S{8,}'
+
+[[pattern]]
+kind = "email"
+regex = '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
+# RFC 2606 names.
+allow = ['@example\.(org|com|net)$', '\.(invalid|test)$']
+
+[[pattern]]
+kind = "ipv4"
+# Each octet is 0-255. The edges reject a digit or dot on either side, so
+# five-part version strings and octets above 255 do not match; a closing sentence dot is fine.
+regex = '(?:^|[^\d.])((?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))(?:$|[^\d.]|\.(?:$|[^\d]))'
+# Loopback, unspecified, and the RFC 5737 documentation ranges.
+allow = ['^127\.0\.0\.1$', '^0\.0\.0\.0$', '^192\.0\.2\.', '^198\.51\.100\.', '^203\.0\.113\.']
+
+[[pattern]]
+kind = "phone"
+regex = '(?:\+1[\s.-]?)?(?:\(\d{3}\)\s?|\b\d{3}[\s.-])\d{3}[\s.-]\d{4}\b'

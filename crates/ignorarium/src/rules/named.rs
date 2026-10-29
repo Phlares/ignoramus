@@ -55,6 +55,7 @@ const NAMED: &[(&str, NamedFn)] = &[
     ("isolation-reachable", isolation_reachable),
     ("input-path-safe", input_path_safe),
     ("input-hash-matches", input_hash_matches),
+    ("secret-scan", secret_scan),
 ];
 
 fn lookup(name: &str) -> Option<NamedFn> {
@@ -407,4 +408,23 @@ fn trigger_declared(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
     flag(spec, pat, |v| {
         v.as_str().is_some_and(|m| !outcomes.contains(&m))
     })
+}
+
+// ---- secrets ----
+
+/// One hit per finding, at the string's path. The detail names the kind, never the text.
+fn secret_scan(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let patterns = crate::scan::builtin();
+    nodes(spec, pat)
+        .into_iter()
+        .filter_map(|(p, v)| Some((p, v.as_str()?)))
+        .flat_map(|(p, s)| {
+            crate::scan::scan_str(s, patterns)
+                .into_iter()
+                .map(move |kind| Hit {
+                    path: p.clone(),
+                    detail: Some(format!("{kind}.")),
+                })
+        })
+        .collect()
 }

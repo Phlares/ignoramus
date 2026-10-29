@@ -12,6 +12,7 @@ pub mod power;
 pub mod prior;
 pub mod records;
 pub mod rules;
+pub mod scan;
 pub mod schedule;
 pub mod seed;
 pub mod spec;

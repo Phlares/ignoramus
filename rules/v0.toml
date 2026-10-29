@@ -518,3 +518,14 @@ sources = []
 target = [
   { path = "inputs[*].sha256", check = "named:input-hash-matches" },
 ]
+
+[[rule]]
+code = "E-SEC-001"
+severity = "error"
+problem = "A string looks like a secret or personal data, of kind"
+instruction = "Remove the value from the spec, or move it out of the spec and refer to it by name. Do not copy the value into any other text."
+why = "A registered plan is kept and shared. A secret or personal detail in it cannot be taken back."
+sources = ["https://github.com/gitleaks/gitleaks"]
+target = [
+  { path = "**", check = "named:secret-scan" },
+]

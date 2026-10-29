@@ -400,19 +400,20 @@ fn the_named_rules_are_the_brief_table_and_rows_cover_the_pure_ones() {
         "E-ISO-001",
         "E-PTH-001",
         "E-HSH-001",
+        "E-SEC-001",
     ]
     .into_iter()
     .map(String::from)
     .collect();
     assert_eq!(in_file, want);
-    // E-CNF-005 and E-HSH-001 read files; their tests are below.
+    // E-CNF-005 and E-HSH-001 read files; their tests are below. E-SEC-001 is in tests/scan.rs.
     let in_rows: BTreeSet<String> = faults()
         .iter()
         .flat_map(|r| r.want.iter().map(|w| w.0.to_string()))
         .collect();
     let missing: Vec<_> = want
         .difference(&in_rows)
-        .filter(|c| !matches!(c.as_str(), "E-CNF-005" | "E-HSH-001"))
+        .filter(|c| !matches!(c.as_str(), "E-CNF-005" | "E-HSH-001" | "E-SEC-001"))
         .collect();
     assert!(missing.is_empty(), "{missing:?}");
 }
