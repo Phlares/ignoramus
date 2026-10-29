@@ -124,6 +124,10 @@ fn recipe_dir(root: &Path) -> PathBuf {
     d
 }
 
+fn store_in(root: &Path) -> Store {
+    Store::open(&root.join("home")).unwrap()
+}
+
 const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -179,7 +183,7 @@ fn rebuild_rate_is_the_fraction_equal_to_the_first() {
     let t = tempfile::tempdir().unwrap();
     let dir = recipe_dir(t.path());
     let (b, log) = fake(t.path(), &[A]);
-    assert_eq!(rebuild_rate(&b, &dir, 3).unwrap(), 1.0);
+    assert_eq!(rebuild_rate(&b, &dir, &store_in(t.path()), 3).unwrap(), 1.0);
     let calls = std::fs::read_to_string(&log).unwrap();
     assert_eq!(calls.matches("--no-cache").count(), 3, "{calls}");
     assert!(!calls.contains("save"));
@@ -187,12 +191,12 @@ fn rebuild_rate_is_the_fraction_equal_to_the_first() {
     let t = tempfile::tempdir().unwrap();
     let dir = recipe_dir(t.path());
     let (b, _) = fake(t.path(), &[A, B]);
-    assert_eq!(rebuild_rate(&b, &dir, 4).unwrap(), 0.5);
+    assert_eq!(rebuild_rate(&b, &dir, &store_in(t.path()), 4).unwrap(), 0.5);
 
     let t = tempfile::tempdir().unwrap();
     let dir = recipe_dir(t.path());
     let (b, _) = fake(t.path(), &[A, B, B]);
-    assert!((rebuild_rate(&b, &dir, 3).unwrap() - 1.0 / 3.0).abs() < 1e-12);
+    assert!((rebuild_rate(&b, &dir, &store_in(t.path()), 3).unwrap() - 1.0 / 3.0).abs() < 1e-12);
 }
 
 #[test]
@@ -200,8 +204,11 @@ fn rebuild_rate_of_one_build_is_one_and_zero_builds_is_an_error() {
     let t = tempfile::tempdir().unwrap();
     let dir = recipe_dir(t.path());
     let (b, _) = fake(t.path(), &[A]);
-    assert_eq!(rebuild_rate(&b, &dir, 1).unwrap(), 1.0);
-    assert!(matches!(rebuild_rate(&b, &dir, 0), Err(EnvError::Build(_))));
+    assert_eq!(rebuild_rate(&b, &dir, &store_in(t.path()), 1).unwrap(), 1.0);
+    assert!(matches!(
+        rebuild_rate(&b, &dir, &store_in(t.path()), 0),
+        Err(EnvError::Build(_))
+    ));
 }
 
 #[test]
@@ -213,7 +220,66 @@ fn build_stores_the_image_and_reports_a_rebuild_rate() {
     let dir = Path::new("tests/fixtures/env");
     let built = build(&b, dir, &store).unwrap();
     assert!(store.has(&built.store_digest));
-    let rate = rebuild_rate(&b, dir, 2).unwrap();
+    let rate = rebuild_rate(&b, dir, &store, 2).unwrap();
     assert!((0.0..=1.0).contains(&rate));
     println!("rebuild rate over 2 builds: {rate}");
+}
+
+#[test]
+fn check_pinned_treats_scratch_as_pinned() {
+    assert!(check_pinned(
+        "FROM scratch
+"
+    ));
+    assert!(check_pinned(
+        "from SCRATCH AS base
+"
+    ));
+    assert!(!check_pinned(
+        "FROM scratch AS a
+FROM debian:12
+"
+    ));
+}
+
+#[test]
+fn the_id_file_lives_under_the_store_root() {
+    let t = tempfile::tempdir().unwrap();
+    let dir = recipe_dir(t.path());
+    let (b, log) = fake(t.path(), &[A]);
+    let store = store_in(t.path());
+    rebuild_rate(&b, &dir, &store, 1).unwrap();
+    let calls = std::fs::read_to_string(log).unwrap();
+    let iid = calls
+        .split_whitespace()
+        .skip_while(|w| *w != "--iidfile")
+        .nth(1)
+        .unwrap();
+    assert!(Path::new(iid).starts_with(&store.root), "{iid}");
+    assert!(!Path::new(iid).exists(), "scratch file removed");
+}
+
+#[test]
+fn an_id_file_that_is_a_link_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = tempfile::tempdir().unwrap();
+    let dir = recipe_dir(t.path());
+    let real = t.path().join("real");
+    std::fs::write(&real, format!("sha256:{A}")).unwrap();
+    let p = t.path().join("engine");
+    std::fs::write(
+        &p,
+        format!(
+            "#!/bin/sh
+prev=\"\"
+for a in \"$@\"; do [ \"$prev\" = \"--iidfile\" ] && ln -s '{}' \"$a\"; prev=\"$a\"; done
+",
+            real.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let b = Builder::with_program(&p);
+    let r = rebuild_rate(&b, &dir, &store_in(t.path()), 1);
+    assert!(matches!(r, Err(EnvError::Io(_))), "{r:?}");
 }

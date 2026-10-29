@@ -78,7 +78,7 @@ fn is_digest(s: &str) -> bool {
 }
 
 /// True when the Dockerfile has a `FROM` and every `FROM` names an earlier
-/// stage or an image pinned as `@sha256:<64 lowercase hex>`.
+/// stage, `scratch` (the empty image), or an image pinned as `@sha256:<64 lowercase hex>`.
 pub fn check_pinned(dockerfile: &str) -> bool {
     let joined = dockerfile.replace("\\\r\n", " ").replace("\\\n", " ");
     let mut stages: Vec<String> = Vec::new();
@@ -94,7 +94,8 @@ pub fn check_pinned(dockerfile: &str) -> bool {
             return false;
         };
         seen = true;
-        let ok = stages.contains(&image.to_ascii_lowercase())
+        let ok = image.eq_ignore_ascii_case("scratch")
+            || stages.contains(&image.to_ascii_lowercase())
             || (!image.contains('$')
                 && image
                     .split_once("@sha256:")
@@ -158,6 +159,20 @@ pub struct Built {
     pub pinned: bool,
 }
 
+/// Reads a small text file and refuses a symbolic link at `p`.
+fn read_nofollow(p: &Path) -> io::Result<String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut text = String::new();
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(p)?
+        .take(4096)
+        .read_to_string(&mut text)?;
+    Ok(text)
+}
+
 fn tail(bytes: &[u8]) -> String {
     let s = String::from_utf8_lossy(bytes);
     let start = s.char_indices().rev().nth(TAIL).map_or(0, |(i, _)| i);
@@ -165,10 +180,18 @@ fn tail(bytes: &[u8]) -> String {
 }
 
 /// Builds the image. Returns the id as the engine prints it and as 64 hex digits.
-fn build_image(b: &Builder, dir: &Path, no_cache: bool) -> Result<(String, String), EnvError> {
-    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let iid = std::env::temp_dir().join(format!("ignorarium-iid-{}-{n}", std::process::id()));
+fn build_image(
+    b: &Builder,
+    dir: &Path,
+    store: &Store,
+    no_cache: bool,
+) -> Result<(String, String), EnvError> {
+    let mut rnd = [0u8; 8];
+    getrandom::fill(&mut rnd).map_err(|e| io::Error::other(e.to_string()))?;
+    // The store root is private (0700); the random name is unguessable.
+    let iid = store
+        .root
+        .join(format!(".{}.{}.iid", std::process::id(), hex::encode(rnd)));
     let mut cmd = Command::new(&b.program);
     cmd.arg("build").arg("--iidfile").arg(&iid);
     if no_cache {
@@ -182,7 +205,7 @@ fn build_image(b: &Builder, dir: &Path, no_cache: bool) -> Result<(String, Strin
             EnvError::Io(e)
         }
     })?;
-    let text = std::fs::read_to_string(&iid);
+    let text = read_nofollow(&iid);
     // Scratch file this call created; a missing one is fine.
     let _ = std::fs::remove_file(&iid);
     if !out.status.success() {
@@ -199,7 +222,7 @@ fn build_image(b: &Builder, dir: &Path, no_cache: bool) -> Result<(String, Strin
 
 pub fn build(b: &Builder, recipe_dir: &Path, store: &Store) -> Result<Built, EnvError> {
     let recipe = Recipe::load(recipe_dir)?;
-    let (id, image_digest) = build_image(b, recipe_dir, false)?;
+    let (id, image_digest) = build_image(b, recipe_dir, store, false)?;
     let mut save = Command::new(&b.program)
         .arg("save")
         .arg(&id)
@@ -225,16 +248,21 @@ pub fn build(b: &Builder, recipe_dir: &Path, store: &Store) -> Result<Built, Env
     })
 }
 
-/// Builds `n` times without cache. Returns the fraction of builds whose
+/// Builds `n` times without cache. `store` only holds the scratch id files. Returns the fraction of builds whose
 /// image id equals the first build's. `n == 0` is an error.
-pub fn rebuild_rate(b: &Builder, recipe_dir: &Path, n: u32) -> Result<f64, EnvError> {
+pub fn rebuild_rate(
+    b: &Builder,
+    recipe_dir: &Path,
+    store: &Store,
+    n: u32,
+) -> Result<f64, EnvError> {
     if n == 0 {
         return Err(EnvError::Build("rebuild count must be at least 1".into()));
     }
-    let first = build_image(b, recipe_dir, true)?.1;
+    let first = build_image(b, recipe_dir, store, true)?.1;
     let mut same = 1u32;
     for _ in 1..n {
-        if build_image(b, recipe_dir, true)?.1 == first {
+        if build_image(b, recipe_dir, store, true)?.1 == first {
             same += 1;
         }
     }
