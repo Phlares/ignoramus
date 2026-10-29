@@ -114,7 +114,20 @@ impl Licensing {
                     "Fill the input's licence record: an SPDX id, the source URL and every creator; a custom licence uses a LicenseRef- id.",
                 ));
             }
-            let entry = normalize(&input.path).and_then(|p| files.iter().find(|f| f.path == p));
+            let path = normalize(&input.path);
+            if let Some(j) = path.and_then(|p| {
+                self.inputs[..i]
+                    .iter()
+                    .position(|o| normalize(&o.path) == Some(p))
+            }) {
+                problems.push(Problem::new(
+                    "E-PUB-005",
+                    format!("inputs[{i}].path"),
+                    format!("the same file as inputs[{j}]"),
+                    "Keep one input record per file.",
+                ));
+            }
+            let entry = path.and_then(|p| files.iter().find(|f| f.path == p));
             let no_share = matches!(r.kind, Kind::RequestForm | Kind::Unspecified);
             match entry {
                 Some(e) => {

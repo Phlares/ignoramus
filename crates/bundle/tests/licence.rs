@@ -184,6 +184,36 @@ fn check_accepts_a_clean_set() {
 }
 
 #[test]
+fn two_records_for_one_file_are_refused() {
+    let r = || rec("MIT", Kind::Common, "s", &["A"]);
+    let l = licensing(vec![
+        input("data/a.txt", H, r()),
+        input("cited.txt", H, r()),
+        input("./data/a.txt", H, r()),
+        input("../x", H, r()),
+        input("../x", H, r()),
+        input("././data/a.txt", H, r()),
+    ]);
+    let mut files = all_licences();
+    files.push(entry("LICENSES/MIT.txt", H));
+    files.push(entry("data/a.txt", H));
+    let (p, w) = l.check(&files, &|_| None);
+    let got: Vec<(&str, &str, &str)> = p
+        .iter()
+        .map(|p| (p.code, p.path.as_str(), p.message.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("E-PUB-005", "inputs[2].path", "the same file as inputs[0]"),
+            ("E-PUB-005", "inputs[5].path", "the same file as inputs[0]"),
+        ]
+    );
+    assert_eq!(p[0].instruction, "Keep one input record per file.");
+    assert!(w.is_empty());
+}
+
+#[test]
 fn blank_creator_and_blank_id_are_refused() {
     let l = licensing(vec![
         input("x", H, rec("CC0-1.0", Kind::Common, "s", &[])),
