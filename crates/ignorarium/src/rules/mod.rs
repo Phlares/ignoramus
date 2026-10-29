@@ -262,3 +262,21 @@ fn parse_interval(s: &str) -> Result<(Bound, Bound), String> {
     }
     Ok((min, max))
 }
+
+/// Defaults, then generic, then named checks. Returns the defaulted spec, the
+/// defaults filled, and every diagnostic.
+pub fn check_all(
+    value: &serde_json::Value,
+    rules: &[Rule],
+    ctx: &CheckCtx,
+) -> (
+    serde_json::Value,
+    Vec<(String, serde_json::Value)>,
+    Vec<crate::diag::Diagnostic>,
+) {
+    let mut v = value.clone();
+    let filled = crate::estimate::apply_defaults(&mut v);
+    let mut diags = check_generic(&v, rules);
+    diags.extend(check_named(&v, rules, ctx));
+    (v, filled, diags)
+}

@@ -1,6 +1,8 @@
 //! ignorarium library crate.
 pub mod canon;
 pub mod diag;
+pub mod estimate;
+pub mod machine;
 pub mod power;
 pub mod prior;
 pub mod rules;
