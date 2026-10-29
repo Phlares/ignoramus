@@ -234,6 +234,7 @@ dependencies = [
 name = "deposit"
 version = "0.0.1"
 dependencies = [
+ "bundle",
  "hex",
  "serde",
  "serde_json",

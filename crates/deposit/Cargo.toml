@@ -13,4 +13,5 @@ sha2 = "0.10"
 hex = "0.4"
 
 [dev-dependencies]
+bundle = { path = "../bundle" }
 tempfile = "3"
