@@ -119,8 +119,11 @@ name = "bundle"
 version = "0.0.1"
 dependencies = [
  "hex",
+ "serde",
+ "serde_json",
  "sha2",
  "tempfile",
+ "toml",
 ]
 
 [[package]]

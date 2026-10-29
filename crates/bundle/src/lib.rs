@@ -4,8 +4,10 @@
 #![forbid(unsafe_code)]
 use std::fmt;
 
+pub mod citation;
 pub mod manifest;
 pub mod tree;
+pub mod yaml;
 pub mod zip;
 
 /// One refusal: a stable code, the path it concerns, what is wrong and how to fix it.
