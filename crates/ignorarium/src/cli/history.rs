@@ -1,14 +1,20 @@
 //! `import-history`: record earlier data files as one `legacy` plan log leaf.
 use super::{CliError, Ctx, Done, Run, out};
-use crate::planlog::store::{Leaf, PlanLog};
+use crate::keys;
+use crate::planlog::store::PlanLog;
 use crate::prior::file_hashes;
-use crate::{keys, time};
+use crate::runner::OWN_PREFIX;
 use std::path::PathBuf;
 
 pub fn run(ctx: &Ctx, phase: &str, files: &[PathBuf]) -> Run {
     let home = ctx.home()?;
     if phase.is_empty() {
         return Err(CliError::usage("--phase needs a name"));
+    }
+    if phase.starts_with(OWN_PREFIX) {
+        return Err(CliError::usage(format!(
+            "--phase cannot start with {OWN_PREFIX}, which marks the data a study recorded itself"
+        )));
     }
     // Every file is read before the log changes, so a bad file adds nothing.
     let mut data_hashes = Vec::new();
@@ -25,20 +31,7 @@ pub fn run(ctx: &Ctx, phase: &str, files: &[PathBuf]) -> Run {
     }
     let key = keys::load_or_create(home).map_err(|e| CliError::usage(format!("box key: {e}")))?;
     let (index, _) = PlanLog::open(&home.root.join("planlog"))
-        .and_then(|log| {
-            log.append(
-                Leaf {
-                    kind: "legacy".into(),
-                    commitment: None,
-                    family: None,
-                    mode: None,
-                    data_hashes,
-                    label: phase.into(),
-                    ts: time::now_rfc3339(),
-                },
-                &key,
-            )
-        })
+        .and_then(|log| log.append_legacy(phase, data_hashes, &key))
         .map_err(|e| CliError::usage(format!("planlog: {e}")))?;
     out(&format!("leaf {index}\n"))?;
     Ok(Done {

@@ -55,7 +55,7 @@ fn guide_json_lists_every_step_with_its_output() {
     assert_eq!(
         ids,
         [
-            "brief", "template", "fill", "check", "review", "register", "run", "report"
+            "brief", "template", "fill", "check", "review", "register", "run", "status", "report"
         ]
     );
     for s in steps {
@@ -63,10 +63,13 @@ fn guide_json_lists_every_step_with_its_output() {
             assert!(!s[key].as_str().unwrap().is_empty(), "{s}");
         }
     }
-    for id in ["run", "report"] {
-        let s = steps.iter().find(|s| s["id"] == id).unwrap();
-        assert!(s["does"].as_str().unwrap().contains("not available yet"));
-    }
+    let report = steps.iter().find(|s| s["id"] == "report").unwrap();
+    assert!(
+        report["does"]
+            .as_str()
+            .unwrap()
+            .contains("not available yet")
+    );
 }
 
 #[test]
@@ -488,8 +491,11 @@ fn guide_wording_is_public() {
     let dir = TempDir::new().unwrap();
     let a = bin(dir.path()).arg("guide").assert().success();
     let out = stdout(&a);
-    assert!(!out.contains("Plan 2"));
-    assert!(out.matches("not available yet").count() >= 2);
+    assert!(
+        !regex::Regex::new(r"Plan \d").unwrap().is_match(&out),
+        "{out}"
+    );
+    assert_eq!(out.matches("not available yet").count(), 3);
 }
 
 #[cfg(target_os = "linux")]
@@ -508,6 +514,29 @@ fn a_stdout_write_error_other_than_a_closed_pipe_exits_2() {
         .status()
         .unwrap();
     assert_eq!(st.code(), Some(2));
+}
+
+/// A hung-up terminal fails every write, as `/dev/full` does here.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_error_that_cannot_reach_stderr_keeps_its_exit_code_and_its_event() {
+    let dir = TempDir::new().unwrap();
+    let full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .unwrap();
+    let st = std::process::Command::new(env!("CARGO_BIN_EXE_ignorarium"))
+        .env("IGNORARIUM_HOME", dir.path())
+        .args(["status", "nope"])
+        .stdout(std::process::Stdio::null())
+        .stderr(full)
+        .status()
+        .unwrap();
+    assert_eq!(st.code(), Some(1));
+    let ev = events(dir.path());
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0]["name"], "status");
+    assert_eq!(ev[0]["attrs"]["exit"], 1);
 }
 
 fn events(home: &Path) -> Vec<Value> {
@@ -637,6 +666,31 @@ fn import_history_refuses_a_bad_file_before_appending() {
         assert!(stderr(&a).contains(&bad.display().to_string()));
     }
     assert!(leaf_lines(&home, "planlog").is_empty());
+}
+
+#[test]
+fn import_history_refuses_a_phase_in_the_form_of_a_studys_own_label() {
+    let (d, home, _) = setup(|t| t);
+    let file = d.path().join("rows.csv");
+    std::fs::write(&file, "x").unwrap();
+    let a = bin(&home)
+        .args(["import-history", "--phase", "study:pilot"])
+        .arg(&file)
+        .assert()
+        .code(2);
+    assert!(stderr(&a).contains("study:"), "{}", stderr(&a));
+    assert!(leaf_lines(&home, "planlog").is_empty());
+    // A colon elsewhere is a plain phase name.
+    bin(&home)
+        .args(["import-history", "--phase", "pilot:study:1"])
+        .arg(&file)
+        .assert()
+        .code(0);
+    let help = bin(&home)
+        .args(["import-history", "--help"])
+        .assert()
+        .success();
+    assert!(stdout(&help).contains("Must not start with `study:`"));
 }
 
 /// Register the template through the library, then return the box.

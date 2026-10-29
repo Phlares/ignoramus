@@ -143,13 +143,19 @@ pub fn append(path: &Path, key: &SigningKey, d: RecordDraft) -> Result<Record, R
 
 /// Check every line in order. Returns the number of records.
 pub fn verify(path: &Path, key: &VerifyingKey) -> Result<u64, VerifyError> {
+    read_all(path, key).map(|r| r.len() as u64)
+}
+
+/// Check every line in order and return the records. A missing file holds none. The file is
+/// read once, so each record returned is a line that was checked.
+pub fn read_all(path: &Path, key: &VerifyingKey) -> Result<Vec<Record>, VerifyError> {
     let buf = match std::fs::read(path) {
         Ok(b) => b,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e.into()),
     };
     let mut prev = GENESIS_PREV.to_string();
-    let mut count = 0u64;
+    let mut out = Vec::new();
     for (i, raw) in buf.split_inclusive(|&b| b == b'\n').enumerate() {
         let parse = VerifyError::Parse { line: i + 1 };
         let s = parse_line(raw).ok_or(parse)?;
@@ -161,11 +167,11 @@ pub fn verify(path: &Path, key: &VerifyingKey) -> Result<u64, VerifyError> {
         if !verify_hex(key, &bytes, &s.sig) {
             return Err(VerifyError::BadSig { seq });
         }
-        if seq != count || s.record.prev != prev {
+        if seq != out.len() as u64 || s.record.prev != prev {
             return Err(VerifyError::BrokenChain { seq });
         }
         prev = s.hash;
-        count += 1;
+        out.push(s.record);
     }
-    Ok(count)
+    Ok(out)
 }

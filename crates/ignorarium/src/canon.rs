@@ -27,6 +27,13 @@ pub fn canonical_of<T: serde::Serialize>(v: &T) -> std::io::Result<Vec<u8>> {
     to_canonical(&v).map_err(std::io::Error::other)
 }
 
+/// `canonical_of` and a final LF: one line of a JSON Lines file.
+pub fn canonical_line<T: serde::Serialize>(v: &T) -> std::io::Result<Vec<u8>> {
+    let mut line = canonical_of(v)?;
+    line.push(b'\n');
+    Ok(line)
+}
+
 pub fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
