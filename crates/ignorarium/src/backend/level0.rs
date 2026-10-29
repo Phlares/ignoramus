@@ -33,11 +33,12 @@ impl Backend for Level0 {
         let start = Instant::now();
         let (mut exit, cpu_seconds) = run_child(job, start, watch);
         let wall_seconds = start.elapsed().as_secs_f64();
+        // The payload ran: an output it left unhashable is its own result, not a box fault.
         let output_hash = match output_hash(&job.output_dir) {
             Ok(h) => h,
             Err(e) => {
-                if !matches!(exit, Exit::Infra(_)) {
-                    exit = Exit::Infra(format!("cannot hash output: {e}"));
+                if exit == Exit::Ok {
+                    exit = Exit::Void(format!("cannot hash output: {e}"));
                 }
                 String::new()
             }

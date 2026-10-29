@@ -239,9 +239,31 @@ fn a_symlinked_output_dir_is_refused() {
     assert!(output_hash(&ln).is_err());
     let mut j = job(d.path(), "true", Duration::from_secs(5));
     j.output_dir = ln;
+    // The box made a real folder, so a link there is the payload's doing: void, no retry.
     let o = Level0.run_row(&j, &|| true).unwrap();
-    assert!(matches!(o.exit, Exit::Infra(_)));
+    assert!(
+        matches!(&o.exit, Exit::Void(why) if why.starts_with("cannot hash output: ")),
+        "{:?}",
+        o.exit
+    );
     assert_eq!(o.output_hash, "");
+}
+
+#[test]
+fn an_output_the_payload_removed_is_void_unless_the_payload_failed() {
+    let d = tempfile::tempdir().unwrap();
+    let removed = |script: &str| {
+        let j = job(d.path(), script, Duration::from_secs(5));
+        Level0.run_row(&j, &|| true).unwrap()
+    };
+    let o = removed("rm -rf \"$OUT\"");
+    assert_eq!(
+        o.exit,
+        Exit::Void("cannot hash output: No such file or directory (os error 2)".into())
+    );
+    assert_eq!(o.output_hash, "");
+    // A failed payload stays a payload failure.
+    assert_eq!(removed("rm -rf \"$OUT\"; exit 3").exit, Exit::Payload(3));
 }
 
 #[test]

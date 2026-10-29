@@ -451,13 +451,7 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
         .filter(|r| r.kind == "row")
         .filter_map(|r| r.row)
         .collect();
-    let mut tally = Tally::of(&all);
-    let per_row = row_estimate(plan, &machine);
-    let budget = &plan.spec.scope.budget;
-    let prior = tally.cost(machine.rate_usd_per_hour);
-    plan.meter.set_prior(prior);
-    // Only spend from earlier sessions stays silent; this session's first reading may alert.
-    let mut alerts = Alerts::seeded(&prior, budget);
+    let mut books = Books::open(plan, &all, &machine);
     for row in plan
         .schedule
         .rows
@@ -467,24 +461,67 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
         if let Some(h) = at_boundary(&control) {
             return halt(plan, &dir, lock, h);
         }
-        let sampled = plan.meter.sample();
-        let now = sampled.clone().unwrap_or_default();
-        if let Ok(c) = &sampled {
-            for (dim, fraction) in alerts.fresh(c, budget) {
-                let attrs = json!({ "dimension": dimension_name(dim), "fraction": fraction });
-                log_event(plan, &dir, None, "budget.alert", "warn", attrs)?;
-            }
+        if let Some(h) = books.gate(plan, &dir)? {
+            return halt(plan, &dir, lock, h);
         }
-        let next = per_row.larger(&tally.mean(machine.rate_usd_per_hour));
-        if let Decision::Pause(why) = decide(&now, &next, budget, sampled.map(|_| ())) {
-            return halt(plan, &dir, lock, Halt::Pause(why.to_string()));
-        }
-        if let Some(h) = run_row(plan, row, &dir, &log, &mut tally, &watch)? {
+        if let Some(h) = run_row(plan, row, &dir, &log, &mut books, &watch)? {
             return halt(plan, &dir, lock, h);
         }
     }
     State::Done.write(&plan.home, &plan.study_id).map_err(io)?;
     Ok(RunStatus::Done)
+}
+
+/// This session's spend: the signed records' tally, the alerts already fired, and the row
+/// estimate. Every attempt's spend goes into the tally and the meter together.
+struct Books {
+    tally: Tally,
+    alerts: Alerts,
+    per_row: Cost,
+    rate_usd_per_hour: f64,
+}
+
+impl Books {
+    /// Start from the records read under the run lock; the meter starts there too.
+    fn open(plan: &RunPlan, all: &[records::Record], machine: &Machine) -> Books {
+        let tally = Tally::of(all);
+        let prior = tally.cost(machine.rate_usd_per_hour);
+        plan.meter.set_prior(prior);
+        Books {
+            tally,
+            // Only spend from earlier sessions stays silent; this session's first reading may alert.
+            alerts: Alerts::seeded(&prior, &plan.spec.scope.budget),
+            per_row: row_estimate(plan, machine),
+            rate_usd_per_hour: machine.rate_usd_per_hour,
+        }
+    }
+
+    /// Before each attempt: read the meter, emit the alerts it crossed, and pause when a
+    /// cap is reached or the attempt would reach one.
+    fn gate(&mut self, plan: &RunPlan, dir: &Path) -> Result<Option<Halt>, RunError> {
+        let budget = &plan.spec.scope.budget;
+        let sampled = plan.meter.sample();
+        let now = sampled.clone().unwrap_or_default();
+        if let Ok(c) = &sampled {
+            for (dim, fraction) in self.alerts.fresh(c, budget) {
+                let attrs = json!({ "dimension": dimension_name(dim), "fraction": fraction });
+                log_event(plan, dir, None, "budget.alert", "warn", attrs)?;
+            }
+        }
+        let next = self
+            .per_row
+            .larger(&self.tally.mean(self.rate_usd_per_hour));
+        Ok(match decide(&now, &next, budget, sampled.map(|_| ())) {
+            Decision::Pause(why) => Some(Halt::Pause(why.to_string())),
+            Decision::Continue => None,
+        })
+    }
+
+    /// An attempt's spend; `completed` when its row record holds it.
+    fn add(&mut self, plan: &RunPlan, o: &RowOutcome, completed: bool) {
+        self.tally.add(o.cpu_seconds, o.wall_seconds, completed);
+        plan.meter.add_row(o.cpu_seconds);
+    }
 }
 
 /// Between rows: a stop or a pause ends the run, and so does a control file that cannot be
@@ -674,8 +711,9 @@ impl Tally {
         t
     }
 
-    fn add(&mut self, cpu: f64, wall: f64) {
-        self.rows += 1;
+    /// One attempt; `row` when a row record holds it, as `of` counts.
+    fn add(&mut self, cpu: f64, wall: f64, row: bool) {
+        self.rows += u64::from(row);
         self.cpu += cpu;
         self.wall += wall;
     }
@@ -705,31 +743,31 @@ fn run_row(
     row: &Row,
     dir: &Path,
     log: &Path,
-    tally: &mut Tally,
+    books: &mut Books,
     watch: &RunWatch,
 ) -> Result<Option<Halt>, RunError> {
     let span = events::new_span_id();
     watch.begin(row.index, &span);
     let start = json!({ "row": row.index });
     log_event(plan, dir, Some(&span), "row.start", "info", start)?;
-    let (exit, halt) = attempt_row(plan, row, dir, log, tally, watch)?;
+    let (exit, halt) = attempt_row(plan, row, dir, log, books, watch)?;
     let end = json!({ "row": row.index, "exit": exit });
     log_event(plan, dir, Some(&span), "row.end", "info", end)?;
     Ok(halt)
 }
 
 /// A row's attempts, retries included, then its record. Returns the recorded exit, or
-/// `stopped` or `paused` for a row that ends the run with only a spend record.
+/// `stopped` or `paused` for a row that ends the run with only spend records. The row
+/// record holds the last attempt's spend; each earlier attempt has its own spend record.
 fn attempt_row(
     plan: &RunPlan,
     row: &Row,
     dir: &Path,
     log: &Path,
-    tally: &mut Tally,
+    books: &mut Books,
     watch: &RunWatch,
 ) -> Result<(String, Option<Halt>), RunError> {
     let mut attempts = 0u32;
-    let (mut cpu, mut wall) = (0.0, 0.0);
     let outcome = loop {
         attempts += 1;
         let job = job_for(plan, row, dir)?;
@@ -744,30 +782,61 @@ fn attempt_row(
                 selftest_ok: false,
             });
         control::row_ended(&plan.home, &plan.study_id);
-        cpu += o.cpu_seconds;
-        wall += o.wall_seconds;
         // A row ended early is not data: its spend is recorded, and the run ends.
         if let Some(h) = watch.ended.borrow_mut().take() {
-            return ended_early(plan, log, row, (cpu, wall), h);
+            unrecorded(plan, log, row, books, &o, &h.reason())?;
+            return Ok((h.exit().into(), Some(h)));
         }
         // A stop nobody asked for is a backend fault: void the row and pause, no retry.
         if o.exit == Exit::Stopped {
             let exit = Exit::Infra("the backend stopped the row with no stop requested".into());
             break RowOutcome { exit, ..o };
         }
-        if !matches!(o.exit, Exit::Infra(_)) || attempts > MAX_RETRIES {
-            break o;
-        }
-        if let Probe::Unavailable(why) = plan.backend.probe() {
-            let h = Halt::Pause(format!("backend unavailable: {why}"));
-            return ended_early(plan, log, row, (cpu, wall), h);
+        let why = match &o.exit {
+            Exit::Infra(why) if attempts <= MAX_RETRIES => why.clone(),
+            _ => break o,
+        };
+        // The failed attempt is spend first. A retry then needs a healthy backend and room
+        // in the budget, as a new row does.
+        unrecorded(
+            plan,
+            log,
+            row,
+            books,
+            &o,
+            &format!("infrastructure fault: {why}"),
+        )?;
+        let halt = match plan.backend.probe() {
+            Probe::Unavailable(why) => Some(Halt::Pause(format!("backend unavailable: {why}"))),
+            Probe::Available => books.gate(plan, dir)?,
+        };
+        if let Some(h) = halt {
+            return Ok((h.exit().into(), Some(h)));
         }
     };
-    let exit = match &outcome.exit {
-        Exit::Ok => "ok".to_string(),
-        Exit::Payload(c) => format!("payload:{c}"),
-        Exit::Infra(_) | Exit::Stopped => "void:infra".to_string(),
+    let (exit, reason) = match &outcome.exit {
+        Exit::Ok => ("ok".to_string(), None),
+        Exit::Payload(c) => (format!("payload:{c}"), None),
+        Exit::Void(why) => ("void:output".to_string(), Some(why)),
+        Exit::Infra(_) | Exit::Stopped => ("void:infra".to_string(), None),
     };
+    let mut body = json!({
+        "condition": row.condition,
+        "unit": row.unit,
+        "repeat": row.repeat,
+        "seed": row.seed_hex,
+        "isolation": plan.backend.level(),
+        "payload_sha256": plan.payload_sha256,
+        "data_hashes": plan.data_hashes,
+        "cpu_seconds": outcome.cpu_seconds,
+        "wall_seconds": outcome.wall_seconds,
+        "output_hash": outcome.output_hash,
+        "exit": exit,
+        "attempts": attempts,
+    });
+    if let Some(why) = reason {
+        body["reason"] = json!(why);
+    }
     records::append(
         log,
         &plan.key,
@@ -775,24 +844,10 @@ fn attempt_row(
             study: plan.study_id.clone(),
             row: Some(row.index),
             kind: "row".into(),
-            body: json!({
-                "condition": row.condition,
-                "unit": row.unit,
-                "repeat": row.repeat,
-                "seed": row.seed_hex,
-                "isolation": plan.backend.level(),
-                "payload_sha256": plan.payload_sha256,
-                "data_hashes": plan.data_hashes,
-                "cpu_seconds": cpu,
-                "wall_seconds": wall,
-                "output_hash": outcome.output_hash,
-                "exit": exit,
-                "attempts": attempts,
-            }),
+            body,
         },
     )?;
-    tally.add(cpu, wall);
-    plan.meter.add_row(cpu);
+    books.add(plan, &outcome, true);
     let halt = match outcome.exit {
         Exit::Infra(why) => Some(Halt::Pause(format!(
             "row {} voided by infrastructure faults: {why}",
@@ -803,15 +858,18 @@ fn attempt_row(
     Ok((exit, halt))
 }
 
-/// A row that ends the run without a row record: its attempts' spend goes into one signed
-/// `spend` record, so a resume counts it.
-fn ended_early(
+/// An attempt no row record holds: its spend goes into one signed `spend` record, so a
+/// resume counts it, and into this session's books.
+fn unrecorded(
     plan: &RunPlan,
     log: &Path,
     row: &Row,
-    (cpu, wall): (f64, f64),
-    h: Halt,
-) -> Result<(String, Option<Halt>), RunError> {
+    books: &mut Books,
+    o: &RowOutcome,
+    reason: &str,
+) -> Result<(), RunError> {
+    let body =
+        json!({ "cpu_seconds": o.cpu_seconds, "wall_seconds": o.wall_seconds, "reason": reason });
     records::append(
         log,
         &plan.key,
@@ -819,11 +877,11 @@ fn ended_early(
             study: plan.study_id.clone(),
             row: Some(row.index),
             kind: "spend".into(),
-            body: json!({ "cpu_seconds": cpu, "wall_seconds": wall, "reason": h.reason() }),
+            body,
         },
     )?;
-    plan.meter.add_row(cpu);
-    Ok((h.exit().into(), Some(h)))
+    books.add(plan, o, false);
+    Ok(())
 }
 
 /// The job for one attempt, with a fresh output dir. An old one is renamed, never deleted.

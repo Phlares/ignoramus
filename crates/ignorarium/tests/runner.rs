@@ -195,6 +195,14 @@ fn infra_failure_retries_then_voids_after_three() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].body["exit"], "void:infra");
     assert_eq!(rows[0].body["attempts"], 4);
+    // The three retried attempts each left a spend record.
+    let spend = kind_of(&lab, "s5", "spend");
+    assert_eq!(spend.len(), 3);
+    assert!(
+        spend
+            .iter()
+            .all(|s| s.row == Some(0) && s.body["reason"] == "infrastructure fault: box fault")
+    );
 }
 
 #[test]
@@ -228,6 +236,54 @@ fn an_unavailable_backend_pauses_before_the_retry() {
     );
     assert_eq!(*seen.borrow(), vec![0]);
     assert!(rows_of(&lab, "s5c").is_empty());
+}
+
+#[test]
+fn a_payload_that_removes_its_output_runs_once_and_is_void() {
+    let lab = lab();
+    // Counts its runs beside the output folder, then removes the folder and exits 0.
+    let payload =
+        "#!/bin/sh\necho run >> \"$IGNORARIUM_OUT/../runs\"\nrm -rf \"$IGNORARIUM_OUT\"\n";
+    let dir = common::with_payload(&lab, "gone", payload);
+    assert_eq!(run(&plan_of(&lab, "gone")).unwrap(), RunStatus::Done);
+    let rows = rows_of(&lab, "gone");
+    assert_eq!(rows.len(), 6);
+    for r in &rows {
+        assert_eq!(r.body["exit"], "void:output");
+        assert_eq!(r.body["attempts"], 1);
+        assert_eq!(r.body["output_hash"], "");
+        let reason = r.body["reason"].as_str().unwrap_or_default();
+        assert!(reason.starts_with("cannot hash output: "), "{reason}");
+    }
+    let runs = std::fs::read_to_string(dir.join("run/rows/0/runs")).unwrap();
+    assert_eq!(runs, "run\n");
+    assert!(kind_of(&lab, "gone", "spend").is_empty());
+}
+
+#[test]
+fn a_retry_that_would_reach_a_cap_pauses_instead() {
+    let lab = lab();
+    // Only the cpu cap can bind: the wall cap is 100 hours.
+    let roomy = |t: String| t.replace("wall_hours = 1.0", "wall_hours = 100.0");
+    common::edited(&lab, "retry-cap", roomy, PAYLOAD);
+    let mut plan = plan_of(&lab, "retry-cap");
+    // The failed attempt uses 2000 of the 3600 cpu seconds; a retry as costly would pass the cap.
+    let (mut b, seen) = fake(vec![Exit::Infra("box fault".into())]);
+    b.wall = Some(4000.0);
+    plan.backend = Box::new(b);
+    let why = "the next row would reach the cpu cap";
+    assert_eq!(run(&plan).unwrap(), RunStatus::Paused(why.into()));
+    assert_eq!(*seen.borrow(), vec![0]);
+    assert!(rows_of(&lab, "retry-cap").is_empty());
+    let spend = kind_of(&lab, "retry-cap", "spend");
+    assert_eq!(spend.len(), 1);
+    assert_eq!(spend[0].row, Some(0));
+    assert_eq!(
+        spend[0].body,
+        serde_json::json!({"cpu_seconds": 2000.0, "wall_seconds": 4000.0,
+                           "reason": "infrastructure fault: box fault"})
+    );
+    assert_eq!(plan.meter.sample().unwrap().cpu_seconds, 2000.0);
 }
 
 #[test]
@@ -759,13 +815,25 @@ fn retried_attempts_count_in_the_record_the_tally_and_the_meter() {
     b.wall = Some(100.0);
     plan.backend = Box::new(b);
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    // The row record holds the last attempt; each failed attempt has a spend record.
     let rows = rows_of(&lab, "b7");
     assert_eq!(rows[0].body["attempts"], 3);
-    assert_eq!(rows[0].body["wall_seconds"], 300.0);
-    assert_eq!(rows[0].body["cpu_seconds"], 150.0);
+    assert_eq!(rows[0].body["wall_seconds"], 100.0);
+    assert_eq!(rows[0].body["cpu_seconds"], 50.0);
     assert_eq!(rows[1].body["wall_seconds"], 100.0);
+    let spend = kind_of(&lab, "b7", "spend");
+    assert_eq!(spend.len(), 2);
+    for s in &spend {
+        assert_eq!(s.row, Some(0));
+        assert_eq!(s.body["cpu_seconds"], 50.0);
+        assert_eq!(s.body["wall_seconds"], 100.0);
+    }
     // Rows 1..5 cost 50 cpu seconds each; row 0 cost 3 attempts of 50 -> 400 in all.
     assert_eq!(plan.meter.sample().unwrap().cpu_seconds, 400.0);
+    // A resume reads the same 400 from the records: no attempt counts twice.
+    let resumed = plan_of(&lab, "b7");
+    assert_eq!(run(&resumed).unwrap(), RunStatus::Done);
+    assert_eq!(resumed.meter.sample().unwrap().cpu_seconds, 400.0);
 }
 
 #[test]
@@ -968,7 +1036,7 @@ fn attempts_before_a_backend_pause_are_spend_that_counts_on_resume() {
         assert_eq!(
             spend[0].body,
             serde_json::json!({"cpu_seconds": wall / 2.0, "wall_seconds": wall,
-                               "reason": "backend unavailable: gone"})
+                               "reason": "infrastructure fault: box fault"})
         );
         // The signed spend record is part of the earlier spend a resume starts from.
         let resumed = plan_of(&lab, id);

@@ -23,7 +23,10 @@ pub enum Exit {
     Ok,
     /// The payload failed (non-zero exit, signal or timeout). Never retried.
     Payload(i32),
-    /// The box or the sandbox failed. Retryable.
+    /// The payload exited 0, but its output cannot be hashed: it removed the folder, made it
+    /// a link, or left a file the box cannot read. Never retried.
+    Void(String),
+    /// The box or the sandbox failed before the payload could run or be reaped. Retryable.
     Infra(String),
     /// The watch said stop; the row's process group was killed.
     Stopped,
