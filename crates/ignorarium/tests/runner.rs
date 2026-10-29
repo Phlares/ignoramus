@@ -1,10 +1,11 @@
 use ignorarium::backend::level0::Level0;
 use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome};
+use ignorarium::canon::sha256_hex;
 use ignorarium::cli::register;
 use ignorarium::home::Home;
 use ignorarium::planlog::store::PlanLog;
 use ignorarium::prior::{PriorUse, file_hashes};
-use ignorarium::runner::{RunError, RunPlan, RunStatus, prepare_with, run};
+use ignorarium::runner::{RunError, RunPlan, RunStatus, prepare, prepare_with, run, up_to};
 use ignorarium::{estimate, keys, records, schedule, spec};
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -113,11 +114,13 @@ struct Fake {
     seen: Rc<RefCell<Vec<u64>>>,
     probe: Probe,
     panic_at: Option<u64>,
+    level: u8,
+    wall: Option<f64>,
 }
 
 impl Backend for Fake {
     fn level(&self) -> u8 {
-        0
+        self.level
     }
     fn probe(&self) -> Probe {
         self.probe.clone()
@@ -126,7 +129,11 @@ impl Backend for Fake {
         let env = |k: &str| job.env.iter().find(|(n, _)| n == k).unwrap().1.clone();
         let index: u64 = env("IGNORARIUM_ROW").parse().unwrap();
         self.seen.borrow_mut().push(index);
-        let o = Level0.run_row(job)?;
+        let mut o = Level0.run_row(job)?;
+        if let Some(w) = self.wall {
+            o.wall_seconds = w;
+            o.cpu_seconds = w / 2.0;
+        }
         if self.panic_at == Some(index) {
             panic!("crash after the sandbox exits");
         }
@@ -144,6 +151,8 @@ fn fake(script: Vec<Exit>) -> (Fake, Rc<RefCell<Vec<u64>>>) {
         seen: seen.clone(),
         probe: Probe::Available,
         panic_at: None,
+        level: 0,
+        wall: None,
     };
     (b, seen)
 }
@@ -330,7 +339,7 @@ fn late_confirmation_data_used_before_is_refused() {
     match err_of(&lab, "plan-a") {
         RunError::DataReused { path, label } => {
             assert_eq!(path, "data/conf.txt");
-            assert_eq!(label, "plan-b");
+            assert_eq!(label, "study plan-b");
         }
         e => panic!("{e}"),
     }
@@ -378,7 +387,7 @@ fn data_present_at_registration_is_not_late() {
 }
 
 #[test]
-fn prepare_refuses_a_missing_backend_a_changed_spec_and_a_changed_payload() {
+fn prepare_refuses_a_missing_backend_an_unknown_study_and_a_changed_spec() {
     let lab = lab();
     let dir = plain(&lab, "guard");
     let none = prepare_with(&lab.home, "guard", vec![]).err().unwrap();
@@ -388,7 +397,7 @@ fn prepare_refuses_a_missing_backend_a_changed_spec_and_a_changed_payload() {
     );
     let nobody = err_of(&lab, "nobody");
     assert!(matches!(nobody, RunError::NotRegistered(_)), "{nobody}");
-    // A payload that differs from a non-empty pin.
+    // A spec edited after registration no longer matches the register record.
     let spec_text = std::fs::read_to_string(dir.join("spec.toml")).unwrap();
     std::fs::rename(dir.join("spec.toml"), dir.join("spec.old")).unwrap();
     std::fs::write(
@@ -429,4 +438,211 @@ fn units_from_spec_matches_the_estimate_count() {
     assert_eq!(units[0].0, "a/w0");
     assert_eq!(units[8].0, "c/w2");
     assert_eq!(units[3].1, "b");
+}
+
+#[test]
+fn two_crashed_attempts_keep_two_output_dirs() {
+    let lab = lab();
+    let dir = plain(&lab, "s3b");
+    let mut plan = plan_of(&lab, "s3b");
+    for _ in 0..2 {
+        let (mut b, _) = fake(vec![]);
+        b.panic_at = Some(0);
+        plan.backend = Box::new(b);
+        assert!(catch_unwind(AssertUnwindSafe(|| run(&plan))).is_err());
+    }
+    let (b, _) = fake(vec![]);
+    plan.backend = Box::new(b);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    for k in ["out.crashed-0", "out.crashed-1", "out"] {
+        assert!(dir.join(format!("run/rows/0/{k}/result")).is_file(), "{k}");
+    }
+    assert!(!dir.join("run/rows/0/out.crashed-2").exists());
+}
+
+#[test]
+fn the_wall_time_the_backend_reports_lands_in_the_record() {
+    let lab = lab();
+    plain(&lab, "wall");
+    let mut plan = plan_of(&lab, "wall");
+    let (mut b, _) = fake(vec![]);
+    b.wall = Some(1.25);
+    plan.backend = Box::new(b);
+    run(&plan).unwrap();
+    for r in rows_of(&lab, "wall") {
+        assert_eq!(r.body["wall_seconds"], 1.25);
+        assert_eq!(r.body["cpu_seconds"], 0.625);
+    }
+}
+
+fn fake_at(level: u8) -> Box<dyn Backend> {
+    let (mut b, _) = fake(vec![]);
+    b.level = level;
+    Box::new(b)
+}
+
+fn need_isolation(t: String) -> String {
+    t.replace("min_isolation = 0", "min_isolation = 1")
+}
+
+#[test]
+fn the_lowest_backend_that_meets_min_isolation_runs() {
+    let lab = lab();
+    plain(&lab, "lvl0");
+    register_study(&lab, "lvl1", need_isolation, &[], PAYLOAD);
+    let pick = |id: &str| {
+        let all = vec![fake_at(2), fake_at(0), fake_at(1)];
+        prepare_with(&lab.home, id, all).unwrap().backend.level()
+    };
+    assert_eq!(pick("lvl0"), 0);
+    assert_eq!(pick("lvl1"), 1);
+    let only0 = prepare_with(&lab.home, "lvl1", vec![fake_at(0)])
+        .err()
+        .unwrap();
+    assert!(
+        matches!(only0, RunError::NoBackend { need: 1, .. }),
+        "{only0}"
+    );
+}
+
+#[test]
+fn backend_max_filters_out_higher_levels() {
+    let levels = |max| -> Vec<u8> {
+        up_to(vec![fake_at(0), fake_at(1), fake_at(2)], max)
+            .iter()
+            .map(|b| b.level())
+            .collect()
+    };
+    assert_eq!(levels(0), vec![0]);
+    assert_eq!(levels(1), vec![0, 1]);
+    assert_eq!(levels(2), vec![0, 1, 2]);
+    let lab = lab();
+    plain(&lab, "reg");
+    assert_eq!(prepare(&lab.home, "reg", 0).unwrap().backend.level(), 0);
+    register_study(&lab, "reg1", need_isolation, &[], PAYLOAD);
+    let err = prepare(&lab.home, "reg1", 0).err().unwrap();
+    assert!(matches!(err, RunError::NoBackend { need: 1, .. }), "{err}");
+}
+
+#[test]
+fn a_matching_payload_pin_runs_with_or_without_the_prefix() {
+    let hash = sha256_hex(PAYLOAD.as_bytes());
+    for (id, pin) in [("pin-a", format!("sha256:{hash}")), ("pin-b", hash.clone())] {
+        let lab = lab();
+        let set = move |t: String| t.replace("payload = \"\"", &format!("payload = \"{pin}\""));
+        register_study(&lab, id, set, &[], PAYLOAD);
+        assert_eq!(plan_of(&lab, id).payload_sha256, hash);
+    }
+}
+
+#[test]
+fn a_symlinked_payload_is_refused() {
+    let lab = lab();
+    let dir = plain(&lab, "link-payload");
+    let outside = lab.root.join("outside-payload");
+    std::fs::write(&outside, PAYLOAD).unwrap();
+    std::fs::rename(dir.join("payload/run"), dir.join("payload/run.old")).unwrap();
+    std::os::unix::fs::symlink(&outside, dir.join("payload/run")).unwrap();
+    assert!(matches!(err_of(&lab, "link-payload"), RunError::Unsafe(_)));
+}
+
+#[test]
+fn a_symlinked_payload_folder_is_refused() {
+    let lab = lab();
+    let dir = plain(&lab, "link-pdir");
+    let outside = lab.root.join("outside-pdir");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("run"), PAYLOAD).unwrap();
+    std::fs::rename(dir.join("payload"), dir.join("payload.old")).unwrap();
+    std::os::unix::fs::symlink(&outside, dir.join("payload")).unwrap();
+    assert!(matches!(err_of(&lab, "link-pdir"), RunError::Unsafe(_)));
+}
+
+/// Make `dir/<linked>` a link to an outside folder; `run` must refuse and touch nothing there.
+fn run_is_refused_when_linked(id: &str, linked: &str) {
+    let lab = lab();
+    let dir = plain(&lab, id);
+    let plan = plan_of(&lab, id);
+    let outside = lab.root.join("outside-run");
+    std::fs::create_dir(&outside).unwrap();
+    let at = dir.join(linked);
+    std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&outside, &at).unwrap();
+    let err = run(&plan).expect_err("run should refuse");
+    assert!(matches!(err, RunError::Unsafe(_)), "{err}");
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    assert!(rows_of(&lab, id).is_empty());
+}
+
+#[test]
+fn a_symlinked_run_folder_is_refused() {
+    run_is_refused_when_linked("link-run", "run");
+}
+
+#[test]
+fn a_symlinked_rows_folder_is_refused() {
+    run_is_refused_when_linked("link-rows", "run/rows");
+}
+
+#[test]
+fn a_symlinked_row_folder_is_refused() {
+    run_is_refused_when_linked("link-row", "run/rows/0");
+}
+
+#[test]
+fn a_register_record_without_a_leaf_is_refused() {
+    let lab = lab();
+    let dir = plain(&lab, "noleaf");
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let log = dir.join("records.jsonl");
+    std::fs::rename(&log, dir.join("records.old")).unwrap();
+    let hash = spec::load(&dir.join("spec.toml")).unwrap().hash;
+    let draft = records::RecordDraft {
+        study: "noleaf".into(),
+        row: None,
+        kind: "register".into(),
+        body: serde_json::json!({"spec_hash": hash, "log": "planlog"}),
+    };
+    records::append(&log, &key, draft).unwrap();
+    let err = err_of(&lab, "noleaf");
+    assert!(matches!(err, RunError::NotRegistered(_)), "{err}");
+}
+
+#[test]
+fn a_reused_input_names_a_registered_plan_by_leaf() {
+    let lab = lab();
+    let a = register_study(&lab, "plan-a", conf_input, &[], PAYLOAD);
+    register_study(
+        &lab,
+        "plan-c",
+        conf_input,
+        &[("data/conf.txt", "shared")],
+        PAYLOAD,
+    );
+    std::fs::create_dir_all(a.join("data")).unwrap();
+    std::fs::write(a.join("data/conf.txt"), "shared").unwrap();
+    match err_of(&lab, "plan-a") {
+        RunError::DataReused { label, .. } => assert_eq!(label, "registered plan, leaf 1"),
+        e => panic!("{e}"),
+    }
+}
+
+#[test]
+fn a_plan_leaf_labelled_like_the_study_is_not_its_own_use() {
+    let lab = lab();
+    // A plan leaf carries the earnable label `signal`; a study with that id must not match it.
+    let s = register_study(&lab, "signal", conf_input, &[], PAYLOAD);
+    register_study(
+        &lab,
+        "other",
+        conf_input,
+        &[("data/conf.txt", "shared")],
+        PAYLOAD,
+    );
+    std::fs::create_dir_all(s.join("data")).unwrap();
+    std::fs::write(s.join("data/conf.txt"), "shared").unwrap();
+    assert!(matches!(
+        err_of(&lab, "signal"),
+        RunError::DataReused { .. }
+    ));
 }

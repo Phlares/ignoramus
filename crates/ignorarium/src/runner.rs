@@ -4,7 +4,7 @@ use crate::backend::{self, Backend, Exit, Probe, RowJob, RowOutcome};
 use crate::canon::sha256_hex;
 use crate::estimate::apply_defaults;
 use crate::home::Home;
-use crate::planlog::store::{LogError, PlanLog};
+use crate::planlog::store::{Leaf, LogError, PlanLog};
 use crate::prior::file_hashes;
 use crate::records::{self, RecordDraft, RecordError, VerifyError};
 use crate::rules::input_bytes;
@@ -54,6 +54,8 @@ pub enum RunError {
     PayloadChanged,
     NoPayload(String),
     NoKey,
+    /// A path inside the study folder is a symbolic link.
+    Unsafe(String),
     NoBackend {
         need: u8,
         have: Vec<u8>,
@@ -78,6 +80,7 @@ impl fmt::Display for RunError {
             RunError::PayloadChanged => write!(f, "the payload differs from pins.payload"),
             RunError::NoPayload(e) => write!(f, "cannot read the payload: {e}"),
             RunError::NoKey => write!(f, "the box key does not exist"),
+            RunError::Unsafe(p) => write!(f, "{p} is a symbolic link"),
             RunError::NoBackend { need, have } => {
                 write!(
                     f,
@@ -129,11 +132,12 @@ fn io(e: impl fmt::Display) -> RunError {
 
 /// `prepare_with` on the backends this build registers, up to `backend_max`.
 pub fn prepare(home: &Home, study_id: &str, backend_max: u8) -> Result<RunPlan, RunError> {
-    let backends = backend::registered()
-        .into_iter()
-        .filter(|b| b.level() <= backend_max)
-        .collect();
-    prepare_with(home, study_id, backends)
+    prepare_with(home, study_id, up_to(backend::registered(), backend_max))
+}
+
+/// The backends at or below `max`.
+pub fn up_to(backends: Vec<Box<dyn Backend>>, max: u8) -> Vec<Box<dyn Backend>> {
+    backends.into_iter().filter(|b| b.level() <= max).collect()
 }
 
 /// Load a registered study, gate its late data, write its schedule, and pick the lowest
@@ -167,6 +171,7 @@ pub fn prepare_with(
         .min_by_key(|b| b.level())
         .ok_or(RunError::NoBackend { need, have })?;
 
+    no_links(&dir, &["payload", "run"])?;
     let payload = std::path::absolute(dir.join("payload").join("run")).map_err(io)?;
     let payload_sha256 =
         sha256_hex(&std::fs::read(&payload).map_err(|e| RunError::NoPayload(e.to_string()))?);
@@ -176,7 +181,18 @@ pub fn prepare_with(
         return Err(RunError::PayloadChanged);
     }
 
-    let data_hashes = gate_late_data(home, &spec, register.body["leaf"].as_u64(), &key)?;
+    let leaf = register.body["leaf"]
+        .as_u64()
+        .ok_or_else(|| RunError::NotRegistered(study_id.into()))?;
+    let log = match register.body["log"].as_str() {
+        Some(l @ ("planlog" | "testlog")) => l,
+        other => {
+            return Err(RunError::Records(format!(
+                "register record names log {other:?}"
+            )));
+        }
+    };
+    let data_hashes = gate_late_data(home, &spec, log, leaf, &key)?;
     let rows = schedule::expand(&spec, &spec_hash, &schedule::units_from_spec(&spec))
         .map_err(|e| RunError::Spec(e.to_string()))?;
     let schedule = Schedule::new(&spec_hash, rows);
@@ -208,20 +224,17 @@ fn decode_hash(h: &str) -> Result<[u8; 32], RunError> {
 fn gate_late_data(
     home: &Home,
     spec: &Spec,
-    leaf_index: Option<u64>,
+    log_name: &str,
+    leaf_index: u64,
     key: &SigningKey,
 ) -> Result<Vec<(String, String)>, RunError> {
     let id = spec.study.id.as_str();
     let dir = home.study_dir(id);
-    let log = PlanLog::open(&home.root.join(if spec.study.test_log {
-        "testlog"
-    } else {
-        "planlog"
-    }))?;
-    let registered = match leaf_index {
-        Some(i) => log.leaf(i)?.map(|l| l.data_hashes).unwrap_or_default(),
-        None => Vec::new(),
-    };
+    let log = PlanLog::open(&home.root.join(log_name))?;
+    let registered = log
+        .leaf(leaf_index)?
+        .ok_or_else(|| RunError::NotRegistered(id.into()))?
+        .data_hashes;
     let mut all = Vec::new();
     let mut late = Vec::new();
     for input in &spec.inputs {
@@ -239,11 +252,12 @@ fn gate_late_data(
     let mut new = Vec::new();
     for (path, hashes) in late {
         let uses = log.uses(&hashes.0, &hashes.1)?;
-        if let Some((_, leaf)) = uses.iter().find(|(_, l)| l.label != id) {
-            return Err(RunError::DataReused {
-                path,
-                label: leaf.label.clone(),
-            });
+        if let Some((i, leaf)) = uses.iter().find(|(_, l)| !is_own(l, id)) {
+            let label = match leaf.kind.as_str() {
+                "legacy" => format!("study {}", leaf.label),
+                _ => format!("registered plan, leaf {i}"),
+            };
+            return Err(RunError::DataReused { path, label });
         }
         if uses.is_empty() {
             new.push(hashes);
@@ -253,6 +267,28 @@ fn gate_late_data(
         log.append_legacy(id, new, key)?;
     }
     Ok(all)
+}
+
+/// A late-data leaf this study appended. A plan leaf is never its own use.
+fn is_own(leaf: &Leaf, id: &str) -> bool {
+    leaf.kind == "legacy" && leaf.label == id
+}
+
+/// Refuse a symbolic link at any step of `parts` below `base`. Steps that do not exist yet are fine.
+fn no_links(base: &Path, parts: &[&str]) -> Result<(), RunError> {
+    let mut at = base.to_path_buf();
+    for p in parts {
+        at.push(p);
+        match at.symlink_metadata() {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(RunError::Unsafe(at.display().to_string()));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(io(e)),
+        }
+    }
+    Ok(())
 }
 
 /// Run every row that has no record. Pauses when a row voids on infrastructure faults.
@@ -336,8 +372,9 @@ fn run_row(plan: &RunPlan, row: &Row, dir: &Path, log: &Path) -> Result<Option<S
 
 /// The job for one attempt, with a fresh output dir. An old one is renamed, never deleted.
 fn job_for(plan: &RunPlan, row: &Row, dir: &Path) -> Result<RowJob, RunError> {
-    let row_dir = std::path::absolute(dir.join("run").join("rows").join(row.index.to_string()))
-        .map_err(io)?;
+    let index = row.index.to_string();
+    no_links(dir, &["run", "rows", &index])?;
+    let row_dir = std::path::absolute(dir.join("run").join("rows").join(&index)).map_err(io)?;
     let out = row_dir.join("out");
     std::fs::create_dir_all(&row_dir).map_err(io)?;
     if out.symlink_metadata().is_ok() {
