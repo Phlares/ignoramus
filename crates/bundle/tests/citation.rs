@@ -223,6 +223,101 @@ name = " "
 }
 
 #[test]
+fn parse_checks_what_the_cff_schema_checks() {
+    let text = r#"
+title = "T"
+message = "M"
+abstract = "A"
+keywords = ["a", " ", "b", "a"]
+
+[[authors]]
+family-names = "Example"
+given-names = "Ada"
+affiliation = " "
+
+[[authors]]
+name = "Team"
+affiliation = "Lab"
+
+[[authors]]
+family-names = "Example"
+given-names = "Ada"
+affiliation = " "
+
+[[references]]
+type = "data"
+title = "D"
+url = "https://"
+version = " "
+[[references.authors]]
+name = "C"
+[[references.authors]]
+name = "C"
+"#;
+    let ps = citation::parse(text).unwrap_err();
+    let got: Vec<(&str, &str)> = ps
+        .iter()
+        .map(|p| (p.path.as_str(), p.message.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("citation.toml:keywords[1]", "this field is blank"),
+            (
+                "citation.toml:keywords[3]",
+                "the same keyword as keywords[0]"
+            ),
+            (
+                "citation.toml:authors[0].affiliation",
+                "this field is blank"
+            ),
+            (
+                "citation.toml:authors[1].affiliation",
+                "an entity author (one with a name) has no affiliation"
+            ),
+            (
+                "citation.toml:authors[2].affiliation",
+                "this field is blank"
+            ),
+            ("citation.toml:authors[2]", "the same author as authors[0]"),
+            (
+                "citation.toml:references[0].authors[1]",
+                "the same author as references[0].authors[0]"
+            ),
+            (
+                "citation.toml:references[0].url",
+                "a url is https:// or http:// and an address"
+            ),
+            ("citation.toml:references[0].version", "this field is blank"),
+        ]
+    );
+}
+
+#[test]
+fn a_url_needs_an_address_after_the_scheme() {
+    for (url, ok) in [
+        ("https://example.org", true),
+        ("http://x", true),
+        ("https://", false),
+        ("http://", false),
+        ("https://\\nx", false),
+        ("https://\\rx", false),
+        ("https://\\u2028x", false),
+        ("https://\\u2029x", false),
+        ("https://x\\ny", true),
+        ("ftp://x", false),
+        ("https:/x", false),
+    ] {
+        let text = format!(
+            "title = \"T\"\nmessage = \"M\"\nabstract = \"A\"\n[[authors]]\nname = \"N\"\n\
+             [[references]]\ntype = \"data\"\ntitle = \"D\"\nurl = \"{url}\"\n\
+             [[references.authors]]\nname = \"C\"\n"
+        );
+        assert_eq!(citation::parse(&text).is_ok(), ok, "{url}");
+    }
+}
+
+#[test]
 fn load_reports_a_read_error() {
     let d = tempfile::tempdir().unwrap();
     let ps = citation::load(&d.path().join("citation.toml")).unwrap_err();
@@ -245,7 +340,14 @@ fn load_reports_a_read_error() {
 
 #[test]
 fn is_doi_bounds() {
-    for ok in ["10.5072/zenodo.123456", "10.1234/x", "10.123456789/x"] {
+    for ok in [
+        "10.5072/zenodo.123456",
+        "10.1234/x",
+        "10.123456789/x",
+        "10.1000.10/x",
+        "10.1000.1/a/b",
+        "10.1234/AZaz09:/_;-.()[]\\",
+    ] {
         assert!(is_doi(ok), "{ok}");
     }
     for bad in [
@@ -257,6 +359,14 @@ fn is_doi_bounds() {
         "10.1234",
         "10.12a4/x",
         "10.1234/a\tb",
+        "10.1234/a#b",
+        "10.1234/a<b",
+        "10.1234/a+b",
+        "10.1234/\u{e9}",
+        "10.1000./x",
+        "10.1000.1.2/x",
+        "10.1000.a/x",
+        "10.1234/x\n",
     ] {
         assert!(!is_doi(bad), "{bad}");
     }

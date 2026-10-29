@@ -77,18 +77,36 @@ fn set(o: &Option<String>) -> bool {
     o.as_deref().is_some_and(|s| !blank(s))
 }
 
-/// True for `10.` plus 4 to 9 digits, `/`, and a suffix; no whitespace.
+/// True for the CFF 1.2.0 DOI pattern `^10\.\d{4,9}(\.\d+)?/[A-Za-z0-9:/_;\-\.\(\)\[\]\\]+$`.
 pub fn is_doi(s: &str) -> bool {
-    let Some(rest) = s.strip_prefix("10.") else {
+    let digits = |d: &str| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit());
+    let Some((prefix, suffix)) = s.strip_prefix("10.").and_then(|r| r.split_once('/')) else {
         return false;
     };
-    let Some((digits, suffix)) = rest.split_once('/') else {
-        return false;
+    let (registrant, sub_ok) = match prefix.split_once('.') {
+        Some((r, sub)) => (r, digits(sub)),
+        None => (prefix, true),
     };
-    (4..=9).contains(&digits.len())
-        && digits.bytes().all(|b| b.is_ascii_digit())
+    (4..=9).contains(&registrant.len())
+        && digits(registrant)
+        && sub_ok
         && !suffix.is_empty()
-        && !s.chars().any(char::is_whitespace)
+        && suffix
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b":/_;-.()[]\\".contains(&b))
+}
+
+/// True for the CFF 1.2.0 url pattern `^(https|http)://.+`. Its `.` is any character but a
+/// line break, and the pattern has no end anchor, so one such character after `://` is enough.
+fn is_url(s: &str) -> bool {
+    ["https://", "http://"]
+        .iter()
+        .filter_map(|scheme| s.strip_prefix(scheme))
+        .any(|rest| {
+            rest.chars()
+                .next()
+                .is_some_and(|c| !matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}'))
+        })
 }
 
 fn is_orcid(s: &str) -> bool {
@@ -119,6 +137,15 @@ fn check_author(a: &Author, path: &str, out: &mut Vec<Problem>) {
             "an orcid is https://orcid.org/ and four groups of four digits; the last character may be X",
         ));
     }
+    let at = format!("{path}.affiliation");
+    match &a.affiliation {
+        Some(_) if a.name.is_some() => out.push(problem(
+            &at,
+            "an entity author (one with a name) has no affiliation",
+        )),
+        Some(aff) if blank(aff) => out.push(problem(&at, "this field is blank")),
+        _ => {}
+    }
 }
 
 fn check_authors(authors: &[Author], path: &str, out: &mut Vec<Problem>) {
@@ -126,7 +153,12 @@ fn check_authors(authors: &[Author], path: &str, out: &mut Vec<Problem>) {
         out.push(problem(path, "at least one author is needed"));
     }
     for (i, a) in authors.iter().enumerate() {
-        check_author(a, &format!("{path}[{i}]"), out);
+        let at = format!("{path}[{i}]");
+        check_author(a, &at, out);
+        if let Some(j) = authors[..i].iter().position(|b| b == a) {
+            let list = path.trim_start_matches(':');
+            out.push(problem(&at, format!("the same author as {list}[{j}]")));
+        }
     }
 }
 
@@ -139,6 +171,14 @@ fn validate(c: &Citation) -> Vec<Problem> {
     ] {
         if blank(text) {
             out.push(problem(path, "this field is blank"));
+        }
+    }
+    for (i, k) in c.keywords.iter().enumerate() {
+        let at = format!(":keywords[{i}]");
+        if blank(k) {
+            out.push(problem(&at, "this field is blank"));
+        } else if let Some(j) = c.keywords[..i].iter().position(|o| o == k) {
+            out.push(problem(&at, format!("the same keyword as keywords[{j}]")));
         }
     }
     check_authors(&c.authors, ":authors", &mut out);
@@ -154,17 +194,17 @@ fn validate(c: &Citation) -> Vec<Problem> {
         if r.doi.as_deref().is_some_and(|d| !is_doi(d)) {
             out.push(problem(
                 &format!("{at}.doi"),
-                "a doi starts with 10. and has a prefix and a suffix",
+                "a doi is 10., 4 to 9 digits, a slash, and a suffix of letters, digits and :/_;-.()[]\\",
             ));
         }
-        if r.url
-            .as_deref()
-            .is_some_and(|u| !(u.starts_with("https://") || u.starts_with("http://")))
-        {
+        if r.url.as_deref().is_some_and(|u| !is_url(u)) {
             out.push(problem(
                 &format!("{at}.url"),
-                "a url starts with https:// or http://",
+                "a url is https:// or http:// and an address",
             ));
+        }
+        if r.version.as_deref().is_some_and(blank) {
+            out.push(problem(&format!("{at}.version"), "this field is blank"));
         }
     }
     out
