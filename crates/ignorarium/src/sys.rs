@@ -117,6 +117,41 @@ pub fn wait4(pid: u32, block: bool) -> io::Result<Option<Reaped>> {
     }))
 }
 
+/// Make the child that `cmd` starts inherit, besides stdin, stdout and stderr, only the
+/// descriptors in `keep`, at the same numbers. The box's own descriptors are close-on-exec,
+/// but ones it inherited from its own parent may not be. A kernel before Linux 5.11 lacks
+/// `CLOSE_RANGE_CLOEXEC`, so the spawn fails there.
+pub fn inherit_only(cmd: &mut std::process::Command, keep: [i32; 2]) {
+    use std::os::unix::process::CommandExt;
+    let hook = move || -> io::Result<()> {
+        let (first, last): (libc::c_uint, libc::c_uint) = (3, libc::c_uint::MAX);
+        // SAFETY: close_range takes three integers and only marks this process's descriptors
+        // close-on-exec; it reads and writes no memory.
+        let marked = unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                first,
+                last,
+                libc::CLOSE_RANGE_CLOEXEC,
+            )
+        };
+        if marked != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        for fd in keep {
+            // SAFETY: fcntl F_SETFD with 0 clears close-on-exec on a descriptor number; it
+            // reads and writes no memory.
+            if unsafe { libc::fcntl(fd, libc::F_SETFD, 0) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    };
+    // SAFETY: `hook` runs in the child between fork and exec. It makes only the
+    // async-signal-safe close_range and fcntl calls, and it allocates nothing.
+    unsafe { cmd.pre_exec(hook) };
+}
+
 /// Send SIGKILL to the process group led by `pid`. A group already gone is fine.
 pub fn kill_group(pid: u32) -> io::Result<()> {
     use rustix::process::{Pid, Signal, kill_process_group};

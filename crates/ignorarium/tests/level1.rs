@@ -1,13 +1,17 @@
 //! Level 1: rows in a bubblewrap sandbox. A test that launches one prints
 //! `skip level1: <reason>` and returns where bubblewrap cannot run.
 mod common;
-use common::{PAYLOAD, lab, no_level1, plain, register_study, rows_of, write_exec};
+use common::{
+    PAYLOAD, REQUIRE_LEVEL1, in_child, is_child, lab, plain, register_study, rows_of, skip_level1,
+    write_exec,
+};
 use ignorarium::backend::level0::Level0;
-use ignorarium::backend::level1::Level1;
+use ignorarium::backend::level1::{Level1, isolation_args, row_args};
 use ignorarium::backend::{Backend, Exit, Probe, RowJob, Watch, output_hash, seccomp};
 use ignorarium::machine;
 use ignorarium::runner::{self, RunError, RunStatus, prepare, prepare_with};
 use std::cell::Cell;
+use std::ffi::{OsStr, OsString};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -23,8 +27,7 @@ fn backend() -> Level1 {
 /// The backend, or `None` once the reason this host cannot run bubblewrap is printed.
 /// Where the host can, the backend's own probe must agree.
 fn ready() -> Option<Level1> {
-    if let Some(why) = no_level1() {
-        println!("skip level1: {why}");
+    if skip_level1() {
         return None;
     }
     let b = backend();
@@ -314,6 +317,183 @@ fn no_new_privileges_and_no_capabilities() {
     );
 }
 
+#[test]
+fn payload_inherits_no_file_descriptors_from_the_box() {
+    let Some(b) = ready() else { return };
+    let (d, job) = row("ls /proc/self/fd > /out/fds", LONG);
+    // A writable host file the box holds without close-on-exec, as a parent's
+    // `exec 3>file` leaves one.
+    let host = std::fs::File::create(d.path().join("host-file")).unwrap();
+    rustix::io::fcntl_setfd(&host, rustix::io::FdFlags::empty()).unwrap();
+    let o = b.run_row(&job, &|| true).unwrap();
+    drop(host);
+    assert_eq!(o.exit, Exit::Ok);
+    // stdin, stdout, stderr, and the folder `ls` reads.
+    assert_eq!(sorted_lines(&read(&job, "fds")), ["0", "1", "2", "3"]);
+}
+
+/// The namespaces level 1 unshares. bubblewrap has no time namespace option.
+const UNSHARED: [&str; 7] = ["cgroup", "ipc", "mnt", "net", "pid", "user", "uts"];
+
+#[test]
+fn payload_runs_in_its_own_namespaces_and_session() {
+    let Some(b) = ready() else { return };
+    let (_d, job) = row(
+        &format!(
+            "for n in {}; do echo \"$n $(readlink /proc/self/ns/$n)\"; done > /out/ns; \
+             if unshare -U true 2>/dev/null; then echo allowed; else echo refused; fi > /out/userns; \
+             echo \"$$ $(cut -d' ' -f6 /proc/$$/stat)\" > /out/session",
+            UNSHARED.join(" ")
+        ),
+        LONG,
+    );
+    assert_eq!(b.run_row(&job, &|| true).unwrap().exit, Exit::Ok);
+    let inside = read(&job, "ns");
+    for (line, n) in inside.lines().zip(UNSHARED) {
+        let host = std::fs::read_link(format!("/proc/self/ns/{n}")).unwrap();
+        assert_eq!(line.split_once(' ').unwrap().0, n);
+        assert_ne!(
+            line.split_once(' ').unwrap().1,
+            host.to_str().unwrap(),
+            "{n}"
+        );
+    }
+    assert_eq!(inside.lines().count(), UNSHARED.len());
+    assert_eq!(read(&job, "userns"), "refused\n");
+    // The sandbox's PID 1 leads a session of its own, and the payload (PID 2) is in it.
+    // Without a new session the payload's session lies outside the namespace: 0.
+    assert_eq!(read(&job, "session"), "2 1\n");
+}
+
+#[test]
+fn isolation_args_are_the_constraint_list() {
+    let want = [
+        "--unshare-user",
+        "--unshare-ipc",
+        "--unshare-pid",
+        "--unshare-net",
+        "--unshare-uts",
+        "--unshare-cgroup",
+        "--disable-userns",
+        "--die-with-parent",
+        "--new-session",
+        "--clearenv",
+        "--seccomp",
+        "10",
+        "--json-status-fd",
+        "11",
+        "--proc",
+        "/proc",
+        "--dir",
+        "/dev",
+        "--dev-bind",
+        "/dev/null",
+        "/dev/null",
+        "--dev-bind",
+        "/dev/zero",
+        "/dev/zero",
+        "--dev-bind",
+        "/dev/urandom",
+        "/dev/urandom",
+        "--remount-ro",
+        "/",
+    ];
+    assert_eq!(isolation_args(10, 11), want.map(OsString::from));
+}
+
+fn os(items: &[&str]) -> Vec<OsString> {
+    items.iter().map(OsString::from).collect()
+}
+
+#[test]
+fn row_args_bind_folders_read_only_and_recreate_links() {
+    let d = TempDir::new().unwrap();
+    let root = d.path().join("root");
+    std::fs::create_dir_all(root.join("usr/bin")).unwrap();
+    std::os::unix::fs::symlink("usr/bin", root.join("bin")).unwrap();
+    // A plain file is neither a folder nor a link: it adds nothing.
+    std::fs::write(root.join("etc"), "").unwrap();
+    let (_r, mut job) = row("true", LONG);
+    job.rootfs = Some(root.clone());
+    job.env = vec![("A".into(), "1".into())];
+    let s = row_args(&job).unwrap();
+    let text = |p: &Path| p.to_str().unwrap().to_string();
+    let payload_dir = Path::new(&job.argv[0]).parent().unwrap();
+    assert_eq!(
+        s.mounts,
+        os(&[
+            "--ro-bind",
+            &text(&root.join("usr")),
+            "/usr",
+            "--symlink",
+            "usr/bin",
+            "/bin",
+            "--ro-bind-try",
+            &text(&job.input_dir),
+            "/in",
+            "--bind",
+            &text(&job.output_dir),
+            "/out",
+            "--ro-bind",
+            &text(payload_dir),
+            "/payload",
+        ])
+    );
+    assert_eq!(
+        s.run,
+        os(&[
+            "--setenv",
+            "A",
+            "1",
+            "--setenv",
+            "IGNORARIUM_IN",
+            "/in",
+            "--setenv",
+            "IGNORARIUM_OUT",
+            "/out",
+            "--chdir",
+            "/out",
+            "--",
+            "/payload/run",
+            "--condition",
+            "a",
+        ])
+    );
+    // An environment root that is not a folder is refused.
+    for bad in [root.join("etc"), d.path().join("missing")] {
+        job.rootfs = Some(bad.clone());
+        assert_eq!(
+            row_args(&job).err(),
+            Some(format!(
+                "environment root {} is not a folder",
+                bad.display()
+            ))
+        );
+    }
+}
+
+#[test]
+fn a_required_level1_turns_a_skip_into_a_failure() {
+    const NAME: &str = "a_required_level1_turns_a_skip_into_a_failure";
+    if is_child(NAME) {
+        assert!(skip_level1());
+        return;
+    }
+    // No bubblewrap on PATH, so level 1 cannot run in the child.
+    let d = TempDir::new().unwrap();
+    let path = d.path().as_os_str();
+    assert!(in_child(
+        NAME,
+        d.path(),
+        &[("PATH", path), (REQUIRE_LEVEL1, OsStr::new("0"))]
+    ));
+    assert!(!in_child(
+        NAME,
+        d.path(),
+        &[("PATH", path), (REQUIRE_LEVEL1, OsStr::new("1"))]
+    ));
+}
+
 /// Notes once a process holding `marker` runs.
 struct Spy {
     marker: String,
@@ -396,18 +576,18 @@ fn killing_bwrap_ends_the_sandbox() {
 #[test]
 fn a_bad_bind_is_an_infra_fault_with_bwraps_reason() {
     let Some(b) = ready() else { return };
-    // A missing root binds nothing, so the payload's interpreter is missing.
+    // A missing environment root is refused before bubblewrap runs.
     let (d, mut job) = row("printf ran > /out/ran", LONG);
     job.rootfs = Some(d.path().join("no-root"));
     let o = b.run_row(&job, &|| true).unwrap();
     assert_eq!(
         o.exit,
-        Exit::Infra(
-            "bubblewrap reported no payload exit: \
-             bwrap: execvp /payload/run: No such file or directory"
-                .into()
-        )
+        Exit::Infra(format!(
+            "environment root {} is not a folder",
+            d.path().join("no-root").display()
+        ))
     );
+    assert!(!job.output_dir.join("ran").exists());
     // A missing output folder cannot be bound.
     let (d, mut job) = row("printf ran > /out/ran", LONG);
     job.output_dir = d.path().join("no-output");
@@ -448,15 +628,37 @@ fn payload_exit_codes_pass_through() {
 
 /// A stand-in bubblewrap that prints `bubblewrap <version>` and refuses to sandbox.
 fn fake(dir: &Path, version: &str) -> Level1 {
-    let path = dir.join(format!("bwrap-{version}"));
+    fake_running(dir, version, "echo 'fake: no sandbox here' >&2")
+}
+
+/// A stand-in bubblewrap that prints `bubblewrap <version>` and, asked for a sandbox,
+/// runs `script` and exits 1.
+fn fake_running(dir: &Path, version: &str, script: &str) -> Level1 {
+    let path = dir.join(format!("bwrap-{version}-{}", script.len()));
     write_exec(
         &path,
         &format!(
             "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'bubblewrap {version}'; exit 0; fi\n\
-             echo 'fake: no sandbox here' >&2\nexit 1\n"
+             {script}\nexit 1\n"
         ),
     );
     Level1::with(path, BOX.into())
+}
+
+#[test]
+fn a_setup_fault_keeps_the_last_4_kib_of_stderr() {
+    let d = TempDir::new().unwrap();
+    // 10 KiB of `x`, then a marker, on stderr.
+    let b = fake_running(
+        d.path(),
+        "0.9.0",
+        "head -c 10240 /dev/zero | tr '\\0' x >&2; printf 'END-OF-STDERR' >&2",
+    );
+    let tail = format!("{}END-OF-STDERR", "x".repeat(4096 - "END-OF-STDERR".len()));
+    assert_eq!(
+        why(&b),
+        format!("bubblewrap reported no payload exit: {tail}")
+    );
 }
 
 fn why(b: &Level1) -> String {
@@ -589,18 +791,24 @@ fn seccomp_program_is_a_whole_number_of_filters() {
     const RET: u16 = 0x06;
     let mut compared: Vec<u32> = ins.iter().filter(|i| i.0 == JEQ).map(|i| i.1).collect();
     compared.sort();
+    // x86_64 also takes each call through the x32 ABI: the same number with bit 30 set.
     #[cfg(target_arch = "x86_64")]
-    let arch = 0xC000_003E;
+    let (arch, abis) = (0xC000_003E, [0, 0x4000_0000].as_slice());
     #[cfg(target_arch = "aarch64")]
-    let arch = 0xC000_00B7;
-    let mut want = vec![
-        arch,
-        libc::SYS_io_uring_setup as u32,
-        libc::SYS_io_uring_enter as u32,
-        libc::SYS_io_uring_register as u32,
-        libc::SYS_socket as u32,
-        libc::AF_VSOCK as u32,
-    ];
+    let (arch, abis) = (0xC000_00B7, [0].as_slice());
+    let mut want = vec![arch];
+    for abi in abis {
+        for nr in [
+            libc::SYS_io_uring_setup,
+            libc::SYS_io_uring_enter,
+            libc::SYS_io_uring_register,
+            libc::SYS_socket,
+        ] {
+            want.push(nr as u32 | abi);
+        }
+        // Each `socket` entry compares its first argument with AF_VSOCK.
+        want.push(libc::AF_VSOCK as u32);
+    }
     want.sort();
     assert_eq!(compared, want);
     let mut returns: Vec<u32> = ins.iter().filter(|i| i.0 == RET).map(|i| i.1).collect();

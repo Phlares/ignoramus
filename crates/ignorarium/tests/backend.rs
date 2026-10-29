@@ -1,3 +1,4 @@
+mod common;
 use ignorarium::backend::level0::Level0;
 use ignorarium::backend::{Backend, Exit, Probe, RowJob, Watch, output_hash};
 use ignorarium::sys;
@@ -400,10 +401,10 @@ impl Watch for Leaders {
 #[test]
 fn every_registered_backend_reports_one_leader_start() {
     for b in ignorarium::backend::registered() {
-        if b.probe() != Probe::Available {
-            println!("skip level{}: unavailable", b.level());
+        if b.level() == 1 && common::skip_level1() {
             continue;
         }
+        assert_eq!(b.probe(), Probe::Available, "level {}", b.level());
         let d = tempfile::tempdir().unwrap();
         let watch = Leaders::default();
         let o = b

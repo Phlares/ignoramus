@@ -2,11 +2,8 @@
 //! IPC, UTS and cgroup namespaces, an empty read-only root with read-only binds of the
 //! environment, the input folder and the payload, one writable output folder, and a
 //! seccomp filter. See the bubblewrap manual: <https://github.com/containers/bubblewrap>.
-use super::{
-    Backend, Exit, POLL, Probe, RowJob, RowOutcome, TIMEOUT_CODE, Watch, outcome, supervise,
-};
+use super::{Backend, Exit, Probe, RowJob, RowOutcome, TIMEOUT_CODE, Watch, outcome, supervise};
 use crate::sys;
-use rustix::io::{FdFlags, fcntl_setfd};
 use rustix::pipe::{PipeFlags, pipe_with};
 use rustix::process::{getpid, set_child_subreaper};
 use std::cell::Cell;
@@ -17,7 +14,6 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, channel};
-use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 /// The first bubblewrap with `--disable-userns`.
@@ -31,10 +27,10 @@ const SMOKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Time to wait for the pipes to reach their end once bubblewrap is reaped.
 const DRAIN_GRACE: Duration = Duration::from_secs(5);
 
-/// Held from the moment a sandbox's inherited pipe ends exist until its bubblewrap has
-/// started, so no other sandbox inherits them.
-static SPAWN: Mutex<()> = Mutex::new(());
-
+/// The level 1 backend. Its first sandbox makes the calling process a child subreaper
+/// for the rest of its life: bubblewrap leaves the sandbox's PID 1 unreaped, and the box
+/// must reap it to count the payload's CPU. Every orphan of the process's descendants
+/// then becomes its child, and stays a zombie unless something reaps it.
 pub struct Level1 {
     /// The bubblewrap binary.
     pub bwrap: PathBuf,
@@ -137,7 +133,6 @@ impl Level1 {
         if let Err(e) = set_child_subreaper(Some(getpid())) {
             return (Exit::Infra(format!("cannot become a subreaper: {e}")), 0.0);
         }
-        let spawning = SPAWN.lock().unwrap_or_else(PoisonError::into_inner);
         let pipes = match Pipes::new() {
             Ok(p) => p,
             Err(e) => {
@@ -147,18 +142,17 @@ impl Level1 {
                 );
             }
         };
+        let inherited = [pipes.filter.as_raw_fd(), pipes.status_w.as_raw_fd()];
         let mut cmd = Command::new(&self.bwrap);
         cmd.args(&sandbox.mounts)
-            .args(isolation_args(
-                pipes.filter.as_raw_fd(),
-                pipes.status_w.as_raw_fd(),
-            ))
+            .args(isolation_args(inherited[0], inherited[1]))
             .args(&sandbox.run)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(pipes.stderr_w));
+        sys::inherit_only(&mut cmd, inherited);
         let started = Started {
-            held: Cell::new(Some((pipes.filter, pipes.status_w, spawning))),
+            held: Cell::new(Some((pipes.filter, pipes.status_w))),
             inner: watch,
         };
         let (exit, cpu) = supervise(cmd, job, start, &started);
@@ -167,8 +161,12 @@ impl Level1 {
         let status = pipes.status.recv_timeout(DRAIN_GRACE).unwrap_or_default();
         let stderr = pipes.stderr.recv_timeout(DRAIN_GRACE).unwrap_or_default();
         let cpu = cpu + field(&status, "child-pid").map_or(0.0, reap);
-        let timed_out = exit == Exit::Payload(TIMEOUT_CODE) && start.elapsed() >= job.wall_timeout;
-        if timed_out || matches!(exit, Exit::Stopped | Exit::Infra(_)) {
+        // `Payload(TIMEOUT_CODE)` without an exit document is the wall timeout; with one,
+        // bubblewrap passed on the payload's own 124, which the document holds too.
+        if matches!(
+            exit,
+            Exit::Stopped | Exit::Infra(_) | Exit::Payload(TIMEOUT_CODE)
+        ) {
             return (exit, cpu);
         }
         let exit = match field(&status, "exit-code") {
@@ -270,7 +268,14 @@ pub fn row_args(job: &RowJob) -> Result<Sandbox, String> {
     let (Some(dir), Some(name)) = (prog.parent(), prog.file_name()) else {
         return Err(format!("payload {} names no file", prog.display()));
     };
-    let mut mounts = root_mounts(job.rootfs.as_deref().unwrap_or(Path::new("/")));
+    let root = job.rootfs.as_deref().unwrap_or(Path::new("/"));
+    if !root.is_dir() {
+        return Err(format!(
+            "environment root {} is not a folder",
+            root.display()
+        ));
+    }
+    let mut mounts = root_mounts(root);
     mounts.extend(op("--ro-bind-try", &job.input_dir, "/in"));
     mounts.extend(op("--bind", &job.output_dir, "/out"));
     mounts.extend(op("--ro-bind", dir, "/payload"));
@@ -323,21 +328,22 @@ fn field<T: TryFrom<i64>>(status: &str, key: &str) -> Option<T> {
         .and_then(|n| T::try_from(n).ok())
 }
 
-/// Reap `pid` once it ends, if it is the box's child, and return the CPU seconds it and
-/// the processes it reaped used. Waits at most `DRAIN_GRACE`; 0 when it cannot reap.
+/// Reap `pid` if it is the box's child, and return the CPU seconds it and the processes it
+/// reaped used; 0 when it is not. The sandbox's PID 1 dies with bubblewrap
+/// (`--die-with-parent`), so the wait is short.
 fn reap(pid: u32) -> f64 {
-    let deadline = Instant::now() + DRAIN_GRACE;
-    while matches!(sys::has_exited(pid), Ok(false)) && Instant::now() < deadline {
-        std::thread::sleep(POLL);
+    if sys::has_exited(pid).is_err() {
+        return 0.0;
     }
-    match sys::wait4(pid, false) {
+    match sys::wait4(pid, true) {
         Ok(Some(r)) => r.cpu_seconds,
         _ => 0.0,
     }
 }
 
-/// The pipes of one sandbox. bubblewrap inherits `filter` (the seccomp program, already
-/// written) and `status_w`; every other end is close-on-exec, so no child holds it.
+/// The pipes of one sandbox, all close-on-exec in the box. bubblewrap alone inherits
+/// `filter` (the seccomp program, already written) and `status_w`: `sys::inherit_only`
+/// clears close-on-exec on them in its child only.
 struct Pipes {
     filter: OwnedFd,
     status_w: OwnedFd,
@@ -352,8 +358,6 @@ impl Pipes {
         File::from(filter_w).write_all(&super::seccomp::program())?;
         let (status_r, status_w) = pipe_with(PipeFlags::CLOEXEC)?;
         let (stderr_r, stderr_w) = pipe_with(PipeFlags::CLOEXEC)?;
-        fcntl_setfd(&filter, FdFlags::empty())?;
-        fcntl_setfd(&status_w, FdFlags::empty())?;
         Ok(Pipes {
             filter,
             status_w,
@@ -386,10 +390,10 @@ fn drain(fd: OwnedFd) -> io::Result<Receiver<String>> {
     Ok(rx)
 }
 
-/// Forwards to `inner`. On `started` it first closes the box's copies of the inherited
-/// ends, then lets the next sandbox spawn: the tuple drops in order, the guard last.
+/// Forwards to `inner`. On `started` it first closes the box's copies of the ends
+/// bubblewrap inherited, so the status pipe ends when bubblewrap's copy closes.
 struct Started<'a> {
-    held: Cell<Option<(OwnedFd, OwnedFd, MutexGuard<'static, ()>)>>,
+    held: Cell<Option<(OwnedFd, OwnedFd)>>,
     inner: &'a dyn Watch,
 }
 

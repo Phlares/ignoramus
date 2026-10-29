@@ -165,6 +165,21 @@ pub fn write_exec(path: &Path, text: &str) {
     assert!(child.wait().unwrap().success(), "cannot write {path:?}");
 }
 
+/// Set to `1` (CI does) to make every level 1 skip a failure.
+pub const REQUIRE_LEVEL1: &str = "IGNORARIUM_REQUIRE_LEVEL1";
+
+/// True, once the reason is printed, when this host cannot run level 1, so the test
+/// returns early. With `REQUIRE_LEVEL1=1` such a host fails the test instead.
+pub fn skip_level1() -> bool {
+    let Some(why) = no_level1() else {
+        return false;
+    };
+    let required = std::env::var_os(REQUIRE_LEVEL1).is_some_and(|v| v == "1");
+    assert!(!required, "level 1 is required here, but: {why}");
+    println!("skip level1: {why}");
+    true
+}
+
 /// Why bubblewrap cannot run a level 1 sandbox on this host, or `None` when it can.
 /// Found by calling `bwrap` directly, never through the box's code, so a fault in that
 /// code fails the level 1 tests instead of skipping them.

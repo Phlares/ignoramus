@@ -8,9 +8,24 @@ use seccompiler::{
 };
 use std::collections::BTreeMap;
 
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+compile_error!("the level 1 seccomp filter is built for x86_64 and aarch64 only");
+
+#[cfg(target_arch = "x86_64")]
+const ARCH: TargetArch = TargetArch::x86_64;
+#[cfg(target_arch = "aarch64")]
+const ARCH: TargetArch = TargetArch::aarch64;
+
+/// Bits added to each call number. An x86_64 kernel built with the x32 ABI also takes
+/// each call under the same architecture tag with bit 30 set.
+#[cfg(target_arch = "x86_64")]
+const ABIS: [i64; 2] = [0, 0x4000_0000];
+#[cfg(target_arch = "aarch64")]
+const ABIS: [i64; 1] = [0];
+
 /// The compiled filter as raw `sock_filter` records (code u16, jt u8, jf u8, k u32, native
-/// endian), the form bubblewrap reads from `--seccomp`. Empty on an architecture the
-/// compiler lacks; bubblewrap then refuses to start the sandbox.
+/// endian), the form bubblewrap reads from `--seccomp`. Empty if the rules fail to
+/// compile; bubblewrap then refuses to start the sandbox.
 pub fn program() -> Vec<u8> {
     compile()
         .map(|p| {
@@ -32,18 +47,21 @@ fn compile() -> Result<BpfProgram, seccompiler::BackendError> {
         SeccompCmpOp::Eq,
         libc::AF_VSOCK as u64,
     )?;
-    let rules: BTreeMap<i64, Vec<SeccompRule>> = [
+    let denied = [
         (libc::SYS_io_uring_setup, vec![]),
         (libc::SYS_io_uring_enter, vec![]),
         (libc::SYS_io_uring_register, vec![]),
         (libc::SYS_socket, vec![SeccompRule::new(vec![vsock])?]),
-    ]
-    .into();
+    ];
+    let rules: BTreeMap<i64, Vec<SeccompRule>> = ABIS
+        .iter()
+        .flat_map(|abi| denied.iter().map(move |(nr, r)| (nr | abi, r.clone())))
+        .collect();
     let filter = SeccompFilter::new(
         rules,
         SeccompAction::Allow,
         SeccompAction::Errno(libc::EPERM as u32),
-        TargetArch::try_from(std::env::consts::ARCH)?,
+        ARCH,
     )?;
     BpfProgram::try_from(filter)
 }
