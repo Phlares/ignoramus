@@ -34,7 +34,7 @@ The numpy payload itself took 1.14 times as long inside the machine (1323 ms aga
 
 Limits:
 
-- The host refuses an input file or directory that an unprivileged user cannot read, because the payload does not run as the file owner.
+- The host refuses an input file or directory that an unprivileged user cannot read, because the payload does not run as the user who owns the files.
 - `/out` and `/tmp` live in guest memory, each up to the output disk size, so the host refuses an output disk of zero bytes or of more than a quarter of the guest memory.
 - `/dev` has no `shm`, so programs that need POSIX shared memory fail.
 - Waiting for the runner: the level 2 backend, storing the three image parts in the content store, caching input disks by tree hash, and one output-hash function shared with level 0.
