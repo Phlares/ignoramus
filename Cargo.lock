@@ -231,6 +231,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "deposit"
+version = "0.0.1"
+dependencies = [
+ "hex",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
