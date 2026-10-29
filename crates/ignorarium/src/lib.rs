@@ -7,6 +7,7 @@ pub mod files;
 pub mod home;
 pub mod keys;
 pub mod machine;
+pub mod planlog;
 pub mod power;
 pub mod prior;
 pub mod records;

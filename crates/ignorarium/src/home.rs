@@ -97,7 +97,7 @@ pub fn is_windows_mount(path: &Path) -> bool {
 
 /// Create `dir` (and parents when `parents`) with mode 0700; tighten an
 /// existing one. Refuses a symbolic link.
-fn make_private_dir(dir: &Path, parents: bool) -> Result<(), HomeError> {
+pub(crate) fn make_private_dir(dir: &Path, parents: bool) -> Result<(), HomeError> {
     match fs::symlink_metadata(dir) {
         Ok(m) if m.file_type().is_symlink() => return Err(HomeError::Link(dir.to_path_buf())),
         Ok(_) => {}
