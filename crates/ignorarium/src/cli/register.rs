@@ -55,7 +55,7 @@ fn put(dir: &Path, name: &str, bytes: &[u8], mode: u32) -> Result<(), CliError> 
     Ok(())
 }
 
-/// The body of the `register` record. A confirmatory plan waits for a stamp (Plan 3).
+/// The body of the `register` record. A confirmatory plan waits for a timestamp, which a later version adds.
 fn record_body(
     hash: &str,
     leaf: u64,

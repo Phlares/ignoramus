@@ -424,7 +424,7 @@ fn each_fault_row_yields_exactly_its_codes_and_paths() {
 }
 
 #[test]
-fn the_named_rules_are_the_brief_table_and_rows_cover_the_pure_ones() {
+fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
     let in_file: BTreeSet<_> = v0()
         .iter()
         .filter(|r| matches!(r.check, rules::Check::Named(_)))
