@@ -4,13 +4,17 @@
 #![forbid(unsafe_code)]
 use std::fmt;
 
+pub mod build;
 pub mod citation;
 pub mod licence;
 pub mod manifest;
+pub mod profile;
 pub mod rocrate;
 pub mod tree;
 pub mod yaml;
 pub mod zip;
+
+pub use build::{Built, Facts, GENERATED, build, zip_name};
 
 /// One refusal: a stable code, the path it concerns, what is wrong and how to fix it.
 #[derive(Debug, Clone, PartialEq, Eq)]

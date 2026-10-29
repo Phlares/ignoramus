@@ -367,7 +367,7 @@ fn tool() -> Tool {
 }
 
 fn want_cff() -> Value {
-    json!({"abstract":"A","authors":[{"affiliation":"Lab","family-names":"Example","given-names":"Ada","orcid":"https://orcid.org/0000-0002-1825-0097"},{"name":"Team"}],"cff-version":"1.2.0","commit":"0000000000000000000000000000000000000000","date-released":"2026-10-29","doi":"10.5072/zenodo.9","keywords":["k"],"license":"CC0-1.0","message":"M","references":[{"authors":[{"name":"The ignorarium contributors"}],"title":"ignorarium","type":"software","url":"https://github.com/Phlares/ignoramus","version":"0.0.1"},{"authors":[{"name":"C"}],"doi":"10.5072/zenodo.1","title":"D","type":"dataset"}],"title":"T","type":"dataset","version":"1.0.0"})
+    json!({"abstract":"A","authors":[{"affiliation":"Lab","family-names":"Example","given-names":"Ada","orcid":"https://orcid.org/0000-0002-1825-0097"},{"name":"Team"}],"cff-version":"1.2.0","commit":"0000000000000000000000000000000000000000","date-released":"2026-10-29","doi":"10.5072/zenodo.9","keywords":["k"],"license":"CC0-1.0","message":"M","references":[{"authors":[{"name":"The ignorarium contributors"}],"title":"ignorarium","type":"software","url":"https://github.com/Phlares/ignoramus","version":"0.0.1"},{"authors":[{"name":"C"}],"doi":"10.5072/zenodo.1","title":"D","type":"data"}],"title":"T","type":"dataset","version":"1.0.0"})
 }
 
 #[test]

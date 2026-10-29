@@ -58,7 +58,7 @@ impl RefKind {
     fn as_str(self) -> &'static str {
         match self {
             RefKind::Article => "article",
-            RefKind::Dataset => "dataset",
+            RefKind::Dataset => "data",
             RefKind::Software => "software",
         }
     }

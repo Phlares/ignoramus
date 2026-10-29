@@ -1,0 +1,21 @@
+title = "Fixture study: lookup tables in place of multiplication"
+message = "If you use these data, please cite them using these metadata."
+abstract = "A fixture for the bundle tests. Two conditions, one outcome."
+keywords = ["fixture", "lookup tables"]
+
+[[authors]]
+family-names = "Example"
+given-names = "Ada"
+orcid = "https://orcid.org/0000-0002-1825-0097"
+affiliation = "Example Lab"
+
+[[authors]]
+name = "The ignorarium fixture team"
+
+[[references]]
+type = "dataset"
+title = "Example input texts"
+doi = "10.5072/zenodo.1"
+
+[[references.authors]]
+name = "Example Creator"

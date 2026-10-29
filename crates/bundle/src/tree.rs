@@ -22,7 +22,7 @@ fn is_hidden(c: char) -> bool {
         | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
 }
 
-fn name_is_safe(name: &str) -> bool {
+pub(crate) fn name_is_safe(name: &str) -> bool {
     !name.chars().any(|c| is_hidden(c) || c == '\\')
 }
 
