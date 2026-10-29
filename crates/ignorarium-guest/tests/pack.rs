@@ -117,6 +117,25 @@ fn pack(parts: &[Vec<u8>]) -> Vec<u8> {
     v
 }
 
+/// Sixteen 255-byte parts: every prefix is a legal path, but the last is too long once
+/// joined to any `dest`.
+fn deep_pack() -> Vec<u8> {
+    let mut parts = Vec::new();
+    let mut path = Vec::new();
+    for i in 0..16 {
+        if i > 0 {
+            path.push(b'/');
+        }
+        path.extend_from_slice(&[b'p'; 255]);
+        parts.push(if i < 15 {
+            entry(b'd', &path)
+        } else {
+            file(&path, b"x")
+        });
+    }
+    pack(&parts)
+}
+
 #[test]
 fn hostile_packs_are_refused() {
     let mut long_name = vec![b'a'; 4097];
@@ -195,6 +214,12 @@ fn hostile_packs_are_refused() {
         ("truncated path", b"IGNPACK1f\0\0\0\x09ab".to_vec(), 1 << 20),
         ("no end", b"IGNPACK1".to_vec(), 1 << 20),
         ("link target nul", pack(&[link(b"l", b"a\0b")]), 1 << 20),
+        (
+            "link target at the path limit",
+            pack(&[link(b"l", &[b't'; 4096])]),
+            1 << 20,
+        ),
+        ("path past the limit with dest", deep_pack(), 1 << 20),
     ];
     for (name, bytes, limit) in cases {
         let outer = tempfile::tempdir().unwrap();

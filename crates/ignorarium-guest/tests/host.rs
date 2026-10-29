@@ -93,13 +93,9 @@ impl Rig {
     }
 
     fn pid_gone(&self) {
-        // No pid file: the host killed the VMM before its script ran.
-        let pid = fs::read_to_string(self.root.path().join("vmm.pid")).unwrap_or_default();
-        if pid.trim().is_empty() {
-            return;
-        }
+        let pid = wait_pid(self.root.path());
         assert!(
-            !Path::new("/proc").join(pid.trim()).exists(),
+            !Path::new("/proc").join(&pid).exists(),
             "VMM {pid} still runs"
         );
     }
@@ -111,6 +107,7 @@ impl Rig {
     /// Plays the guest: connects to the listener path, reads nothing, then runs `f`.
     fn guest(&self, f: impl FnOnce(&mut UnixStream, &mut Ctx) + Send + 'static) -> JoinHandle<()> {
         let sock = self.work.join("vsock.sock_7201");
+        let root = self.root.path().to_path_buf();
         let (work, src) = (self.work.clone(), self.src.clone());
         let blank = Job {
             seed_hex: String::new(),
@@ -120,6 +117,9 @@ impl Rig {
             timeout_ms: 0,
         };
         thread::spawn(move || {
+            // The VMM is running (its pid is recorded) before the guest connects, so the
+            // kill checks are never vacuous.
+            wait_pid(&root);
             let t = Instant::now();
             let mut s = loop {
                 match UnixStream::connect(&sock) {
@@ -137,6 +137,34 @@ impl Rig {
                 },
             );
         })
+    }
+}
+
+/// The fake VMM's pid, once its script has recorded it.
+fn wait_pid(root: &Path) -> String {
+    let t = Instant::now();
+    loop {
+        let pid = fs::read_to_string(root.join("vmm.pid")).unwrap_or_default();
+        if !pid.trim().is_empty() {
+            return pid.trim().to_string();
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(5),
+            "the VMM never started"
+        );
+        thread::sleep(ms(1));
+    }
+}
+
+/// Sends one byte of a never-finished frame every `every`, until the host hangs up.
+fn trickle(s: &mut UnixStream, every: Duration) {
+    let mut bytes = vec![0, 0, 0xff, 0xff];
+    bytes.extend([b'x'; 60]);
+    for b in bytes {
+        if s.write_all(&[b]).is_err() {
+            return;
+        }
+        thread::sleep(every);
     }
 }
 
@@ -325,7 +353,10 @@ fn a_hostile_pack_is_a_guest_error() {
     let res = rig.run();
     h.join().unwrap();
     match res {
-        Err(VmError::Guest(m)) => assert!(m.contains("bad output pack"), "{m}"),
+        Err(VmError::Guest(m)) => {
+            assert!(m.contains("bad output pack"), "{m}");
+            assert!(m.contains("vmm.log tail"), "{m}");
+        }
         other => panic!("{:?}", other),
     }
     assert!(!rig.root.path().join("x").exists());
@@ -372,7 +403,7 @@ fn boot_fails_fast_when_the_vmm_exits() {
     let res = rig.run();
     assert!(t.elapsed() < Duration::from_secs(5));
     match res {
-        Err(VmError::Boot(m)) => assert!(m.contains('3') && m.contains("boom"), "{m}"),
+        Err(VmError::Boot(m)) => assert!(m.contains("exit status: 3") && m.contains("boom"), "{m}"),
         other => panic!("{:?}", other),
     }
 }
@@ -425,12 +456,32 @@ fn a_closed_channel_is_a_guest_error() {
 fn the_vmm_is_killed_when_it_outlives_the_report() {
     let mut rig = Rig::sleeper();
     rig.vm.exit_timeout = ms(100);
+    // A big output makes read-back slow, so a VMM still alive during it shows up.
+    fs::write(rig.src.join("big"), vec![1u8; 6 << 20]).unwrap();
+    let root = rig.root.path().to_path_buf();
+    let watcher = thread::spawn(move || {
+        let pid = wait_pid(&root);
+        while Path::new("/proc").join(&pid).exists() {
+            thread::sleep(ms(1));
+        }
+        Instant::now()
+    });
     let h = good_guest(&rig);
     let res = rig.run();
+    let returned = Instant::now();
     h.join().unwrap();
     let o = res.unwrap();
+    let died = watcher.join().unwrap();
     assert!(o.timings.stop >= ms(100));
     assert!(o.timings.stop < Duration::from_secs(1));
+    assert!(o.timings.extract >= ms(5), "read-back too fast to tell");
+    // The VMM was gone well before read-back ended, not only when run_row returned.
+    let gap = returned.saturating_duration_since(died);
+    assert!(
+        gap >= o.timings.extract / 2,
+        "VMM died {gap:?} before return, read-back took {:?}",
+        o.timings.extract
+    );
     rig.pid_gone();
 }
 
@@ -455,4 +506,117 @@ fn a_non_empty_work_dir_is_refused() {
     fs::write(rig.work.join("stale"), "x").unwrap();
     let res = rig.run();
     assert!(matches!(res, Err(VmError::Io(_))), "{:?}", res);
+}
+
+#[test]
+fn a_trickled_hello_cannot_stretch_the_boot_deadline() {
+    let mut rig = Rig::sleeper();
+    rig.vm.boot_timeout = ms(300);
+    let h = rig.guest(|s, _| trickle(s, ms(100)));
+    let t = Instant::now();
+    let res = rig.run();
+    assert!(t.elapsed() < ms(900), "{:?}", t.elapsed());
+    h.join().unwrap();
+    match res {
+        Err(VmError::Boot(m)) => assert!(m.contains("vmm.log tail"), "{m}"),
+        other => panic!("{:?}", other),
+    }
+    rig.pid_gone();
+}
+
+#[test]
+fn a_trickled_report_cannot_stretch_the_report_deadline() {
+    let mut rig = Rig::sleeper();
+    rig.job.wall_timeout = ms(150);
+    rig.vm.report_slack = ms(150);
+    let h = rig.guest(|s, c| {
+        hello(s);
+        read_job(s, c);
+        trickle(s, ms(100));
+    });
+    let t = Instant::now();
+    let res = rig.run();
+    assert!(t.elapsed() < ms(900), "{:?}", t.elapsed());
+    h.join().unwrap();
+    match res {
+        Err(VmError::Timeout(m)) => assert!(m.contains("vmm.log tail"), "{m}"),
+        other => panic!("{:?}", other),
+    }
+    rig.pid_gone();
+}
+
+#[test]
+fn a_guest_that_never_reads_the_job_times_out() {
+    let mut rig = Rig::sleeper();
+    rig.job.argv = vec!["a".repeat(900_000)];
+    rig.job.wall_timeout = ms(100);
+    rig.vm.report_slack = ms(100);
+    let h = rig.guest(|s, _| {
+        hello(s);
+        thread::sleep(ms(1500));
+    });
+    let t = Instant::now();
+    let res = rig.run();
+    assert!(t.elapsed() < ms(1000), "{:?}", t.elapsed());
+    h.join().unwrap();
+    assert!(matches!(res, Err(VmError::Timeout(_))), "{:?}", res);
+}
+
+#[test]
+fn guest_text_in_errors_is_capped_and_escaped() {
+    let rig = Rig::sleeper();
+    let h = rig.guest(|s, c| {
+        hello(s);
+        read_job(s, c);
+        write_frame(s, &failed(&"\u{7}".repeat(150_000))).unwrap();
+    });
+    let res = rig.run();
+    h.join().unwrap();
+    match res {
+        Err(VmError::Guest(m)) => {
+            assert!(m.len() < 3000, "{} bytes", m.len());
+            assert!(!m.contains('\u{7}'));
+        }
+        other => panic!("{:?}", other),
+    }
+}
+
+fn refused_before_boot(rig: &Rig, work: &Path) {
+    let res = run_row(&rig.vm, &rig.job, work);
+    assert!(matches!(res, Err(VmError::Io(_))), "{:?}", res);
+    thread::sleep(ms(100));
+    assert!(!rig.root.path().join("vmm.pid").exists());
+    assert_eq!(fs::read_dir(work).unwrap().count(), 0);
+}
+
+#[test]
+fn a_non_empty_output_dir_is_refused_before_boot() {
+    let rig = Rig::new(&format!("touch $PIDFILE\n{SLEEPER}"));
+    fs::write(rig.out.join("old"), "x").unwrap();
+    refused_before_boot(&rig, &rig.work);
+}
+
+#[test]
+fn a_comma_in_a_path_is_refused_before_boot() {
+    let mut rig = Rig::new(&format!("touch $PIDFILE\n{SLEEPER}"));
+    let comma = rig.root.path().join("w,x");
+    fs::create_dir(&comma).unwrap();
+    refused_before_boot(&rig, &comma);
+    let set: [fn(&mut Vm); 4] = [
+        |v| v.kernel = "k,x".into(),
+        |v| v.initramfs = "i,x".into(),
+        |v| v.rootfs = "r,x".into(),
+        |v| v.serial_log = Some("s,x".into()),
+    ];
+    for f in set {
+        let saved = (
+            rig.vm.kernel.clone(),
+            rig.vm.initramfs.clone(),
+            rig.vm.rootfs.clone(),
+        );
+        f(&mut rig.vm);
+        refused_before_boot(&rig, &rig.work);
+        (rig.vm.kernel, rig.vm.initramfs, rig.vm.rootfs) = saved;
+        rig.vm.serial_log = None;
+    }
 }

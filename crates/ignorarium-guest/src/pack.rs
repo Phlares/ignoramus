@@ -199,6 +199,9 @@ pub fn unpack(r: &mut impl Read, dest: &Path, limit: u64) -> io::Result<()> {
             return Err(entry("duplicate path"));
         }
         let to = dest.join(OsStr::from_bytes(&path));
+        if to.as_os_str().len() >= MAX_PATH {
+            return Err(entry("path with the destination is too long"));
+        }
         match kind[0] {
             b'd' => {
                 fs::create_dir(&to)?;
@@ -234,6 +237,9 @@ pub fn unpack(r: &mut impl Read, dest: &Path, limit: u64) -> io::Result<()> {
                 })?;
                 if target.is_empty() {
                     return Err(entry("empty link target"));
+                }
+                if target.len() >= MAX_PATH {
+                    return Err(entry("link target is too long"));
                 }
                 symlink(OsStr::from_bytes(&target), &to)?;
             }

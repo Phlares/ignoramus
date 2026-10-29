@@ -8,7 +8,8 @@ use crate::proto::{
 use crate::tree::tree_hash;
 use std::ffi::OsString;
 use std::fs::{self, File};
-use std::io::{self, BufReader};
+use std::io::{self, BufReader, Read};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -82,7 +83,8 @@ impl std::fmt::Display for VmError {
             VmError::Mismatch { guest, host } => {
                 write!(
                     f,
-                    "output hash mismatch: guest said {guest}, host computed {host}"
+                    "output hash mismatch: guest said {}, host computed {host}",
+                    shown(guest)
                 )
             }
             VmError::Io(e) => write!(f, "host I/O error: {e}"),
@@ -96,6 +98,27 @@ impl std::error::Error for VmError {}
 const SOCKET_PATH_MAX: usize = 107;
 const LOG_TAIL_CHARS: usize = 2000;
 const POLL: Duration = Duration::from_millis(5);
+/// Guest-written text enters host errors at most this long.
+const SHOWN_CHARS: usize = 200;
+
+/// At most `SHOWN_CHARS` characters of guest-written text.
+fn cap(s: &str) -> String {
+    let mut out: String = s.chars().take(SHOWN_CHARS).collect();
+    if s.chars().count() > SHOWN_CHARS {
+        out.push_str("...");
+    }
+    out
+}
+
+/// Guest-written text for an error message: capped and escaped.
+fn shown(s: &str) -> String {
+    format!("{:?}", cap(s))
+}
+
+/// A guest-side failure, with the VMM log tail.
+fn guest_err(msg: String, work: &Path) -> VmError {
+    VmError::Guest(with_log(msg, work))
+}
 
 fn kv(key: &str, path: &Path) -> OsString {
     let mut s = OsString::from(key);
@@ -209,28 +232,45 @@ fn accept(
     }
 }
 
-/// Reads one frame within `within`. A timeout becomes `on_timeout(what)`; a closed or
+/// Reads from a stream until an absolute deadline. A guest that trickles bytes cannot
+/// stretch the wait: each read gets only the time that is left.
+struct Until<'a> {
+    stream: &'a mut UnixStream,
+    at: Instant,
+}
+
+impl Read for Until<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let left = self.at.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        self.stream.read(buf)
+    }
+}
+
+/// Reads one frame before `at`. A timeout becomes `on_timeout(message)`; a closed or
 /// broken channel becomes a guest error.
 fn recv(
     s: &mut UnixStream,
-    within: Duration,
+    at: Instant,
     what: &str,
     on_timeout: fn(String) -> VmError,
     work: &Path,
 ) -> Result<ToHost, VmError> {
-    s.set_read_timeout(Some(within.max(Duration::from_millis(1))))?;
-    read_frame(s).map_err(|e| match e.kind() {
-        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
-            on_timeout(format!("no {what} within {within:?}"))
-        }
+    read_frame(&mut Until { stream: s, at }).map_err(|e| match e.kind() {
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => on_timeout(with_log(
+            format!("no complete {what} before the deadline"),
+            work,
+        )),
         io::ErrorKind::UnexpectedEof => {
-            let msg = format!("control channel closed before the {what}");
-            VmError::Guest(with_log(msg, work))
+            guest_err(format!("control channel closed before the {what}"), work)
         }
-        _ => {
-            let msg = format!("control channel failed before the {what}: {e}");
-            VmError::Guest(with_log(msg, work))
-        }
+        _ => guest_err(
+            format!("control channel failed before the {what}: {e}"),
+            work,
+        ),
     })
 }
 
@@ -238,20 +278,40 @@ fn boot_timed_out(msg: String) -> VmError {
     VmError::Boot(format!("timed out: {msg}"))
 }
 
+fn check_inputs(vm: &Vm, job: &HostJob, work: &Path) -> io::Result<()> {
+    let listen_len = work
+        .join(format!("vsock.sock_{CONTROL_PORT}"))
+        .as_os_str()
+        .len();
+    if listen_len > SOCKET_PATH_MAX {
+        return Err(invalid(format!(
+            "work dir is too deep for a Unix socket: {listen_len} bytes, at most {SOCKET_PATH_MAX}"
+        )));
+    }
+    // A comma would split a Cloud Hypervisor option.
+    let paths = [&vm.kernel, &vm.initramfs, &vm.rootfs]
+        .into_iter()
+        .chain(vm.serial_log.as_ref())
+        .map(PathBuf::as_path)
+        .chain([work]);
+    for p in paths {
+        if p.as_os_str().as_bytes().contains(&b',') {
+            return Err(invalid(format!("path {} holds a comma", p.display())));
+        }
+    }
+    for (what, dir) in [("work dir", work), ("output dir", &job.output_dir)] {
+        if fs::read_dir(dir)?.next().is_some() {
+            return Err(invalid(format!("{what} {} is not empty", dir.display())));
+        }
+    }
+    Ok(())
+}
+
 /// Runs one row in one VM. `work` must exist and be empty.
 pub fn run_row(vm: &Vm, job: &HostJob, work: &Path) -> Result<VmOutcome, VmError> {
     let t0 = Instant::now();
+    check_inputs(vm, job, work)?;
     let listen_path = work.join(format!("vsock.sock_{CONTROL_PORT}"));
-    if listen_path.as_os_str().len() > SOCKET_PATH_MAX {
-        return Err(invalid(format!(
-            "work dir is too deep for a Unix socket: {} bytes, at most {SOCKET_PATH_MAX}",
-            listen_path.as_os_str().len()
-        ))
-        .into());
-    }
-    if fs::read_dir(work)?.next().is_some() {
-        return Err(invalid(format!("work dir {} is not empty", work.display())).into());
-    }
 
     let in_img = work.join("in.img");
     ext4(Some(&job.input_dir), &in_img, size_mib(&job.input_dir)?)?;
@@ -276,17 +336,22 @@ pub fn run_row(vm: &Vm, job: &HostJob, work: &Path) -> Result<VmOutcome, VmError
     fs::remove_file(&listen_path)?;
     chan.set_nonblocking(false)?;
 
-    let left = vm.boot_timeout.saturating_sub(started.elapsed());
-    match recv(&mut chan, left, "hello", boot_timed_out, work)? {
+    match recv(
+        &mut chan,
+        started + vm.boot_timeout,
+        "hello",
+        boot_timed_out,
+        work,
+    )? {
         ToHost::Hello { .. } => {}
         ToHost::Failed { reason } => {
-            return Err(VmError::Guest(with_log(
-                format!("guest failed to start: {reason}"),
+            return Err(guest_err(
+                format!("guest failed to start: {}", shown(&reason)),
                 work,
-            )));
+            ));
         }
         ToHost::Report(_) => {
-            return Err(VmError::Guest(with_log("report before hello".into(), work)));
+            return Err(guest_err("report before hello".into(), work));
         }
     }
     let boot = started.elapsed();
@@ -301,26 +366,24 @@ pub fn run_row(vm: &Vm, job: &HostJob, work: &Path) -> Result<VmOutcome, VmError
         env: job.env.clone(),
         timeout_ms: job.wall_timeout.as_millis() as u64,
     };
-    write_frame(&mut chan, &wire).map_err(|e| {
-        VmError::Guest(with_log(
+    let report_by = sent + job.wall_timeout + vm.report_slack;
+    chan.set_write_timeout(Some(report_by - sent))?;
+    write_frame(&mut chan, &wire).map_err(|e| match e.kind() {
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
+            VmError::Timeout(with_log("the guest did not take the job".into(), work))
+        }
+        _ => guest_err(
             format!("control channel closed while sending the job: {e}"),
             work,
-        ))
+        ),
     })?;
-    let within = job.wall_timeout + vm.report_slack;
-    let report = match recv(&mut chan, within, "report", VmError::Timeout, work)? {
+    let report = match recv(&mut chan, report_by, "report", VmError::Timeout, work)? {
         ToHost::Report(r) => r,
         ToHost::Failed { reason } => {
-            return Err(VmError::Guest(with_log(
-                format!("guest failed: {reason}"),
-                work,
-            )));
+            return Err(guest_err(format!("guest failed: {}", shown(&reason)), work));
         }
         ToHost::Hello { .. } => {
-            return Err(VmError::Guest(with_log(
-                "second hello instead of a report".into(),
-                work,
-            )));
+            return Err(guest_err("second hello instead of a report".into(), work));
         }
     };
     let guest = sent.elapsed();
@@ -336,14 +399,14 @@ pub fn run_row(vm: &Vm, job: &HostJob, work: &Path) -> Result<VmOutcome, VmError
         let mut out = BufReader::new(File::open(work.join("out.img"))?);
         pack::unpack(&mut out, &job.output_dir, vm.out_mib << 20).map_err(|e| match e.kind() {
             io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof => {
-                VmError::Guest(format!("bad output pack: {e}"))
+                guest_err(format!("bad output pack: {}", cap(&e.to_string())), work)
             }
             _ => VmError::Io(e),
         })?;
         output_hash = tree_hash(&job.output_dir)?;
         if output_hash != report.output_hash {
             return Err(VmError::Mismatch {
-                guest: report.output_hash,
+                guest: cap(&report.output_hash),
                 host: output_hash,
             });
         }
