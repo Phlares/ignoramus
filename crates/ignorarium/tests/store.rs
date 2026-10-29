@@ -60,26 +60,54 @@ fn put_reader_handles_an_empty_stream() {
     assert!(s.has(&h));
 }
 
-#[test]
-fn put_reader_failure_leaves_no_blob_or_temp() {
-    struct Bad(bool);
-    impl std::io::Read for Bad {
-        fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
-            if self.0 {
-                return Err(std::io::Error::other("cut"));
-            }
-            self.0 = true;
+/// Gives one byte, then each scripted error once, then the end of the stream.
+struct Flaky(Vec<std::io::ErrorKind>, bool);
+
+impl std::io::Read for Flaky {
+    fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+        if !self.1 {
+            self.1 = true;
             b[0] = 1;
-            Ok(1)
+            return Ok(1);
+        }
+        match self.0.pop() {
+            Some(kind) => Err(std::io::Error::new(kind, "cut")),
+            None => Ok(0),
         }
     }
+}
+
+#[test]
+fn put_reader_failure_leaves_no_blob_or_temp() {
     let (_d, s) = open();
-    assert!(matches!(
-        s.put_reader(&mut Bad(false)),
-        Err(StoreError::Io(_))
-    ));
+    let mut bad = Flaky(vec![std::io::ErrorKind::Other], false);
+    assert!(matches!(s.put_reader(&mut bad), Err(StoreError::Io(_))));
     assert!(leftovers(&s).is_empty());
     assert_eq!(std::fs::read_dir(&s.root).unwrap().count(), 0);
+}
+
+#[test]
+fn put_reader_retries_an_interrupted_read() {
+    let (_d, s) = open();
+    let interrupted = std::io::ErrorKind::Interrupted;
+    let h = s.put_reader(&mut Flaky(vec![interrupted, interrupted], false));
+    assert_eq!(h.unwrap(), s.put(&[1]).unwrap());
+}
+
+#[test]
+fn store_errors_read_as_plain_text() {
+    assert_eq!(
+        StoreError::BadDigest.to_string(),
+        "digest is not 64 lowercase hex characters"
+    );
+    assert_eq!(
+        StoreError::Link.to_string(),
+        "store path is a symbolic link"
+    );
+    assert_eq!(
+        StoreError::Io(std::io::Error::other("gone")).to_string(),
+        "I/O failed: gone"
+    );
 }
 
 #[cfg(unix)]

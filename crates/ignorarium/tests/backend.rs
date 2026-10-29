@@ -1,5 +1,6 @@
 use ignorarium::backend::level0::{Level0, output_hash};
 use ignorarium::backend::{Backend, Exit, Probe, RowJob};
+use ignorarium::sys;
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::time::Duration;
@@ -130,11 +131,12 @@ fn level0_reports_a_signal_death_as_128_plus_signal() {
 #[test]
 fn level0_counts_cpu_time() {
     let d = tempfile::tempdir().unwrap();
+    // About 0.4 s of cpu. Under one second, the microseconds field holds the whole count.
     let o = Level0
         .run_row(
             &job(
                 d.path(),
-                "i=0; while [ $i -lt 1500000 ]; do i=$((i+1)); done",
+                "i=0; while [ $i -lt 400000 ]; do i=$((i+1)); done",
                 Duration::from_secs(60),
             ),
             &|| true,
@@ -322,4 +324,25 @@ fn level0_ticks_the_watch_while_the_row_runs() {
     assert_eq!(o.exit, Exit::Ok);
     // One tick per 5 ms poll: about 60 in 0.3 s.
     assert!(ticks.get() >= 10, "{}", ticks.get());
+}
+
+/// `f()`, or a panic when it takes over 5 s.
+fn within<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send(f()));
+    rx.recv_timeout(Duration::from_secs(5))
+        .expect("the call returns")
+}
+
+#[test]
+fn waits_on_a_process_that_is_not_a_child_fail_at_once() {
+    let me = std::process::id();
+    assert!(within(move || sys::wait4(me, true)).is_err());
+    assert!(within(move || sys::has_exited(me)).is_err());
+}
+
+#[test]
+fn killing_a_group_that_does_not_exist_is_fine() {
+    // Above the kernel's largest process id, so no group has it.
+    assert!(sys::kill_group(i32::MAX as u32).is_ok());
 }

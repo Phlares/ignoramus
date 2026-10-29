@@ -1205,6 +1205,48 @@ fn reads_create_no_run_folder() {
             .is_none()
     );
     assert!(!dir.join("run").exists());
+    // Once run/ exists, a read still adds no control file.
+    State::Done.write(&lab.home, "untouched").unwrap();
+    assert_eq!(control_of(&lab, "untouched").peek().unwrap(), None);
+    assert_eq!(control_of(&lab, "untouched").take().unwrap(), None);
+    assert!(!dir.join("run/control").exists());
+}
+
+#[test]
+fn reads_refuse_a_linked_or_broken_run_folder() {
+    let lab = lab();
+    // A linked run folder is refused, even when its target holds a state.
+    let dir = plain(&lab, "linked");
+    let elsewhere = lab.root.join("elsewhere-run");
+    std::fs::create_dir(&elsewhere).unwrap();
+    std::fs::write(elsewhere.join("state.json"), "\"done\"\n").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, dir.join("run")).unwrap();
+    assert!(State::read(&lab.home, "linked").is_err());
+    assert!(control_of(&lab, "linked").peek().is_err());
+    assert!(control::run_is_live(&lab.home, "linked").is_err());
+    // Under a study folder that is a file, no request can be read.
+    std::fs::write(lab.home.study_dir("flat"), "x").unwrap();
+    assert!(control_of(&lab, "flat").peek().is_err());
+    // A state that is a folder is an error, not a study that never ran.
+    let dir = plain(&lab, "odd");
+    std::fs::create_dir_all(dir.join("run/state.json")).unwrap();
+    assert!(State::read(&lab.home, "odd").is_err());
+    // A lock that cannot be opened is an error, not a free lock.
+    std::os::unix::fs::symlink("lock", dir.join("run/lock")).unwrap();
+    assert!(control::run_is_live(&lab.home, "odd").is_err());
+}
+
+#[test]
+fn a_stop_never_appends_to_a_deviation_log_it_cannot_read() {
+    let lab = lab();
+    let dir = plain(&lab, "garbled");
+    send_stop(&lab.home, "garbled", "first").unwrap();
+    let log = dir.join("deviations.jsonl");
+    let mut bytes = std::fs::read(&log).unwrap();
+    bytes.extend_from_slice(b"\xff\n");
+    std::fs::write(&log, &bytes).unwrap();
+    assert!(try_stop(&lab.home, "garbled", "again").is_err());
+    assert_eq!(std::fs::read(&log).unwrap(), bytes);
 }
 
 #[test]
