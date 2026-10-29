@@ -832,6 +832,14 @@ fn guide_lists_run_and_status_with_real_commands() {
     let run = find("run");
     assert_eq!(run["command"], "ignorarium run <id>");
     assert!(!run.to_string().contains("not available yet"));
+    // Level 0 isolates nothing, so the step promises no sandbox.
+    assert!(!run.to_string().contains("sandbox"), "{run}");
+    assert!(
+        run["does"]
+            .as_str()
+            .unwrap()
+            .contains("no network or file isolation")
+    );
     let status = find("status");
     assert_eq!(status["command"], "ignorarium status <id>");
     assert!(!status.to_string().contains("not available yet"));

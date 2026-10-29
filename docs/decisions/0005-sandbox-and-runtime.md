@@ -1,13 +1,12 @@
 # 0005 Sandbox and runtime
 
-`run` executes each plan row in a sandbox with the network off. This record names the planned stack and the reason for each part. A crate gets a line in `0001-dependencies.md` when it lands.
+`run` executes each plan row on a backend. This release ships level 0 only: a bare process on the host, with no network or filesystem isolation. This record names the stack that ships and the reason for each part. A crate gets a line in `0001-dependencies.md` when it lands.
 
 Decision:
 
-- `rustix`: safe wrappers for `unshare`, `mount`, `pivot_root` and `prctl(PR_SET_NO_NEW_PRIVS)`. It keeps `unsafe` out of the launcher. https://docs.rs/rustix
-- `libc`: `getrusage`, `wait4`, and the syscall numbers the seccomp filter denies. `rustix` does not cover these. https://docs.rs/libc
-- `landlock`: filesystem rules at the best ABI the kernel offers. https://docs.kernel.org/userspace-api/landlock.html
-- `seccompiler`: compiles the BPF syscall filter in pure Rust. Firecracker uses it. https://github.com/rust-vmm/seccompiler
+- `rustix`: safe wrappers to kill a row's process group, to wait on it with `waitid`, and to read the user id. https://docs.rs/rustix
+- `libc`: `wait4`, which returns a child's CPU time, and `sigaction`, which installs the SIGINT, SIGTERM and SIGHUP handlers. `rustix` does not cover these. Only `src/sys.rs` calls it. https://docs.rs/libc
+- Level 1 is planned, first as a shell-out to bubblewrap; a launcher of our own is evaluated against it later. https://github.com/containers/bubblewrap
 - Docker or Podman: builds the run environment image. The box calls the tool with an argument array and adds no crate for it.
 - `uv`: writes the Python lockfile, so the environment rebuilds from pinned versions. https://docs.astral.sh/uv/
 

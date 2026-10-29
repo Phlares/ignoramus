@@ -45,7 +45,7 @@ command = "ignorarium register studies/<id>/spec.toml"
 [[step]]
 id = "run"
 title = "Run the plan"
-does = "Runs each row of the registered plan in a sandbox and signs a record for each. Pause, resume or stop it with the verbs of the same names."
+does = "Runs each row of the registered plan and signs a record for each. At isolation level 0 a row is a plain process on this machine, with no network or file isolation. Pause, resume or stop it with the verbs of the same names."
 produces = "A signed record for every row, and an event log."
 command = "ignorarium run <id>"
 
