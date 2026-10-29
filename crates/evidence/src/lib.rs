@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 use std::fmt;
 
+pub mod eprocess;
 pub mod rng;
 
 #[derive(Debug, Clone, PartialEq)]
