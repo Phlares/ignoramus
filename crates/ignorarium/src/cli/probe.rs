@@ -23,19 +23,10 @@ pub fn run(ctx: &Ctx) -> Run {
             Probe::Available => "available".to_string(),
             Probe::Unavailable(why) => format!("unavailable: {why}"),
         };
-        report.push_str(&format!(
-            "level {level} ({}): {answer}
-",
-            b.launcher()
-        ));
+        report.push_str(&format!("level {level} ({}): {answer}\n", b.launcher()));
     }
     out(&format!(
-        "machine: {}
-cpus: {}
-memory: {} GiB
-{report}max level: {}
-/dev/kvm: {note}
-",
+        "machine: {}\ncpus: {}\nmemory: {} GiB\n{report}max level: {}\n/dev/kvm: {note}\n",
         m.name, m.cpus, m.mem_gib, m.max_level
     ))?;
     Ok(Done {

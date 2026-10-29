@@ -776,6 +776,7 @@ fn status_json_has_every_field() {
         "cost_rate_usd_per_hour",
         "voided",
         "retried",
+        "unknown_cpu",
         "triggers",
         "blind",
         "conditions",
@@ -790,6 +791,7 @@ fn status_json_has_every_field() {
     assert_eq!(s["budget"]["cpu_hours"], 1.0);
     assert_eq!(s["voided"], 0);
     assert_eq!(s["retried"], 0);
+    assert_eq!(s["unknown_cpu"], 0);
     assert_eq!(s["triggers"], serde_json::json!([]));
     assert_eq!(s["blind"], false);
     let conds = s["conditions"].as_array().unwrap();
@@ -810,6 +812,7 @@ fn status_json_has_every_field() {
         "budget:",
         "voided: 0",
         "retried: 0",
+        "rows with unknown cpu: 0",
         "triggers: none",
         "arm-a:",
     ] {

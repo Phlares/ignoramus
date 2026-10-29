@@ -298,6 +298,8 @@ pub struct Progress {
     pub conditions: BTreeMap<String, (u64, u64)>,
     /// Rows whose exit is not `ok`.
     pub voided: u64,
+    /// Attempts, recorded as a row or as spend, whose CPU count could not be read.
+    pub unknown_cpu: u64,
     /// Attempts beyond the first, over all recorded rows.
     pub retried: u64,
     /// Spend in the records, money at the machine rate.
@@ -332,6 +334,7 @@ pub fn progress(
         done: seen.len(),
         conditions,
         voided: tally.voided,
+        unknown_cpu: tally.unknown_cpu,
         retried: tally.retried,
         cost: tally.cost(machine.rate_usd_per_hour),
     })
@@ -754,6 +757,7 @@ struct Tally {
     wall: f64,
     voided: u64,
     retried: u64,
+    unknown_cpu: u64,
 }
 
 impl Tally {
@@ -767,6 +771,7 @@ impl Tally {
             t.cpu += num("cpu_seconds");
             t.wall += num("wall_seconds");
             t.rows += u64::from(r.kind == "row");
+            t.unknown_cpu += u64::from(r.body.get("cpu_unknown").is_some());
             if r.kind == "row" {
                 t.voided += u64::from(r.body["exit"] != "ok");
                 t.retried += r.body["attempts"].as_u64().unwrap_or(1).saturating_sub(1);
@@ -832,10 +837,11 @@ fn attempt_row(
     watch: &RunWatch,
 ) -> Result<(String, Option<Halt>), RunError> {
     let mut attempts = 0u32;
+    let mut unknown = false;
     let outcome = loop {
         attempts += 1;
         let job = job_for(plan, row, dir)?;
-        let o = plan
+        let mut o = plan
             .backend
             .run_row(&job, watch)
             .unwrap_or_else(|e| RowOutcome {
@@ -853,8 +859,23 @@ fn attempt_row(
                 "connect_blocked": t.connect_blocked,
                 "vsock_blocked": t.vsock_blocked,
                 "io_uring_blocked": t.io_uring_blocked,
+                "vsock": t.vsock_state(),
+                "io_uring": t.io_uring_state(),
             });
             log_event(plan, dir, Some(&span), "sandbox.selftest", "info", attrs)?;
+        }
+        // A meter that cannot read is charged the row estimate, as the fail-safe rule says,
+        // and the run pauses once the row is recorded.
+        if let Some(reason) = &o.cpu_unknown {
+            o.cpu_seconds = o.cpu_seconds.max(books.per_row.cpu_seconds);
+            unknown = true;
+            let span = watch.row.borrow().1.clone();
+            let attrs = json!({
+                "row": row.index,
+                "reason": reason,
+                "charged_cpu_seconds": o.cpu_seconds,
+            });
+            log_event(plan, dir, Some(&span), "row.cpu_unknown", "warn", attrs)?;
         }
         control::row_ended(&plan.home, &plan.study_id);
         // A row ended early is not data: its spend is recorded, and the run ends.
@@ -932,7 +953,12 @@ fn attempt_row(
             "row {} voided by infrastructure faults: {why}",
             row.index
         ))),
-        _ => None,
+        _ => unknown.then(|| {
+            Halt::Pause(format!(
+                "row {} has an unknown CPU count; it is charged the row estimate",
+                row.index
+            ))
+        }),
     };
     Ok((exit, halt))
 }

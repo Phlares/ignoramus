@@ -69,7 +69,9 @@ pub enum Probe {
 pub trait Watch {
     /// Called over and over while the row runs. `false` means stop the row now.
     fn tick(&self) -> bool;
-    /// The row now runs as process `pid`, the leader of its own process group.
+    /// A supervised process group now runs, led by `pid`. Called once for every group, in
+    /// order: a level 1 row starts its self-test group and then its own. Each call replaces
+    /// the last; the earlier group is already killed and reaped.
     fn started(&self, _pid: u32) {}
 }
 

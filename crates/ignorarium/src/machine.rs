@@ -81,14 +81,9 @@ pub fn probe_backends(backends: &[Box<dyn Backend>]) -> Vec<(u8, Probe)> {
     backends.iter().map(|b| (b.level(), b.probe())).collect()
 }
 
-/// Fill a profile from this host and `backends`. `rate_usd_per_hour`, `experiment_mode`
-/// and `long_job_minutes` come from an existing `machine.toml`. A file that fails to load
-/// is an error; the probe never writes.
-pub fn probe(home: &Path, backends: &[Box<dyn Backend>]) -> Result<Machine, MachineError> {
-    measure(home, &probe_backends(backends))
-}
-
-/// `probe` with the backends' answers already in hand.
+/// Fill a profile from this host and the backends' answers. `rate_usd_per_hour`,
+/// `experiment_mode` and `long_job_minutes` come from an existing `machine.toml`. A file that
+/// fails to load is an error; the probe never writes.
 pub fn measure(home: &Path, probes: &[(u8, Probe)]) -> Result<Machine, MachineError> {
     let kept = load(home)?;
     let name = std::fs::read_to_string("/proc/sys/kernel/hostname")

@@ -661,35 +661,59 @@ fn a_setup_fault_keeps_the_last_4_kib_of_stderr() {
     );
 }
 
-/// A stand-in bubblewrap whose sandbox exits 0 and leaves a process behind, reported as
-/// the sandbox's PID 1, in a session of its own so the group kill misses it, and holding
-/// none of the pipes. The self-test sandbox, which names `/box/ignorarium`, prints a passing
-/// result instead. The fake waits 0.3 s so the process has left the group before the group kill.
-fn fake_with_stuck_pid_1(dir: &Path) -> Level1 {
-    let path = dir.join("bwrap-stuck");
-    write_exec(
-        &path,
-        "#!/bin/bash
-         if [ \"$1\" = --version ]; then echo 'bubblewrap 0.9.0'; exit 0; fi
-         prev=; for a in \"$@\"; do [ \"$prev\" = --json-status-fd ] && fd=$a; prev=$a; done
-         case \"$*\" in *' /box/ignorarium '*)
-           echo '{\"connect_blocked\":true,\"vsock_blocked\":true,\"io_uring_blocked\":true}'
-           echo '{\"exit-code\": 0}' >&$fd
-           exit 0;; esac
-         pid=$( eval \"exec $fd>&-\"; setsid sleep 20 >/dev/null 2>&1 & echo $! )
-         sleep 0.3
-         echo \"{\\\"child-pid\\\": $pid}\" >&$fd
-         echo '{\"exit-code\": 0}' >&$fd
-         exit 0
-",
-    );
+/// A stand-in bubblewrap. The self-test sandbox, which names `/box/ignorarium`, prints a
+/// passing result. A row sandbox (one that names `/payload/`) leaves a process behind,
+/// reported as the sandbox's PID 1, in a session of its own so the group kill misses it,
+/// holding none of the pipes. The fake waits 0.3 s so the process has left the group before
+/// the group kill. Any other sandbox, the probe's, just succeeds. With `report_exit` the row
+/// sandbox also reports an exit code; without it the row is an infrastructure fault. With
+/// `once`, only the first row sandbox leaves the process behind.
+fn stuck_bwrap(dir: &Path, report_exit: bool, once: bool) -> Level1 {
+    let path = dir.join(format!("bwrap-stuck-{report_exit}-{once}"));
+    let marker = dir.join(format!("stuck-seen-{report_exit}-{once}"));
+    let script = r#"#!/bin/bash
+if [ "$1" = --version ]; then echo 'bubblewrap 0.9.0'; exit 0; fi
+prev=; for a in "$@"; do [ "$prev" = --json-status-fd ] && fd=$a; prev=$a; done
+case "$*" in *' /box/ignorarium '*)
+  echo '{"connect_blocked":true,"vsock_blocked":true,"io_uring_blocked":true}'
+  echo '{"exit-code": 0}' >&$fd
+  exit 0;; esac
+case "$*" in *' /payload/'*) ;; *) echo '{"exit-code": 0}' >&$fd; exit 0;; esac
+if [ -n "@@ONCE@@" ] && [ -e "@@MARKER@@" ]; then echo '{"exit-code": 0}' >&$fd; exit 0; fi
+: > "@@MARKER@@"
+pid=$( eval "exec $fd>&-"; setsid sleep 20 >/dev/null 2>&1 & echo $! )
+sleep 0.3
+echo "{\"child-pid\": $pid}" >&$fd
+if [ -n "@@REPORT@@" ]; then echo '{"exit-code": 0}' >&$fd; fi
+exit 0
+"#;
+    let script = script
+        .replace("@@MARKER@@", &marker.to_string_lossy())
+        .replace("@@ONCE@@", if once { "y" } else { "" })
+        .replace("@@REPORT@@", if report_exit { "y" } else { "" });
+    write_exec(&path, &script);
     Level1::with(path, BOX.into())
+}
+
+fn progress_of(lab: &common::Lab, id: &str) -> runner::Progress {
+    let key = ignorarium::keys::load(&lab.home).unwrap().unwrap();
+    let log = lab.home.study_dir(id).join("records.jsonl");
+    let all = ignorarium::records::read_all(&log, &key.verifying_key()).unwrap();
+    runner::progress(&lab.home, id, &all).unwrap()
+}
+
+/// The study's per-row CPU estimate in seconds.
+fn per_row_cpu(lab: &common::Lab, id: &str) -> f64 {
+    let spec = progress_of(lab, id).spec;
+    let m = machine::load(&lab.home.root).unwrap();
+    let e = ignorarium::estimate::estimate(&spec, &m, ignorarium::estimate::units(&spec));
+    e.cpu_hours * 3600.0 / e.rows.max(1) as f64
 }
 
 #[test]
 fn a_stuck_sandbox_pid_1_marks_the_cpu_unknown_and_the_row_goes_on() {
     let d = TempDir::new().unwrap();
-    let b = fake_with_stuck_pid_1(d.path());
+    let b = stuck_bwrap(d.path(), true, false);
     let (_w, job) = row("true", LONG);
     let t = Instant::now();
     let o = b.run_row(&job, &|| true).unwrap();
@@ -704,6 +728,84 @@ fn a_stuck_sandbox_pid_1_marks_the_cpu_unknown_and_the_row_goes_on() {
         waited >= Duration::from_secs(5) && waited < Duration::from_secs(15),
         "{waited:?}"
     );
+}
+
+const UNKNOWN: &str = "the sandbox's PID 1 did not exit in time; its CPU time is unknown";
+
+#[test]
+fn an_unknown_cpu_row_is_charged_the_estimate_warned_about_and_pauses_the_run() {
+    let lab = lab();
+    let dir = plain(&lab, "unk");
+    let d = TempDir::new().unwrap();
+    let plan = prepare_with(
+        &lab.home,
+        "unk",
+        vec![Box::new(stuck_bwrap(d.path(), true, false))],
+    )
+    .unwrap();
+    let status = runner::run(&plan).unwrap();
+    let RunStatus::Paused(why) = status else {
+        panic!("{status:?}")
+    };
+    assert_eq!(
+        why,
+        "row 0 has an unknown CPU count; it is charged the row estimate"
+    );
+    let rows = rows_of(&lab, "unk");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].body["cpu_unknown"], UNKNOWN);
+    // The row is charged the estimate, not the near-zero it measured.
+    let est = per_row_cpu(&lab, "unk");
+    assert!(est > 1.0, "{est}");
+    assert_eq!(rows[0].body["cpu_seconds"].as_f64().unwrap(), est);
+    // The warn event names the row.
+    let events = common::events_of(&dir);
+    let warns = common::named(&events, "row.cpu_unknown");
+    assert_eq!(warns.len(), 1);
+    assert_eq!(warns[0]["level"], "warn");
+    assert_eq!(warns[0]["attrs"]["row"], 0);
+    assert_eq!(warns[0]["attrs"]["reason"], UNKNOWN);
+    assert_eq!(
+        warns[0]["attrs"]["charged_cpu_seconds"].as_f64().unwrap(),
+        est
+    );
+    // Status counts it, and the cost carries the charge.
+    let p = progress_of(&lab, "unk");
+    assert_eq!(p.unknown_cpu, 1);
+    assert_eq!(p.cost.cpu_seconds, est);
+}
+
+#[test]
+fn an_unknown_cpu_attempt_that_is_retried_leaves_a_spend_record_and_still_pauses() {
+    let lab = lab();
+    plain(&lab, "unk2");
+    let d = TempDir::new().unwrap();
+    // The first attempt is a fault with a stuck PID 1; the retry runs clean.
+    let plan = prepare_with(
+        &lab.home,
+        "unk2",
+        vec![Box::new(stuck_bwrap(d.path(), false, true))],
+    )
+    .unwrap();
+    let status = runner::run(&plan).unwrap();
+    let RunStatus::Paused(why) = status else {
+        panic!("{status:?}")
+    };
+    assert_eq!(
+        why,
+        "row 0 has an unknown CPU count; it is charged the row estimate"
+    );
+    let spends = common::kind_of(&lab, "unk2", "spend");
+    assert_eq!(spends.len(), 1);
+    assert_eq!(spends[0].body["cpu_unknown"], UNKNOWN);
+    assert_eq!(
+        spends[0].body["cpu_seconds"].as_f64().unwrap(),
+        per_row_cpu(&lab, "unk2")
+    );
+    let rows = rows_of(&lab, "unk2");
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].body.get("cpu_unknown").is_none());
+    assert_eq!(rows[0].body["attempts"], 2);
 }
 
 fn why(b: &Level1) -> String {
@@ -745,7 +847,12 @@ fn probe_reports_why_level1_is_unavailable() {
     }
     // A machine that cannot do level 1 probes level 0.
     let backends: Vec<Box<dyn Backend>> = vec![Box::new(Level0), Box::new(missing)];
-    assert_eq!(machine::probe(d.path(), &backends).unwrap().max_level, 0);
+    assert_eq!(
+        machine::measure(d.path(), &machine::probe_backends(&backends))
+            .unwrap()
+            .max_level,
+        0
+    );
 }
 
 #[test]

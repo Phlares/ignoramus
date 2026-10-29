@@ -25,6 +25,8 @@ const ROOT_ENTRIES: [&str; 5] = ["usr", "bin", "lib", "lib64", "etc"];
 const TAIL: usize = 4096;
 /// Time the probe's test sandbox may take.
 const SMOKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Time the self-test sandbox may take, within the row's own wall time.
+const SELFTEST_LIMIT: Duration = Duration::from_secs(10);
 /// Time to wait for the pipes to reach their end once bubblewrap is reaped.
 const DRAIN_GRACE: Duration = Duration::from_secs(5);
 /// Time to wait for the sandbox's PID 1 to become reapable once bubblewrap is gone. A
@@ -220,39 +222,67 @@ impl Level1 {
     }
 
     /// The self-test sandbox: the host root, the box binary and the isolation of a row.
-    /// `Ok` holds what the self-test found; `Err` is the row's exit when the test failed
-    /// or could not run, with what it found when it printed a readable result.
-    fn self_test(
-        &self,
-        job: &RowJob,
-        start: Instant,
-        watch: &dyn Watch,
-    ) -> Result<SelfTest, (Exit, Option<SelfTest>)> {
+    /// `result` is what the self-test found, or the row's exit when the test failed or
+    /// could not run, with what it found when it printed a readable result. Its CPU and
+    /// its unknown-CPU note go on the row.
+    fn self_test(&self, job: &RowJob, start: Instant, watch: &dyn Watch) -> Checked {
         let mut mounts = root_mounts(Path::new("/"));
         mounts.extend(op("--ro-bind", &self.exe, BOX_PATH));
         let sandbox = Sandbox {
             mounts,
             run: os_args(["--", BOX_PATH, "dev", "selftest"]),
         };
+        let (limit, row_first) = self_test_limit(start.elapsed(), job.wall_timeout, SELFTEST_LIMIT);
         let probe_job = RowJob {
-            wall_timeout: SMOKE_TIMEOUT.min(job.wall_timeout),
+            wall_timeout: limit,
             ..RowJob::default()
         };
         let l = self.launch(&sandbox, &probe_job, start, watch, true);
-        if l.exit == Exit::Stopped {
-            return Err((Exit::Stopped, None));
-        }
         let found = serde_json::from_str::<SelfTest>(l.stdout.trim()).ok();
-        let why = match (&found, &l.exit) {
-            (Some(t), Exit::Ok) if t.ok() => return Ok(*t),
-            (Some(t), _) if !t.ok() => format!("{} was not blocked", t.failed().join(" and ")),
-            _ => format!("it ended with {:?}: {}", l.exit, l.stdout.trim()),
+        let result = match (&found, &l.exit) {
+            (Some(t), Exit::Ok) if t.ok() => Ok(*t),
+            (_, Exit::Stopped) => Err((Exit::Stopped, None)),
+            // The row's own wall time ran out during the self-test: the row timed out.
+            (_, Exit::Payload(TIMEOUT_CODE)) if row_first => {
+                Err((Exit::Payload(TIMEOUT_CODE), found))
+            }
+            (Some(t), _) if !t.ok() => Err((
+                Exit::Infra(format!(
+                    "sandbox self-test failed: {} was not blocked",
+                    t.failed().join(" and ")
+                )),
+                found,
+            )),
+            _ => Err((
+                Exit::Infra(format!(
+                    "sandbox self-test failed: it ended with {:?}: {}",
+                    l.exit,
+                    l.stdout.trim()
+                )),
+                found,
+            )),
         };
-        Err((
-            Exit::Infra(format!("sandbox self-test failed: {why}")),
-            found,
-        ))
+        Checked {
+            result,
+            cpu: l.cpu,
+            cpu_unknown: l.cpu_unknown,
+        }
     }
+}
+
+/// The self-test's outcome and what it cost.
+struct Checked {
+    result: Result<SelfTest, (Exit, Option<SelfTest>)>,
+    cpu: f64,
+    cpu_unknown: Option<String>,
+}
+
+/// The wall limit for the self-test sandbox, on the row's clock: `own` after `elapsed`,
+/// but never past the row's `wall`. The flag is true when the row's time ends first, so a
+/// timeout is the row's and not a fault of the self-test.
+fn self_test_limit(elapsed: Duration, wall: Duration, own: Duration) -> (Duration, bool) {
+    let own_end = elapsed + own;
+    (own_end.min(wall), wall <= own_end)
 }
 
 impl Backend for Level1 {
@@ -280,20 +310,22 @@ impl Backend for Level1 {
             Ok(s) => s,
             Err(why) => return Ok(outcome(job, start, Exit::Infra(why), 0.0)),
         };
-        let selftest = match self.self_test(job, start, watch) {
+        let checked = self.self_test(job, start, watch);
+        let selftest = match checked.result {
             Ok(t) => Some(t),
             Err((exit, found)) => {
                 return Ok(RowOutcome {
                     selftest: found,
-                    ..outcome(job, start, exit, 0.0)
+                    cpu_unknown: checked.cpu_unknown,
+                    ..outcome(job, start, exit, checked.cpu)
                 });
             }
         };
         let l = self.launch(&sandbox, job, start, watch, false);
         Ok(RowOutcome {
             selftest,
-            cpu_unknown: l.cpu_unknown,
-            ..outcome(job, start, l.exit, l.cpu)
+            cpu_unknown: l.cpu_unknown.or(checked.cpu_unknown),
+            ..outcome(job, start, l.exit, checked.cpu + l.cpu)
         })
     }
 }
@@ -538,6 +570,20 @@ impl Watch for Started<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_self_test_limit_is_its_own_unless_the_row_ends_first() {
+        let sec = Duration::from_secs;
+        // Plenty of row time left: the self-test's own limit, after the time already used.
+        assert_eq!(self_test_limit(sec(2), sec(100), sec(10)), (sec(12), false));
+        // The row's time ends first.
+        assert_eq!(self_test_limit(sec(2), sec(5), sec(10)), (sec(5), true));
+        // Both end together: the row's time is the one that ran out.
+        assert_eq!(self_test_limit(sec(2), sec(12), sec(10)), (sec(12), true));
+        assert_eq!(self_test_limit(sec(2), sec(13), sec(10)), (sec(12), false));
+        // No time left at all.
+        assert_eq!(self_test_limit(sec(9), sec(1), sec(10)), (sec(1), true));
+    }
 
     #[test]
     fn a_kernel_without_close_range_cloexec_is_named_in_the_probe() {

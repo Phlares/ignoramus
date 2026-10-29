@@ -64,7 +64,10 @@ fn self_test_passes_inside_the_sandbox() {
         connect_blocked: true,
         vsock_blocked: true,
         io_uring_blocked: true,
+        vsock_absent: false,
+        io_uring_absent: false,
     };
+    // The filter's EPERM, not a missing feature, is what blocks both calls.
     assert_eq!(o.selftest, Some(all));
     assert_eq!(
         std::fs::read_to_string(d.path().join("out/ran")).unwrap(),
@@ -93,6 +96,8 @@ fn a_run_logs_the_self_test_of_every_row() {
         assert_eq!(a["connect_blocked"], true);
         assert_eq!(a["vsock_blocked"], true);
         assert_eq!(a["io_uring_blocked"], true);
+        assert_eq!(a["vsock"], "denied");
+        assert_eq!(a["io_uring"], "denied");
     }
 }
 
@@ -145,9 +150,9 @@ fn a_self_test_that_prints_nothing_never_runs_the_payload() {
 fn io_uring_setup_fails_inside_and_succeeds_or_is_absent_outside() {
     // Outside any filter the answer is the kernel's. Where io_uring is on, it must succeed.
     let kernel = std::fs::read_to_string("/proc/sys/kernel/io_uring_disabled");
-    let outside = sys::io_uring_setup_fails();
+    let outside = sys::io_uring_setup_errno();
     if kernel.is_ok_and(|v| v.trim() == "0") {
-        assert!(!outside);
+        assert_eq!(outside, None);
     }
     // Inside the sandbox, the seccomp filter denies it.
     if skip_level1() {
@@ -157,4 +162,52 @@ fn io_uring_setup_fails_inside_and_succeeds_or_is_absent_outside() {
     let d = TempDir::new().unwrap();
     let o = b.run_row(&job(d.path()), &|| true).unwrap();
     assert!(o.selftest.unwrap().io_uring_blocked);
+}
+
+#[test]
+fn a_row_timeout_during_the_self_test_is_the_rows_timeout() {
+    if skip_level1() {
+        return;
+    }
+    let d = TempDir::new().unwrap();
+    let slow = d.path().join("slow-box");
+    write_exec(
+        &slow,
+        "#!/bin/sh
+sleep 30
+",
+    );
+    let b = Level1::with(Level1::new().bwrap, slow);
+    let work = TempDir::new().unwrap();
+    let job = RowJob {
+        wall_timeout: Duration::from_secs(1),
+        ..job(work.path())
+    };
+    let t = std::time::Instant::now();
+    let o = b.run_row(&job, &|| true).unwrap();
+    assert_eq!(o.exit, Exit::Payload(124));
+    assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+    assert!(!work.path().join("out/ran").exists());
+}
+
+#[test]
+fn the_self_tests_cpu_counts_in_the_row() {
+    if skip_level1() {
+        return;
+    }
+    // A self-test that burns about 0.4 s of CPU before it reports.
+    let d = TempDir::new().unwrap();
+    let busy = d.path().join("busy-box");
+    write_exec(
+        &busy,
+        "#!/bin/sh
+i=0; while [ $i -lt 400000 ]; do i=$((i+1)); done
+         echo '{\"connect_blocked\":true,\"vsock_blocked\":true,\"io_uring_blocked\":true}'
+",
+    );
+    let b = Level1::with(Level1::new().bwrap, busy);
+    let work = TempDir::new().unwrap();
+    let o = b.run_row(&job(work.path()), &|| true).unwrap();
+    assert_eq!(o.exit, Exit::Ok);
+    assert!(o.cpu_seconds > 0.1, "{}", o.cpu_seconds);
 }
