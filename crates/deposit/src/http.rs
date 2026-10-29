@@ -202,9 +202,9 @@ impl Transport for Curl {
                 String::from_utf8_lossy(&stderr).trim()
             )));
         }
-        let digits = match pending.as_slice() {
-            [b'\n', d @ ..] if d.len() == 3 && d.iter().all(u8::is_ascii_digit) => d,
-            _ => return Err(no_status()),
+        // At most 3 bytes follow the newline, so only 100 to 599 written as three digits passes.
+        let [b'\n', digits @ ..] = pending.as_slice() else {
+            return Err(no_status());
         };
         let status = std::str::from_utf8(digits)
             .ok()

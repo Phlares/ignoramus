@@ -190,7 +190,7 @@ fn secrets_never_print() {
 
 #[test]
 fn a_status_outside_100_to_599_is_not_a_response() {
-    for tail in ["000", "099", "600"] {
+    for tail in ["000", "099", "600", "+99", "2 0"] {
         let dir = TempDir::new().unwrap();
         let curl = Curl::with_program(fake(dir.path(), &format!("printf '\n{tail}'")));
         match curl.send(&req("https://h/x", None, Body::None, true)) {

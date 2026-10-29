@@ -74,3 +74,50 @@ impl From<std::io::Error> for Error {
         Error::Io(e)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_error_prints_its_text() {
+        let cases = [
+            (Error::Request("x".into()), "bad request: x"),
+            (Error::Transport("x".into()), "transport failed: x"),
+            (
+                Error::Protocol {
+                    step: "verify",
+                    what: "x".into(),
+                },
+                "verify: unexpected response: x",
+            ),
+            (
+                Error::Mismatch {
+                    step: "verify",
+                    what: "x".into(),
+                },
+                "verify: mismatch: x",
+            ),
+            (
+                Error::Io(std::io::Error::other("disk full")),
+                "io error: disk full",
+            ),
+        ];
+        for (e, want) in cases {
+            assert_eq!(e.to_string(), want);
+        }
+    }
+
+    #[test]
+    fn a_status_error_prints_the_first_200_chars_of_the_body() {
+        let e = Error::Status {
+            step: "create",
+            status: 400,
+            body: "\u{e9}".repeat(201),
+        };
+        assert_eq!(
+            e.to_string(),
+            format!("create: status 400: {}", "\u{e9}".repeat(200))
+        );
+    }
+}
