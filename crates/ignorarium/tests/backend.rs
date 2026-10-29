@@ -1,6 +1,7 @@
 use ignorarium::backend::level0::{Level0, output_hash};
 use ignorarium::backend::{Backend, Exit, Probe, RowJob};
 use sha2::{Digest, Sha256};
+use std::cell::Cell;
 use std::time::Duration;
 
 fn job(dir: &std::path::Path, script: &str, timeout: Duration) -> RowJob {
@@ -28,11 +29,14 @@ fn sha(b: &[u8]) -> String {
 fn level0_runs_hashes_output_and_times_the_row() {
     let d = tempfile::tempdir().unwrap();
     let o = Level0
-        .run_row(&job(
-            d.path(),
-            "printf 42 > \"$OUT/result\"",
-            Duration::from_secs(30),
-        ))
+        .run_row(
+            &job(
+                d.path(),
+                "printf 42 > \"$OUT/result\"",
+                Duration::from_secs(30),
+            ),
+            &|| true,
+        )
         .unwrap();
     assert_eq!(o.exit, Exit::Ok);
     assert!(o.selftest_ok);
@@ -46,7 +50,7 @@ fn level0_runs_hashes_output_and_times_the_row() {
 fn level0_marks_a_nonzero_exit_a_payload_failure() {
     let d = tempfile::tempdir().unwrap();
     let o = Level0
-        .run_row(&job(d.path(), "exit 3", Duration::from_secs(30)))
+        .run_row(&job(d.path(), "exit 3", Duration::from_secs(30)), &|| true)
         .unwrap();
     assert_eq!(o.exit, Exit::Payload(3));
 }
@@ -55,11 +59,14 @@ fn level0_marks_a_nonzero_exit_a_payload_failure() {
 fn level0_clears_the_environment() {
     let d = tempfile::tempdir().unwrap();
     let o = Level0
-        .run_row(&job(
-            d.path(),
-            "tr '\\0' '\\n' </proc/$$/environ > \"$OUT/env\"",
-            Duration::from_secs(30),
-        ))
+        .run_row(
+            &job(
+                d.path(),
+                "tr '\\0' '\\n' </proc/$$/environ > \"$OUT/env\"",
+                Duration::from_secs(30),
+            ),
+            &|| true,
+        )
         .unwrap();
     assert_eq!(o.exit, Exit::Ok);
     let seen = std::fs::read_to_string(d.path().join("out/env")).unwrap();
@@ -73,11 +80,14 @@ fn level0_clears_the_environment() {
 fn level0_kills_the_group_at_the_wall_timeout() {
     let d = tempfile::tempdir().unwrap();
     let o = Level0
-        .run_row(&job(
-            d.path(),
-            "(sleep 3; printf late > \"$OUT/late\") & sleep 30",
-            Duration::from_millis(300),
-        ))
+        .run_row(
+            &job(
+                d.path(),
+                "(sleep 3; printf late > \"$OUT/late\") & sleep 30",
+                Duration::from_millis(300),
+            ),
+            &|| true,
+        )
         .unwrap();
     assert_eq!(o.exit, Exit::Payload(124));
     assert!(
@@ -94,10 +104,13 @@ fn level0_reports_a_missing_program_as_infra() {
     let d = tempfile::tempdir().unwrap();
     let mut j = job(d.path(), "", Duration::from_secs(5));
     j.argv = vec!["/nonexistent/prog".into()];
-    assert!(matches!(Level0.run_row(&j).unwrap().exit, Exit::Infra(_)));
+    assert!(matches!(
+        Level0.run_row(&j, &|| true).unwrap().exit,
+        Exit::Infra(_)
+    ));
     j.argv = vec![];
     assert_eq!(
-        Level0.run_row(&j).unwrap().exit,
+        Level0.run_row(&j, &|| true).unwrap().exit,
         Exit::Infra("empty argv".into())
     );
 }
@@ -106,7 +119,10 @@ fn level0_reports_a_missing_program_as_infra() {
 fn level0_reports_a_signal_death_as_128_plus_signal() {
     let d = tempfile::tempdir().unwrap();
     let o = Level0
-        .run_row(&job(d.path(), "kill -9 $$", Duration::from_secs(30)))
+        .run_row(
+            &job(d.path(), "kill -9 $$", Duration::from_secs(30)),
+            &|| true,
+        )
         .unwrap();
     assert_eq!(o.exit, Exit::Payload(137));
 }
@@ -115,11 +131,14 @@ fn level0_reports_a_signal_death_as_128_plus_signal() {
 fn level0_counts_cpu_time() {
     let d = tempfile::tempdir().unwrap();
     let o = Level0
-        .run_row(&job(
-            d.path(),
-            "i=0; while [ $i -lt 1500000 ]; do i=$((i+1)); done",
-            Duration::from_secs(60),
-        ))
+        .run_row(
+            &job(
+                d.path(),
+                "i=0; while [ $i -lt 1500000 ]; do i=$((i+1)); done",
+                Duration::from_secs(60),
+            ),
+            &|| true,
+        )
         .unwrap();
     assert_eq!(o.exit, Exit::Ok);
     assert!(o.cpu_seconds > 0.05, "{}", o.cpu_seconds);
@@ -161,7 +180,7 @@ fn level0_kills_a_background_grandchild_when_the_leader_exits() {
         pidfile.display()
     );
     let o = Level0
-        .run_row(&job(d.path(), &script, Duration::from_secs(30)))
+        .run_row(&job(d.path(), &script, Duration::from_secs(30)), &|| true)
         .unwrap();
     assert_eq!(o.exit, Exit::Ok);
     std::thread::sleep(Duration::from_millis(800));
@@ -218,7 +237,7 @@ fn a_symlinked_output_dir_is_refused() {
     assert!(output_hash(&ln).is_err());
     let mut j = job(d.path(), "true", Duration::from_secs(5));
     j.output_dir = ln;
-    let o = Level0.run_row(&j).unwrap();
+    let o = Level0.run_row(&j, &|| true).unwrap();
     assert!(matches!(o.exit, Exit::Infra(_)));
     assert_eq!(o.output_hash, "");
 }
@@ -228,11 +247,14 @@ fn payload_stdout_does_not_reach_the_box_stdout() {
     if std::env::var_os("LEVEL0_STDOUT_CHILD").is_some() {
         let d = tempfile::tempdir().unwrap();
         let o = Level0
-            .run_row(&job(
-                d.path(),
-                "echo LEAKED; echo LEAKED >&2",
-                Duration::from_secs(30),
-            ))
+            .run_row(
+                &job(
+                    d.path(),
+                    "echo LEAKED; echo LEAKED >&2",
+                    Duration::from_secs(30),
+                ),
+                &|| true,
+            )
             .unwrap();
         assert_eq!(o.exit, Exit::Ok);
         return;
@@ -255,7 +277,49 @@ fn payload_stdout_does_not_reach_the_box_stdout() {
 fn a_row_that_finishes_in_time_is_not_a_timeout() {
     let d = tempfile::tempdir().unwrap();
     let o = Level0
-        .run_row(&job(d.path(), "exit 0", Duration::from_secs(30)))
+        .run_row(&job(d.path(), "exit 0", Duration::from_secs(30)), &|| true)
         .unwrap();
     assert_eq!(o.exit, Exit::Ok);
+}
+
+#[test]
+fn level0_stops_the_group_when_the_watch_says_stop() {
+    let d = tempfile::tempdir().unwrap();
+    let ticks = Cell::new(0u32);
+    // The 20th tick, about 100 ms in, says stop.
+    let watch = || {
+        ticks.set(ticks.get() + 1);
+        ticks.get() < 20
+    };
+    let o = Level0
+        .run_row(
+            &job(
+                d.path(),
+                "(sleep 1; printf late > \"$OUT/late\") & sleep 30",
+                Duration::from_secs(60),
+            ),
+            &watch,
+        )
+        .unwrap();
+    assert_eq!(o.exit, Exit::Stopped);
+    assert_eq!(ticks.get(), 20);
+    assert!(o.wall_seconds < 2.0, "{}", o.wall_seconds);
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(!d.path().join("out/late").exists());
+}
+
+#[test]
+fn level0_ticks_the_watch_while_the_row_runs() {
+    let d = tempfile::tempdir().unwrap();
+    let ticks = Cell::new(0u32);
+    let watch = || {
+        ticks.set(ticks.get() + 1);
+        true
+    };
+    let o = Level0
+        .run_row(&job(d.path(), "sleep 0.3", Duration::from_secs(30)), &watch)
+        .unwrap();
+    assert_eq!(o.exit, Exit::Ok);
+    // One tick per 5 ms poll: about 60 in 0.3 s.
+    assert!(ticks.get() >= 10, "{}", ticks.get());
 }

@@ -25,6 +25,8 @@ pub enum Exit {
     Payload(i32),
     /// The box or the sandbox failed. Retryable.
     Infra(String),
+    /// The watch said stop; the row's process group was killed.
+    Stopped,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -42,10 +44,22 @@ pub enum Probe {
     Unavailable(String),
 }
 
+/// Called by a backend over and over while a row runs.
+pub trait Watch {
+    /// `false` means stop the row now.
+    fn tick(&self) -> bool;
+}
+
+impl<F: Fn() -> bool> Watch for F {
+    fn tick(&self) -> bool {
+        self()
+    }
+}
+
 pub trait Backend {
     fn level(&self) -> u8;
     fn probe(&self) -> Probe;
-    fn run_row(&self, job: &RowJob) -> io::Result<RowOutcome>;
+    fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> io::Result<RowOutcome>;
 }
 
 /// Every backend this build knows, lowest level first.

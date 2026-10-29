@@ -4,6 +4,7 @@ pub mod backend;
 pub mod budget;
 pub mod canon;
 pub mod cli;
+pub mod control;
 pub mod diag;
 pub mod environ;
 pub mod estimate;

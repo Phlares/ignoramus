@@ -186,6 +186,18 @@ pub fn locked_append<E: From<io::Error>>(
     Ok(())
 }
 
+/// Append `line` and a LF under an exclusive lock. A log that ends in a partial
+/// line gets a LF first, so the fragment stays its own line.
+pub fn append_line(path: &Path, mut line: Vec<u8>) -> io::Result<()> {
+    line.push(b'\n');
+    locked_append(path, |tail| {
+        if matches!(tail, Tail::Partial(_)) {
+            line.insert(0, b'\n');
+        }
+        Ok::<_, io::Error>(line)
+    })
+}
+
 /// Replace `path` with `bytes` atomically: a unique temp file in the same
 /// directory, fsync, then `rename` over `path`. Refuses a symbolic link at
 /// `path`. The temp file is removed on any failure. `mode` applies on unix only.

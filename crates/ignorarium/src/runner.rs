@@ -1,8 +1,9 @@
 //! The run engine: writes the schedule, runs each row on a backend, records each row.
 //! A row is done when its signed record exists. A crash before the record reruns the row.
-use crate::backend::{self, Backend, Exit, Probe, RowJob, RowOutcome};
+use crate::backend::{self, Backend, Exit, Probe, RowJob, RowOutcome, Watch};
 use crate::budget::{Alerts, Cost, CostMeter, Decision, HostMeter, decide, dimension_name};
 use crate::canon::sha256_hex;
+use crate::control::{self, ControlError, ControlFile, RunLock, Signal, State};
 use crate::estimate::{apply_defaults, estimate, units};
 use crate::events::{self, Event};
 use crate::home::Home;
@@ -16,16 +17,20 @@ use crate::spec::model::{Role, Spec};
 use crate::{keys, spec};
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Infrastructure failures retried per row, after a health check each.
 pub const MAX_RETRIES: u32 = 3;
+/// Signs of life while a row runs: one `heartbeat` event per interval.
+pub const HEARTBEAT: Duration = Duration::from_secs(15);
 const MIN_TIMEOUT: Duration = Duration::from_secs(60);
 const TIMEOUT_FACTOR: f64 = 10.0;
 const PATH_ENV: &str = "/usr/bin:/bin";
+const PAUSE_REQUESTED: &str = "a pause was requested";
 
 pub struct RunPlan {
     pub home: Home,
@@ -41,12 +46,15 @@ pub struct RunPlan {
     pub payload_sha256: String,
     /// Cumulative cost, read before each row.
     pub meter: Box<dyn CostMeter>,
+    /// Interval between `heartbeat` events while a row runs.
+    pub heartbeat: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunStatus {
     Done,
     Paused(String),
+    Stopped(String),
 }
 
 #[derive(Debug)]
@@ -59,6 +67,8 @@ pub enum RunError {
     PayloadChanged,
     NoPayload(String),
     NoKey,
+    /// Another run of this study holds the run lock.
+    Busy,
     /// A path inside the study folder is a symbolic link.
     Unsafe(String),
     NoBackend {
@@ -85,6 +95,7 @@ impl fmt::Display for RunError {
             RunError::PayloadChanged => write!(f, "the payload differs from pins.payload"),
             RunError::NoPayload(e) => write!(f, "cannot read the payload: {e}"),
             RunError::NoKey => write!(f, "the box key does not exist"),
+            RunError::Busy => write!(f, "another run of this study is in progress"),
             RunError::Unsafe(p) => write!(f, "{p} is a symbolic link"),
             RunError::NoBackend { need, have } => {
                 write!(
@@ -128,6 +139,15 @@ impl From<VerifyError> for RunError {
 impl From<RecordError> for RunError {
     fn from(e: RecordError) -> Self {
         RunError::Records(e.to_string())
+    }
+}
+
+impl From<ControlError> for RunError {
+    fn from(e: ControlError) -> Self {
+        match e {
+            ControlError::Io(e) => RunError::Io(e.to_string()),
+            ControlError::Records(e) => RunError::Records(e),
+        }
     }
 }
 
@@ -216,6 +236,7 @@ pub fn prepare_with(
         payload,
         payload_sha256,
         meter: Box::new(HostMeter::new(prior, machine.rate_usd_per_hour)),
+        heartbeat: HEARTBEAT,
     })
 }
 
@@ -299,13 +320,51 @@ fn no_links(base: &Path, parts: &[&str]) -> Result<(), RunError> {
     Ok(())
 }
 
-/// Run every row that has no record. Before each row the meter is read; the run pauses
-/// instead of starting a row when a cap is reached or the row would reach one.
-pub fn run(plan: &RunPlan) -> Result<RunStatus, RunError> {
+/// Run every row that has no record, holding the run lock; a second run gets `Busy`.
+/// At each row boundary the control file is read: a stop ends the run with the stop trace,
+/// a pause ends it at that boundary. Then the meter is read: the run pauses instead of
+/// starting a row when a cap is reached or the row would reach one. While a row runs, the
+/// backend ticks the watch, which emits heartbeats and ends the row on a stop.
+pub fn run(plan: &RunPlan, control: &ControlFile) -> Result<RunStatus, RunError> {
+    no_links(&plan.home.study_dir(&plan.study_id), &["run"])?;
+    let status = {
+        let lock = RunLock::try_take(&plan.home, &plan.study_id)
+            .map_err(io)?
+            .ok_or(RunError::Busy)?;
+        run_locked(plan, control, &lock)?
+    };
+    // A stop sent after this run's last look found the lock still held: finish it here.
+    Ok(
+        match control::stop_if_idle(&plan.home, &plan.study_id, &plan.key, control)? {
+            Some(r) => RunStatus::Stopped(why_of(&r)),
+            None => status,
+        },
+    )
+}
+
+fn run_locked(
+    plan: &RunPlan,
+    control: &ControlFile,
+    lock: &RunLock,
+) -> Result<RunStatus, RunError> {
     let dir = plan.home.study_dir(&plan.study_id);
     let log = dir.join("records.jsonl");
     let machine = machine::load(&plan.home.root).map_err(io)?;
     let all = records::read_all(&log, &plan.key.verifying_key())?;
+    if let Some(r) = all.iter().find(|r| r.kind == "stop") {
+        return halt(plan, &dir, lock, Halt::Stop(why_of(r)));
+    }
+    State::Running
+        .write(&plan.home, &plan.study_id)
+        .map_err(io)?;
+    let watch = RunWatch {
+        plan,
+        control,
+        dir: &dir,
+        heard: RefCell::new(None),
+        row: RefCell::new((0, String::new())),
+        last_beat: Cell::new(Instant::now()),
+    };
     let done: BTreeSet<u64> = all
         .iter()
         .filter(|r| r.kind == "row")
@@ -322,44 +381,148 @@ pub fn run(plan: &RunPlan) -> Result<RunStatus, RunError> {
         .iter()
         .filter(|r| !done.contains(&r.index))
     {
+        if let Some(h) = watch.at_boundary() {
+            return halt(plan, &dir, lock, h);
+        }
         let sampled = plan.meter.sample();
         let now = sampled.clone().unwrap_or_default();
         if let Ok(c) = &sampled {
             for (dim, fraction) in alerts.fresh(c, budget) {
                 let attrs = json!({ "dimension": dimension_name(dim), "fraction": fraction });
-                log_event(plan, &dir, "budget.alert", attrs)?;
+                log_event(plan, &dir, None, "budget.alert", "warn", attrs)?;
             }
         }
         let next = per_row.larger(&tally.mean(machine.rate_usd_per_hour));
         if let Decision::Pause(why) = decide(&now, &next, budget, sampled.map(|_| ())) {
-            return pause(plan, &dir, why.to_string());
+            return halt(plan, &dir, lock, Halt::Pause(why.to_string()));
         }
-        if let Some(why) = run_row(plan, row, &dir, &log, &mut tally)? {
-            return pause(plan, &dir, why);
+        if let Some(h) = run_row(plan, row, &dir, &log, &mut tally, &watch)? {
+            return halt(plan, &dir, lock, h);
         }
     }
+    State::Done.write(&plan.home, &plan.study_id).map_err(io)?;
     Ok(RunStatus::Done)
 }
 
-fn pause(plan: &RunPlan, dir: &Path, reason: String) -> Result<RunStatus, RunError> {
-    log_event(plan, dir, "run.pause", json!({ "reason": reason }))?;
-    Ok(RunStatus::Paused(reason))
+/// Why a run ends before its last row.
+enum Halt {
+    Pause(String),
+    Stop(String),
 }
 
-/// One event line in the study's event log. The study is the trace.
-fn log_event(plan: &RunPlan, dir: &Path, name: &str, attrs: Value) -> Result<(), RunError> {
+/// End the run. A pause writes `run.pause` and the paused state; a stop writes the stop trace.
+fn halt(plan: &RunPlan, dir: &Path, lock: &RunLock, h: Halt) -> Result<RunStatus, RunError> {
+    match h {
+        Halt::Pause(why) => {
+            log_event(
+                plan,
+                dir,
+                None,
+                "run.pause",
+                "warn",
+                json!({ "reason": why }),
+            )?;
+            State::Paused(why.clone())
+                .write(&plan.home, &plan.study_id)
+                .map_err(io)?;
+            Ok(RunStatus::Paused(why))
+        }
+        Halt::Stop(why) => {
+            control::stop(&plan.home, &plan.study_id, &plan.key, &why, lock)?;
+            Ok(RunStatus::Stopped(why))
+        }
+    }
+}
+
+fn why_of(stop: &records::Record) -> String {
+    stop.body["why"].as_str().unwrap_or_default().to_string()
+}
+
+/// One event line in the study's event log. The study is the trace; a row is a span.
+fn log_event(
+    plan: &RunPlan,
+    dir: &Path,
+    span: Option<&str>,
+    name: &str,
+    level: &str,
+    attrs: Value,
+) -> Result<(), RunError> {
     events::emit(
         &dir.join("events.jsonl"),
         Event {
             ts: crate::time::now_rfc3339(),
             trace_id: hex::encode(&plan.spec_hash[..16]),
-            span_id: None,
+            span_id: span.map(String::from),
             name: name.into(),
-            level: "warn".into(),
+            level: level.into(),
             attrs,
         },
     )
     .map_err(io)
+}
+
+/// What the backend ticks while a row runs: a heartbeat on the plan's cadence, and a read
+/// of the control file, so a stop ends the row at once.
+struct RunWatch<'a> {
+    plan: &'a RunPlan,
+    control: &'a ControlFile,
+    dir: &'a Path,
+    /// Every request heard so far, merged: nothing replaces a stop.
+    heard: RefCell<Option<Signal>>,
+    /// The row in flight and its span id.
+    row: RefCell<(u64, String)>,
+    last_beat: Cell<Instant>,
+}
+
+impl RunWatch<'_> {
+    fn listen(&self) -> std::io::Result<()> {
+        if let Some(s) = self.control.take()? {
+            let mut heard = self.heard.borrow_mut();
+            *heard = Some(Signal::then(heard.take(), s));
+        }
+        Ok(())
+    }
+
+    fn stop_heard(&self) -> Option<String> {
+        match &*self.heard.borrow() {
+            Some(Signal::Stop(why)) => Some(why.clone()),
+            _ => None,
+        }
+    }
+
+    /// Between rows: a stop or a pause ends the run. So does a control file that cannot be
+    /// read, as a pause; a stop heard earlier still wins.
+    fn at_boundary(&self) -> Option<Halt> {
+        let read = self.listen();
+        if let Some(why) = self.stop_heard() {
+            return Some(Halt::Stop(why));
+        }
+        match (read, &*self.heard.borrow()) {
+            (Err(e), _) => Some(Halt::Pause(format!("the control file cannot be read: {e}"))),
+            (_, Some(Signal::Pause)) => Some(Halt::Pause(PAUSE_REQUESTED.into())),
+            _ => None,
+        }
+    }
+
+    fn begin(&self, index: u64, span: &str) {
+        *self.row.borrow_mut() = (index, span.into());
+        self.last_beat.set(Instant::now());
+    }
+}
+
+impl Watch for RunWatch<'_> {
+    fn tick(&self) -> bool {
+        if self.last_beat.get().elapsed() >= self.plan.heartbeat {
+            self.last_beat.set(Instant::now());
+            let (index, span) = self.row.borrow().clone();
+            let attrs = json!({ "row": index });
+            // A failed write shows at the row's end event, which ends the run.
+            let _ = log_event(self.plan, self.dir, Some(&span), "heartbeat", "info", attrs);
+        }
+        // A failed read is retried on the next tick and pauses the run at the boundary.
+        let _ = self.listen();
+        self.stop_heard().is_none()
+    }
 }
 
 /// The spec estimate for one row. Zero when the schedule has no rows.
@@ -416,39 +579,69 @@ impl Tally {
     }
 }
 
-/// One row, retries included. `Some(reason)` means the run must pause.
+/// One row in its own span: `row.start`, the attempts, `row.end`. `Some` ends the run.
 fn run_row(
     plan: &RunPlan,
     row: &Row,
     dir: &Path,
     log: &Path,
     tally: &mut Tally,
-) -> Result<Option<String>, RunError> {
+    watch: &RunWatch,
+) -> Result<Option<Halt>, RunError> {
+    let span = events::new_span_id();
+    watch.begin(row.index, &span);
+    let start = json!({ "row": row.index });
+    log_event(plan, dir, Some(&span), "row.start", "info", start)?;
+    let (exit, halt) = attempt_row(plan, row, dir, log, tally, watch)?;
+    let end = json!({ "row": row.index, "exit": exit });
+    log_event(plan, dir, Some(&span), "row.end", "info", end)?;
+    Ok(halt)
+}
+
+/// A row's attempts, retries included, then its record. Returns the recorded exit, or
+/// `stopped` or `paused` for a row that ends the run without a record.
+fn attempt_row(
+    plan: &RunPlan,
+    row: &Row,
+    dir: &Path,
+    log: &Path,
+    tally: &mut Tally,
+    watch: &RunWatch,
+) -> Result<(String, Option<Halt>), RunError> {
     let mut attempts = 0u32;
     let (mut cpu, mut wall) = (0.0, 0.0);
     let outcome = loop {
         attempts += 1;
         let job = job_for(plan, row, dir)?;
-        let o = plan.backend.run_row(&job).unwrap_or_else(|e| RowOutcome {
-            exit: Exit::Infra(e.to_string()),
-            cpu_seconds: 0.0,
-            wall_seconds: 0.0,
-            output_hash: String::new(),
-            selftest_ok: false,
-        });
+        let o = plan
+            .backend
+            .run_row(&job, watch)
+            .unwrap_or_else(|e| RowOutcome {
+                exit: Exit::Infra(e.to_string()),
+                cpu_seconds: 0.0,
+                wall_seconds: 0.0,
+                output_hash: String::new(),
+                selftest_ok: false,
+            });
         cpu += o.cpu_seconds;
         wall += o.wall_seconds;
+        // A stopped row is not data: it gets no record, and the study runs no further row.
+        if let Some(why) = watch.stop_heard() {
+            return Ok(("stopped".into(), Some(Halt::Stop(why))));
+        }
         if !matches!(o.exit, Exit::Infra(_)) || attempts > MAX_RETRIES {
             break o;
         }
         if let Probe::Unavailable(why) = plan.backend.probe() {
-            return Ok(Some(format!("backend unavailable: {why}")));
+            let why = format!("backend unavailable: {why}");
+            return Ok(("paused".into(), Some(Halt::Pause(why))));
         }
     };
     let exit = match &outcome.exit {
         Exit::Ok => "ok".to_string(),
         Exit::Payload(c) => format!("payload:{c}"),
         Exit::Infra(_) => "void:infra".to_string(),
+        Exit::Stopped => "void:stopped".to_string(),
     };
     records::append(
         log,
@@ -475,13 +668,14 @@ fn run_row(
     )?;
     tally.add(cpu, wall);
     plan.meter.add_row(cpu);
-    Ok(match outcome.exit {
-        Exit::Infra(why) => Some(format!(
+    let halt = match outcome.exit {
+        Exit::Infra(why) => Some(Halt::Pause(format!(
             "row {} voided by infrastructure faults: {why}",
             row.index
-        )),
+        ))),
         _ => None,
-    })
+    };
+    Ok((exit, halt))
 }
 
 /// The job for one attempt, with a fresh output dir. An old one is renamed, never deleted.

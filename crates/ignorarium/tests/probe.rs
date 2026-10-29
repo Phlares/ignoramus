@@ -1,4 +1,4 @@
-use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome, level0::Level0};
+use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome, Watch, level0::Level0};
 use ignorarium::files::replace_atomic;
 use ignorarium::machine::{self, Machine};
 
@@ -14,7 +14,7 @@ impl Backend for Fake {
             Probe::Unavailable("no".into())
         }
     }
-    fn run_row(&self, _: &RowJob) -> std::io::Result<RowOutcome> {
+    fn run_row(&self, _: &RowJob, _: &dyn Watch) -> std::io::Result<RowOutcome> {
         Ok(RowOutcome {
             exit: Exit::Ok,
             cpu_seconds: 0.0,

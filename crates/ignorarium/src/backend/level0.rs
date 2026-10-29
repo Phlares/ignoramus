@@ -1,5 +1,5 @@
 //! Level 0: a bare process on the host. No isolation.
-use super::{Backend, Exit, Probe, RowJob, RowOutcome};
+use super::{Backend, Exit, Probe, RowJob, RowOutcome, Watch};
 use crate::canon::{sha256_hex, to_canonical};
 use crate::sys::{self, Ended};
 use serde_json::{Value, json};
@@ -29,9 +29,9 @@ impl Backend for Level0 {
         Probe::Available
     }
 
-    fn run_row(&self, job: &RowJob) -> io::Result<RowOutcome> {
+    fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> io::Result<RowOutcome> {
         let start = Instant::now();
-        let (mut exit, cpu_seconds) = run_child(job, start);
+        let (mut exit, cpu_seconds) = run_child(job, start, watch);
         let wall_seconds = start.elapsed().as_secs_f64();
         let output_hash = match output_hash(&job.output_dir) {
             Ok(h) => h,
@@ -52,7 +52,7 @@ impl Backend for Level0 {
     }
 }
 
-fn run_child(job: &RowJob, start: Instant) -> (Exit, f64) {
+fn run_child(job: &RowJob, start: Instant, watch: &dyn Watch) -> (Exit, f64) {
     let Some((prog, args)) = job.argv.split_first() else {
         return (Exit::Infra("empty argv".into()), 0.0);
     };
@@ -70,17 +70,24 @@ fn run_child(job: &RowJob, start: Instant) -> (Exit, f64) {
         Err(e) => return (Exit::Infra(format!("cannot start {prog}: {e}")), 0.0),
     };
     let pid = child.id();
+    // Set when the box ends the row itself: a stop or the wall timeout.
+    let mut ended_by_box: Option<Exit> = None;
+    let mut fault: Option<String> = None;
     // Detect exit without reaping: the zombie leader keeps the process group id,
     // so the group kill below cannot hit an unrelated group.
-    let mut timed_out = false;
-    let mut fault: Option<String> = None;
     loop {
         match sys::has_exited(pid) {
             Ok(true) => break,
+            Ok(false) if !watch.tick() => {
+                ended_by_box = Some(Exit::Stopped);
+                break;
+            }
             Ok(false) if start.elapsed() < job.wall_timeout => std::thread::sleep(POLL),
             Ok(false) => {
                 // One more look: the row may have finished just now.
-                timed_out = !matches!(sys::has_exited(pid), Ok(true));
+                if !matches!(sys::has_exited(pid), Ok(true)) {
+                    ended_by_box = Some(Exit::Payload(TIMEOUT_CODE));
+                }
                 break;
             }
             Err(e) => {
@@ -102,15 +109,11 @@ fn run_child(job: &RowJob, start: Instant) -> (Exit, f64) {
     if let Some(f) = fault {
         return (Exit::Infra(f), reaped.cpu_seconds);
     }
-    let exit = if timed_out {
-        Exit::Payload(TIMEOUT_CODE)
-    } else {
-        match reaped.ended {
-            Ended::Code(0) => Exit::Ok,
-            Ended::Code(c) => Exit::Payload(c),
-            Ended::Signal(s) => Exit::Payload(128 + s),
-        }
-    };
+    let exit = ended_by_box.unwrap_or(match reaped.ended {
+        Ended::Code(0) => Exit::Ok,
+        Ended::Code(c) => Exit::Payload(c),
+        Ended::Signal(s) => Exit::Payload(128 + s),
+    });
     (exit, reaped.cpu_seconds)
 }
 
