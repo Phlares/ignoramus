@@ -233,6 +233,14 @@ fn load_reports_a_read_error() {
         citation::load(&d.path().join("citation.toml")).unwrap(),
         citation::parse(FULL).unwrap()
     );
+    std::fs::write(d.path().join("citation.toml"), b"title = \"\xFF\"\n").unwrap();
+    let ps = citation::load(&d.path().join("citation.toml")).unwrap_err();
+    assert_eq!(paths(&ps), ["citation.toml"]);
+    assert_eq!(ps[0].message, "is not UTF-8 text");
+    assert_eq!(
+        citation::parse_bytes(FULL.as_bytes()).unwrap(),
+        citation::parse(FULL).unwrap()
+    );
 }
 
 #[test]

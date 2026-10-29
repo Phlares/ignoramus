@@ -377,6 +377,47 @@ fn artifacts_are_hashed_and_listed() {
 }
 
 #[test]
+fn unreadable_artifacts_are_problems() {
+    let t = tempfile::tempdir().unwrap();
+    let dir = t.path().join("dir.tar");
+    fs::create_dir(&dir).unwrap();
+    let mut f = facts();
+    f.artifacts = vec![t.path().join("absent.tar"), dir];
+    f.label = "bogus".into();
+    let (problems, _) = refused(build(&fixture(), &t.path().join("out"), &f, &release()));
+    let got: Vec<(&str, &str, &str)> = problems
+        .iter()
+        .map(|p| (p.code, p.path.as_str(), p.message.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("E-PUB-014", "label", "is not a claim label"),
+            ("E-PUB-010", "absent.tar", "cannot be read"),
+            ("E-PUB-010", "dir.tar", "cannot be read"),
+        ]
+    );
+    assert_eq!(
+        problems[1].instruction,
+        "Give the path of a regular file that can be read."
+    );
+}
+
+#[test]
+fn a_citation_that_is_not_utf8_is_a_problem() {
+    let tmp = tempfile::tempdir().unwrap();
+    let study = study_copy(tmp.path());
+    fs::write(study.join("citation.toml"), b"title = \"\xFF\"\n").unwrap();
+    let (problems, _) = refused(build(&study, &tmp.path().join("out"), &facts(), &release()));
+    assert_eq!(problems.len(), 1);
+    assert_eq!(
+        (problems[0].code, problems[0].path.as_str()),
+        ("E-PUB-004", "citation.toml")
+    );
+    assert_eq!(problems[0].message, "is not UTF-8 text");
+}
+
+#[test]
 fn zip_name_joins_id_and_version() {
     assert_eq!(
         zip_name("fixture-numeric", "1.0.0"),

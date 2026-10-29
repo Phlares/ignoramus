@@ -155,13 +155,18 @@ fn hash_artifacts(
             ));
             continue;
         }
-        let mut file = File::open(path)?;
-        if !file.metadata()?.is_file() {
-            return Err(Error::Io(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("{} is not a regular file", shown(&name)),
-            )));
-        }
+        let opened = File::open(path)
+            .ok()
+            .filter(|f| f.metadata().is_ok_and(|m| m.is_file()));
+        let Some(mut file) = opened else {
+            problems.push(Problem::new(
+                "E-PUB-010",
+                shown(&name),
+                "cannot be read",
+                "Give the path of a regular file that can be read.",
+            ));
+            continue;
+        };
         let (sha256, size) = sha256_copy(&mut file, &mut io::sink())?;
         out.push((Artifact { name, sha256, size }, path.clone()));
     }
@@ -237,9 +242,9 @@ pub fn build(study: &Path, out: &Path, facts: &Facts, release: &Release) -> Resu
 
     let mut citation = None;
     if let Some(f) = found.iter().find(|f| f.path == "citation.toml") {
-        let mut text = String::new();
-        tree::open(study, f)?.read_to_string(&mut text)?;
-        match citation::parse(&text) {
+        let mut bytes = Vec::new();
+        tree::open(study, f)?.read_to_end(&mut bytes)?;
+        match citation::parse_bytes(&bytes) {
             Ok(c) => citation = Some(c),
             Err(p) => problems.extend(p),
         }

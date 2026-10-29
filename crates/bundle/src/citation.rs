@@ -186,14 +186,20 @@ pub fn parse(text: &str) -> Result<Citation, Vec<Problem>> {
     }
 }
 
+/// Like `parse`, for the file's bytes. Bytes that are not UTF-8 are one problem.
+pub fn parse_bytes(bytes: &[u8]) -> Result<Citation, Vec<Problem>> {
+    let text = std::str::from_utf8(bytes).map_err(|_| vec![problem("", "is not UTF-8 text")])?;
+    parse(text)
+}
+
 pub fn load(path: &Path) -> Result<Citation, Vec<Problem>> {
-    let text = std::fs::read_to_string(path).map_err(|e| {
+    let bytes = std::fs::read(path).map_err(|e| {
         vec![problem(
             "",
             format!("cannot read: {}", shown(&e.to_string())),
         )]
     })?;
-    parse(&text)
+    parse_bytes(&bytes)
 }
 
 #[derive(Debug, Clone)]
