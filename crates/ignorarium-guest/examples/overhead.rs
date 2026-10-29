@@ -17,8 +17,10 @@ use ignorarium_guest::image::initramfs;
 use ignorarium_guest::proto::End;
 use serde::Serialize;
 use serde_json::{Value, json};
+use std::fmt::Display;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 /// Student t quantiles at 0.975 for 1 to 30 degrees of freedom.
@@ -86,26 +88,12 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
     };
     let mut it = args;
     while let Some(flag) = it.next() {
-        let value =
-            |it: &mut dyn Iterator<Item = String>| it.next().ok_or(format!("{flag} needs a value"));
         match flag.as_str() {
-            "--runs" => {
-                a.runs = value(&mut it)?
-                    .parse()
-                    .map_err(|e| format!("--runs: {e}"))?
-            }
-            "--cpus" => {
-                a.cpus = value(&mut it)?
-                    .parse()
-                    .map_err(|e| format!("--cpus: {e}"))?
-            }
-            "--mem-mib" => {
-                a.mem_mib = value(&mut it)?
-                    .parse()
-                    .map_err(|e| format!("--mem-mib: {e}"))?
-            }
+            "--runs" => a.runs = value(&flag, &mut it)?,
+            "--cpus" => a.cpus = value(&flag, &mut it)?,
+            "--mem-mib" => a.mem_mib = value(&flag, &mut it)?,
             "--env" => {
-                let kv = value(&mut it)?;
+                let kv: String = value(&flag, &mut it)?;
                 let (k, v) = kv
                     .split_once('=')
                     .ok_or(format!("--env wants K=V, got {kv}"))?;
@@ -133,6 +121,15 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
         );
     }
     Ok(a)
+}
+
+/// The value after `flag`, parsed.
+fn value<T: FromStr>(flag: &str, it: &mut impl Iterator<Item = String>) -> Result<T, String>
+where
+    T::Err: Display,
+{
+    let v = it.next().ok_or(format!("{flag} needs a value"))?;
+    v.parse().map_err(|e| format!("{flag}: {e}"))
 }
 
 fn ms(d: Duration) -> f64 {
@@ -372,5 +369,12 @@ mod tests {
         assert_eq!(a.baseline.unwrap(), ["x", "-y"]);
         assert_eq!(a.payload, ["p", "--q"]);
         assert!(parse(["--runs", "5"].map(String::from).into_iter()).is_err());
+    }
+
+    #[test]
+    fn a_bad_or_missing_value_names_its_flag() {
+        let err = |v: &[&str]| parse(v.iter().map(|s| s.to_string())).err().unwrap();
+        assert!(err(&["--runs", "x"]).starts_with("--runs: "));
+        assert_eq!(err(&["--cpus"]), "--cpus needs a value");
     }
 }
