@@ -1,0 +1,1 @@
+//! ignorarium library crate.

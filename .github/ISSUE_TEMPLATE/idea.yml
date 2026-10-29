@@ -1,0 +1,28 @@
+name: Idea
+description: Something ignorarium can't do today, or should do differently.
+labels: [idea]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can you not do today? Who needs it?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should ignorarium do instead? Optional if you only have the problem.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Other approaches you considered, and why they fall short.
+  - type: checkboxes
+    id: rules
+    attributes:
+      label: Checks
+      options:
+        - label: I said in the text whether I used an AI tool to write this (see AI_POLICY.md).
+          required: true

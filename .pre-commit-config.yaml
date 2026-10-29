@@ -1,0 +1,53 @@
+# The CI lint job runs this file with pre-commit, including the manual stage.
+# Every rev is a commit hash; Dependabot moves it with its `# frozen:` tag.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # frozen: v6.0.0
+    hooks:
+      # copier update writes conflicts as inline markers outside a git merge.
+      - id: check-merge-conflict
+        args: [--assume-in-merge]
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e  # frozen: v8.30.1
+    hooks:
+      - id: gitleaks
+      # The lint job runs the manual stage: CI has nothing staged, so the
+      # entry above scans nothing there. A depth-1 checkout scans HEAD's tree.
+      - id: gitleaks
+        alias: gitleaks-history
+        entry: gitleaks git --redact --verbose
+        stages: [manual]
+  # Generic leaks gitleaks does not look for. Loopback and wildcard
+  # addresses pass. Cargo.lock carries only package names, versions and hashes.
+  - repo: local
+    hooks:
+      - id: no-personal-paths
+        name: no personal paths
+        language: pygrep
+        entry: '(?i)\b[a-z]:\\\\?[a-z]|/(?:home|users)/[a-z]'
+        types: [text]
+        exclude: ^Cargo.lock$
+      - id: no-ip-addresses
+        name: no IP addresses
+        language: pygrep
+        entry: '\b(?!127\.|0\.0\.0\.0\b)(?:\d{1,3}\.){3}\d{1,3}\b'
+        types: [text]
+        exclude: ^Cargo.lock$
+      - id: no-email-addresses
+        name: no email addresses
+        language: pygrep
+        entry: '\b[\w.+-]+@(?!users\.noreply\.github\.com\b)[\w-]+(?:\.[\w-]+)*\.[a-zA-Z]{2,}\b'
+        types: [text]
+        exclude: ^Cargo.lock$
+      - id: cargo-fmt
+        name: cargo fmt
+        language: system
+        entry: cargo fmt --all -- --check
+        pass_filenames: false
+        types: [rust]
+      - id: cargo-clippy
+        name: cargo clippy
+        language: system
+        entry: cargo clippy --all-targets -- -D warnings
+        pass_filenames: false
+        types: [rust]

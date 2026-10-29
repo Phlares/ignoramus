@@ -1,0 +1,42 @@
+# Per ecosystem per month: one PR for minor and patch updates, one for major
+# updates, and one for security updates.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+      actions-major:
+        patterns: ["*"]
+        update-types: ["major"]
+      actions-security:
+        applies-to: security-updates
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      cargo:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+      cargo-major:
+        patterns: ["*"]
+        update-types: ["major"]
+      cargo-security:
+        applies-to: security-updates
+        patterns: ["*"]
+
+  # Hook revs are commit hashes with a `# frozen:` tag comment.
+  - package-ecosystem: pre-commit
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      hooks:
+        patterns: ["*"]
