@@ -95,6 +95,15 @@ fn a_cut_frame_is_unexpected_eof() {
 }
 
 #[test]
+fn a_truncated_json_body_in_a_whole_frame_is_invalid_data() {
+    // The frame is complete; only its JSON ends early, so this is not a cut stream.
+    let mut bytes = 5u32.to_be_bytes().to_vec();
+    bytes.extend_from_slice(br#"{"a":"#);
+    let e = read_frame::<serde_json::Value>(&mut Cursor::new(bytes)).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::InvalidData);
+}
+
+#[test]
 fn bad_json_is_invalid_data() {
     let mut bytes = 4u32.to_be_bytes().to_vec();
     bytes.extend_from_slice(b"nope");

@@ -65,7 +65,11 @@ pub enum VmError {
     Boot(String),
     Guest(String),
     Timeout(String),
-    Mismatch { guest: String, host: String },
+    /// `guest` is the hash the guest reported, capped, quoted and escaped.
+    Mismatch {
+        guest: String,
+        host: String,
+    },
     Io(io::Error),
 }
 
@@ -84,8 +88,7 @@ impl std::fmt::Display for VmError {
             VmError::Mismatch { guest, host } => {
                 write!(
                     f,
-                    "output hash mismatch: guest said {}, host computed {host}",
-                    shown(guest)
+                    "output hash mismatch: guest said {guest}, host computed {host}"
                 )
             }
             VmError::Io(e) => write!(f, "host I/O error: {e}"),
@@ -461,14 +464,14 @@ pub fn run_row(vm: &Vm, job: &HostJob, work: &Path) -> Result<VmOutcome, VmError
         let mut out = BufReader::new(File::open(work.join("out.img"))?);
         pack::unpack(&mut out, &job.output_dir, vm.out_mib << 20).map_err(|e| match e.kind() {
             io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof => {
-                guest_err(format!("bad output pack: {}", cap(&e.to_string())), work)
+                guest_err(format!("bad output pack: {}", shown(&e.to_string())), work)
             }
             _ => VmError::Io(e),
         })?;
         output_hash = tree_hash(&job.output_dir)?;
         if output_hash != report.output_hash {
             return Err(VmError::Mismatch {
-                guest: cap(&report.output_hash),
+                guest: shown(&report.output_hash),
                 host: output_hash,
             });
         }

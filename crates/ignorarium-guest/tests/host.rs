@@ -316,22 +316,23 @@ fn the_listener_is_gone_after_the_guest_connects() {
 }
 
 #[test]
-fn a_hash_mismatch_is_an_error() {
+fn a_hash_mismatch_is_an_error_with_the_guest_hash_escaped() {
     let rig = Rig::sleeper();
-    let zero = "0".repeat(64);
-    let z = zero.clone();
     let h = rig.guest(move |s, c| {
         hello(s);
         read_job(s, c);
         put_out(&c.work, &packed(&c.src));
-        write_frame(s, &report(&z, Some(End::Code(0)))).unwrap();
+        let bells = "\u{7}".repeat(300);
+        write_frame(s, &report(&bells, Some(End::Code(0)))).unwrap();
     });
     let res = rig.run();
     h.join().unwrap();
-    match res {
-        Err(VmError::Mismatch { guest, host }) => {
-            assert_eq!(guest, zero);
-            assert_eq!(host, rig.src_hash());
+    match &res {
+        Err(e @ VmError::Mismatch { guest, host }) => {
+            assert_eq!(*guest, format!("{:?}", "\u{7}".repeat(200) + "..."));
+            assert_eq!(*host, rig.src_hash());
+            let msg = e.to_string();
+            assert!(msg.contains(&format!("guest said {guest},")), "{msg}");
         }
         other => panic!("{:?}", other),
     }
@@ -355,7 +356,8 @@ fn a_hostile_pack_is_a_guest_error() {
     h.join().unwrap();
     match res {
         Err(VmError::Guest(m)) => {
-            assert!(m.contains("bad output pack"), "{m}");
+            // The pack error is quoted and escaped like other guest text.
+            assert!(m.contains("bad output pack: \""), "{m}");
             assert!(m.contains("vmm.log tail"), "{m}");
         }
         other => panic!("{:?}", other),

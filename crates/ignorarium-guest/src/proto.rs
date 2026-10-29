@@ -78,7 +78,8 @@ pub fn read_frame<T: DeserializeOwned>(r: &mut impl Read) -> io::Result<T> {
     }
     let mut body = vec![0u8; n];
     r.read_exact(&mut body)?;
-    Ok(serde_json::from_slice(&body)?)
+    // The whole body is here, so JSON that ends early is bad data, not a cut stream.
+    serde_json::from_slice(&body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 fn too_big(n: usize) -> io::Error {
