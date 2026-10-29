@@ -1,14 +1,19 @@
-//! The payload's view: the tree the agent enters with `chroot` before it starts the payload.
+//! The payload's view: the tree the agent enters with `chroot` before it starts the payload
+//! as `PAYLOAD_UID`:`PAYLOAD_GID`.
 //!
-//! - `usr bin lib lib64 etc` come from the environment: a directory is bound read-only, a
-//!   symbolic link (as in merged-usr images) is copied as the same link, a missing one is
-//!   left out;
-//! - `/in` is the input disk, read-only;
-//! - `/out` is a tmpfs capped at the output disk's size; the agent packs it onto that disk;
-//! - `/proc`; `/dev` is a tmpfs with `null zero full random urandom tty`, mode 0666;
-//! - `/tmp` is a tmpfs, mode 1777.
+//! - `usr bin lib lib64 etc` come from the environment: a directory is bound read-only,
+//!   nosuid, nodev; a symbolic link (as in merged-usr images) is copied as the same link; a
+//!   missing one is left out;
+//! - `/in` is the input disk: read-only, nosuid, nodev;
+//! - `/out` is a tmpfs (nosuid, nodev) owned by the payload's user, mode 0755, capped at the
+//!   output disk's size; the agent packs it onto that disk;
+//! - `/proc` with `hidepid=2`, so the payload sees only its own user's processes (nosuid,
+//!   nodev, noexec);
+//! - `/dev` is a tmpfs (nosuid, noexec) with `null zero full random urandom tty`, mode 0666;
+//! - `/tmp` is a tmpfs (nosuid, nodev), mode 1777.
 //!
 //! The root is a tmpfs, remounted read-only once it holds all of the above.
+use super::{PAYLOAD_GID, PAYLOAD_UID};
 use rustix::fs::{CWD, FileType, Mode, makedev, mknodat};
 use rustix::io::Errno;
 use rustix::mount::{MountFlags, mount, mount_bind, mount_remount};
@@ -34,8 +39,9 @@ const DEVICES: [(&str, u32, u32); 6] = [
 /// Builds the view at `sandbox` from the environment at `env_root` and the input disk
 /// `inputs`.
 pub fn build(env_root: &Path, sandbox: &Path, inputs: &Path, out_bytes: u64) -> io::Result<()> {
+    let (ro, no_suid_dev) = (MountFlags::RDONLY, MountFlags::NOSUID | MountFlags::NODEV);
     fs::create_dir_all(sandbox)?;
-    tmpfs(sandbox, "mode=0755")?;
+    tmpfs(sandbox, MountFlags::empty(), "mode=0755")?;
     for name in FROM_ENV {
         let (from, to) = (env_root.join(name), sandbox.join(name));
         match fs::symlink_metadata(&from) {
@@ -46,7 +52,7 @@ pub fn build(env_root: &Path, sandbox: &Path, inputs: &Path, out_bytes: u64) -> 
                 fs::create_dir(&to)?;
                 mount_bind(&from, &to).map_err(|e| named(e, "bind", &to))?;
                 // A bind ignores MS_RDONLY; only a remount makes it read-only.
-                mount_remount(&to, MountFlags::BIND | MountFlags::RDONLY, "")
+                mount_remount(&to, MountFlags::BIND | ro | no_suid_dev, "")
                     .map_err(|e| named(e, "remount read-only", &to))?;
             }
         }
@@ -56,11 +62,13 @@ pub fn build(env_root: &Path, sandbox: &Path, inputs: &Path, out_bytes: u64) -> 
         fs::create_dir(&p)?;
         Ok(p)
     };
-    mount_fs(inputs, &dir("in")?, "ext4", MountFlags::RDONLY, "")?;
-    tmpfs(&dir("out")?, &format!("size={out_bytes}"))?;
-    mount_fs("proc", &dir("proc")?, "proc", MountFlags::empty(), "")?;
+    mount_fs(inputs, &dir("in")?, "ext4", ro | no_suid_dev, "")?;
+    let out = format!("uid={PAYLOAD_UID},gid={PAYLOAD_GID},mode=0755,size={out_bytes}");
+    tmpfs(&dir("out")?, no_suid_dev, &out)?;
+    let proc_flags = no_suid_dev | MountFlags::NOEXEC;
+    mount_fs("proc", &dir("proc")?, "proc", proc_flags, "hidepid=2")?;
     let dev = dir("dev")?;
-    tmpfs(&dev, "mode=0755")?;
+    tmpfs(&dev, MountFlags::NOSUID | MountFlags::NOEXEC, "mode=0755")?;
     for (name, major, minor) in DEVICES {
         let node = dev.join(name);
         let (kind, mode) = (FileType::CharacterDevice, Mode::from_raw_mode(0o666));
@@ -69,13 +77,12 @@ pub fn build(env_root: &Path, sandbox: &Path, inputs: &Path, out_bytes: u64) -> 
         // mknod applies the umask.
         fs::set_permissions(&node, fs::Permissions::from_mode(0o666))?;
     }
-    tmpfs(&dir("tmp")?, "mode=1777")?;
-    mount_remount(sandbox, MountFlags::RDONLY, "")
-        .map_err(|e| named(e, "remount read-only", sandbox))
+    tmpfs(&dir("tmp")?, no_suid_dev, "mode=1777")?;
+    mount_remount(sandbox, ro, "").map_err(|e| named(e, "remount read-only", sandbox))
 }
 
-fn tmpfs(at: &Path, data: &str) -> io::Result<()> {
-    mount_fs("tmpfs", at, "tmpfs", MountFlags::empty(), data)
+fn tmpfs(at: &Path, flags: MountFlags, data: &str) -> io::Result<()> {
+    mount_fs("tmpfs", at, "tmpfs", flags, data)
 }
 
 /// Mounts a file system of type `fs_type` from `source` on `at`.

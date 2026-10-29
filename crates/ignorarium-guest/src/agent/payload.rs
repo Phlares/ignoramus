@@ -14,8 +14,14 @@ pub struct Ran {
     pub cpu_seconds: f64,
 }
 
-/// Runs `job.argv`. When this returns, no process of the payload's group is left.
+/// Runs `job.argv` as the current user. When this returns, no process of the payload's
+/// group is left.
 pub fn run(job: &Job) -> io::Result<Ran> {
+    run_as(job, None)
+}
+
+/// Runs `job.argv` as `user` (uid, gid) when given. Changing the user needs root.
+pub fn run_as(job: &Job, user: Option<(u32, u32)>) -> io::Result<Ran> {
     let Some((program, args)) = job.argv.split_first() else {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty argv"));
     };
@@ -28,6 +34,10 @@ pub fn run(job: &Job) -> io::Result<Ran> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .process_group(0);
+    if let Some((uid, gid)) = user {
+        // When root changes the uid, std also drops the supplementary groups.
+        cmd.uid(uid).gid(gid);
+    }
     let start = Instant::now();
     let mut child = cmd.spawn()?;
     let pid = Pid::from_raw(child.id() as i32).ok_or_else(|| io::Error::other("bad pid"))?;

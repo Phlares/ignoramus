@@ -17,6 +17,7 @@ use rustix::io::Errno;
 use rustix::mount::MountFlags;
 use rustix::process::{WaitOptions, wait};
 use rustix::system::{RebootCommand, reboot};
+use rustix::thread::set_no_new_privs;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter};
 use std::os::fd::OwnedFd;
@@ -25,6 +26,10 @@ use std::path::Path;
 use std::thread::sleep;
 use std::time::Duration;
 use steps::{disk_by_serial, disk_bytes, mix_seed, now_nanos, set_clock};
+
+/// The payload's user and group: `nobody` and `nogroup` in Debian-based images.
+pub const PAYLOAD_UID: u32 = 65534;
+pub const PAYLOAD_GID: u32 = 65534;
 
 const CONNECT_TRIES: u32 = 10;
 const CONNECT_PAUSE: Duration = Duration::from_millis(50);
@@ -104,7 +109,9 @@ fn row(chan: &mut File, mut out_disk: File) -> io::Result<Report> {
     gate(selftest, clock, || {
         chroot("/sandbox")?;
         std::env::set_current_dir("/")?;
-        let ran = payload::run(&job)?;
+        // Inherited by the payload, so no setuid file gives it root again.
+        set_no_new_privs(true)?;
+        let ran = payload::run_as(&job, Some((PAYLOAD_UID, PAYLOAD_GID)))?;
         kill_all_others()?;
         reap_all()?;
         let out = Path::new("/out");

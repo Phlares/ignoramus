@@ -157,8 +157,8 @@ fn the_payload_view_is_the_documented_layout() {
     let row = Row::sh(concat!(
         "cd /; ls -A > /out/root; ls -A /dev > /out/dev; readlink /bin > /out/bin; ",
         "stat -c %a /tmp /dev/null > /out/modes; ls /proc/self/fd > /out/fds; ",
-        // Mount point and the first per-mount option (ro or rw).
-        "cut -d' ' -f5,6 /proc/self/mountinfo | sed 's/,.*//' | sort > /out/mounts; ",
+        // Mount point and per-mount options.
+        "cut -d' ' -f5,6 /proc/self/mountinfo | sort > /out/mounts; ",
         "head -c 17M /dev/zero > /out/big 2> /dev/null || { rm -f /out/big; exit 9; }",
     ));
     let o = row.run();
@@ -171,12 +171,49 @@ fn the_payload_view_is_the_documented_layout() {
     assert_eq!(row.out("modes"), "1777\n666\n");
     // stdin, stdout, stderr and the listing's own directory: no descriptor of the agent.
     assert_eq!(row.out("fds"), "0\n1\n2\n3\n");
+    let mounts = [
+        "/ ro,relatime",
+        "/dev rw,nosuid,noexec,relatime",
+        "/etc ro,nosuid,nodev,relatime",
+        "/in ro,nosuid,nodev,relatime",
+        "/out rw,nosuid,nodev,relatime",
+        "/proc rw,nosuid,nodev,noexec,relatime",
+        "/tmp rw,nosuid,nodev,relatime",
+        "/usr ro,nosuid,nodev,relatime",
+    ];
     assert_eq!(
         row.out("mounts"),
-        "/ ro\n/dev rw\n/etc ro\n/in ro\n/out rw\n/proc rw\n/tmp rw\n/usr ro\n"
+        mounts.map(|m| m.to_owned() + "\n").concat()
     );
     // A file larger than the 16 MiB output disk does not fit in /out.
     assert_eq!(o.report.end, Some(End::Code(9)));
+}
+
+#[test]
+#[ignore = "boots a VM; see the top of the file"]
+fn the_payload_has_no_privileges() {
+    let row = Row::sh(concat!(
+        "id -u > /out/uid; id -g > /out/gid; id -G > /out/groups; ",
+        "grep NoNewPrivs /proc/self/status > /out/nnp; ",
+        "if [ -e /proc/1 ]; then echo seen; else echo hidden; fi > /out/pid1; ",
+        "ls /proc/1/fd > /dev/null 2>&1; echo $? > /out/fd1; ",
+        "mount -t tmpfs none /tmp 2> /dev/null; echo $? > /out/mount; ",
+        "touch /out/x",
+    ));
+    let o = row.run();
+    assert_eq!(o.report.end, Some(End::Code(0)));
+    for (f, want) in [
+        ("uid", "65534\n"),
+        ("gid", "65534\n"),
+        ("groups", "65534\n"),
+    ] {
+        assert_eq!(row.out(f), want, "{f}");
+    }
+    assert_eq!(row.out("nnp"), "NoNewPrivs:\t1\n");
+    assert_eq!(row.out("pid1"), "hidden\n");
+    assert_ne!(row.out("fd1"), "0\n", "PID 1's descriptors are listable");
+    assert_ne!(row.out("mount"), "0\n", "the payload can mount");
+    assert_eq!(row.out("x"), "");
 }
 
 #[test]
