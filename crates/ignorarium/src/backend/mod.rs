@@ -1,7 +1,10 @@
 //! Backends run one schedule row in isolation and report what happened.
 pub mod level0;
 pub mod level1;
+mod output;
 pub mod seccomp;
+
+pub use output::output_hash;
 
 use crate::sys::{self, Ended};
 use std::io;
@@ -94,7 +97,7 @@ pub fn outcome(job: &RowJob, start: Instant, mut exit: Exit, cpu_seconds: f64) -
     let output_hash = if exit == Exit::Stopped {
         String::new()
     } else {
-        level0::output_hash(&job.output_dir).unwrap_or_else(|e| {
+        output_hash(&job.output_dir).unwrap_or_else(|e| {
             if exit == Exit::Ok {
                 exit = Exit::Void(format!("cannot hash output: {e}"));
             }

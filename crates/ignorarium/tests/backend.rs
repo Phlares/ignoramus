@@ -1,5 +1,5 @@
-use ignorarium::backend::level0::{Level0, output_hash};
-use ignorarium::backend::{Backend, Exit, Probe, RowJob, Watch};
+use ignorarium::backend::level0::Level0;
+use ignorarium::backend::{Backend, Exit, Probe, RowJob, Watch, output_hash};
 use ignorarium::sys;
 use sha2::{Digest, Sha256};
 use std::cell::Cell;

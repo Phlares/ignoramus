@@ -2,9 +2,9 @@
 //! `skip level1: <reason>` and returns where bubblewrap cannot run.
 mod common;
 use common::{PAYLOAD, lab, no_level1, plain, register_study, rows_of, write_exec};
-use ignorarium::backend::level0::{Level0, output_hash};
+use ignorarium::backend::level0::Level0;
 use ignorarium::backend::level1::Level1;
-use ignorarium::backend::{Backend, Exit, Probe, RowJob, Watch, seccomp};
+use ignorarium::backend::{Backend, Exit, Probe, RowJob, Watch, output_hash, seccomp};
 use ignorarium::machine;
 use ignorarium::runner::{self, RunError, RunStatus, prepare, prepare_with};
 use std::cell::Cell;
