@@ -64,6 +64,21 @@ pub struct Found {
     id: Id,
 }
 
+#[cfg(test)]
+impl Found {
+    /// A file no walk saw, for tests that never open it.
+    pub(crate) fn fake(path: &str, len: u64) -> Found {
+        Found {
+            path: path.to_string(),
+            len,
+            id: Id {
+                #[cfg(unix)]
+                dev_ino: (0, 0),
+            },
+        }
+    }
+}
+
 /// Opens a found file once and checks the handle is the file the walk saw.
 /// A swap for a link, another file or a resize gives `InvalidData`.
 pub fn open(dir: &Path, f: &Found) -> io::Result<File> {

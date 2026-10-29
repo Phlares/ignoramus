@@ -7,9 +7,10 @@ use std::fs::File;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-const INSTRUCTION: &str = "Deposit files of 4 GiB or more as artifacts beside the bundle; a bundle zip holds at most 65,535 files under 4 GiB in all.";
+const INSTRUCTION: &str = "Deposit files of 4 GiB or more as artifacts beside the bundle; a bundle zip holds at most 65,534 files under 4 GiB in all.";
 const LIMIT: u64 = 0xFFFF_FFFF;
-const MAX_FILES: usize = 65_535;
+// A count of 0xFFFF in the end record means "read the Zip64 record", which this zip has not.
+const MAX_FILES: usize = 65_534;
 const DATE: u16 = 0x0021;
 const FLAGS: u16 = 0x0800;
 
@@ -181,4 +182,80 @@ pub fn pack_files(dir: &Path, files: &[Found], out: &Path) -> Result<String, Err
     put16(&mut w, &[0])?;
     w.flush()?;
     Ok(hex::encode(w.hasher.finalize()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn refused(files: &[Found]) -> Vec<(String, String)> {
+        match check_limits(files) {
+            Ok(()) => Vec::new(),
+            Err(Error::Refused { problems, .. }) => {
+                problems.into_iter().map(|p| (p.path, p.message)).collect()
+            }
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    fn one(path: &str, message: &str) -> Vec<(String, String)> {
+        vec![(path.to_string(), message.to_string())]
+    }
+
+    #[test]
+    fn a_zip_holds_at_most_65534_files() {
+        let files = |n| vec![Found::fake("a", 0); n];
+        assert_eq!(refused(&files(65_534)), []);
+        assert_eq!(
+            refused(&files(65_535)),
+            one("", "too many files for a bundle zip")
+        );
+    }
+
+    #[test]
+    fn a_name_holds_at_most_65535_bytes() {
+        let named = |n| Found::fake(&"a".repeat(n), 0);
+        assert_eq!(refused(&[named(65_535)]), []);
+        assert_eq!(
+            refused(&[named(65_536)]),
+            one(&"a".repeat(65_536), "name too long for a bundle zip")
+        );
+    }
+
+    #[test]
+    fn the_zip_stays_below_4_gib() {
+        // The end record (22), both headers (76) and the name twice (6) take 104 bytes.
+        assert_eq!(refused(&[Found::fake("abc", LIMIT - 105)]), []);
+        assert_eq!(
+            refused(&[Found::fake("abc", LIMIT - 104)]),
+            one("", "bundle zip would reach 4 GiB")
+        );
+        assert_eq!(
+            refused(&[Found::fake("abc", LIMIT)]),
+            one("abc", "too large for a bundle zip")
+        );
+    }
+
+    struct FailingFlush;
+
+    impl Write for FailingFlush {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::other("disk full"))
+        }
+    }
+
+    #[test]
+    fn tee_passes_a_flush_error_on() {
+        let mut t = Tee {
+            inner: FailingFlush,
+            hasher: Sha256::new(),
+            written: 0,
+        };
+        t.write_all(b"abc").unwrap();
+        assert_eq!(t.written, 3);
+        assert_eq!(t.flush().unwrap_err().to_string(), "disk full");
+    }
 }

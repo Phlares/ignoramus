@@ -91,7 +91,7 @@ fn pack_refuses_four_gib_without_reading() {
     assert_eq!(problems[0].message, "too large for a bundle zip");
     assert_eq!(
         problems[0].instruction,
-        "Deposit files of 4 GiB or more as artifacts beside the bundle; a bundle zip holds at most 65,535 files under 4 GiB in all."
+        "Deposit files of 4 GiB or more as artifacts beside the bundle; a bundle zip holds at most 65,534 files under 4 GiB in all."
     );
     assert!(!out.exists());
 }
