@@ -2,6 +2,7 @@
 pub mod level0;
 pub mod level1;
 mod output;
+pub mod rootfs;
 pub mod seccomp;
 pub mod selftest;
 

@@ -1,9 +1,11 @@
 //! The run engine: writes the schedule, runs each row on a backend, records each row.
 //! A row is done when its signed record exists. A crash before the record reruns the row.
+use crate::backend::rootfs;
 use crate::backend::{self, Backend, Exit, Probe, RowJob, RowOutcome, Watch};
 use crate::budget::{Alerts, Cost, CostMeter, Decision, HostMeter, decide, dimension_name};
 use crate::canon::sha256_hex;
 use crate::control::{self, ControlError, ControlFile, RunLock, Signal, State};
+use crate::environ::{Builder, Built, Recipe};
 use crate::estimate::{apply_defaults, estimate, units};
 use crate::events::{self, Event};
 use crate::home::Home;
@@ -14,6 +16,7 @@ use crate::records::{self, RecordDraft, RecordError, VerifyError};
 use crate::rules::input_bytes;
 use crate::schedule::{self, Row, Schedule, ScheduleError};
 use crate::spec::model::{Role, Spec};
+use crate::store::Store;
 use crate::{keys, spec, sys};
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
@@ -35,6 +38,10 @@ const INTERRUPTED: &str = "interrupted by a signal";
 const REAPED: &str = "SIGCHLD is ignored; the box cannot see a row end";
 /// The payload, relative to the study folder.
 const PAYLOAD: &str = "payload/run";
+/// The recipe folder, relative to the study folder.
+const RECIPE: &str = "env";
+/// The environment name of a run on the host root.
+const HOST: &str = "host";
 
 pub struct RunPlan {
     pub home: Home,
@@ -47,6 +54,10 @@ pub struct RunPlan {
     pub inputs: InputHashes,
     pub payload: PathBuf,
     pub payload_sha256: String,
+    /// The environment root rows run in; `None` is the host root.
+    pub rootfs: Option<PathBuf>,
+    /// `"host"`, or the store digest of the environment image.
+    pub environment: String,
     /// Cumulative cost, read before each row.
     pub meter: Box<dyn CostMeter>,
     /// Interval between `heartbeat` events while a row runs.
@@ -73,6 +84,10 @@ pub enum RunError {
     /// The payload file differs from `pins.payload`.
     PayloadChanged,
     NoPayload(String),
+    /// `pins.environment` names an image that is not in the store.
+    EnvironmentMissing(String),
+    /// The environment cannot be built or extracted.
+    Environment(String),
     NoKey,
     /// Another run of this study holds the run lock.
     Busy,
@@ -101,6 +116,10 @@ impl fmt::Display for RunError {
             RunError::SpecChanged => write!(f, "the stored spec differs from the registered hash"),
             RunError::PayloadChanged => write!(f, "the payload differs from pins.payload"),
             RunError::NoPayload(e) => write!(f, "cannot read the payload: {e}"),
+            RunError::EnvironmentMissing(d) => {
+                write!(f, "the pinned environment {d} is not in the store")
+            }
+            RunError::Environment(e) => write!(f, "environment: {e}"),
             RunError::NoKey => write!(f, "the box key does not exist"),
             RunError::Busy => write!(f, "another run of this study is in progress"),
             RunError::Unsafe(p) => write!(f, "{p} is a symbolic link"),
@@ -200,6 +219,35 @@ pub fn prepare_with(
         .ok_or(RunError::NoBackend { need, have })?;
 
     let (payload, payload_sha256) = read_payload(&dir)?;
+    let (rootfs, environment) = if backend.level() >= 1 {
+        let store = Store::open(&home.root).map_err(io)?;
+        let pin = spec.pins.environment.trim();
+        let found = environment(&store, &dir, pin, Builder::detect().as_ref())?;
+        if let Some(b) = &found.built {
+            let attrs = json!({
+                "recipe_hash": b.recipe_hash,
+                "image_digest": b.image_digest,
+                "store_digest": b.store_digest,
+                "pinned": b.pinned,
+            });
+            let level = if b.pinned { "info" } else { "warn" };
+            events::emit(
+                &dir.join("events.jsonl"),
+                Event {
+                    ts: crate::time::now_rfc3339(),
+                    trace_id: events::trace_id(&spec_hash),
+                    span_id: None,
+                    name: "env.build".into(),
+                    level: level.into(),
+                    attrs,
+                },
+            )
+            .map_err(io)?;
+        }
+        (found.rootfs, found.name)
+    } else {
+        (None, HOST.into())
+    };
     let pin = spec.pins.payload.trim();
     let pin = pin.strip_prefix("sha256:").unwrap_or(pin);
     if !pin.is_empty() && pin != payload_sha256 {
@@ -233,8 +281,69 @@ pub fn prepare_with(
         inputs,
         payload,
         payload_sha256,
+        rootfs,
+        environment,
         meter: Box::new(HostMeter::new(machine.rate_usd_per_hour)),
         heartbeat: HEARTBEAT,
+    })
+}
+
+/// Where rows run: the root folder (`None` is the host's) and its name.
+pub struct Environment {
+    pub rootfs: Option<PathBuf>,
+    /// `"host"`, or the store digest of the image.
+    pub name: String,
+    /// What the build made, when this call built the image.
+    pub built: Option<Built>,
+}
+
+/// The environment for a level 1 row. A non-empty `pin` is the store digest of a saved
+/// image, used as is. Otherwise the recipe in `<study>/env/` is built with `builder` and its
+/// image used; with no recipe the host root is used.
+pub fn environment(
+    store: &Store,
+    study: &Path,
+    pin: &str,
+    builder: Option<&Builder>,
+) -> Result<Environment, RunError> {
+    let pin = pin.strip_prefix("sha256:").unwrap_or(pin);
+    let (digest, built) = if !pin.is_empty() {
+        if !store.has(pin) {
+            return Err(RunError::EnvironmentMissing(pin.into()));
+        }
+        (pin.to_string(), None)
+    } else {
+        no_links(study, &[RECIPE])?;
+        let recipe = study.join(RECIPE);
+        if !recipe.is_dir() {
+            return Ok(Environment {
+                rootfs: None,
+                name: HOST.into(),
+                built: None,
+            });
+        }
+        let builder = builder.ok_or_else(|| {
+            RunError::Environment(
+                concat!(
+                    "the study has an env/ recipe but neither docker nor podman is on PATH; ",
+                    "build the image elsewhere and pin its store digest in pins.environment"
+                )
+                .into(),
+            )
+        })?;
+        Recipe::load(&recipe).map_err(|e| {
+            RunError::Environment(format!("cannot read env/Dockerfile and env/uv.lock: {e}"))
+        })?;
+        let built = crate::environ::build(builder, &recipe, store)
+            .map_err(|e| RunError::Environment(e.to_string()))?;
+        (built.store_digest.clone(), Some(built))
+    };
+    let root =
+        rootfs::from_store(store, &digest).map_err(|e| RunError::Environment(e.to_string()))?;
+    Ok(Environment {
+        rootfs: Some(root),
+        name: digest,
+        built,
     })
 }
 
@@ -475,7 +584,11 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
     State::Running
         .write(&plan.home, &plan.study_id)
         .map_err(io)?;
-    let launch = json!({ "isolation": plan.backend.level(), "launcher": plan.backend.launcher() });
+    let launch = json!({
+        "isolation": plan.backend.level(),
+        "launcher": plan.backend.launcher(),
+        "environment": plan.environment,
+    });
     let resumed = all.iter().any(|r| r.kind == "row" || r.kind == "spend");
     let name = if resumed { "run.resume" } else { "run.start" };
     log_event(plan, &dir, None, name, "info", launch)?;
@@ -923,6 +1036,7 @@ fn attempt_row(
         "seed": row.seed_hex,
         "isolation": plan.backend.level(),
         "launcher": plan.backend.launcher(),
+        "environment": plan.environment,
         "payload_sha256": plan.payload_sha256,
         "data_hashes": plan.inputs.iter().filter_map(|(_, h)| h.as_ref()).collect::<Vec<_>>(),
         "cpu_seconds": outcome.cpu_seconds,
@@ -1030,7 +1144,7 @@ fn job_for(plan: &RunPlan, row: &Row, dir: &Path) -> Result<RowJob, RunError> {
         output_dir: out,
         seed,
         wall_timeout: wall_timeout(plan.spec.design.row_seconds),
-        rootfs: None,
+        rootfs: plan.rootfs.clone(),
     })
 }
 
