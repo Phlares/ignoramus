@@ -129,6 +129,11 @@ fn ids<S: Into<String>>(items: impl IntoIterator<Item = S>) -> Value {
     Value::Array(items.into_iter().map(id).collect())
 }
 
+/// A reference to the bundle's text of licence `spdx`.
+fn licence_text(spdx: &str) -> Value {
+    id(uri(&format!("LICENSES/{spdx}.txt")))
+}
+
 fn item_id(i: &Item) -> String {
     match i {
         Item::Path(p) => uri(p),
@@ -181,18 +186,15 @@ fn file(c: &Crate, e: &Entry) -> Value {
         }
         None => {
             let spdx = c.licensing.of(&e.path);
-            m.insert("license".into(), id(uri(&format!("LICENSES/{spdx}.txt"))));
+            m.insert("license".into(), licence_text(spdx));
         }
     }
     Value::Object(m)
 }
 
-fn action(c: &Crate, r: &Run) -> Value {
+fn action(r: &Run, run_id: &str) -> Value {
     let mut m = Map::new();
-    m.insert(
-        "@id".into(),
-        json!(format!("urn:uuid:{}", run_uuid(c.study_id, &r.id))),
-    );
+    m.insert("@id".into(), json!(run_id));
     m.insert("@type".into(), json!("CreateAction"));
     m.insert("name".into(), json!(r.name));
     m.insert("instrument".into(), id("#tool"));
@@ -317,7 +319,7 @@ pub fn metadata(c: &Crate) -> Value {
     root.insert("description".into(), json!(c.citation.summary));
     root.insert("datePublished".into(), json!(c.release.date));
     root.insert("version".into(), json!(c.release.version));
-    root.insert("license".into(), id(uri(&format!("LICENSES/{data}.txt"))));
+    root.insert("license".into(), licence_text(data));
     root.insert(
         "author".into(),
         ids(c
@@ -399,7 +401,7 @@ pub fn metadata(c: &Crate) -> Value {
             "sha256": i.sha256,
         })
     }));
-    graph.extend(c.runs.iter().map(|r| action(c, r)));
+    graph.extend(c.runs.iter().zip(&run_ids).map(|(r, rid)| action(r, rid)));
     graph.extend(hashes.entities());
     graph.extend(
         envs.iter().map(
