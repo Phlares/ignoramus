@@ -64,3 +64,21 @@ pub fn kill_group(pid: u32) -> io::Result<()> {
         Err(e) => Err(e.into()),
     }
 }
+
+/// True once child `pid` has exited. The child stays unreaped, so its pid and
+/// process group cannot be reused until `wait4` collects it.
+pub fn has_exited(pid: u32) -> io::Result<bool> {
+    use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+    let pid = i32::try_from(pid)
+        .ok()
+        .and_then(Pid::from_raw)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "bad process id"))?;
+    loop {
+        let opts = WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT;
+        match waitid(WaitId::Pid(pid), opts) {
+            Ok(st) => return Ok(st.is_some()),
+            Err(e) if e == rustix::io::Errno::INTR => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+}

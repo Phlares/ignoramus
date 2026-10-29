@@ -70,44 +70,35 @@ fn run_child(job: &RowJob, start: Instant) -> (Exit, f64) {
         Err(e) => return (Exit::Infra(format!("cannot start {prog}: {e}")), 0.0),
     };
     let pid = child.id();
+    // Detect exit without reaping: the zombie leader keeps the process group id,
+    // so the group kill below cannot hit an unrelated group.
     let mut timed_out = false;
     let mut fault: Option<String> = None;
-    let reaped = loop {
-        match sys::wait4(pid, timed_out) {
-            Ok(Some(r)) => break Some(r),
-            Ok(None) => {}
+    loop {
+        match sys::has_exited(pid) {
+            Ok(true) => break,
+            Ok(false) if start.elapsed() < job.wall_timeout => std::thread::sleep(POLL),
+            Ok(false) => {
+                // One more look: the row may have finished just now.
+                timed_out = !matches!(sys::has_exited(pid), Ok(true));
+                break;
+            }
             Err(e) => {
                 fault = Some(format!("wait failed: {e}"));
-                break None;
+                break;
             }
         }
-        if start.elapsed() < job.wall_timeout {
-            std::thread::sleep(POLL);
-        } else if !timed_out {
-            // One more look: the row may have finished just now.
-            match sys::wait4(pid, false) {
-                Ok(Some(r)) => break Some(r),
-                Ok(None) => {}
-                Err(e) => {
-                    fault = Some(format!("wait failed: {e}"));
-                    break None;
-                }
-            }
-            timed_out = true;
-            if let Err(e) = sys::kill_group(pid) {
-                fault = Some(format!("kill failed: {e}"));
-                // Kill the leader alone, then reap it in the next pass.
-                let _ = child.kill();
-            }
-        }
-    };
-    let Some(reaped) = reaped else {
-        return (Exit::Infra(fault.unwrap_or_default()), 0.0);
-    };
-    // The leader is gone. Nothing else of the row may outlive it or touch the output.
+    }
     if let Err(e) = sys::kill_group(pid) {
         fault.get_or_insert(format!("kill failed: {e}"));
+        // Kill the leader alone so the reap below cannot hang.
+        let _ = child.kill();
     }
+    let reaped = match sys::wait4(pid, true) {
+        Ok(Some(r)) => r,
+        Ok(None) => return (Exit::Infra("wait returned early".into()), 0.0),
+        Err(e) => return (Exit::Infra(format!("wait failed: {e}")), 0.0),
+    };
     if let Some(f) = fault {
         return (Exit::Infra(f), reaped.cpu_seconds);
     }

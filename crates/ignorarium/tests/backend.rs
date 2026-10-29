@@ -117,12 +117,13 @@ fn level0_counts_cpu_time() {
     let o = Level0
         .run_row(&job(
             d.path(),
-            "i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done",
+            "i=0; while [ $i -lt 1500000 ]; do i=$((i+1)); done",
             Duration::from_secs(60),
         ))
         .unwrap();
     assert_eq!(o.exit, Exit::Ok);
-    assert!(o.cpu_seconds > 0.0);
+    assert!(o.cpu_seconds > 0.05, "{}", o.cpu_seconds);
+    assert!(o.cpu_seconds <= o.wall_seconds + 0.05);
 }
 
 #[test]
