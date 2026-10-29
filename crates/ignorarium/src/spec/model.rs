@@ -2,13 +2,6 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-impl Spec {
-    /// Call only after `check` passes.
-    pub fn from_value(v: &Value) -> Result<Spec, serde_json::Error> {
-        Spec::deserialize(v)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Spec {
@@ -22,6 +15,13 @@ pub struct Spec {
     pub mutations: Mutations,
     pub access: Access,
     pub report: Report,
+}
+
+impl Spec {
+    /// Call only after `check` passes.
+    pub fn from_value(v: &Value) -> Result<Spec, serde_json::Error> {
+        Spec::deserialize(v)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

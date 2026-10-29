@@ -35,6 +35,19 @@ fn templates_differ_where_the_brief_says() {
 fn unknown_key_is_rejected_at_every_depth() {
     for path in [
         "/study",
+        "/question",
+        "/question/hypotheses/0",
+        "/outcomes/0",
+        "/scope",
+        "/scope/end_of_run",
+        "/design",
+        "/design/conditions/0",
+        "/design/selection",
+        "/design/confirmation",
+        "/pins",
+        "/mutations",
+        "/access",
+        "/report",
         "/design/variance",
         "/inputs/0",
         "/inputs/0/licence",
@@ -72,8 +85,35 @@ fn unknown_key_in_inline_table_entries_is_rejected() {
 
 #[test]
 fn wrong_enum_value_is_rejected() {
+    for path in [
+        "/study/template",
+        "/study/mode",
+        "/study/label",
+        "/outcomes/0/direction",
+        "/scope/stop_rule",
+        "/scope/end_of_run/route",
+        "/design/test",
+        "/inputs/0/role",
+        "/inputs/0/licence/type",
+        "/report/publish",
+    ] {
+        let mut v = template_value();
+        *v.pointer_mut(path).unwrap() = json!("bogus");
+        assert!(Spec::from_value(&v).is_err(), "accepted bogus at {path}");
+    }
+}
+
+#[test]
+fn whole_numbers_widen_to_floats_and_fractions_do_not_fit_integers() {
     let mut v = template_value();
-    v["study"]["mode"] = json!("maybe");
+    v["scope"]["budget"]["cpu_hours"] = json!(1);
+    v["design"]["row_seconds"] = json!(0);
+    v["design"]["variance"]["value"] = json!(0);
+    let s = Spec::from_value(&v).unwrap();
+    assert_eq!(s.scope.budget.cpu_hours, 1.0);
+    assert_eq!(s.design.row_seconds, 0.0);
+    assert_eq!(s.design.variance.value, 0.0);
+    v["scope"]["min_isolation"] = json!(1.5);
     assert!(Spec::from_value(&v).is_err());
 }
 
