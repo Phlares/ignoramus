@@ -39,6 +39,6 @@ pub fn family(spec: &Spec) -> String {
         "outcomes": outcomes,
         "hypotheses": hypotheses,
     });
-    let bytes = to_canonical(&v).unwrap_or_default();
+    let bytes = to_canonical(&v).expect("a JSON value of strings and arrays always serializes");
     sha256_hex(&bytes)[..16].to_string()
 }

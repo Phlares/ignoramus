@@ -1,9 +1,9 @@
 //! The plan log on disk: `leaves.jsonl`, `heads.jsonl` and a `lock` file.
 use super::merkle;
 use crate::canon::to_canonical;
-use crate::files::{Tail, locked_append, open_log};
+use crate::files::{locked_append, open_log};
 use crate::home::{HomeError, make_private_dir};
-use crate::prior::PriorUse;
+use crate::prior::{PriorError, PriorUse};
 use crate::time::now_rfc3339;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -11,8 +11,9 @@ use serde_json::json;
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// No `deny_unknown_fields`: later versions may add leaf fields, and
+/// older binaries must still read the log.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Leaf {
     /// `plan` or `legacy`.
     pub kind: String,
@@ -43,6 +44,10 @@ pub enum LogError {
         index: usize,
         reason: &'static str,
     },
+    /// Leaf line `index` (0-based) is not a leaf.
+    Leaf {
+        index: usize,
+    },
     Dir(HomeError),
     Io(io::Error),
 }
@@ -52,6 +57,7 @@ impl std::fmt::Display for LogError {
         match self {
             LogError::CorruptTail => write!(f, "a plan log file does not end with a whole line"),
             LogError::Head { index, reason } => write!(f, "head {index}: {reason}"),
+            LogError::Leaf { index } => write!(f, "leaf {index} is not a leaf"),
             LogError::Dir(e) => e.fmt(f),
             LogError::Io(e) => write!(f, "I/O failed: {e}"),
         }
@@ -72,6 +78,17 @@ impl From<HomeError> for LogError {
     }
 }
 
+/// What `verify` found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Verified {
+    /// Leaves covered by the last signed head.
+    pub signed: u64,
+    /// Lines in `leaves.jsonl`. More than `signed` means unsigned leaves
+    /// at the end. A crash between the leaf write and the head write is
+    /// the only legitimate cause; the next append signs them.
+    pub leaves: u64,
+}
+
 pub struct PlanLog {
     dir: PathBuf,
 }
@@ -83,6 +100,14 @@ fn head_bytes(size: u64, root: &str, ts: &str) -> io::Result<Vec<u8>> {
 
 /// The whole lines of a log file, without their line feeds.
 fn read_lines(path: &Path) -> Result<Vec<Vec<u8>>, LogError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => {
+            return Err(io::Error::other("log path is a symbolic link").into());
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    }
     let buf = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -95,14 +120,6 @@ fn read_lines(path: &Path) -> Result<Vec<Vec<u8>>, LogError> {
                 .ok_or(LogError::CorruptTail)
         })
         .collect()
-}
-
-/// Refuse to append after a partial line.
-fn whole_tail(tail: Tail) -> Result<(), LogError> {
-    match tail {
-        Tail::Partial(_) => Err(LogError::CorruptTail),
-        _ => Ok(()),
-    }
 }
 
 fn line(mut bytes: Vec<u8>) -> Vec<u8> {
@@ -127,7 +144,19 @@ impl PlanLog {
         self.dir.join("heads.jsonl")
     }
 
+    /// Hold the shared lock while reading. Writers wait for it.
+    fn read_lock(&self) -> io::Result<std::fs::File> {
+        let f = open_log(&self.dir.join("lock"))?;
+        f.lock_shared()?;
+        Ok(f)
+    }
+
     pub fn heads(&self) -> Result<Vec<TreeHead>, LogError> {
+        let _lock = self.read_lock()?;
+        self.read_heads()
+    }
+
+    fn read_heads(&self) -> Result<Vec<TreeHead>, LogError> {
         read_lines(&self.heads_path())?
             .iter()
             .enumerate()
@@ -147,7 +176,9 @@ impl PlanLog {
         lock.lock()?;
         let data = to_canonical(&serde_json::to_value(&leaf).map_err(io::Error::other)?)
             .map_err(io::Error::other)?;
+        // Both tails are checked before anything is written.
         let mut leaves = read_lines(&self.leaves_path())?;
+        read_lines(&self.heads_path())?;
         let index = leaves.len() as u64;
         leaves.push(data.clone());
         let root = hex::encode(merkle::root(&leaves));
@@ -162,12 +193,8 @@ impl PlanLog {
             ts,
             sig,
         };
-        locked_append(&self.leaves_path(), |tail| {
-            whole_tail(tail)?;
-            Ok::<_, LogError>(line(data))
-        })?;
-        locked_append(&self.heads_path(), |tail| {
-            whole_tail(tail)?;
+        locked_append(&self.leaves_path(), |_| Ok::<_, LogError>(line(data)))?;
+        locked_append(&self.heads_path(), |_| {
             let v = serde_json::to_value(&head).map_err(io::Error::other)?;
             Ok::<_, LogError>(line(to_canonical(&v).map_err(io::Error::other)?))
         })?;
@@ -175,11 +202,12 @@ impl PlanLog {
     }
 
     /// Recompute each head's root from the leaves and check its signature.
-    /// Head sizes must grow. Returns the number of leaves.
-    pub fn verify(&self, key: &VerifyingKey) -> Result<u64, LogError> {
+    /// Head sizes must grow.
+    pub fn verify(&self, key: &VerifyingKey) -> Result<Verified, LogError> {
+        let _lock = self.read_lock()?;
         let leaves = read_lines(&self.leaves_path())?;
         let mut last = 0u64;
-        for (index, head) in self.heads()?.iter().enumerate() {
+        for (index, head) in self.read_heads()?.iter().enumerate() {
             let bad = |reason| LogError::Head { index, reason };
             if head.size <= last {
                 return Err(bad("size does not grow"));
@@ -199,19 +227,31 @@ impl PlanLog {
                 .ok_or_else(|| bad("signature does not match"))?;
             last = head.size;
         }
-        Ok(leaves.len() as u64)
+        Ok(Verified {
+            signed: last,
+            leaves: leaves.len() as u64,
+        })
+    }
+
+    fn find_used(&self, exact: &str, normalized: &str) -> Result<Option<String>, LogError> {
+        let _lock = self.read_lock()?;
+        for (i, l) in read_lines(&self.leaves_path())?.iter().enumerate() {
+            let leaf: Leaf = serde_json::from_slice(l).map_err(|_| LogError::Leaf { index: i })?;
+            let hit = leaf
+                .data_hashes
+                .iter()
+                .any(|(e, n)| e == exact || (!normalized.is_empty() && n == normalized));
+            if hit {
+                return Ok(Some(format!("leaf {i} ({})", leaf.kind)));
+            }
+        }
+        Ok(None)
     }
 }
 
 impl PriorUse for PlanLog {
-    fn used(&self, exact_sha256: &str, normalized_sha256: &str) -> Option<String> {
-        let lines = read_lines(&self.leaves_path()).ok()?;
-        lines.iter().enumerate().find_map(|(i, l)| {
-            let leaf: Leaf = serde_json::from_slice(l).ok()?;
-            let hit = leaf.data_hashes.iter().any(|(e, n)| {
-                e == exact_sha256 || (!normalized_sha256.is_empty() && n == normalized_sha256)
-            });
-            hit.then(|| format!("leaf {i} ({})", leaf.kind))
-        })
+    fn used(&self, exact: &str, normalized: &str) -> Result<Option<String>, PriorError> {
+        self.find_used(exact, normalized)
+            .map_err(|e| PriorError(e.to_string()))
     }
 }

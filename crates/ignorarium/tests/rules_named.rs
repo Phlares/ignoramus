@@ -1,6 +1,6 @@
 use ignorarium::canon::sha256_hex;
 use ignorarium::diag::{Diagnostic, Severity};
-use ignorarium::prior::{NoPriorUse, PriorUse, normalized_sha256};
+use ignorarium::prior::{NoPriorUse, PriorError, PriorUse, normalized_sha256};
 use ignorarium::rules::{self, CheckCtx, Rule};
 use serde_json::{Value, json};
 use std::cell::RefCell;
@@ -667,18 +667,44 @@ struct Fake {
 }
 
 impl PriorUse for Fake {
-    fn used(&self, exact: &str, normalized: &str) -> Option<String> {
+    fn used(&self, exact: &str, normalized: &str) -> Result<Option<String>, PriorError> {
         self.seen
             .borrow_mut()
             .push((exact.into(), normalized.into()));
         if self.exact.as_deref() == Some(exact) {
-            return Some("entry-exact".into());
+            return Ok(Some("entry-exact".into()));
         }
         if self.normalized.as_deref() == Some(normalized) {
-            return Some("entry-norm".into());
+            return Ok(Some("entry-norm".into()));
         }
-        None
+        Ok(None)
     }
+}
+
+struct Broken;
+
+impl PriorUse for Broken {
+    fn used(&self, _: &str, _: &str) -> Result<Option<String>, PriorError> {
+        Err(PriorError("leaf 3 is not a leaf".into()))
+    }
+}
+
+#[test]
+fn an_unreadable_plan_log_fails_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "d.txt", b"abc");
+    let d = fresh(
+        &with_input("d.txt", "", "confirmation"),
+        dir.path(),
+        Box::new(Broken),
+    );
+    assert_eq!(codes_paths(&d), [("E-CNF-005", "inputs[0].path")]);
+    assert!(
+        d[0].problem
+            .ends_with("The plan log cannot be read: leaf 3 is not a leaf."),
+        "{}",
+        d[0].problem
+    );
 }
 
 fn fake(exact: Option<&str>, normalized: Option<&str>) -> (Box<dyn PriorUse>, Seen) {

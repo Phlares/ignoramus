@@ -3,7 +3,7 @@ use ignorarium::planlog::merkle::{
     consistency_proof, inclusion_proof, leaf_hash, node_hash, root, verify_consistency,
     verify_inclusion,
 };
-use ignorarium::planlog::store::{Leaf, LogError, PlanLog};
+use ignorarium::planlog::store::{Leaf, LogError, PlanLog, Verified};
 use ignorarium::planlog::{commitment, family};
 use ignorarium::prior::PriorUse;
 use ignorarium::spec::model::Spec;
@@ -42,6 +42,13 @@ cons 1 8 ['96a296d224f285c67bee93c30f8a309157f0daa35dc5b87e410b78630a09cfc7', '5
 cons 6 8 ['0ebc5d3437fbe2db158b9f126a1d118e308181031d0a949f8dededebc558ef6a', 'ca854ea128ed050b41b35ffc1b87b8eb2bde461e9e3b5596ece6b9d5975a0ae0', 'd37ee418976dd95753c1c73862b9398fa2a2cf9b4ff0fdfe8b30cd95209614b7']
 cons 2 5 ['5f083f0a1a33ca076a95279832580db3e0ef4584bdff1f54c8a360f50de3031e', 'bc1a0643b12e4d2d7c77918f44e0f4f79a838b6cf9ec5b5c283e1f4d88599e6b']
 ";
+
+fn ok(n: u64) -> Verified {
+    Verified {
+        signed: n,
+        leaves: n,
+    }
+}
 
 fn data() -> Vec<Vec<u8>> {
     LEAVES.iter().map(|h| hex::decode(h).unwrap()).collect()
@@ -278,7 +285,7 @@ fn append_returns_index_and_head_and_verify_counts_leaves() {
     let t = tempfile::tempdir().unwrap();
     let dir = t.path().join("pl");
     let log = PlanLog::open(&dir).unwrap();
-    assert_eq!(log.verify(&vk(1)).unwrap(), 0);
+    assert_eq!(log.verify(&vk(1)).unwrap(), ok(0));
     for i in 0..3u32 {
         let (idx, head) = log.append(leaf("plan", i), &key(1)).unwrap();
         assert_eq!(idx, u64::from(i));
@@ -289,7 +296,7 @@ fn append_returns_index_and_head_and_verify_counts_leaves() {
             .collect();
         assert_eq!(head.root, hex::encode(root(&raw)));
     }
-    assert_eq!(log.verify(&vk(1)).unwrap(), 3);
+    assert_eq!(log.verify(&vk(1)).unwrap(), ok(3));
     assert_eq!(log.heads().unwrap().len(), 3);
     assert!(dir.join("lock").exists());
     assert!(matches!(
@@ -377,7 +384,7 @@ fn tampered_head_signature_and_order_fail() {
     ));
     // restored
     write(lines[0], lines[1], lines[2]);
-    assert_eq!(log.verify(&vk(1)).unwrap(), 3);
+    assert_eq!(log.verify(&vk(1)).unwrap(), ok(3));
 }
 
 #[test]
@@ -423,36 +430,110 @@ fn a_leaf_without_a_head_is_tolerated_and_next_append_covers_it() {
     let mut lines = leaf_lines(t.path());
     lines.push(b"{\"orphan\":1}\n".to_vec());
     fs::write(t.path().join("leaves.jsonl"), lines.concat()).unwrap();
-    assert_eq!(log.verify(&vk(1)).unwrap(), 3);
+    assert_eq!(
+        log.verify(&vk(1)).unwrap(),
+        Verified {
+            signed: 2,
+            leaves: 3
+        }
+    );
     let (idx, head) = log.append(leaf("plan", 9), &key(1)).unwrap();
     assert_eq!((idx, head.size), (3, 4));
-    assert_eq!(log.verify(&vk(1)).unwrap(), 4);
+    assert_eq!(log.verify(&vk(1)).unwrap(), ok(4));
 }
 
 #[test]
-fn a_partial_last_line_is_refused() {
+fn a_partial_last_line_in_either_file_refuses_and_writes_nothing() {
+    for victim in ["leaves.jsonl", "heads.jsonl"] {
+        let t = tempfile::tempdir().unwrap();
+        let log = log_with(t.path(), 2);
+        let path = t.path().join(victim);
+        let mut b = fs::read(&path).unwrap();
+        b.extend_from_slice(b"{\"par");
+        fs::write(&path, b).unwrap();
+        let before = (
+            fs::read(t.path().join("leaves.jsonl")).unwrap(),
+            fs::read(t.path().join("heads.jsonl")).unwrap(),
+        );
+        assert!(
+            matches!(
+                log.append(leaf("plan", 5), &key(1)),
+                Err(LogError::CorruptTail)
+            ),
+            "{victim}"
+        );
+        let after = (
+            fs::read(t.path().join("leaves.jsonl")).unwrap(),
+            fs::read(t.path().join("heads.jsonl")).unwrap(),
+        );
+        assert_eq!(before, after, "{victim}");
+        assert!(matches!(log.verify(&vk(1)), Err(LogError::CorruptTail)));
+    }
+}
+
+#[test]
+fn prior_use_fails_closed_on_a_corrupt_or_unreadable_log() {
     let t = tempfile::tempdir().unwrap();
-    let log = log_with(t.path(), 1);
+    let log = log_with(t.path(), 2);
     let path = t.path().join("leaves.jsonl");
     let good = fs::read(&path).unwrap();
+    // partial tail
     let mut b = good.clone();
     b.extend_from_slice(b"{\"par");
     fs::write(&path, b).unwrap();
-    assert!(matches!(
-        log.append(leaf("plan", 5), &key(1)),
-        Err(LogError::CorruptTail)
-    ));
-    assert!(matches!(log.verify(&vk(1)), Err(LogError::CorruptTail)));
-    assert!(log.used("a", "b").is_none());
-    fs::write(&path, good).unwrap();
-    let hp = t.path().join("heads.jsonl");
-    let mut h = fs::read(&hp).unwrap();
-    h.extend_from_slice(b"{\"si");
-    fs::write(&hp, h).unwrap();
-    assert!(matches!(
-        log.append(leaf("plan", 5), &key(1)),
-        Err(LogError::CorruptTail)
-    ));
+    assert!(log.used("exact0", "x").is_err());
+    // an unparsable line is an error, not skipped, even when a later leaf would match
+    let lines: Vec<&[u8]> = good.split_inclusive(|&b| b == b'\n').collect();
+    fs::write(
+        &path,
+        [
+            &b"nonsense
+"[..],
+            lines[1],
+        ]
+        .concat(),
+    )
+    .unwrap();
+    let e = log.used("exact1", "x").unwrap_err();
+    assert!(e.to_string().contains("leaf 0"), "{e}");
+    // a directory where the file should be is unreadable
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    assert!(log.used("exact0", "x").is_err());
+}
+
+#[test]
+fn unknown_leaf_fields_are_tolerated() {
+    let t = tempfile::tempdir().unwrap();
+    let log = PlanLog::open(t.path()).unwrap();
+    let line = "{\"commitment\":null,\"data_hashes\":[[\"e1\",\"n1\"]],\"family\":null,\"future\":7,\"kind\":\"plan\",\"label\":\"l\",\"mode\":null,\"ts\":\"t\"}
+";
+    fs::write(t.path().join("leaves.jsonl"), line).unwrap();
+    assert_eq!(log.used("e1", "").unwrap(), Some("leaf 0 (plan)".into()));
+}
+
+#[cfg(unix)]
+#[test]
+fn readers_and_writers_refuse_symlinked_log_files() {
+    let t = tempfile::tempdir().unwrap();
+    let log = log_with(t.path(), 1);
+    for name in ["leaves.jsonl", "heads.jsonl"] {
+        let p = t.path().join(name);
+        let real = t.path().join(format!("{name}.real"));
+        fs::rename(&p, &real).unwrap();
+        std::os::unix::fs::symlink(&real, &p).unwrap();
+        assert!(log.verify(&vk(1)).is_err(), "{name}");
+        assert_eq!(log.heads().is_err(), name == "heads.jsonl", "{name}");
+        assert_eq!(
+            log.used("a", "b").is_err(),
+            name == "leaves.jsonl",
+            "{name}"
+        );
+        assert!(log.append(leaf("plan", 7), &key(1)).is_err(), "{name}");
+        fs::remove_file(&p).unwrap();
+        fs::rename(&real, &p).unwrap();
+    }
+    assert_eq!(log.verify(&vk(1)).unwrap(), ok(1));
 }
 
 #[test]
@@ -469,7 +550,7 @@ fn concurrent_appends_all_land() {
             });
         }
     });
-    assert_eq!(log.verify(&vk(1)).unwrap(), 20);
+    assert_eq!(log.verify(&vk(1)).unwrap(), ok(20));
     let sizes: Vec<u64> = log.heads().unwrap().iter().map(|h| h.size).collect();
     assert_eq!(sizes, (1..=20).collect::<Vec<u64>>());
 }
@@ -487,7 +568,7 @@ fn prior_use_sees_legacy_and_plan_leaves_by_exact_or_normalized() {
     ];
     log.append(legacy, &key(1)).unwrap();
     log.append(plan, &key(1)).unwrap();
-    let u = |e: &str, n: &str| log.used(e, n);
+    let u = |e: &str, n: &str| log.used(e, n).unwrap();
     assert_eq!(u("ex-a", "zzz"), Some("leaf 0 (legacy)".into()));
     assert_eq!(u("zzz", "no-a"), Some("leaf 0 (legacy)".into()));
     assert_eq!(u("ex-c", "zzz"), Some("leaf 1 (plan)".into()));
@@ -503,14 +584,20 @@ fn prior_use_ignores_an_empty_normalized_hash() {
     let mut binary = leaf("legacy", 0);
     binary.data_hashes = vec![("ex-bin".into(), String::new())];
     log.append(binary, &key(1)).unwrap();
-    assert_eq!(log.used("other", ""), None);
-    assert_eq!(log.used("ex-bin", ""), Some("leaf 0 (legacy)".into()));
+    assert_eq!(log.used("other", "").unwrap(), None);
+    assert_eq!(
+        log.used("ex-bin", "").unwrap(),
+        Some("leaf 0 (legacy)".into())
+    );
 }
 
 #[test]
 fn prior_use_on_an_empty_log_is_none() {
     let t = tempfile::tempdir().unwrap();
-    assert_eq!(PlanLog::open(t.path()).unwrap().used("a", "b"), None);
+    assert_eq!(
+        PlanLog::open(t.path()).unwrap().used("a", "b").unwrap(),
+        None
+    );
 }
 
 // ---- family and commitment ----

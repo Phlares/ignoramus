@@ -231,12 +231,15 @@ fn data_fresh(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
         let normalized = std::str::from_utf8(&bytes)
             .map(normalized_sha256)
             .unwrap_or_default();
-        if let Some(id) = ctx.prior.used(&sha256_hex(&bytes), &normalized) {
-            out.push(Hit {
-                path,
-                detail: Some(format!("The earlier entry is {id}.")),
-            });
-        }
+        let detail = match ctx.prior.used(&sha256_hex(&bytes), &normalized) {
+            Ok(None) => continue,
+            Ok(Some(id)) => format!("The earlier entry is {id}."),
+            Err(e) => format!("The plan log cannot be read: {e}."),
+        };
+        out.push(Hit {
+            path,
+            detail: Some(detail),
+        });
     }
     out
 }

@@ -91,7 +91,7 @@ fn subproof(leaves: &[Vec<u8>], m: usize, whole: bool) -> Vec<Hash> {
     p
 }
 
-/// RFC 9162 section 2.1.3.2. False on any malformed input.
+/// RFC 9162 inclusion check (the section 2.1.3 algorithm). False on any malformed input.
 pub fn verify_inclusion(leaf: &[u8], index: u64, size: u64, proof: &[Hash], root: &Hash) -> bool {
     if index >= size {
         return false;
@@ -117,7 +117,7 @@ pub fn verify_inclusion(leaf: &[u8], index: u64, size: u64, proof: &[Hash], root
     s == 0 && r == *root
 }
 
-/// RFC 9162 section 2.1.4.2. False on any malformed input.
+/// RFC 9162 consistency check (the section 2.1.4 algorithm). False on any malformed input.
 pub fn verify_consistency(
     old_size: u64,
     new_size: u64,
