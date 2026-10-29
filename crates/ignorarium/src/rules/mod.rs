@@ -32,7 +32,7 @@ pub enum Check {
         min: Bound,
         max: Bound,
     },
-    Format(Fmt),
+    Format(Regex),
     Finite,
     /// Every key must match a `Type` target.
     KnownKey,
@@ -75,12 +75,6 @@ pub enum Bound {
     Exclusive(f64),
 }
 
-#[derive(Debug, Clone)]
-pub struct Fmt {
-    pub pattern: String,
-    pub regex: Regex,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct When {
@@ -91,6 +85,7 @@ pub struct When {
 #[derive(Debug)]
 pub enum RulesError {
     Io(std::io::Error),
+    /// The parser's message, with line and column; the rule code when known.
     Toml(String),
     Invalid {
         code: String,
@@ -144,8 +139,10 @@ struct Target {
 /// Flattens the file to one `Rule` per target; targets of one code share its text.
 pub fn load(path: &Path) -> Result<Vec<Rule>, RulesError> {
     let text = std::fs::read_to_string(path).map_err(RulesError::Io)?;
-    let file: File =
-        toml::from_str(&text).map_err(|e| RulesError::Toml(e.message().to_string()))?;
+    let file: File = toml::from_str(&text).map_err(|e| match failing_code(&text) {
+        Some(code) => RulesError::Toml(format!("rule {code}: {e}")),
+        None => RulesError::Toml(e.to_string()),
+    })?;
     let mut out = Vec::new();
     for row in file.rule {
         for t in row.target {
@@ -170,61 +167,95 @@ pub fn load(path: &Path) -> Result<Vec<Rule>, RulesError> {
     Ok(out)
 }
 
+/// The code of the first rule that does not fit the schema, if the file parses as TOML.
+fn failing_code(text: &str) -> Option<String> {
+    let table: toml::Table = toml::from_str(text).ok()?;
+    let bad = table
+        .get("rule")?
+        .as_array()?
+        .iter()
+        .find(|r| Row::deserialize((*r).clone()).is_err())?;
+    bad.get("code")?.as_str().map(str::to_string)
+}
+
 fn parse_check(t: &Target) -> Result<Check, String> {
     let need = |what: &str| format!("check \"{}\" needs {what}", t.check);
-    Ok(match t.check.as_str() {
-        "required" => Check::Required,
-        "non-empty" => Check::NonEmpty,
-        "finite" => Check::Finite,
-        "known-key" => Check::KnownKey,
-        "type" => Check::Type(t.kind.ok_or_else(|| need("kind"))?),
-        "enum" => Check::Enum(t.values.clone().ok_or_else(|| need("values"))?),
+    let (check, param) = match t.check.as_str() {
+        "required" => (Check::Required, None),
+        "non-empty" => (Check::NonEmpty, None),
+        "finite" => (Check::Finite, None),
+        "known-key" => (Check::KnownKey, None),
+        "type" => (
+            Check::Type(t.kind.ok_or_else(|| need("kind"))?),
+            Some("kind"),
+        ),
+        "enum" => {
+            let values = t.values.clone().ok_or_else(|| need("values"))?;
+            (Check::Enum(values), Some("values"))
+        }
         "range" => {
             let iv = t.interval.as_deref().ok_or_else(|| need("interval"))?;
             let (min, max) = parse_interval(iv)?;
-            Check::Range { min, max }
+            (Check::Range { min, max }, Some("interval"))
         }
         "format" => {
-            let pattern = t.pattern.clone().ok_or_else(|| need("pattern"))?;
-            let regex = Regex::new(&pattern).map_err(|e| format!("bad pattern: {e}"))?;
-            Check::Format(Fmt { pattern, regex })
+            let pattern = t.pattern.as_deref().ok_or_else(|| need("pattern"))?;
+            let regex = Regex::new(pattern).map_err(|e| format!("bad pattern: {e}"))?;
+            (Check::Format(regex), Some("pattern"))
         }
         other => match other.strip_prefix("named:") {
-            Some(n) if !n.is_empty() => Check::Named(n.to_string()),
+            Some(n) if !n.is_empty() => (Check::Named(n.to_string()), None),
             _ => return Err(format!("unknown check \"{other}\"")),
         },
-    })
+    };
+    let given = [
+        ("kind", t.kind.is_some()),
+        ("values", t.values.is_some()),
+        ("interval", t.interval.is_some()),
+        ("pattern", t.pattern.is_some()),
+    ];
+    for (name, set) in given {
+        if set && Some(name) != param {
+            return Err(format!("check \"{}\" does not take \"{name}\"", t.check));
+        }
+    }
+    Ok(check)
 }
 
 /// Interval notation: `(0, 0.5]`, `[1, inf)`. `inf` and `-inf` mean unbounded.
+/// Both brackets are required. An empty interval is an error: `a > b`, or
+/// `a == b` unless both ends are inclusive.
 fn parse_interval(s: &str) -> Result<(Bound, Bound), String> {
     let bad = || format!("bad interval \"{s}\"");
     let s = s.trim();
-    let inner = s.get(1..s.len().saturating_sub(1)).ok_or_else(bad)?;
-    let (lo, hi) = inner.split_once(',').ok_or_else(bad)?;
+    let (open, close) = (s.chars().next(), s.chars().last());
+    if s.len() < 2 || !matches!(open, Some('[' | '(')) || !matches!(close, Some(']' | ')')) {
+        return Err(bad());
+    }
+    let (lo, hi) = s[1..s.len() - 1].split_once(',').ok_or_else(bad)?;
     let num = |x: &str| -> Result<Option<f64>, String> {
         match x.trim() {
             "inf" | "-inf" => Ok(None),
-            n => n.parse::<f64>().map(Some).map_err(|_| bad()),
+            n => match n.parse::<f64>() {
+                Ok(v) if v.is_finite() => Ok(Some(v)),
+                _ => Err(bad()),
+            },
         }
     };
     let (lo, hi) = (num(lo)?, num(hi)?);
-    let min = match (s.chars().next(), lo) {
-        (_, None) => Bound::Unbounded,
-        (Some('['), Some(x)) => Bound::Inclusive(x),
-        (Some('('), Some(x)) => Bound::Exclusive(x),
-        _ => return Err(bad()),
-    };
-    let max = match (s.chars().last(), hi) {
-        (_, None) => Bound::Unbounded,
-        (Some(']'), Some(x)) => Bound::Inclusive(x),
-        (Some(')'), Some(x)) => Bound::Exclusive(x),
-        _ => return Err(bad()),
-    };
-    if let (Some(a), Some(b)) = (lo, hi)
-        && a > b
-    {
-        return Err(bad());
+    let min = lo.map_or(Bound::Unbounded, |x| match open {
+        Some('[') => Bound::Inclusive(x),
+        _ => Bound::Exclusive(x),
+    });
+    let max = hi.map_or(Bound::Unbounded, |x| match close {
+        Some(']') => Bound::Inclusive(x),
+        _ => Bound::Exclusive(x),
+    });
+    if let (Some(a), Some(b)) = (lo, hi) {
+        let both_inclusive = open == Some('[') && close == Some(']');
+        if a > b || (a == b && !both_inclusive) {
+            return Err(bad());
+        }
     }
     Ok((min, max))
 }

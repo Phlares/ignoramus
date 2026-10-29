@@ -38,35 +38,125 @@ fn one_rule(extra: &str, target: &str) -> Vec<Rule> {
     ))
 }
 
+/// (code, JSON pointer, new value or `None` to remove, expected path).
+type Fault = (&'static str, &'static str, Option<Value>, &'static str);
+
+fn faults() -> Vec<Fault> {
+    let nan = || Some(json!("!nonfinite:nan"));
+    vec![
+        ("E-REQ-001", "/study/mode", None, "study.mode"),
+        (
+            "E-TYP-001",
+            "/design/repeats",
+            Some(json!("one")),
+            "design.repeats",
+        ),
+        (
+            "E-ENM-001",
+            "/study/mode",
+            Some(json!("sometimes")),
+            "study.mode",
+        ),
+        (
+            "E-RNG-001",
+            "/design/alpha",
+            Some(json!(0.0)),
+            "design.alpha",
+        ),
+        ("E-FMT-001", "/study/id", Some(json!("étude-1")), "study.id"),
+        (
+            "E-FMT-001",
+            "/design/conditions/1/id",
+            Some(json!("Arm A")),
+            "design.conditions[1].id",
+        ),
+        (
+            "E-FMT-002",
+            "/design/variance/source",
+            Some(json!("record:xyz")),
+            "design.variance.source",
+        ),
+        (
+            "E-FMT-003",
+            "/inputs/0/sha256",
+            Some(json!("ABC")),
+            "inputs[0].sha256",
+        ),
+        ("E-NUM-001", "/design/sesoi", nan(), "design.sesoi"),
+        (
+            "E-KEY-001",
+            "/study/surprise",
+            Some(json!(1)),
+            "study.surprise",
+        ),
+        (
+            "E-OUT-001",
+            "/outcomes/0/unit",
+            Some(json!("")),
+            "outcomes[0].unit",
+        ),
+        ("E-OUT-001", "/outcomes/0/unit", None, "outcomes[0].unit"),
+        (
+            "E-OUT-002",
+            "/outcomes/0/direction",
+            Some(json!("")),
+            "outcomes[0].direction",
+        ),
+        (
+            "E-OUT-002",
+            "/outcomes/0/direction",
+            Some(json!("sideways")),
+            "outcomes[0].direction",
+        ),
+        (
+            "E-OUT-002",
+            "/outcomes/0/direction",
+            None,
+            "outcomes[0].direction",
+        ),
+        (
+            "W-LIC-001",
+            "/inputs/0/licence/spdx",
+            Some(json!("")),
+            "inputs[0].licence.spdx",
+        ),
+    ]
+}
+
+fn apply(spec: &mut Value, ptr: &str, v: Option<Value>) {
+    let (parent, key) = ptr.rsplit_once('/').unwrap();
+    match (spec.pointer_mut(parent).unwrap(), v) {
+        (Value::Object(m), Some(v)) => {
+            m.insert(key.into(), v);
+        }
+        (Value::Object(m), None) => {
+            m.remove(key).unwrap();
+        }
+        (Value::Array(a), Some(v)) => a[key.parse::<usize>().unwrap()] = v,
+        _ => panic!("cannot apply {ptr}"),
+    }
+}
+
+fn faulted(rows: &[Fault]) -> Value {
+    let mut s = template();
+    for (_, ptr, v, _) in rows {
+        apply(&mut s, ptr, v.clone());
+    }
+    s
+}
+
 #[test]
-fn each_bad_fixture_yields_its_code_and_path() {
+fn each_fault_row_yields_its_code_and_path_alone() {
     let rules = v0();
-    for (code, path) in [
-        ("E-REQ-001", "study.mode"),
-        ("E-TYP-001", "design.repeats"),
-        ("E-ENM-001", "study.mode"),
-        ("E-RNG-001", "design.alpha"),
-        ("E-FMT-001", "study.id"),
-        ("E-NUM-001", "design.sesoi"),
-        ("E-OUT-001", "outcomes[0].unit"),
-        ("E-OUT-002", "outcomes[0].direction"),
-        ("W-LIC-001", "inputs[0].licence.spdx"),
-        ("E-KEY-001", "study.surprise"),
-        ("E-FMT-002", "design.variance.source"),
-        ("E-FMT-003", "inputs[0].sha256"),
-    ] {
-        let raw = spec_at(&format!("tests/fixtures/specs/bad/{code}.toml"));
-        let d = rules::check_generic(&raw, &rules);
-        assert!(
-            d.iter().any(|x| x.code == code && x.path == path),
-            "{code}: {d:?}"
-        );
-        // One fault, one diagnostic: no cascade.
-        assert_eq!(
-            d.iter().filter(|x| x.code != "W-LIC-001").count(),
-            usize::from(code != "W-LIC-001"),
-            "{code}: {d:?}"
-        );
+    for row in faults() {
+        let (code, _, _, path) = &row;
+        let d = rules::check_generic(&faulted(std::slice::from_ref(&row)), &rules);
+        // The template itself carries W-LIC-001; drop it unless the row is about it.
+        let d: Vec<_> = d
+            .into_iter()
+            .filter(|x| x.code != "W-LIC-001" || *code == "W-LIC-001")
+            .collect();
+        assert_eq!(codes_paths(&d), [(*code, *path)], "{row:?}");
     }
 }
 
@@ -80,12 +170,16 @@ fn templates_have_no_generic_errors_and_no_unknown_keys() {
     }
 }
 
+fn three_faults() -> Value {
+    let rows = faults();
+    let pick = |i: usize| rows[i].clone();
+    // study.mode removed, alpha 0, study.id non-ASCII.
+    faulted(&[pick(0), pick(3), pick(4)])
+}
+
 #[test]
 fn all_faults_reported_at_once_in_rule_file_order() {
-    let d = rules::check_generic(
-        &spec_at("tests/fixtures/specs/bad/three-faults.toml"),
-        &v0(),
-    );
+    let d = rules::check_generic(&three_faults(), &v0());
     assert_eq!(
         codes_paths(&d),
         [
@@ -99,7 +193,9 @@ fn all_faults_reported_at_once_in_rule_file_order() {
 
 #[test]
 fn diagnostic_carries_rule_text_sources_and_doc() {
-    let d = rules::check_generic(&spec_at("tests/fixtures/specs/bad/E-OUT-001.toml"), &v0());
+    let mut s = template();
+    apply(&mut s, "/outcomes/0/unit", Some(json!("")));
+    let d = rules::check_generic(&s, &v0());
     let x = d.iter().find(|x| x.code == "E-OUT-001").unwrap();
     assert_eq!(x.severity, Severity::Error);
     assert_eq!(x.problem, "An outcome has no unit.");
@@ -113,10 +209,7 @@ fn diagnostic_carries_rule_text_sources_and_doc() {
 
 #[test]
 fn json_render_round_trips() {
-    let d = rules::check_generic(
-        &spec_at("tests/fixtures/specs/bad/three-faults.toml"),
-        &v0(),
-    );
+    let d = rules::check_generic(&three_faults(), &v0());
     let back: Value = serde_json::from_str(&render_json(&d)).unwrap();
     let got: Vec<(&str, &str)> = back
         .as_array()
@@ -128,6 +221,151 @@ fn json_render_round_trips() {
     assert_eq!(back[0]["severity"], "error");
     assert_eq!(back[3]["severity"], "warning");
     assert_eq!(back[0]["doc"], "docs/rules/E-REQ-001.md");
+}
+
+#[test]
+fn missing_licence_id_gives_the_schema_error_then_the_warning() {
+    let mut s = template();
+    apply(&mut s, "/inputs/0/licence/spdx", None);
+    let d = rules::check_generic(&s, &v0());
+    assert_eq!(
+        codes_paths(&d),
+        [
+            ("E-REQ-001", "inputs[0].licence.spdx"),
+            ("W-LIC-001", "inputs[0].licence.spdx"),
+        ]
+    );
+}
+
+/// The templates with extra elements, so every `[*]` path has nodes at index 0 and 1.
+fn fat_templates() -> Vec<Value> {
+    ["numeric-ablation", "planted-spawn"]
+        .iter()
+        .map(|t| {
+            let mut s = spec_at(&format!("../../templates/{t}.toml"));
+            let second = s["outcomes"][0].clone();
+            s["outcomes"].as_array_mut().unwrap().push(second);
+            s["scope"]["end_of_run"]["follow_on"] = json!([
+                { "when": "H1.pass", "spec": "follow/a.toml" },
+                { "when": "H1.pass", "spec": "follow/b.toml" },
+            ]);
+            s
+        })
+        .collect()
+}
+
+/// Concrete paths a pattern selects in `v`, counting only nodes that exist.
+fn expand(v: &Value, pattern: &str) -> Vec<String> {
+    let mut cur = vec![(String::new(), v)];
+    for seg in pattern.split('.') {
+        let (name, each) = match seg.strip_suffix("[*]") {
+            Some(n) => (n, true),
+            None => (seg, false),
+        };
+        let mut next = vec![];
+        for (p, node) in cur {
+            let Some(child) = node.get(name) else {
+                continue;
+            };
+            let base = if p.is_empty() {
+                name.to_string()
+            } else {
+                format!("{p}.{name}")
+            };
+            match (each, child) {
+                (false, c) => next.push((base, c)),
+                (true, Value::Array(a)) => {
+                    next.extend(
+                        a.iter()
+                            .enumerate()
+                            .map(|(i, e)| (format!("{base}[{i}]"), e)),
+                    );
+                }
+                _ => {}
+            }
+        }
+        cur = next;
+    }
+    cur.into_iter().map(|(p, _)| p).collect()
+}
+
+fn remove_at(v: &mut Value, path: &str) {
+    let (parent, last) = path.rsplit_once('.').unwrap_or(("", path));
+    let mut cur = v;
+    for seg in parent.split('.').filter(|s| !s.is_empty()) {
+        let (name, idx) = match seg.split_once('[') {
+            Some((n, i)) => (n, Some(i.trim_end_matches(']').parse::<usize>().unwrap())),
+            None => (seg, None),
+        };
+        cur = &mut cur[name];
+        if let Some(i) = idx {
+            cur = &mut cur[i];
+        }
+    }
+    let name = last.split('[').next().unwrap();
+    cur.as_object_mut().unwrap().remove(name).unwrap();
+}
+
+#[test]
+fn removing_any_required_node_reports_it_at_its_path() {
+    let rules = v0();
+    let fat = fat_templates();
+    for r in rules.iter().filter(|r| matches!(r.check, Check::Required)) {
+        let mut hit = 0;
+        for t in &fat {
+            for path in expand(t, &r.path) {
+                // Array elements themselves are not keys; only keyed nodes are removed.
+                if path.ends_with(']') {
+                    continue;
+                }
+                let mut s = t.clone();
+                remove_at(&mut s, &path);
+                let d = rules::check_generic(&s, &rules);
+                assert!(
+                    d.iter().any(|x| x.code == r.code && x.path == path),
+                    "{} {path}: {d:?}",
+                    r.code
+                );
+                hit += 1;
+            }
+        }
+        assert!(hit > 0, "required target selects nothing: {}", r.path);
+    }
+}
+
+#[test]
+fn every_non_wildcard_rule_path_selects_a_node_in_some_template() {
+    let fat = fat_templates();
+    for r in v0() {
+        if r.path == "**" || matches!(r.check, Check::Named(_)) {
+            continue;
+        }
+        let n: usize = fat.iter().map(|t| expand(t, &r.path).len()).sum();
+        assert!(
+            n > 0,
+            "{} {} ({}) selects nothing",
+            r.code,
+            r.path,
+            r.check.name()
+        );
+    }
+}
+
+#[test]
+fn indexed_paths_cover_second_elements() {
+    let rules = v0();
+    let mut s = fat_templates().remove(0);
+    s["outcomes"][1]["unit"] = json!("");
+    s["design"]["conditions"][1]["id"] = json!("B");
+    let d = rules::check_generic(&s, &rules);
+    assert_eq!(
+        codes_paths(&d),
+        [
+            ("E-FMT-001", "design.conditions[1].id"),
+            ("E-OUT-001", "outcomes[1].unit"),
+            ("W-LIC-001", "inputs[0].licence.spdx"),
+        ]
+    );
 }
 
 #[test]
@@ -217,7 +455,6 @@ fn fields_with_defaults_are_never_required() {
         "scope.min_isolation",
         "access.blind",
         "outcomes[*].unit",
-        "outcomes[*].direction",
     ] {
         assert!(!required.contains(p), "{p}");
     }
@@ -474,40 +711,114 @@ fn interval_notation_parses_every_bound_kind() {
     assert!(ok("(-inf, 5]", -1e300) && !ok("(-inf, 5]", 5.1));
 }
 
-#[test]
-fn bad_rule_files_are_errors_not_panics() {
+fn rule_text(target: &str) -> String {
+    format!("[[rule]]\n{HEAD}[[rule.target]]\n{target}\n")
+}
+
+fn load_text(text: &str) -> Result<Vec<Rule>, rules::RulesError> {
     let dir = tempfile::tempdir().unwrap();
     let f = dir.path().join("r.toml");
-    let try_load = |text: &str| {
-        std::fs::write(&f, text).unwrap();
-        rules::load(&f)
-    };
-    assert!(rules::load(&dir.path().join("missing.toml")).is_err());
-    assert!(try_load("not toml [").is_err());
-    let rule = |t: &str| format!("[[rule]]\n{HEAD}[[rule.target]]\n{t}\n");
-    assert!(try_load(&rule("path = \"a\"\ncheck = \"type\"\nkind = \"blob\"")).is_err());
-    for t in [
+    std::fs::write(&f, text).unwrap();
+    rules::load(&f)
+}
+
+#[test]
+fn load_errors_name_the_code_the_value_and_the_line() {
+    let ok_target = "path = \"a\"\ncheck = \"required\"";
+    let cases = [
+        // (text, strings the message must contain)
+        (
+            rule_text(ok_target).replace("severity = \"error\"", "severity = \"fatal\""),
+            vec!["X-TST-001", "fatal", "line 3"],
+        ),
+        (
+            rule_text("path = \"a\"\ncheck = \"type\"\nkind = \"blob\""),
+            vec!["X-TST-001", "blob", "line 11"],
+        ),
+        (
+            rule_text(ok_target).replace("why = \"w\"", "why = \"w\"\nextra = 1"),
+            vec!["X-TST-001", "extra", "line 7"],
+        ),
+        (
+            rule_text(ok_target).replace("why = \"w\"\n", ""),
+            vec!["X-TST-001", "why"],
+        ),
+    ];
+    for (text, needles) in cases {
+        let e = load_text(&text).unwrap_err().to_string();
+        for n in needles {
+            assert!(e.contains(n), "missing {n:?} in: {e}");
+        }
+    }
+    let e = load_text("not toml [").unwrap_err().to_string();
+    assert!(e.contains("line 1"), "{e}");
+    assert!(rules::load("no/such/rules.toml".as_ref()).is_err());
+}
+
+#[test]
+fn bad_targets_are_rejected_with_the_code_and_path() {
+    let bad = [
         "path = \"a\"\ncheck = \"nope\"",
         "path = \"a\"\ncheck = \"type\"",
         "path = \"a\"\ncheck = \"enum\"",
         "path = \"a\"\ncheck = \"range\"",
         "path = \"a\"\ncheck = \"range\"\ninterval = \"1, 2\"",
-        "path = \"a\"\ncheck = \"range\"\ninterval = \"[2, 1]\"",
         "path = \"a\"\ncheck = \"format\"",
         "path = \"a\"\ncheck = \"format\"\npattern = \"(\"",
         "path = \"a\"\ncheck = \"named:\"",
-    ] {
-        let e = try_load(&rule(t)).unwrap_err().to_string();
-        assert!(e.contains("X-TST-001"), "{t}: {e}");
+        // Params that do not belong to the check.
+        "path = \"a\"\ncheck = \"range\"\ninterval = \"[0, 1]\"\nvalues = [\"x\"]",
+        "path = \"a\"\ncheck = \"required\"\nkind = \"int\"",
+        "path = \"a\"\ncheck = \"enum\"\nvalues = [\"x\"]\npattern = \"x\"",
+        "path = \"a\"\ncheck = \"finite\"\ninterval = \"[0, 1]\"",
+        "path = \"a\"\ncheck = \"named:x\"\nkind = \"int\"",
+    ];
+    for t in bad {
+        let e = load_text(&rule_text(t)).unwrap_err().to_string();
+        assert!(e.contains("rule X-TST-001 at a: "), "{t}: {e}");
     }
 }
 
 #[test]
-fn one_code_reports_a_path_once_even_when_two_targets_fail() {
-    // An empty direction fails both `non-empty` and `enum` under E-OUT-002.
-    let mut s = template();
-    s["outcomes"][0]["direction"] = json!("");
-    let d = rules::check_generic(&s, &v0());
-    let hits: Vec<_> = d.iter().filter(|x| x.code == "E-OUT-002").collect();
-    assert_eq!(hits.len(), 1);
+fn interval_syntax_is_strict() {
+    let interval = |iv: &str| {
+        load_text(&rule_text(&format!(
+            "path = \"a\"\ncheck = \"range\"\ninterval = \"{iv}\""
+        )))
+        .is_ok()
+    };
+    for ok in [
+        "[0, 1]",
+        "(0, 1)",
+        "[1, 1]",
+        "[1, inf)",
+        "(-inf, 5]",
+        " [0,1] ",
+    ] {
+        assert!(interval(ok), "{ok}");
+    }
+    for bad in [
+        "0, 1]",
+        "[0, 1",
+        "0, 1",
+        "{0, 1}",
+        "[0 1]",
+        "[0, 1, 2]",
+        "[a, 1]",
+        "[nan, 1]",
+        "[0, nan]",
+        "[2, 1]",
+        "(1, 1]",
+        "[1, 1)",
+        "(1, 1)",
+        "[infinity, 5]",
+        "[0, infinity]",
+        "[0, 1}",
+        "{0, 1]",
+        "",
+        "[",
+        "[]",
+    ] {
+        assert!(!interval(bad), "{bad}");
+    }
 }

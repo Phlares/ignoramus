@@ -6,29 +6,26 @@ use std::collections::HashSet;
 
 const NONFINITE: &str = "!nonfinite:";
 
-/// Every violation of the generic rules, in rule-file order, then document order.
-/// One diagnostic per code and path.
+/// Every violation of the generic rules, in rule-file order, then in key-sorted order within a rule
+/// (array elements by index).
 pub fn check_generic(spec: &Value, rules: &[Rule]) -> Vec<Diagnostic> {
     let known: HashSet<&str> = rules
         .iter()
         .filter(|r| matches!(r.check, Check::Type(_)))
         .map(|r| r.path.as_str())
         .collect();
-    let mut seen = HashSet::new();
     let mut out = Vec::new();
     for rule in rules.iter().filter(|r| applies(r, spec)) {
         for path in violations(rule, spec, &known) {
-            if seen.insert((rule.code.clone(), path.clone())) {
-                out.push(Diagnostic {
-                    code: rule.code.clone(),
-                    severity: rule.severity,
-                    path,
-                    problem: rule.problem.clone(),
-                    instruction: rule.instruction.clone(),
-                    doc: format!("docs/rules/{}.md", rule.code),
-                    sources: rule.sources.clone(),
-                });
-            }
+            out.push(Diagnostic {
+                code: rule.code.clone(),
+                severity: rule.severity,
+                path,
+                problem: rule.problem.clone(),
+                instruction: rule.instruction.clone(),
+                doc: format!("docs/rules/{}.md", rule.code),
+                sources: rule.sources.clone(),
+            });
         }
     }
     out
@@ -73,7 +70,7 @@ fn fails(check: &Check, v: Option<&Value>) -> bool {
         (Check::Range { min, max }, Some(Value::Number(n))) => n
             .as_f64()
             .is_some_and(|x| !above(*min, x) || !below(*max, x)),
-        (Check::Format(f), Some(Value::String(s))) => !f.regex.is_match(s),
+        (Check::Format(re), Some(Value::String(s))) => !re.is_match(s),
         (Check::Finite, Some(Value::String(s))) => s.starts_with(NONFINITE),
         _ => false,
     }
