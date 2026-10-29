@@ -1,0 +1,7 @@
+﻿[study]
+id = "demo"
+mode = "exploratory"
+
+[design]
+repeats = 1
+alpha = 0.005
