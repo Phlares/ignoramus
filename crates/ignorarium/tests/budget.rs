@@ -264,11 +264,13 @@ fn host_meter_adds_earlier_spend_rows_and_elapsed_time() {
         wall_seconds: 1800.0,
         usd: 99.0,
     };
-    let mut m = HostMeter::new(2.0);
-    m.start = Instant::now()
-        .checked_sub(Duration::from_secs(1800))
-        .unwrap();
+    let m = HostMeter::new(2.0);
     m.set_prior(prior);
+    m.start.set(
+        Instant::now()
+            .checked_sub(Duration::from_secs(1800))
+            .unwrap(),
+    );
     m.add_row(50.0);
     m.add_row(25.0);
     let c = m.sample().unwrap();
@@ -280,6 +282,31 @@ fn host_meter_adds_earlier_spend_rows_and_elapsed_time() {
     );
     // Money comes from total wall time, not from the prior usd.
     assert_eq!(c.usd, c.wall_seconds / 3600.0 * 2.0);
+}
+
+#[test]
+fn set_prior_starts_the_session_over_from_the_records() {
+    let m = HostMeter::new(2.0);
+    m.start.set(
+        Instant::now()
+            .checked_sub(Duration::from_secs(1800))
+            .unwrap(),
+    );
+    m.add_row(50.0);
+    let prior = Cost {
+        cpu_seconds: 100.0,
+        wall_seconds: 600.0,
+        usd: 0.0,
+    };
+    m.set_prior(prior);
+    let c = m.sample().unwrap();
+    // The 50 cpu seconds and the 1800 s before `set_prior` are in the records already.
+    assert_eq!(c.cpu_seconds, 100.0);
+    assert!(
+        (600.0..610.0).contains(&c.wall_seconds),
+        "{}",
+        c.wall_seconds
+    );
 }
 
 #[test]

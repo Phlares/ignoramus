@@ -1051,6 +1051,30 @@ fn retried_attempts_count_in_the_record_the_tally_and_the_meter() {
 }
 
 #[test]
+fn a_plan_run_twice_counts_each_attempt_once() {
+    let lab = lab();
+    plain(&lab, "twice");
+    let mut plan = plan_of(&lab, "twice");
+    // The first session ends in a crash after rows 0..2; the same plan then runs again.
+    let (mut b, _) = fake(vec![]);
+    b.wall = Some(100.0);
+    b.panic_at = Some(3);
+    plan.backend = Box::new(b);
+    assert!(catch_unwind(AssertUnwindSafe(|| run(&plan))).is_err());
+    let (mut b, _) = fake(vec![]);
+    b.wall = Some(100.0);
+    plan.backend = Box::new(b);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let recorded: f64 = common::records_of(&lab, "twice")
+        .iter()
+        .filter(|r| r.kind == "row" || r.kind == "spend")
+        .map(|r| r.body["cpu_seconds"].as_f64().unwrap())
+        .sum();
+    assert_eq!(recorded, 300.0);
+    assert_eq!(plan.meter.sample().unwrap().cpu_seconds, recorded);
+}
+
+#[test]
 fn spend_survives_a_resume_through_the_signed_records() {
     let lab = lab();
     let dir = plain(&lab, "b5");
