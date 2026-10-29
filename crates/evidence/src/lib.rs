@@ -6,6 +6,7 @@ pub mod elond;
 pub mod eprocess;
 pub mod rng;
 pub mod scan;
+pub mod sim;
 pub mod tree;
 
 #[derive(Debug, Clone, PartialEq)]
