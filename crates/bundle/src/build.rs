@@ -8,7 +8,7 @@ use crate::tree::{self, Found, name_is_safe, shown};
 use crate::{Error, Problem, yaml};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 /// Files the build writes. A file of such a name in the study is not copied.
@@ -16,10 +16,10 @@ pub const GENERATED: [&str; 7] = [
     "ARTIFACTS.sha256",
     "CITATION.cff",
     "LICENSE.md",
-    "MANIFEST.sha256",
+    manifest::NAME,
     "datacite.json",
     "publish-profile.json",
-    "ro-crate-metadata.json",
+    rocrate::DESCRIPTOR,
 ];
 
 const REQUIRED_FILES: [&str; 3] = ["README.md", "citation.toml", "spec.toml"];
@@ -146,10 +146,7 @@ fn hash_artifacts(
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let valid = path.file_name().is_some_and(|n| n.to_str().is_some())
-            && is_artifact_name(&name)
-            && name != zip;
-        if !valid || !seen.insert(name.clone()) {
+        if !is_artifact_name(&name) || name == zip || !seen.insert(name.clone()) {
             problems.push(Problem::new(
                 "E-PUB-010",
                 shown(&name),
@@ -194,12 +191,18 @@ fn missing_files(names: &[&str]) -> Vec<Problem> {
     out
 }
 
-fn put(out: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
-    let dest = out.join(name);
+/// Writes `src` to the new file `out/path` and returns its manifest entry.
+fn put(out: &Path, path: &str, src: &mut impl Read) -> io::Result<Entry> {
+    let dest = out.join(path);
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
-    File::create_new(dest)?.write_all(bytes)
+    let (sha256, size) = sha256_copy(src, &mut File::create_new(dest)?)?;
+    Ok(Entry {
+        path: path.to_string(),
+        sha256,
+        size,
+    })
 }
 
 fn json_text(v: &impl serde::Serialize) -> String {
@@ -218,7 +221,7 @@ pub fn build(study: &Path, out: &Path, facts: &Facts, release: &Release) -> Resu
     let mut citation = None;
     if let Some(f) = found.iter().find(|f| f.path == "citation.toml") {
         let mut text = String::new();
-        io::Read::read_to_string(&mut tree::open(study, f)?, &mut text)?;
+        tree::open(study, f)?.read_to_string(&mut text)?;
         match citation::parse(&text) {
             Ok(c) => citation = Some(c),
             Err(p) => problems.extend(p),
@@ -286,29 +289,18 @@ pub fn build(study: &Path, out: &Path, facts: &Facts, release: &Release) -> Resu
         fs::create_dir_all(parent)?;
     }
     fs::create_dir(out)?;
+    let mut listed = Vec::with_capacity(all.len() + GENERATED.len());
     for f in &found {
-        let mut src = tree::open(study, f)?;
-        let dest = out.join(&f.path);
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        io::copy(&mut src, &mut File::create_new(dest)?)?;
+        listed.push(put(out, &f.path, &mut tree::open(study, f)?)?);
     }
+    verify_copied(&files, &listed)?;
     for (path, bytes) in &facts.attachments {
-        put(out, path, bytes)?;
+        listed.push(put(out, path, &mut bytes.as_slice())?);
     }
     let data = &facts.licensing.data;
     let cff = citation::cff(&citation, release, &facts.tool, data);
-    put(out, "CITATION.cff", yaml::block(&cff).as_bytes())?;
     let datacite = citation::datacite(&citation, release, &facts.tool, data);
-    put(out, "datacite.json", json_text(&datacite).as_bytes())?;
-    put(
-        out,
-        "LICENSE.md",
-        facts.licensing.statement(&all).as_bytes(),
-    )?;
-    put(out, "publish-profile.json", json_text(&profile).as_bytes())?;
-    let listed: Vec<Entry> = artifacts
+    let artifact_list: Vec<Entry> = artifacts
         .iter()
         .map(|(a, _)| Entry {
             path: a.name.clone(),
@@ -316,13 +308,17 @@ pub fn build(study: &Path, out: &Path, facts: &Facts, release: &Release) -> Resu
             size: a.size,
         })
         .collect();
-    put(
-        out,
-        "ARTIFACTS.sha256",
-        manifest::render(&listed).as_bytes(),
-    )?;
+    for (name, text) in [
+        ("CITATION.cff", yaml::block(&cff)),
+        ("datacite.json", json_text(&datacite)),
+        ("LICENSE.md", facts.licensing.statement(&all)),
+        ("publish-profile.json", json_text(&profile)),
+        ("ARTIFACTS.sha256", manifest::render(&artifact_list)),
+    ] {
+        listed.push(put(out, name, &mut text.as_bytes())?);
+    }
+    listed.sort_by(|a, b| a.path.cmp(&b.path));
 
-    let listed_files = manifest::scan(out)?;
     let plain: Vec<Artifact> = artifacts.iter().map(|(a, _)| a.clone()).collect();
     let doc = rocrate::metadata(&Crate {
         study_id: &facts.study_id,
@@ -330,20 +326,22 @@ pub fn build(study: &Path, out: &Path, facts: &Facts, release: &Release) -> Resu
         release,
         tool: &facts.tool,
         licensing: &facts.licensing,
-        files: &listed_files,
+        files: &listed,
         runs: &facts.runs,
         artifacts: &plain,
     });
-    put(out, "ro-crate-metadata.json", json_text(&doc).as_bytes())?;
-
-    let final_files = manifest::scan(out)?;
-    verify_copied(&files, &final_files)?;
-    let text = manifest::render(&final_files);
-    put(out, manifest::NAME, text.as_bytes())?;
+    listed.push(put(
+        out,
+        rocrate::DESCRIPTOR,
+        &mut json_text(&doc).as_bytes(),
+    )?);
+    listed.sort_by(|a, b| a.path.cmp(&b.path));
+    let text = manifest::render(&listed);
+    let manifest = put(out, manifest::NAME, &mut text.as_bytes())?;
 
     Ok(Built {
         dir: out.to_path_buf(),
-        manifest_sha256: sha256_bytes(text.as_bytes()),
+        manifest_sha256: manifest.sha256,
         artifacts,
         warnings,
         profile,

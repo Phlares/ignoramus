@@ -10,7 +10,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-const DESCRIPTOR: &str = "ro-crate-metadata.json";
+pub const DESCRIPTOR: &str = "ro-crate-metadata.json";
 const ACTION_STATUS: &str = "http://schema.org/";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
