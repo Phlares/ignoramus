@@ -314,7 +314,8 @@ pub fn run(plan: &RunPlan) -> Result<RunStatus, RunError> {
     let mut tally = Tally::of(&all);
     let per_row = row_estimate(plan, &machine);
     let budget = &plan.spec.scope.budget;
-    let mut alerts = None;
+    // Only spend from earlier sessions stays silent; this session's first reading may alert.
+    let mut alerts = Alerts::seeded(&tally.cost(machine.rate_usd_per_hour), budget);
     for row in plan
         .schedule
         .rows
@@ -324,10 +325,7 @@ pub fn run(plan: &RunPlan) -> Result<RunStatus, RunError> {
         let sampled = plan.meter.sample();
         let now = sampled.clone().unwrap_or_default();
         if let Ok(c) = &sampled {
-            let fresh = alerts
-                .get_or_insert_with(|| Alerts::seeded(c, budget))
-                .fresh(c, budget);
-            for (dim, fraction) in fresh {
+            for (dim, fraction) in alerts.fresh(c, budget) {
                 let attrs = json!({ "dimension": dimension_name(dim), "fraction": fraction });
                 log_event(plan, &dir, "budget.alert", attrs)?;
             }
@@ -427,6 +425,7 @@ fn run_row(
     tally: &mut Tally,
 ) -> Result<Option<String>, RunError> {
     let mut attempts = 0u32;
+    let (mut cpu, mut wall) = (0.0, 0.0);
     let outcome = loop {
         attempts += 1;
         let job = job_for(plan, row, dir)?;
@@ -437,6 +436,8 @@ fn run_row(
             output_hash: String::new(),
             selftest_ok: false,
         });
+        cpu += o.cpu_seconds;
+        wall += o.wall_seconds;
         if !matches!(o.exit, Exit::Infra(_)) || attempts > MAX_RETRIES {
             break o;
         }
@@ -464,16 +465,16 @@ fn run_row(
                 "isolation": plan.backend.level(),
                 "payload_sha256": plan.payload_sha256,
                 "data_hashes": plan.data_hashes,
-                "cpu_seconds": outcome.cpu_seconds,
-                "wall_seconds": outcome.wall_seconds,
+                "cpu_seconds": cpu,
+                "wall_seconds": wall,
                 "output_hash": outcome.output_hash,
                 "exit": exit,
                 "attempts": attempts,
             }),
         },
     )?;
-    tally.add(outcome.cpu_seconds, outcome.wall_seconds);
-    plan.meter.add_row(outcome.cpu_seconds);
+    tally.add(cpu, wall);
+    plan.meter.add_row(cpu);
     Ok(match outcome.exit {
         Exit::Infra(why) => Some(format!(
             "row {} voided by infrastructure faults: {why}",

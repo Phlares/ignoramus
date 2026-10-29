@@ -752,19 +752,75 @@ fn a_meter_fault_after_some_rows_pauses_there() {
 }
 
 #[test]
-fn alerts_already_crossed_at_start_are_not_emitted_again() {
+fn a_fresh_study_whose_first_reading_is_high_still_emits_its_alerts() {
     let lab = lab();
     let dir = plain(&lab, "b4");
     let mut plan = plan_of(&lab, "b4");
-    // 0.6 of the wall budget at the start, 0.85 after row 0, then flat.
-    plan.meter = Box::new(FakeMeter::new(vec![cost(0.0, 2160.0), cost(0.0, 3060.0)]));
+    // 0.85 of the wall cap at the first reading; a row estimates 60 s, so the run goes on.
+    plan.meter = Box::new(FakeMeter::new(vec![cost(0.0, 3060.0)]));
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
     let ev = events_of(&dir);
     let alerts = named(&ev, "budget.alert");
-    assert_eq!(alerts.len(), 1);
-    assert_eq!(alerts[0]["attrs"]["fraction"], 0.8);
-    assert_eq!(alerts[0]["attrs"]["dimension"], "wall");
+    let fractions: Vec<f64> = alerts
+        .iter()
+        .map(|e| e["attrs"]["fraction"].as_f64().unwrap())
+        .collect();
+    assert_eq!(fractions, vec![0.5, 0.8]);
+    assert!(alerts.iter().all(|e| e["attrs"]["dimension"] == "wall"));
     assert!(named(&ev, "run.pause").is_empty());
+}
+
+#[test]
+fn alerts_crossed_by_earlier_sessions_stay_silent_on_resume() {
+    let lab = lab();
+    let dir = plain(&lab, "b4b");
+    let mut plan = plan_of(&lab, "b4b");
+    let slow = || {
+        let (mut b, _) = fake(vec![]);
+        b.wall = Some(1000.0);
+        Box::new(b)
+    };
+    plan.backend = slow();
+    plan.meter = Box::new(FakeMeter::new(vec![cost(0.0, 0.0)]));
+    run(&plan).unwrap();
+    // Keep the register record and rows 0 and 1: 2000 s of 3600 s, past 0.50.
+    let log = dir.join("records.jsonl");
+    let text = std::fs::read_to_string(&log).unwrap();
+    let kept: String = text.split_inclusive('\n').take(3).collect();
+    std::fs::write(&log, kept).unwrap();
+    let mut plan = plan_of(&lab, "b4b");
+    plan.backend = slow();
+    plan.meter = Box::new(FakeMeter::new(vec![cost(0.0, 2000.0), cost(0.0, 3000.0)]));
+    let status = run(&plan).unwrap();
+    assert_eq!(
+        status,
+        RunStatus::Paused("the next row would reach the wall cap".into())
+    );
+    let ev = events_of(&dir);
+    let fractions: Vec<f64> = named(&ev, "budget.alert")
+        .iter()
+        .map(|e| e["attrs"]["fraction"].as_f64().unwrap())
+        .collect();
+    assert_eq!(fractions, vec![0.8]);
+}
+
+#[test]
+fn retried_attempts_count_in_the_record_the_tally_and_the_meter() {
+    let lab = lab();
+    plain(&lab, "b7");
+    let mut plan = plan_of(&lab, "b7");
+    let infra = || Exit::Infra("box fault".into());
+    let (mut b, _) = fake(vec![infra(), infra()]);
+    b.wall = Some(100.0);
+    plan.backend = Box::new(b);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let rows = rows_of(&lab, "b7");
+    assert_eq!(rows[0].body["attempts"], 3);
+    assert_eq!(rows[0].body["wall_seconds"], 300.0);
+    assert_eq!(rows[0].body["cpu_seconds"], 150.0);
+    assert_eq!(rows[1].body["wall_seconds"], 100.0);
+    // Rows 1..5 cost 50 cpu seconds each; row 0 cost 3 attempts of 50 -> 400 in all.
+    assert_eq!(plan.meter.sample().unwrap().cpu_seconds, 400.0);
 }
 
 #[test]
