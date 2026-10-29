@@ -77,7 +77,10 @@ fn initramfs_is_newc_with_console_null_and_init() {
     let agent = b"agent bytes!!";
     let es = parse_newc(&initramfs(agent));
     let names: Vec<_> = es.iter().map(|e| e.name.as_str()).collect();
-    assert_eq!(names, ["dev", "dev/console", "dev/null", "init", "TRAILER!!!"]);
+    assert_eq!(
+        names,
+        ["dev", "dev/console", "dev/null", "init", "TRAILER!!!"]
+    );
     assert_eq!(es[0].mode, 0o040755);
     let nlinks: Vec<_> = es[..4].iter().map(|e| e.nlink).collect();
     assert_eq!(nlinks, [2, 1, 1, 1]);
