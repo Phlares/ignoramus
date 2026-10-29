@@ -214,7 +214,6 @@ pub fn prepare_with(
         }
     };
     let machine = machine::load(&home.root).map_err(io)?;
-    let prior = Tally::of(&all).cost(0.0);
     let data_hashes = gate_late_data(home, &spec, log, leaf, &key)?;
     let rows = expand_rows(&spec, &spec_hash)?;
     let schedule = Schedule::new(&spec_hash, rows);
@@ -230,7 +229,7 @@ pub fn prepare_with(
         data_hashes,
         payload,
         payload_sha256,
-        meter: Box::new(HostMeter::new(prior, machine.rate_usd_per_hour)),
+        meter: Box::new(HostMeter::new(machine.rate_usd_per_hour)),
         heartbeat: HEARTBEAT,
     })
 }
@@ -455,8 +454,10 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
     let mut tally = Tally::of(&all);
     let per_row = row_estimate(plan, &machine);
     let budget = &plan.spec.scope.budget;
+    let prior = tally.cost(machine.rate_usd_per_hour);
+    plan.meter.set_prior(prior);
     // Only spend from earlier sessions stays silent; this session's first reading may alert.
-    let mut alerts = Alerts::seeded(&tally.cost(machine.rate_usd_per_hour), budget);
+    let mut alerts = Alerts::seeded(&prior, budget);
     for row in plan
         .schedule
         .rows

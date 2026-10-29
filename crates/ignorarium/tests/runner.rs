@@ -782,14 +782,42 @@ fn spend_survives_a_resume_through_the_signed_records() {
     let text = std::fs::read_to_string(&log).unwrap();
     let kept: String = text.split_inclusive('\n').take(4).collect();
     std::fs::write(&log, kept).unwrap();
-    let resumed = plan_of(&lab, "b5");
+    let mut resumed = plan_of(&lab, "b5");
+    let (mut b, _) = fake(vec![]);
+    b.wall = Some(100.0);
+    resumed.backend = Box::new(b);
+    run(&resumed).unwrap();
+    // 150 cpu seconds from the 3 kept rows, 150 from the 3 rows this run.
     let c = resumed.meter.sample().unwrap();
-    assert_eq!(c.cpu_seconds, 150.0);
+    assert_eq!(c.cpu_seconds, 300.0);
     assert!(
         (300.0..330.0).contains(&c.wall_seconds),
         "{}",
         c.wall_seconds
     );
+}
+
+#[test]
+fn the_meter_starts_from_the_spend_read_under_the_run_lock() {
+    let lab = lab();
+    let dir = plain(&lab, "locked");
+    let plan = plan_of(&lab, "locked");
+    // Another run appends 3000 cpu seconds of spend after this plan was prepared.
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let draft = records::RecordDraft {
+        study: "locked".into(),
+        row: Some(0),
+        kind: "spend".into(),
+        body: serde_json::json!({"cpu_seconds": 3000.0, "wall_seconds": 0.0, "reason": "x"}),
+    };
+    records::append(&dir.join("records.jsonl"), &key, draft).unwrap();
+    // 3000 spent and a 3000 s mean row reach the 3600 s cap.
+    assert_eq!(
+        run(&plan).unwrap(),
+        RunStatus::Paused("the next row would reach the cpu cap".into())
+    );
+    assert!(rows_of(&lab, "locked").is_empty());
+    assert_eq!(plan.meter.sample().unwrap().cpu_seconds, 3000.0);
 }
 
 #[test]
@@ -944,19 +972,20 @@ fn attempts_before_a_backend_pause_are_spend_that_counts_on_resume() {
         );
         // The signed spend record is part of the earlier spend a resume starts from.
         let resumed = plan_of(&lab, id);
-        let prior = resumed.meter.sample().unwrap();
-        assert!(prior.wall_seconds >= wall, "{}", prior.wall_seconds);
-        assert_eq!(prior.cpu_seconds, wall / 2.0);
         let status = run(&resumed).unwrap();
+        let c = resumed.meter.sample().unwrap();
+        assert!(c.wall_seconds >= wall, "{}", c.wall_seconds);
         if wall < 1000.0 {
             assert_eq!(status, RunStatus::Done);
             assert_eq!(rows_of(&lab, id).len(), 6);
+            assert!(c.cpu_seconds >= wall / 2.0, "{}", c.cpu_seconds);
         } else {
             assert_eq!(
                 status,
                 RunStatus::Paused("the next row would reach the wall cap".into())
             );
             assert!(rows_of(&lab, id).is_empty());
+            assert_eq!(c.cpu_seconds, wall / 2.0);
         }
     }
 }

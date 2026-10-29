@@ -264,10 +264,11 @@ fn host_meter_adds_earlier_spend_rows_and_elapsed_time() {
         wall_seconds: 1800.0,
         usd: 99.0,
     };
-    let mut m = HostMeter::new(prior, 2.0);
+    let mut m = HostMeter::new(2.0);
     m.start = Instant::now()
         .checked_sub(Duration::from_secs(1800))
         .unwrap();
+    m.set_prior(prior);
     m.add_row(50.0);
     m.add_row(25.0);
     let c = m.sample().unwrap();

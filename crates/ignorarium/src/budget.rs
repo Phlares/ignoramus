@@ -77,25 +77,27 @@ impl std::error::Error for MeterError {}
 pub trait CostMeter {
     /// Cumulative cost now. An error pauses the run.
     fn sample(&self) -> Result<Cost, MeterError>;
-    /// A row finished this session and used `cpu_seconds` of cpu.
+    /// An attempt finished this session and used `cpu_seconds` of cpu.
     fn add_row(&self, _cpu_seconds: f64) {}
+    /// The spend already in the signed records, read under the run lock.
+    fn set_prior(&self, _prior: Cost) {}
 }
 
 /// Earlier spend, plus wall time on a monotonic clock since `start`, plus this session's rows.
 pub struct HostMeter {
     pub start: Instant,
-    pub prior: Cost,
     pub rate_usd_per_hour: f64,
+    prior: Cell<Cost>,
     rows_cpu: Cell<f64>,
 }
 
 impl HostMeter {
-    /// `prior` is the spend already in the signed row records.
-    pub fn new(prior: Cost, rate_usd_per_hour: f64) -> HostMeter {
+    /// No earlier spend until `set_prior`.
+    pub fn new(rate_usd_per_hour: f64) -> HostMeter {
         HostMeter {
             start: Instant::now(),
-            prior,
             rate_usd_per_hour,
+            prior: Cell::new(Cost::default()),
             rows_cpu: Cell::new(0.0),
         }
     }
@@ -103,9 +105,10 @@ impl HostMeter {
 
 impl CostMeter for HostMeter {
     fn sample(&self) -> Result<Cost, MeterError> {
-        let wall_seconds = self.prior.wall_seconds + self.start.elapsed().as_secs_f64();
+        let prior = self.prior.get();
+        let wall_seconds = prior.wall_seconds + self.start.elapsed().as_secs_f64();
         Ok(Cost {
-            cpu_seconds: self.prior.cpu_seconds + self.rows_cpu.get(),
+            cpu_seconds: prior.cpu_seconds + self.rows_cpu.get(),
             wall_seconds,
             usd: wall_seconds / 3600.0 * self.rate_usd_per_hour,
         })
@@ -113,6 +116,10 @@ impl CostMeter for HostMeter {
 
     fn add_row(&self, cpu_seconds: f64) {
         self.rows_cpu.set(self.rows_cpu.get() + cpu_seconds);
+    }
+
+    fn set_prior(&self, prior: Cost) {
+        self.prior.set(prior);
     }
 }
 
