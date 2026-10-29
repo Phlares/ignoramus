@@ -1,4 +1,6 @@
 //! ignorarium library crate.
+#![deny(unsafe_code)]
+pub mod backend;
 pub mod canon;
 pub mod cli;
 pub mod diag;
@@ -18,4 +20,5 @@ pub mod schedule;
 pub mod seed;
 pub mod spec;
 pub mod store;
+pub mod sys;
 pub mod time;

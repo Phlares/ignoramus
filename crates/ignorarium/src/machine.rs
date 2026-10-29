@@ -1,8 +1,9 @@
 //! The machine profile: what this box can spend. Read from `<home>/machine.toml`.
-use serde::Deserialize;
+use crate::backend::{Backend, Probe};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Machine {
     pub name: String,
@@ -73,4 +74,59 @@ pub fn load(home: &Path) -> Result<Machine, MachineError> {
         return Err(bad("long_job_minutes", "at least 1"));
     }
     Ok(m)
+}
+
+/// Fill a profile from this host. `rate_usd_per_hour`, `experiment_mode` and
+/// `long_job_minutes` come from an existing `machine.toml`; an unreadable file
+/// gives the defaults (the probe never writes).
+pub fn probe(home: &Path, backends: &[Box<dyn Backend>]) -> Machine {
+    let kept = load(home).unwrap_or_default();
+    let name = std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .map(|s| s.trim().to_string())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "local".into());
+    let cpus = std::thread::available_parallelism()
+        .map(|n| u32::try_from(n.get()).unwrap_or(u32::MAX))
+        .unwrap_or(1);
+    let mem_gib = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|t| mem_gib_of(&t))
+        .unwrap_or(1);
+    let max_level = backends
+        .iter()
+        .filter(|b| b.probe() == Probe::Available)
+        .map(|b| b.level())
+        .max()
+        .unwrap_or(0);
+    Machine {
+        name,
+        cpus,
+        mem_gib,
+        max_level,
+        ..kept
+    }
+}
+
+/// Whole GiB (at least 1) from the `MemTotal` line of `/proc/meminfo` text.
+pub fn mem_gib_of(meminfo: &str) -> Option<u32> {
+    let kib: u64 = meminfo
+        .lines()
+        .find_map(|l| l.strip_prefix("MemTotal:"))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    Some(u32::try_from((kib / (1024 * 1024)).max(1)).unwrap_or(u32::MAX))
+}
+
+/// Write `<home>/machine.toml` atomically.
+pub fn write(home: &Path, m: &Machine) -> Result<(), MachineError> {
+    let file = home.join("machine.toml");
+    let err = |msg: String| MachineError {
+        file: file.clone(),
+        msg,
+    };
+    let text = toml::to_string(m).map_err(|e| err(e.to_string()))?;
+    crate::files::replace_atomic(&file, text.as_bytes(), 0o600).map_err(|e| err(e.to_string()))
 }

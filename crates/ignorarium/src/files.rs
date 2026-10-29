@@ -185,3 +185,48 @@ pub fn locked_append<E: From<io::Error>>(
     f.sync_all()?;
     Ok(())
 }
+
+/// Replace `path` with `bytes` atomically: a unique temp file in the same
+/// directory, fsync, then `rename` over `path`. Refuses a symbolic link at
+/// `path`. The temp file is removed on any failure. `mode` applies on unix only.
+pub fn replace_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path is a symbolic link",
+            ));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?
+        .to_string_lossy();
+    let mut rnd = [0u8; 8];
+    getrandom::fill(&mut rnd).map_err(|e| io::Error::other(e.to_string()))?;
+    let tmp = path.with_file_name(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        hex::encode(rnd)
+    ));
+    let out = stage(&tmp, bytes, mode).and_then(|()| fs::rename(&tmp, path));
+    if out.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    out
+}
+
+fn stage(tmp: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+    let mut opts = OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, mode);
+    #[cfg(not(unix))]
+    let _ = mode;
+    let mut f = opts.open(tmp)?;
+    f.write_all(bytes)?;
+    f.sync_all()
+}
