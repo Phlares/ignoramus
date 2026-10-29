@@ -5,7 +5,6 @@ use crate::{Error, Secret};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use std::io::Read;
 use std::path::Path;
 
 pub const API: &str = "https://sandbox.zenodo.org/api";
@@ -69,10 +68,6 @@ fn number(step: &'static str, v: &Value, path: &str) -> Result<u64, Error> {
         .ok_or_else(|| protocol(step, format!("no number at {path}")))
 }
 
-fn parse(step: &'static str, r: &Response) -> Result<Value, Error> {
-    serde_json::from_slice(&r.body).map_err(|_| protocol(step, "the body is not JSON"))
-}
-
 impl<T: Transport> Zenodo<T> {
     /// The only constructor.
     pub fn sandbox(transport: T) -> Self {
@@ -101,23 +96,49 @@ impl<T: Transport> Zenodo<T> {
         Ok(r)
     }
 
+    /// Sends one step whose answer is JSON.
+    /// Returns the answer and the step record without its detail.
+    fn call(
+        &self,
+        step: &'static str,
+        accept: &[u16],
+        method: Method,
+        url: String,
+        token: &Secret,
+        body: Body,
+    ) -> Result<(Value, Step), Error> {
+        let req = Request {
+            method,
+            url: url.clone(),
+            token: Some(token),
+            body,
+            keep_body: true,
+            follow: false,
+        };
+        let r = self.send(step, accept, req)?;
+        let v =
+            serde_json::from_slice(&r.body).map_err(|_| protocol(step, "the body is not JSON"))?;
+        let record = Step {
+            step,
+            method: method.as_str(),
+            url,
+            status: r.status,
+            detail: Value::Null,
+        };
+        Ok((v, record))
+    }
+
     pub fn create(&self, t: &StageToken) -> Result<(Draft, Step), Error> {
-        let url = format!("{API}/deposit/depositions");
         let body = serde_json::to_vec(&json!({"metadata": {"prereserve_doi": true}}))
             .expect("a JSON value serializes");
-        let r = self.send(
+        let (v, step) = self.call(
             "create",
             &[201],
-            Request {
-                method: Method::Post,
-                url: url.clone(),
-                token: Some(&t.0),
-                body: Body::Json(body),
-                keep_body: true,
-                follow: false,
-            },
+            Method::Post,
+            format!("{API}/deposit/depositions"),
+            &t.0,
+            Body::Json(body),
         )?;
-        let v = parse("create", &r)?;
         let draft = Draft {
             id: number("create", &v, "/id")?,
             recid: number("create", &v, "/metadata/prereserve_doi/recid")?,
@@ -127,7 +148,7 @@ impl<T: Transport> Zenodo<T> {
         let detail = json!({
             "id": draft.id, "recid": draft.recid, "doi": draft.doi, "bucket": draft.bucket
         });
-        Ok((draft, step("create", "POST", url, r.status, detail)))
+        Ok((draft, Step { detail, ..step }))
     }
 
     pub fn describe(
@@ -152,20 +173,14 @@ impl<T: Transport> Zenodo<T> {
         let title = metadata["title"].clone();
         let body =
             serde_json::to_vec(&json!({"metadata": metadata})).expect("a JSON value serializes");
-        let url = format!("{API}/deposit/depositions/{}", d.id);
-        let r = self.send(
+        let (v, step) = self.call(
             "describe",
             &[200],
-            Request {
-                method: Method::Put,
-                url: url.clone(),
-                token: Some(&t.0),
-                body: Body::Json(body),
-                keep_body: true,
-                follow: false,
-            },
+            Method::Put,
+            format!("{API}/deposit/depositions/{}", d.id),
+            &t.0,
+            Body::Json(body),
         )?;
-        let v = parse("describe", &r)?;
         let kept = v
             .pointer("/metadata/prereserve_doi/doi")
             .and_then(Value::as_str);
@@ -179,13 +194,10 @@ impl<T: Transport> Zenodo<T> {
                 ),
             ));
         }
-        Ok(step(
-            "describe",
-            "PUT",
-            url,
-            r.status,
-            json!({"doi": d.doi, "title": title}),
-        ))
+        Ok(Step {
+            detail: json!({"doi": d.doi, "title": title}),
+            ..step
+        })
     }
 
     pub fn upload(
@@ -201,22 +213,15 @@ impl<T: Transport> Zenodo<T> {
                 esc(name)
             )));
         }
-        let size = std::fs::metadata(path)?.len();
-        let sha256 = file_sha256(path)?;
-        let url = format!("{}/{name}", d.bucket);
-        let r = self.send(
+        let (sha256, size) = file_sha256(path)?;
+        let (v, step) = self.call(
             "upload",
             &[200, 201],
-            Request {
-                method: Method::Put,
-                url: url.clone(),
-                token: Some(&t.0),
-                body: Body::File(path.to_path_buf()),
-                keep_body: true,
-                follow: false,
-            },
+            Method::Put,
+            format!("{}/{name}", d.bucket),
+            &t.0,
+            Body::File(path.to_path_buf()),
         )?;
-        let v = parse("upload", &r)?;
         let key = text("upload", &v, "/key")?;
         if key != name {
             return Err(mismatch(
@@ -234,7 +239,7 @@ impl<T: Transport> Zenodo<T> {
         let sum = text("upload", &v, "/checksum")?;
         let md5 = sum.strip_prefix("md5:").unwrap_or(sum);
         let detail = json!({"key": name, "size": size, "sha256": sha256, "md5": md5});
-        Ok(step("upload", "PUT", url, r.status, detail))
+        Ok(Step { detail, ..step })
     }
 
     pub fn verify(
@@ -251,19 +256,14 @@ impl<T: Transport> Zenodo<T> {
                 )));
             }
         }
-        let r = self.send(
+        let (v, step) = self.call(
             "verify",
             &[200],
-            Request {
-                method: Method::Get,
-                url: d.bucket.clone(),
-                token: Some(&t.0),
-                body: Body::None,
-                keep_body: true,
-                follow: false,
-            },
+            Method::Get,
+            d.bucket.clone(),
+            &t.0,
+            Body::None,
         )?;
-        let v = parse("verify", &r)?;
         let contents = v
             .get("contents")
             .and_then(Value::as_array)
@@ -276,10 +276,12 @@ impl<T: Transport> Zenodo<T> {
             ));
         }
         let mut problems: Vec<String> = Vec::new();
-        for (name, _) in expected {
-            match listed.iter().filter(|(k, _)| k == name).count() {
-                0 => problems.push(format!("missing {}", esc(name))),
-                1 => {}
+        let mut links = Vec::new();
+        for (name, want) in expected {
+            let mut hits = listed.iter().filter(|(k, _)| k == name);
+            match (hits.next(), hits.next()) {
+                (None, _) => problems.push(format!("missing {}", esc(name))),
+                (Some((_, link)), None) => links.push((name, want, *link)),
                 _ => problems.push(format!("listed twice {}", esc(name))),
             }
         }
@@ -292,12 +294,7 @@ impl<T: Transport> Zenodo<T> {
             return Err(mismatch("verify", problems.join(", ")));
         }
         let mut files = Vec::new();
-        for (name, want) in expected {
-            let link = listed
-                .iter()
-                .find(|(k, _)| k == name)
-                .map(|(_, l)| *l)
-                .expect("every expected name is listed");
+        for (name, want, link) in links {
             let got = self.send(
                 "verify",
                 &[200],
@@ -323,30 +320,21 @@ impl<T: Transport> Zenodo<T> {
             }
             files.push(json!({"key": name, "sha256": got.sha256}));
         }
-        Ok(step(
-            "verify",
-            "GET",
-            d.bucket.clone(),
-            r.status,
-            json!({"files": files}),
-        ))
+        Ok(Step {
+            detail: json!({"files": files}),
+            ..step
+        })
     }
 
     pub fn publish(&self, t: &PublishToken, d: &Draft) -> Result<Step, Error> {
-        let url = format!("{API}/deposit/depositions/{}/actions/publish", d.id);
-        let r = self.send(
+        let (v, step) = self.call(
             "publish",
             &[202],
-            Request {
-                method: Method::Post,
-                url: url.clone(),
-                token: Some(&t.0),
-                body: Body::None,
-                keep_body: true,
-                follow: false,
-            },
+            Method::Post,
+            format!("{API}/deposit/depositions/{}/actions/publish", d.id),
+            &t.0,
+            Body::None,
         )?;
-        let v = parse("publish", &r)?;
         let doi = text("publish", &v, "/doi")?;
         if doi != d.doi {
             return Err(mismatch(
@@ -364,17 +352,7 @@ impl<T: Transport> Zenodo<T> {
             "record_id": record,
             "url": format!("https://sandbox.zenodo.org/records/{record}"),
         });
-        Ok(step("publish", "POST", url, r.status, detail))
-    }
-}
-
-fn step(name: &'static str, method: &'static str, url: String, status: u16, detail: Value) -> Step {
-    Step {
-        step: name,
-        method,
-        url,
-        status,
-        detail,
+        Ok(Step { detail, ..step })
     }
 }
 
@@ -386,17 +364,11 @@ fn safe_name(n: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-fn file_sha256(path: &Path) -> Result<String, Error> {
-    let mut f = std::fs::File::open(path)?;
+/// The file's SHA-256 and byte count.
+fn file_sha256(path: &Path) -> Result<(String, u64), Error> {
     let mut h = Sha256::new();
-    let mut buf = vec![0u8; 64 * 1024];
-    loop {
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            return Ok(hex::encode(h.finalize()));
-        }
-        h.update(&buf[..n]);
-    }
+    let size = std::io::copy(&mut std::fs::File::open(path)?, &mut h)?;
+    Ok((hex::encode(h.finalize()), size))
 }
 
 /// The DataCite entry of `list` whose `key` field equals `want`.

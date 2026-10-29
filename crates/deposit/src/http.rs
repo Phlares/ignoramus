@@ -12,6 +12,16 @@ pub enum Method {
     Put,
 }
 
+impl Method {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Method::Get => "GET",
+            Method::Post => "POST",
+            Method::Put => "PUT",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Body {
     None,
@@ -50,10 +60,10 @@ impl<T: Transport + ?Sized> Transport for &T {
 
 pub struct Curl {
     program: PathBuf,
-    max_secs: u32,
 }
 
 const KEEP_LIMIT: usize = 64 * 1024 * 1024;
+const MAX_SECS: u32 = 600;
 
 impl Curl {
     pub fn new() -> Curl {
@@ -61,10 +71,7 @@ impl Curl {
     }
 
     pub fn with_program(p: impl Into<PathBuf>) -> Curl {
-        Curl {
-            program: p.into(),
-            max_secs: 600,
-        }
+        Curl { program: p.into() }
     }
 }
 
@@ -87,12 +94,8 @@ fn quote(v: &str) -> Result<String, Error> {
     ))
 }
 
-fn config(req: &Request, max_secs: u32) -> Result<String, Error> {
-    let method = match req.method {
-        Method::Get => "GET",
-        Method::Post => "POST",
-        Method::Put => "PUT",
-    };
+fn config(req: &Request) -> Result<String, Error> {
+    let method = req.method.as_str();
     // curl drops a custom Authorization header when a redirect changes host (curl 7.58 and later).
     let follow = if req.follow {
         "location\nmax-redirs = 3\n"
@@ -100,7 +103,7 @@ fn config(req: &Request, max_secs: u32) -> Result<String, Error> {
         ""
     };
     let mut c = format!(
-        "silent\nshow-error\ngloboff\nproto = \"=https\"\nproto-redir = \"=https\"\n{follow}max-time = {max_secs}\nurl = {}\nrequest = \"{method}\"\n",
+        "silent\nshow-error\ngloboff\nproto = \"=https\"\nproto-redir = \"=https\"\n{follow}max-time = {MAX_SECS}\nurl = {}\nrequest = \"{method}\"\n",
         quote(&req.url)?
     );
     if let Some(t) = req.token {
@@ -136,7 +139,7 @@ fn no_status() -> Error {
 
 impl Transport for Curl {
     fn send(&self, req: &Request) -> Result<Response, Error> {
-        let cfg = config(req, self.max_secs)?;
+        let cfg = config(req)?;
         let mut child = Command::new(&self.program)
             .args(["--config", "-"])
             .stdin(Stdio::piped())
