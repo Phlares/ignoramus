@@ -1,6 +1,6 @@
 //! Safe folder walk. Links and special files are refused, never followed.
 use crate::Problem;
-use std::fs;
+use std::fs::{self, File};
 use std::io;
 use std::path::Path;
 
@@ -37,13 +37,60 @@ pub fn shown(s: &str) -> String {
         .collect()
 }
 
+/// Device and inode of a file. Empty where the platform gives none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Id {
+    #[cfg(unix)]
+    dev_ino: (u64, u64),
+}
+
+impl Id {
+    fn of(m: &fs::Metadata) -> Id {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Id {
+                dev_ino: (m.dev(), m.ino()),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = m;
+            Id {}
+        }
+    }
+}
+
+/// A regular file the walk saw: its path, length and identity at that moment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    pub path: String,
+    pub len: u64,
+    id: Id,
+}
+
+/// Opens a found file once and checks the handle is the file the walk saw.
+/// A swap for a link, another file or a resize gives `InvalidData`.
+pub fn open(dir: &Path, f: &Found) -> io::Result<File> {
+    let file = File::open(dir.join(&f.path))?;
+    let m = file.metadata()?;
+    if m.is_file() && Id::of(&m) == f.id && m.len() == f.len {
+        Ok(file)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} changed while the bundle was read", shown(&f.path)),
+        ))
+    }
+}
+
 /// Lists regular files as `/`-joined relative paths, sorted by bytes.
 /// Every refused entry is one E-PUB-001 problem.
-pub fn walk(dir: &Path) -> Result<(Vec<String>, Vec<Problem>), io::Error> {
+pub fn walk(dir: &Path) -> Result<(Vec<Found>, Vec<Problem>), io::Error> {
     let mut files = Vec::new();
     let mut problems = Vec::new();
     visit(dir, "", &mut files, &mut problems)?;
-    files.sort_unstable();
+    files.sort_unstable_by(|a, b| a.path.cmp(&b.path));
     problems.sort_by(|a, b| a.path.cmp(&b.path));
     Ok((files, problems))
 }
@@ -51,7 +98,7 @@ pub fn walk(dir: &Path) -> Result<(Vec<String>, Vec<Problem>), io::Error> {
 fn visit(
     dir: &Path,
     prefix: &str,
-    files: &mut Vec<String>,
+    files: &mut Vec<Found>,
     problems: &mut Vec<Problem>,
 ) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
@@ -66,13 +113,18 @@ fn visit(
             problems.push(refuse(shown(&rel), "name cannot be held in a bundle"));
             continue;
         }
-        let kind = fs::symlink_metadata(entry.path())?.file_type();
+        let meta = fs::symlink_metadata(entry.path())?;
+        let kind = meta.file_type();
         if kind.is_symlink() {
             problems.push(refuse(rel, "is a symbolic link"));
         } else if kind.is_dir() {
             visit(&entry.path(), &format!("{rel}/"), files, problems)?;
         } else if kind.is_file() {
-            files.push(rel);
+            files.push(Found {
+                path: rel,
+                len: meta.len(),
+                id: Id::of(&meta),
+            });
         } else {
             problems.push(refuse(rel, "is not a regular file or folder"));
         }

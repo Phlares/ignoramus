@@ -2,7 +2,7 @@
 use crate::{Error, Problem, tree};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
 
@@ -15,14 +15,13 @@ pub struct Entry {
     pub size: u64,
 }
 
-/// Hashes a file in 64 KiB chunks. Returns the hex digest and the byte count.
-pub fn sha256_file(path: &Path) -> io::Result<(String, u64)> {
-    let mut file = File::open(path)?;
+/// Hashes a reader in 64 KiB chunks. Returns the hex digest and the byte count.
+pub fn sha256_reader(reader: &mut impl Read) -> io::Result<(String, u64)> {
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 64 * 1024];
     let mut size = 0u64;
     loop {
-        let n = file.read(&mut buf)?;
+        let n = reader.read(&mut buf)?;
         if n == 0 {
             break;
         }
@@ -47,9 +46,13 @@ pub fn scan(dir: &Path) -> Result<Vec<Entry>, Error> {
     }
     files
         .into_iter()
-        .map(|path| {
-            let (sha256, size) = sha256_file(&dir.join(&path))?;
-            Ok(Entry { path, sha256, size })
+        .map(|f| {
+            let (sha256, size) = sha256_reader(&mut tree::open(dir, &f)?)?;
+            Ok(Entry {
+                path: f.path,
+                sha256,
+                size,
+            })
         })
         .collect()
 }
@@ -81,14 +84,15 @@ pub fn check(dir: &Path) -> Result<String, Error> {
         }
     }
     let (files, mut problems) = tree::walk(dir)?;
-    for path in &files {
+    for found in &files {
+        let path = &found.path;
         if path == NAME {
             continue;
         }
         match listed.remove(path) {
             None => problems.push(mismatch(path, "not in the manifest")),
             Some(hash) => {
-                if sha256_file(&dir.join(path))?.0 != hash {
+                if sha256_reader(&mut tree::open(dir, found)?)?.0 != hash {
                     problems.push(mismatch(path, "hash differs from the manifest"));
                 }
             }

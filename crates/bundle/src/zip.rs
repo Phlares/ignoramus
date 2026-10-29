@@ -1,8 +1,9 @@
 //! Deterministic stored zip: same files, same bytes. No times, modes or extras.
-use crate::{Error, Problem, tree};
+use crate::tree::{self, Found};
+use crate::{Error, Problem};
 use sha2::{Digest, Sha256};
-use std::fs::{self, File};
-use std::io::{self, BufWriter, Read, Write};
+use std::fs::File;
+use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 const INSTRUCTION: &str = "Deposit files of 4 GiB or more as artifacts beside the bundle; a bundle zip holds at most 65,535 files under 4 GiB in all.";
@@ -52,29 +53,31 @@ fn limit(path: &str, message: &str) -> Problem {
     }
 }
 
-/// Checks the limits from metadata only. Returns each file's size, in `files` order.
-fn sizes(dir: &Path, files: &[String]) -> Result<Vec<u32>, Error> {
+/// Checks the limits from the walk's sizes only. No file is read.
+fn check_limits(files: &[Found]) -> Result<(), Error> {
     let mut problems = Vec::new();
     if files.len() > MAX_FILES {
         problems.push(limit("", "too many files for a bundle zip"));
     }
-    let mut out = Vec::new();
     // End record, plus per file: local header 30, central entry 46, name twice, data.
     let mut total: u64 = 22;
-    for name in files {
-        let len = fs::symlink_metadata(dir.join(name))?.len();
-        if len >= LIMIT {
-            problems.push(limit(&tree::shown(name), "too large for a bundle zip"));
-            continue;
+    for f in files {
+        if f.len >= LIMIT {
+            problems.push(limit(&tree::shown(&f.path), "too large for a bundle zip"));
+        } else if f.path.len() > usize::from(u16::MAX) {
+            problems.push(limit(
+                &tree::shown(&f.path),
+                "name too long for a bundle zip",
+            ));
+        } else {
+            total += 76 + 2 * f.path.len() as u64 + f.len;
         }
-        total += 76 + 2 * name.len() as u64 + len;
-        out.push(len as u32);
     }
     if total >= LIMIT {
         problems.push(limit("", "bundle zip would reach 4 GiB"));
     }
     if problems.is_empty() {
-        Ok(out)
+        Ok(())
     } else {
         Err(Error::Refused {
             problems,
@@ -83,12 +86,11 @@ fn sizes(dir: &Path, files: &[String]) -> Result<Vec<u32>, Error> {
     }
 }
 
-fn crc_file(path: &Path) -> io::Result<(u32, u64)> {
-    let mut file = File::open(path)?;
+fn crc_reader(reader: &mut impl Read) -> io::Result<(u32, u64)> {
     let mut buf = vec![0u8; 64 * 1024];
     let (mut crc, mut size) = (!0u32, 0u64);
     loop {
-        let n = file.read(&mut buf)?;
+        let n = reader.read(&mut buf)?;
         if n == 0 {
             return Ok((!crc, size));
         }
@@ -101,14 +103,14 @@ fn crc_file(path: &Path) -> io::Result<(u32, u64)> {
 struct Tee<W: Write> {
     inner: W,
     hasher: Sha256,
-    written: u32,
+    written: u64,
 }
 
 impl<W: Write> Write for Tee<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let n = self.inner.write(buf)?;
         self.hasher.update(&buf[..n]);
-        self.written += n as u32;
+        self.written += n as u64;
         Ok(n)
     }
     fn flush(&mut self) -> io::Result<()> {
@@ -126,8 +128,15 @@ fn put32(w: &mut impl Write, v: u32) -> io::Result<()> {
     w.write_all(&v.to_le_bytes())
 }
 
-fn changed(name: &str) -> Error {
-    io::Error::other(format!("{} changed while packing", tree::shown(name))).into()
+fn too_big<T>(r: Result<T, std::num::TryFromIntError>) -> io::Result<T> {
+    r.map_err(|_| io::Error::other("bundle zip field out of range"))
+}
+
+fn changed(name: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("{} changed while the bundle was read", tree::shown(name)),
+    )
 }
 
 /// Writes `dir` as a stored zip at `out`, which must not exist.
@@ -140,7 +149,13 @@ pub fn pack(dir: &Path, out: &Path) -> Result<String, Error> {
             warnings: Vec::new(),
         });
     }
-    let sizes = sizes(dir, &files)?;
+    pack_files(dir, &files, out)
+}
+
+/// Like `pack`, for files a walk of `dir` already found. Each file is opened once
+/// through `tree::open`, so a swap after the walk is refused.
+pub fn pack_files(dir: &Path, files: &[Found], out: &Path) -> Result<String, Error> {
+    check_limits(files)?;
     let file = File::options().write(true).create_new(true).open(out)?;
     let mut w = Tee {
         inner: BufWriter::new(file),
@@ -148,15 +163,17 @@ pub fn pack(dir: &Path, out: &Path) -> Result<String, Error> {
         written: 0,
     };
     let mut central = Vec::new();
-    for (name, &size) in files.iter().zip(&sizes) {
-        let path = dir.join(name);
-        let (crc, counted) = crc_file(&path)?;
-        if counted != u64::from(size) {
-            return Err(changed(name));
+    for f in files {
+        let mut src = tree::open(dir, f)?;
+        let (crc, counted) = crc_reader(&mut src)?;
+        if counted != f.len {
+            return Err(changed(&f.path).into());
         }
-        let bytes = name.as_bytes();
-        let len = bytes.len() as u16;
-        let offset = w.written;
+        src.seek(SeekFrom::Start(0))?;
+        let size = too_big(u32::try_from(f.len))?;
+        let bytes = f.path.as_bytes();
+        let len = too_big(u16::try_from(bytes.len()))?;
+        let offset = too_big(u32::try_from(w.written))?;
 
         put32(&mut w, 0x0403_4b50)?;
         put16(&mut w, &[20, FLAGS, 0, 0, DATE])?;
@@ -165,9 +182,9 @@ pub fn pack(dir: &Path, out: &Path) -> Result<String, Error> {
         put32(&mut w, size)?;
         put16(&mut w, &[len, 0])?;
         w.write_all(bytes)?;
-        let copied = io::copy(&mut File::open(&path)?.take(counted), &mut w)?;
-        if copied != counted {
-            return Err(changed(name));
+        let copied = io::copy(&mut src.take(f.len), &mut w)?;
+        if copied != f.len {
+            return Err(changed(&f.path).into());
         }
 
         put32(&mut central, 0x0201_4b50)?;
@@ -180,12 +197,13 @@ pub fn pack(dir: &Path, out: &Path) -> Result<String, Error> {
         put32(&mut central, offset)?;
         central.write_all(bytes)?;
     }
-    let central_offset = w.written;
-    let count = files.len() as u16;
+    let central_offset = too_big(u32::try_from(w.written))?;
+    let count = too_big(u16::try_from(files.len()))?;
+    let central_size = too_big(u32::try_from(central.len()))?;
     w.write_all(&central)?;
     put32(&mut w, 0x0605_4b50)?;
     put16(&mut w, &[0, 0, count, count])?;
-    put32(&mut w, central.len() as u32)?;
+    put32(&mut w, central_size)?;
     put32(&mut w, central_offset)?;
     put16(&mut w, &[0])?;
     w.flush()?;

@@ -12,6 +12,10 @@ fn study(dir: &Path) {
     fs::write(dir.join("d/b.txt"), "").unwrap();
 }
 
+fn paths(files: &[tree::Found]) -> Vec<&str> {
+    files.iter().map(|f| f.path.as_str()).collect()
+}
+
 fn refused(e: Error) -> Vec<bundle::Problem> {
     match e {
         Error::Refused { problems, .. } => problems,
@@ -50,7 +54,7 @@ fn walk_sorts_by_bytes() {
     fs::write(t.path().join("B"), "").unwrap();
     fs::write(t.path().join("a.b"), "").unwrap();
     let (files, problems) = tree::walk(t.path()).unwrap();
-    assert_eq!(files, ["B", "a.b", "a/z", "b"]);
+    assert_eq!(paths(&files), ["B", "a.b", "a/z", "b"]);
     assert!(problems.is_empty());
 }
 
@@ -63,7 +67,7 @@ fn walk_refuses_unsafe_names() {
             continue;
         }
         let (files, problems) = tree::walk(t.path()).unwrap();
-        assert_eq!(files, ["ok.txt"], "{name:?}");
+        assert_eq!(paths(&files), ["ok.txt"], "{name:?}");
         assert_eq!(problems.len(), 1, "{name:?}");
         assert_eq!(problems[0].code, "E-PUB-001");
         assert!(problems[0].path.starts_with("x"), "{name:?}");
@@ -84,7 +88,7 @@ fn walk_refuses_non_utf8_names() {
     fs::write(t.path().join("ok.txt"), "").unwrap();
     fs::write(t.path().join(OsStr::from_bytes(b"bad\xff")), "").unwrap();
     let (files, problems) = tree::walk(t.path()).unwrap();
-    assert_eq!(files, ["ok.txt"]);
+    assert_eq!(paths(&files), ["ok.txt"]);
     assert_eq!(problems.len(), 1);
     assert_eq!(problems[0].code, "E-PUB-001");
     assert_eq!(problems[0].path, "bad\u{fffd}");
@@ -104,7 +108,7 @@ fn walk_refuses_links_without_reading_them() {
     symlink(outside.path().join("key"), t.path().join("data/key")).unwrap();
     symlink(outside.path().join("sub"), t.path().join("dirlink")).unwrap();
     let (files, problems) = tree::walk(t.path()).unwrap();
-    assert_eq!(files, ["data/ok.txt"]);
+    assert_eq!(paths(&files), ["data/ok.txt"]);
     let paths: Vec<_> = problems.iter().map(|p| p.path.as_str()).collect();
     assert_eq!(paths, ["data/key", "dirlink"]);
     assert!(problems.iter().all(|p| p.code == "E-PUB-001"));
@@ -163,7 +167,7 @@ fn refused_names_are_shown_escaped() {
             continue;
         }
         let (files, problems) = tree::walk(t.path()).unwrap();
-        assert!(files.is_empty(), "{shown}");
+        assert!(paths(&files).is_empty(), "{shown}");
         assert_eq!(problems.len(), 1, "{shown}");
         assert_eq!(problems[0].code, "E-PUB-001");
         assert_eq!(problems[0].path, shown);
@@ -210,4 +214,44 @@ fn check_reports_every_mismatch_at_once() {
     fs::write(t.path().join("c.txt"), "x").unwrap();
     fs::remove_file(t.path().join("d/b.txt")).unwrap();
     assert_eq!(refused(manifest::check(t.path()).unwrap_err()).len(), 3);
+}
+
+#[cfg(unix)]
+#[test]
+fn open_refuses_a_file_swapped_for_a_link() {
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("key"), "secret").unwrap();
+    let t = tempfile::tempdir().unwrap();
+    fs::write(t.path().join("a.txt"), "secret").unwrap();
+    let (files, _) = tree::walk(t.path()).unwrap();
+    fs::remove_file(t.path().join("a.txt")).unwrap();
+    std::os::unix::fs::symlink(outside.path().join("key"), t.path().join("a.txt")).unwrap();
+    let e = tree::open(t.path(), &files[0]).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(e.to_string(), "a.txt changed while the bundle was read");
+}
+
+#[cfg(unix)]
+#[test]
+fn open_refuses_a_parent_swapped_for_a_link() {
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("a.txt"), "secret").unwrap();
+    let t = tempfile::tempdir().unwrap();
+    fs::create_dir(t.path().join("d")).unwrap();
+    fs::write(t.path().join("d/a.txt"), "secret").unwrap();
+    let (files, _) = tree::walk(t.path()).unwrap();
+    fs::rename(t.path().join("d"), t.path().join("d.away")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), t.path().join("d")).unwrap();
+    let e = tree::open(t.path(), &files[0]).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn open_refuses_a_file_resized_after_the_walk() {
+    let t = tempfile::tempdir().unwrap();
+    fs::write(t.path().join("a.txt"), "hi").unwrap();
+    let (files, _) = tree::walk(t.path()).unwrap();
+    fs::write(t.path().join("a.txt"), "hi there").unwrap();
+    let e = tree::open(t.path(), &files[0]).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
 }

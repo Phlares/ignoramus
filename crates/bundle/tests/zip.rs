@@ -127,3 +127,17 @@ fn pack_refuses_unsafe_entries() {
     assert_eq!(problems[0].path, "link");
     assert!(!out.exists());
 }
+
+#[test]
+fn pack_files_refuses_a_file_changed_after_the_walk() {
+    let t = tempfile::tempdir().unwrap();
+    let o = tempfile::tempdir().unwrap();
+    study(t.path());
+    let (files, _) = bundle::tree::walk(t.path()).unwrap();
+    fs::write(t.path().join("a.txt"), "hi there\n").unwrap();
+    let out = o.path().join("b.zip");
+    match bundle::zip::pack_files(t.path(), &files, &out) {
+        Err(Error::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData),
+        other => panic!("expected Io, got {other:?}"),
+    }
+}
