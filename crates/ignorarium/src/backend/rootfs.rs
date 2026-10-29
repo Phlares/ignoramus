@@ -3,10 +3,17 @@
 //!
 //! One parser reads each archive (the `tar` crate, headers only) and the same code writes the
 //! tree. The box never calls the `tar` program and never uses the crate's unpack functions.
+//!
+//! One budget bounds an extraction (`WRITE_CAP` bytes). Every decoded byte read from a layer
+//! stream counts, in both passes, and so does `ENTRY` for every entry written (folder, file,
+//! symbolic link, hard link, and each parent folder a path implies) as an estimate of its inode
+//! and metadata. The one count bounds the data written, the decoding work and the number of
+//! entries. An image over the budget fails and publishes nothing.
 use crate::files::temp_beside;
 use crate::home::make_private_dir;
 use crate::store::{Store, StoreError};
 use serde::Deserialize;
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fmt;
@@ -25,10 +32,18 @@ const OPAQUE: &[u8] = b".wh..wh..opq";
 const MANIFEST_MAX: u64 = 16 << 20;
 /// A layer that starts with these bytes is gzip-compressed; it is decoded in process.
 const GZIP: &[u8] = &[0x1f, 0x8b];
-/// A layer that starts with these bytes is zstd-compressed; it is refused.
-const ZSTD: &[u8] = &[0x28, 0xb5, 0x2f, 0xfd];
-/// Most bytes one extraction may write.
+/// Layers that start with these bytes are refused, by compression name.
+const REFUSED: [(&str, &[u8]); 3] = [
+    ("zstd", &[0x28, 0xb5, 0x2f, 0xfd]),
+    ("xz", &[0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00]),
+    ("bzip2", b"BZh"),
+];
+/// Bytes read to tell a layer's compression: the longest magic (xz).
+const HEAD: u64 = 6;
+/// The extraction budget, in bytes (see the module doc).
 pub const WRITE_CAP: u64 = 32 << 30;
+/// What one entry written costs the budget.
+const ENTRY: u64 = 4 << 10;
 
 #[derive(Debug)]
 pub enum RootfsError {
@@ -84,8 +99,8 @@ pub fn from_store(store: &Store, store_digest: &str) -> Result<PathBuf, RootfsEr
     from_store_capped(store, store_digest, WRITE_CAP)
 }
 
-/// `from_store` with a limit of `cap` bytes of file data written. A layer that would write
-/// more fails the call and publishes nothing.
+/// `from_store` with an extraction budget of `cap` bytes. An image over it fails the call and
+/// publishes nothing.
 pub fn from_store_capped(
     store: &Store,
     store_digest: &str,
@@ -169,16 +184,65 @@ fn extract(blob: &Path, root: &Path, cap: u64) -> Result<(), RootfsError> {
         }
     }
     fs::create_dir(root)?;
-    let mut tree = Tree::new(root, cap);
+    let budget = Budget {
+        cap,
+        used: Cell::new(0),
+    };
+    let mut tree = Tree::new(root, &budget);
     for name in &names {
         for pass in [Pass::Whiteouts, Pass::Content] {
-            let seen = with_member(blob, name, |r| tree.layer(r, pass))?;
+            let seen =
+                with_member(blob, name, |r| tree.layer(r, pass)).map_err(|e| budget.explain(e))?;
             seen.ok_or_else(|| {
                 RootfsError::Format(format!("layer {} is missing", name.display()))
             })?;
         }
     }
     Ok(())
+}
+
+/// What one extraction has spent of its `cap`.
+struct Budget {
+    cap: u64,
+    used: Cell<u64>,
+}
+
+impl Budget {
+    /// Spend `n`; an error once the total is over the cap.
+    fn spend(&self, n: u64) -> io::Result<()> {
+        self.used.set(self.used.get().saturating_add(n));
+        if self.used.get() > self.cap {
+            return Err(io::Error::other("over the extraction budget"));
+        }
+        Ok(())
+    }
+
+    /// `e`, or the budget error when the budget is what failed (the tar reader hides the
+    /// cause of a read error).
+    fn explain(&self, e: RootfsError) -> RootfsError {
+        if self.used.get() <= self.cap {
+            return e;
+        }
+        RootfsError::Format(format!(
+            "the image is over the extraction budget of {} bytes (decoded layer bytes, read in \
+             two passes, plus {ENTRY} per entry written)",
+            self.cap
+        ))
+    }
+}
+
+/// A decoded layer stream that spends the budget on every byte it yields.
+struct Counted<'a, R> {
+    inner: R,
+    budget: &'a Budget,
+}
+
+impl<R: Read> Read for Counted<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.budget.spend(n as u64)?;
+        Ok(n)
+    }
 }
 
 /// A relative path of normal components. A leading `./` and empty parts drop out; `None`
@@ -217,30 +281,27 @@ struct Tree<'a> {
     root: &'a Path,
     links: BTreeSet<PathBuf>,
     files: BTreeSet<PathBuf>,
-    /// File bytes still allowed.
-    budget: u64,
-    cap: u64,
+    budget: &'a Budget,
 }
 
 impl<'a> Tree<'a> {
-    fn new(root: &'a Path, cap: u64) -> Tree<'a> {
+    fn new(root: &'a Path, budget: &'a Budget) -> Tree<'a> {
         Tree {
-            budget: cap,
-            cap,
             root,
             links: BTreeSet::new(),
             files: BTreeSet::new(),
+            budget,
         }
     }
 
     /// One pass over the layer's members.
     fn layer(&mut self, layer: &mut dyn Read, pass: Pass) -> Result<(), RootfsError> {
         let mut head = Vec::new();
-        layer.take(4).read_to_end(&mut head)?;
-        if head.starts_with(ZSTD) {
-            return Err(RootfsError::Format(
-                "a zstd-compressed layer is not supported".into(),
-            ));
+        layer.take(HEAD).read_to_end(&mut head)?;
+        if let Some((name, _)) = REFUSED.iter().find(|(_, magic)| head.starts_with(magic)) {
+            return Err(RootfsError::Format(format!(
+                "unsupported compression: {name}"
+            )));
         }
         let joined = io::Cursor::new(head.clone()).chain(layer);
         // Decoded here, so the same reader parses a plain and a gzip layer.
@@ -249,7 +310,10 @@ impl<'a> Tree<'a> {
         } else {
             Box::new(joined)
         };
-        let mut ar = Archive::new(stream);
+        let mut ar = Archive::new(Counted {
+            inner: stream,
+            budget: self.budget,
+        });
         for entry in ar.entries().map_err(tar_err)? {
             let mut entry = entry.map_err(tar_err)?;
             let Some(path) = normalize(&entry.path_bytes())? else {
@@ -300,23 +364,25 @@ impl<'a> Tree<'a> {
         }
         let mode = entry.header().mode().unwrap_or(0o644) & 0o777;
         match entry.header().entry_type() {
-            EntryType::Directory => self.dir(path, mode),
-            EntryType::Regular | EntryType::Continuous => self.file(entry, path, mode),
+            EntryType::Directory => self.dir(path, mode)?,
+            EntryType::Regular | EntryType::Continuous => self.file(entry, path, mode)?,
             EntryType::Symlink => {
                 let target = entry.link_name_bytes().ok_or_else(|| {
                     RootfsError::Format(format!("link {} has no target", path.display()))
                 })?;
-                self.symlink(path, &target)
+                self.symlink(path, &target)?
             }
             EntryType::Link => {
                 let target = entry.link_name_bytes().ok_or_else(|| {
                     RootfsError::Format(format!("link {} has no target", path.display()))
                 })?;
-                self.hard_link(path, &target)
+                self.hard_link(path, &target)?
             }
-            // Devices, pipes, sockets and the rest are not part of the root.
-            _ => Ok(()),
+            // Devices, pipes, sockets and the rest (GNU sparse files too, whose holes do not
+            // come from the counted stream) are not part of the root.
+            _ => return Ok(()),
         }
+        Ok(self.budget.spend(ENTRY)?)
     }
 
     fn full(&self, rel: &Path) -> PathBuf {
@@ -351,6 +417,7 @@ impl<'a> Tree<'a> {
                 }
                 Err(e) if e.kind() == io::ErrorKind::NotFound && create => {
                     fs::create_dir(self.full(&at))?;
+                    self.budget.spend(ENTRY)?;
                 }
                 Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
                 Err(e) => return Err(e.into()),
@@ -424,15 +491,7 @@ impl<'a> Tree<'a> {
             .custom_flags(libc::O_NOFOLLOW)
             .mode(mode)
             .open(self.full(rel))?;
-        // One byte over the budget shows the cap was crossed, and stops the copy there.
-        let copied = io::copy(&mut data.take(self.budget.saturating_add(1)), &mut f)?;
-        if copied > self.budget {
-            return Err(RootfsError::Format(format!(
-                "the image writes more than the {} byte limit",
-                self.cap
-            )));
-        }
-        self.budget -= copied;
+        io::copy(data, &mut f)?;
         self.files.insert(rel.to_path_buf());
         Ok(())
     }

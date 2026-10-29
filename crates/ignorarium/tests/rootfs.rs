@@ -3,7 +3,7 @@ mod common;
 use common::{Lab, edited, lab, named, skip_level1};
 use ignorarium::backend::level0::Level0;
 use ignorarium::backend::level1::Level1;
-use ignorarium::backend::rootfs::{RootfsError, from_store};
+use ignorarium::backend::rootfs::{RootfsError, from_store, from_store_capped};
 use ignorarium::backend::{Backend, Probe, RowJob, RowOutcome, Watch};
 use ignorarium::environ::Builder;
 use ignorarium::runner::{self, RunError, RunStatus, environment, prepare_with};
@@ -1004,17 +1004,24 @@ fn a_later_member_replacing_a_hard_link_target_leaves_the_link_on_the_old_file()
 }
 
 #[test]
-fn a_zstd_layer_is_refused() {
+fn a_zstd_xz_or_bzip2_layer_is_refused() {
     let (_h, store) = store();
-    let mut bytes = vec![0x28, 0xb5, 0x2f, 0xfd];
-    bytes.extend_from_slice(&[0; 600]);
-    let digest = image_of(&store, &[bytes]);
-    let err = from_store(&store, &digest).unwrap_err();
-    assert!(
-        matches!(&err, RootfsError::Format(m) if m.contains("zstd")),
-        "{err}"
-    );
-    assert!(!store.root.join("rootfs").join(&digest).exists());
+    for (name, magic) in [
+        ("zstd", &[0x28, 0xb5, 0x2f, 0xfd][..]),
+        ("xz", &[0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00][..]),
+        ("bzip2", &b"BZh9"[..]),
+    ] {
+        let mut bytes = magic.to_vec();
+        bytes.extend_from_slice(&[0; 600]);
+        let digest = image_of(&store, &[bytes]);
+        let err = from_store(&store, &digest).unwrap_err();
+        assert!(matches!(&err, RootfsError::Format(_)), "{name}: {err}");
+        assert_eq!(
+            err.to_string(),
+            format!("bad image archive: unsupported compression: {name}")
+        );
+        assert!(!store.root.join("rootfs").join(&digest).exists());
+    }
 }
 
 fn gzip(bytes: &[u8]) -> Vec<u8> {
@@ -1084,26 +1091,42 @@ fn a_hostile_gzip_layer_is_judged_like_a_plain_one() {
     refused(&store, &layers, &host);
 }
 
+/// The image is refused for its extraction budget at `cap`, and neither its tree nor a temp
+/// folder for it is left in the store.
+fn over_budget(store: &Store, digest: &str, cap: u64) {
+    let err = from_store_capped(store, digest, cap).unwrap_err();
+    assert!(matches!(&err, RootfsError::Format(_)), "{err}");
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "bad image archive: the image is over the extraction budget of {cap} bytes \
+             (decoded layer bytes, read in two passes, plus 4096 per entry written)"
+        )
+    );
+    let left: Vec<String> = fs::read_dir(store.root.join("rootfs"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(digest))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+}
+
 #[test]
 fn an_extraction_over_the_write_cap_is_refused_and_publishes_nothing() {
-    use ignorarium::backend::rootfs::from_store_capped;
     let (_h, store) = store();
+    // Each pass reads two headers, two data blocks and the end block: 5 * 512 = 2560.
+    // Written: the folder `usr` the paths imply, `usr/a`, `usr/b`: 3 * 4096 = 12288.
+    // 2 * 2560 + 12288 = 17408.
     let layers = [layer_bytes(&[
         M::File("usr/a", "12345"),
         M::File("usr/b", "678"),
     ])];
-    // Exactly the cap is allowed; one byte under is not.
     let digest = image_of(&store, &layers);
-    let err = from_store_capped(&store, &digest, 7).unwrap_err();
-    assert!(
-        matches!(&err, RootfsError::Format(m) if m.contains("more than the 7 byte limit")),
-        "{err}"
-    );
-    let rootfs = store.root.join("rootfs");
-    assert!(!rootfs.join(&digest).exists());
-    assert_eq!(fs::read_dir(&rootfs).unwrap().count(), 0);
-    assert!(from_store_capped(&store, &digest, 8).is_ok());
-    // The cap counts the whole image, across layers.
+    over_budget(&store, &digest, 17407);
+    assert_eq!(fs::read_dir(store.root.join("rootfs")).unwrap().count(), 0);
+    assert!(from_store_capped(&store, &digest, 17408).is_ok());
+    // The budget counts the whole image, across layers: layer 1 costs 2 * 1536 + 2 * 4096 =
+    // 11264, layer 2 costs 2 * 1536 + 4096 = 7168 (the folder exists), 18432 in all.
     let two = image_of(
         &store,
         &[
@@ -1111,25 +1134,67 @@ fn an_extraction_over_the_write_cap_is_refused_and_publishes_nothing() {
             layer_bytes(&[M::File("usr/b", "5678")]),
         ],
     );
-    assert!(from_store_capped(&store, &two, 7).is_err());
-    assert!(from_store_capped(&store, &two, 8).is_ok());
+    over_budget(&store, &two, 18431);
+    assert!(from_store_capped(&store, &two, 18432).is_ok());
 }
 
 #[test]
 fn a_compression_bomb_stops_at_the_cap() {
-    use ignorarium::backend::rootfs::from_store_capped;
     let (_h, store) = store();
     let big = "0".repeat(4 << 20);
     let bomb = gzip(&layer_bytes(&[M::File("usr/zeros", &big)]));
     assert!(bomb.len() < 100_000, "{}", bomb.len());
     let digest = image_of(&store, &[bomb]);
-    let err = from_store_capped(&store, &digest, 1 << 20).unwrap_err();
-    assert!(
-        matches!(&err, RootfsError::Format(m) if m.contains("byte limit")),
-        "{err}"
-    );
-    assert!(!store.root.join("rootfs").join(&digest).exists());
+    over_budget(&store, &digest, 1 << 20);
     assert_eq!(fs::read_dir(store.root.join("rootfs")).unwrap().count(), 0);
+}
+
+#[test]
+fn many_empty_entries_are_stopped_by_the_entry_charge() {
+    let (_h, store) = store();
+    let names: Vec<String> = (0..1000).map(|i| format!("usr/f{i:04}")).collect();
+    let members: Vec<M> = names.iter().map(|n| M::File(n, "")).collect();
+    let plain = layer_bytes(&members);
+    let layer = gzip(&plain);
+    assert!(layer.len() * 20 < plain.len(), "{}", layer.len());
+    let digest = image_of(&store, &[layer]);
+    // The decoded bytes, 2 * (1000 * 512 + 512) = 1025024, fit in 2 MiB; the 1001 entries
+    // written (1000 files and `usr`) at 4096 each do not.
+    over_budget(&store, &digest, 2 << 20);
+    assert!(from_store_capped(&store, &digest, 1_025_024 + 1001 * 4096).is_ok());
+}
+
+#[test]
+fn a_bomb_of_skipped_members_stops_in_the_whiteout_pass() {
+    let (_h, store) = store();
+    let big = "0".repeat(4 << 20);
+    // The content pass would refuse `etc/p` (its target is outside the kept folders) before
+    // it reads `var/zeros`; the budget error shows the whiteout pass stopped the read.
+    let bomb = gzip(&layer_bytes(&[
+        M::Hard("etc/p", "var/x", "box"),
+        M::File("var/zeros", &big),
+    ]));
+    assert!(bomb.len() < 100_000, "{}", bomb.len());
+    let digest = image_of(&store, &[bomb]);
+    over_budget(&store, &digest, 1 << 20);
+}
+
+#[test]
+fn folders_a_deep_path_implies_are_charged_as_entries() {
+    let (_h, store) = store();
+    let deep = format!("usr/{}f", "d/".repeat(200));
+    let mut b = tar::Builder::new(Vec::new());
+    let mut h = tar::Header::new_gnu();
+    h.set_mode(0o644);
+    h.set_size(0);
+    b.append_data(&mut h, &deep, &b""[..]).unwrap();
+    let digest = image_of(&store, &[b.into_inner().unwrap()]);
+    // Each pass reads the long-name header and its name block, the file header and the end
+    // block: 4 * 512. Written: the file and 201 folders (`usr` and 200 `d`).
+    let cost = 2 * 4 * 512 + 202 * 4096;
+    over_budget(&store, &digest, cost - 1);
+    let root = from_store_capped(&store, &digest, cost).unwrap();
+    assert!(root.join(&deep).is_file());
 }
 
 #[test]
