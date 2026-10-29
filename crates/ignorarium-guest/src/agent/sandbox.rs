@@ -14,6 +14,7 @@
 //!
 //! The root is a tmpfs, remounted read-only once it holds all of the above.
 use super::{PAYLOAD_GID, PAYLOAD_UID};
+use crate::proto::{GUEST_IN, GUEST_OUT};
 use rustix::fs::{CWD, FileType, Mode, makedev, mknodat};
 use rustix::io::Errno;
 use rustix::mount::{MountFlags, mount, mount_bind, mount_remount};
@@ -65,13 +66,13 @@ pub fn build(env_root: &Path, sandbox: &Path, inputs: &Path, out_bytes: u64) -> 
         }
     }
     let dir = |name: &str| -> io::Result<PathBuf> {
-        let p = sandbox.join(name);
+        let p = sandbox.join(name.trim_start_matches('/'));
         fs::create_dir(&p)?;
         Ok(p)
     };
-    mount_fs(inputs, &dir("in")?, "ext4", ro | no_suid_dev, "")?;
+    mount_fs(inputs, &dir(GUEST_IN)?, "ext4", ro | no_suid_dev, "")?;
     let out = format!("uid={PAYLOAD_UID},gid={PAYLOAD_GID},mode=0755,size={out_bytes}");
-    tmpfs(&dir("out")?, no_suid_dev, &out)?;
+    tmpfs(&dir(GUEST_OUT)?, no_suid_dev, &out)?;
     let proc_flags = no_suid_dev | MountFlags::NOEXEC;
     mount_fs("proc", &dir("proc")?, "proc", proc_flags, "hidepid=2")?;
     let dev = dir("dev")?;

@@ -7,8 +7,8 @@ pub mod steps;
 
 use crate::pack;
 use crate::proto::{
-    CONTROL_PORT, HOST_CID, Job, Report, SERIAL_IN, SERIAL_OUT, SERIAL_ROOTFS, SelfTest, ToHost,
-    read_frame, seed_from_hex, write_frame,
+    CONTROL_PORT, GUEST_OUT, HOST_CID, Job, Report, SERIAL_IN, SERIAL_OUT, SERIAL_ROOTFS, SelfTest,
+    ToHost, read_frame, seed_from_hex, write_frame,
 };
 use crate::sys::{kill_all_others, vsock_connect};
 use crate::tree::tree_hash;
@@ -130,7 +130,7 @@ fn row(chan: &mut File, out_disk: &mut File, out_bytes: u64) -> io::Result<Repor
         let ran = payload::run_as(&job, Some((PAYLOAD_UID, PAYLOAD_GID)))?;
         kill_all_others()?;
         reap_all()?;
-        let out = Path::new("/out");
+        let out = Path::new(GUEST_OUT);
         let hash = tree_hash(out)?;
         let mut w = BufWriter::new(out_disk);
         pack::write(out, &mut w, out_bytes)?;

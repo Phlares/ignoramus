@@ -234,10 +234,10 @@ pub fn unpack(r: &mut impl Read, dest: &Path, limit: u64) -> io::Result<()> {
         {
             return Err(entry("parent is not an earlier directory"));
         }
-        if seen.insert(path.clone(), kind[0]).is_some() {
+        let to = dest.join(OsStr::from_bytes(&path));
+        if seen.insert(path, kind[0]).is_some() {
             return Err(entry("duplicate path"));
         }
-        let to = dest.join(OsStr::from_bytes(&path));
         if to.as_os_str().len() >= MAX_PATH {
             return Err(entry("path with the destination is too long"));
         }

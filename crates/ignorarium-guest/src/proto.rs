@@ -6,6 +6,9 @@ pub const CONTROL_PORT: u32 = 7201;
 pub const HOST_CID: u32 = 2;
 pub const GUEST_CID: u32 = 3;
 pub const MAX_FRAME: usize = 1 << 20;
+/// Where the payload sees the input and output trees.
+pub const GUEST_IN: &str = "/in";
+pub const GUEST_OUT: &str = "/out";
 pub const SEED_ENV: &str = "IGNORARIUM_SEED";
 pub const SERIAL_ROOTFS: &str = "ign-rootfs";
 pub const SERIAL_IN: &str = "ign-in";
