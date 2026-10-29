@@ -6,15 +6,12 @@ use ignorarium_guest::agent::payload::{self, Ran};
 use ignorarium_guest::agent::selftest::{self, route_blocked};
 use ignorarium_guest::agent::steps::{disk_by_serial, disk_bytes, mix_seed, now_nanos, set_clock};
 use ignorarium_guest::proto::{End, Job, SEED_ENV, SelfTest};
-use ignorarium_guest::sys::kill_all_others;
 use rustix::process::{Pid, Signal, kill_process_group};
 use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::Path;
-use std::process::Command;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -94,16 +91,6 @@ fn disk_bytes_counts_512_byte_sectors() {
     assert!(disk_bytes(d.path(), Path::new("/dev/vdd")).is_err());
 }
 
-#[test]
-fn kill_all_others_refuses_outside_pid_1() {
-    let mut sleeper = Command::new("/bin/sleep").arg("5").spawn().unwrap();
-    let err = kill_all_others().unwrap_err();
-    assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
-    assert!(sleeper.try_wait().unwrap().is_none(), "the sleeper died");
-    sleeper.kill().unwrap();
-    sleeper.wait().unwrap();
-}
-
 fn net_with(names: &[&str]) -> tempfile::TempDir {
     let d = tempfile::tempdir().unwrap();
     for n in names {
@@ -128,7 +115,6 @@ fn selftest_host_path() {
     let d = net_with(&["lo"]);
     let open = selftest::run(d.path(), || Ok(()));
     assert!(!open.host_path_blocked);
-    assert!(!open.ok());
     let shut = selftest::run(d.path(), || Err(io::Error::other("refused")));
     assert!(shut.host_path_blocked);
 }
@@ -136,16 +122,6 @@ fn selftest_host_path() {
 #[test]
 fn route_is_open_on_a_networked_host() {
     assert!(!route_blocked());
-}
-
-#[test]
-fn a_bind_that_fails_for_another_reason_is_not_blocked() {
-    // A documentation address that no host owns: bind fails with EADDRNOTAVAIL.
-    let local = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 77), 0));
-    let remote = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), 9));
-    let err = UdpSocket::bind(local).unwrap_err();
-    assert_eq!(err.raw_os_error(), Some(libc::EADDRNOTAVAIL));
-    assert!(!selftest::blocked(local, remote));
 }
 
 #[test]

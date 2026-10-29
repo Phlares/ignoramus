@@ -57,15 +57,35 @@ pub fn children_cpu_seconds() -> io::Result<f64> {
 /// Sends SIGKILL to every process but this one. Only PID 1 may call it: there it reaches
 /// every other process of the guest, and outside a guest it would reach far more.
 pub fn kill_all_others() -> io::Result<()> {
-    if std::process::id() != 1 {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "only PID 1 may kill all other processes",
-        ));
-    }
+    may_kill_all(std::process::id())?;
     // SAFETY: kill(2) takes no pointers.
     match check(unsafe { libc::kill(-1, libc::SIGKILL) }) {
         Err(e) if e.raw_os_error() == Some(libc::ESRCH) => Ok(()),
         r => r.map(drop),
+    }
+}
+
+/// The guard of `kill_all_others`, apart so that a test never sends the kill.
+fn may_kill_all(pid: u32) -> io::Result<()> {
+    if pid == 1 {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "only PID 1 may kill all other processes",
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::may_kill_all;
+
+    #[test]
+    fn only_pid_1_may_kill_all_others() {
+        assert!(may_kill_all(1).is_ok());
+        for pid in [0, 2, 1000] {
+            let e = may_kill_all(pid).unwrap_err();
+            assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+        }
     }
 }

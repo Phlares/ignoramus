@@ -29,10 +29,26 @@ pub fn route_blocked() -> bool {
     blocked((Ipv4Addr::UNSPECIFIED, 0).into(), v4) && blocked((Ipv6Addr::UNSPECIFIED, 0).into(), v6)
 }
 
-pub fn blocked(local: SocketAddr, remote: SocketAddr) -> bool {
+fn blocked(local: SocketAddr, remote: SocketAddr) -> bool {
     match UdpSocket::bind(local) {
         // The guest kernel has no IPv6, so that family cannot be used at all.
         Err(e) => e.raw_os_error() == Some(libc::EAFNOSUPPORT),
         Ok(s) => s.connect(remote).is_err(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::blocked;
+    use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+
+    #[test]
+    fn a_bind_that_fails_for_another_reason_is_not_blocked() {
+        // A documentation address that no host owns: bind fails with EADDRNOTAVAIL.
+        let local = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 77), 0));
+        let remote = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), 9));
+        let err = UdpSocket::bind(local).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::EADDRNOTAVAIL));
+        assert!(!blocked(local, remote));
     }
 }

@@ -138,9 +138,7 @@ fn deep_pack() -> Vec<u8> {
 
 #[test]
 fn hostile_packs_are_refused() {
-    let mut long_name = vec![b'a'; 4097];
-    long_name.push(0);
-    long_name.pop();
+    let long_name = vec![b'a'; 4097];
     let mut past_end = entry(b'f', b"a");
     past_end.extend_from_slice(&100u64.to_be_bytes());
     past_end.extend_from_slice(b"short");

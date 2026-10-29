@@ -212,7 +212,9 @@ fn the_payload_has_no_privileges() {
     assert_eq!(row.out("nnp"), "NoNewPrivs:\t1\n");
     assert_eq!(row.out("pid1"), "hidden\n");
     assert_ne!(row.out("fd1"), "0\n", "PID 1's descriptors are listable");
-    assert_ne!(row.out("mount"), "0\n", "the payload can mount");
+    // 127 would mean no `mount` program, so the check would prove nothing.
+    let mount: i32 = row.out("mount").trim().parse().unwrap();
+    assert!(![0, 127].contains(&mount), "mount exited {mount}");
     assert_eq!(row.out("x"), "");
 }
 
