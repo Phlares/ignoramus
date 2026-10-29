@@ -392,6 +392,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ignorarium-guest"
+version = "0.0.1"
+dependencies = [
+ "hex",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

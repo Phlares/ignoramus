@@ -15,6 +15,7 @@ Runtime:
 - `regex`: matches text patterns in checks.
 - `rustix`: kills a process group, waits on a child with `waitid` and reads the user id, through safe interfaces.
 - `libc`: reads a child's CPU time with `wait4` and installs signal handlers with `sigaction`; only `src/sys.rs` calls it.
+- `libc`: gives the `O_NOFOLLOW` and `O_NONBLOCK` flags for opening output files.
 
 Development:
 
