@@ -81,16 +81,31 @@ pub fn builtin() -> &'static [Pattern] {
     })
 }
 
+/// True when `p` matches `s` outside its allow list. The search resumes at the end
+/// of each reported text, so a match never hides the one after it.
+fn finds(p: &Pattern, s: &str) -> bool {
+    let mut at = 0;
+    while let Some(c) = p.regex.captures_at(s, at) {
+        let Some(hit) = c.name("hit").or_else(|| c.get(0)) else {
+            return false;
+        };
+        if !p.allow.iter().any(|a| a.is_match(hit.as_str())) {
+            return true;
+        }
+        // An empty hit would not advance.
+        at = hit.end().max(at + 1);
+        if at > s.len() {
+            return false;
+        }
+    }
+    false
+}
+
 /// The kinds of pattern that match `s`, once each, in pattern order.
 pub fn scan_str<'a>(s: &str, patterns: &'a [Pattern]) -> Vec<&'a str> {
     patterns
         .iter()
-        .filter(|p| {
-            p.regex.captures_iter(s).any(|c| {
-                let text = c.get(1).or_else(|| c.get(0)).map_or("", |m| m.as_str());
-                !p.allow.iter().any(|a| a.is_match(text))
-            })
-        })
+        .filter(|p| finds(p, s))
         .map(|p| p.kind.as_str())
         .collect()
 }

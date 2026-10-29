@@ -57,7 +57,26 @@ fn each_secret_kind_is_found() {
     assert_eq!(kinds(&gh()), ["github-token"]);
     assert_eq!(kinds(key_header()), ["private-key"]);
     assert_eq!(kinds("password = hunter2hunter2"), ["generic-secret"]);
-    assert_eq!(kinds("API_KEY: abcdefgh"), ["generic-secret"]);
+    assert_eq!(kinds("API_KEY: abcd1234"), ["generic-secret"]);
+    assert_eq!(kinds("api_key = sk9fj3k2l1"), ["generic-secret"]);
+    assert_eq!(kinds(r#""password": "hunter2hunter2""#), ["generic-secret"]);
+}
+
+#[test]
+fn generic_secret_needs_a_letter_and_a_digit_and_a_literal_value() {
+    assert!(kinds("token: 100000000").is_empty());
+    assert!(kinds("password = abcdefghij").is_empty());
+    assert!(kinds("password = ${DB_PASSWORD}").is_empty());
+    assert!(kinds("password = $DB_PASS1234").is_empty());
+    assert!(kinds("password = <your-pass1>").is_empty());
+    assert!(kinds("password = {pass1234}").is_empty());
+    assert!(kinds("password = env:PASS1234").is_empty());
+    assert_eq!(kinds("password = a1234567"), ["generic-secret"]);
+}
+
+#[test]
+fn same_kind_twice_is_one_finding() {
+    assert_eq!(kinds(&format!("{} {}", aws(), aws())), ["aws-key"]);
 }
 
 #[test]
@@ -77,11 +96,20 @@ fn email_rules() {
     assert!(kinds(&email("ana", "corp.test")).is_empty());
     assert_eq!(kinds(&email("ana", "example.organization")), ["email"]);
     assert_eq!(kinds(&email("ana", "testing.io")), ["email"]);
+    assert!(kinds(&email("ana", "example.net")).is_empty());
+    assert_eq!(kinds(&email("someone", "example.org.evil.com")), ["email"]);
+    let (a, b) = (email("x", "gmail.com"), email("a", "example.org"));
+    assert_eq!(kinds(&format!("{a} example.org")), ["email"]);
+    assert_eq!(kinds(&format!("{b} {a}")), ["email"]);
+    assert!(kinds(&format!("{b} {b}")).is_empty());
 }
 
 #[test]
 fn ipv4_rules() {
     assert_eq!(kinds(&ip("host 10_1_2_3")), ["ipv4"]);
+    assert_eq!(kinds(&ip("127_0_0_1 10_1_2_3")), ["ipv4"]);
+    assert_eq!(kinds(&ip("127_0_0_1,10_1_2_3")), ["ipv4"]);
+    assert_eq!(kinds(&ip("127_0_0_1. 10_1_2_3")), ["ipv4"]);
     assert_eq!(kinds(&ip("host 10_1_2_3.")), ["ipv4"]);
     assert_eq!(kinds(&ip("255_255_255_255")), ["ipv4"]);
     assert_eq!(kinds(&ip("10_0_0_0")), ["ipv4"]);
@@ -101,8 +129,14 @@ fn ipv4_rules() {
 fn phone_rules() {
     assert_eq!(kinds("call (555) 010-0199"), ["phone"]);
     assert_eq!(kinds("555-010-0199"), ["phone"]);
+    assert_eq!(kinds("555.010.0199"), ["phone"]);
     assert_eq!(kinds("+1 555.010.0199"), ["phone"]);
+    assert_eq!(kinds("+1 555 010 0199"), ["phone"]);
     assert!(kinds("555-010-019").is_empty());
+    assert!(kinds("batch sizes 128 256 1024").is_empty());
+    assert!(kinds("128-256-1024").is_empty());
+    assert!(kinds("seeds 100 200 3000").is_empty());
+    assert!(kinds("seeds 555 010 0199").is_empty());
 }
 
 #[test]
@@ -195,4 +229,44 @@ fn nested_array_paths_and_two_kinds() {
             "question.population"
         ]
     );
+}
+
+#[test]
+fn error_messages_name_the_problem() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("p.toml");
+    let msg = |text: &str| {
+        std::fs::write(&f, text).unwrap();
+        scan::load(&f).unwrap_err().to_string()
+    };
+    assert!(msg("x = 1").starts_with("scan patterns are not valid: "));
+    assert_eq!(
+        msg("[[pattern]]
+kind = \"broken\"
+regex = '(['
+")
+        .split(':')
+        .next(),
+        Some("scan pattern broken")
+    );
+    let io = scan::load(&dir.path().join("none.toml")).unwrap_err();
+    assert!(io.to_string().starts_with("cannot read scan patterns: "));
+}
+
+#[test]
+fn a_named_hit_group_is_the_reported_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("p.toml");
+    std::fs::write(
+        &f,
+        "[[pattern]]
+kind = \"k\"
+regex = '(a)(?P<hit>b+)c'
+allow = ['^bb$']
+",
+    )
+    .unwrap();
+    let p = scan::load(&f).unwrap();
+    assert!(scan::scan_str("abbc", &p).is_empty());
+    assert_eq!(scan::scan_str("abbc abc", &p), ["k"]);
 }
