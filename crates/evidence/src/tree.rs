@@ -4,8 +4,11 @@ use crate::Error;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Verdict {
+    /// Level of each hypothesis, in the order of the weights.
     pub levels: Vec<f64>,
+    /// Whether each hypothesis is rejected, in the order of the weights.
     pub rejected: Vec<bool>,
+    /// The merged tree e-value.
     pub e_value: f64,
 }
 
@@ -14,8 +17,8 @@ pub struct Verdict {
 /// that did not gets 0. `e_value` is the weighted mean of the e-values that ran.
 ///
 /// Validity needs one condition: whether a hypothesis ran must not depend on the data
-/// its e-value comes from. The box runs triggers on spawn seeds and tests on disjoint
-/// report seeds.
+/// its e-value comes from. For example, decide which hypotheses run from one set of
+/// seeds and compute their e-values from a disjoint set.
 pub fn decide(alpha: f64, weights: &[f64], e_values: &[Option<f64>]) -> Result<Verdict, Error> {
     if !(0.0..=1.0).contains(&alpha) {
         return Err(Error::Parameter("alpha"));
@@ -55,7 +58,7 @@ pub fn decide(alpha: f64, weights: &[f64], e_values: &[Option<f64>]) -> Result<V
             }
         })
         .collect();
-    let rejected = levels
+    let rejected: Vec<bool> = levels
         .iter()
         .zip(e_values)
         .map(|(&l, e)| l > 0.0 && e.is_some_and(|e| e >= 1.0 / l))
@@ -63,8 +66,16 @@ pub fn decide(alpha: f64, weights: &[f64], e_values: &[Option<f64>]) -> Result<V
     let e_value = weights
         .iter()
         .zip(e_values)
-        .filter_map(|(w, e)| e.map(|e| w / ran_weight * e))
-        .sum();
+        .filter_map(|(w, e)| e.map(|e| w * e))
+        .sum::<f64>()
+        / ran_weight;
+    // Rounding: in exact arithmetic the mean already reaches 1/alpha when any
+    // hypothesis is rejected; the clamp only fixes the last bit.
+    let e_value = if rejected.iter().any(|&r| r) {
+        e_value.max(1.0 / alpha)
+    } else {
+        e_value
+    };
     Ok(Verdict {
         levels,
         rejected,

@@ -107,3 +107,36 @@ fn rejects_bad_inputs() {
     assert!(decide(1.0, &W, &e).is_ok());
     assert!(decide(0.0, &W, &e).is_ok());
 }
+
+#[test]
+fn tiny_weight_share_does_not_make_a_nan_e_value() {
+    let v = decide(
+        ALPHA,
+        &[5e-324, 1e300, 1.0],
+        &[Some(f64::INFINITY), Some(1.0), Some(1.0)],
+    )
+    .unwrap();
+    assert_eq!(v.e_value, f64::INFINITY);
+}
+
+#[test]
+fn a_rejection_always_reaches_one_over_alpha() {
+    let alpha = 0.05;
+    let level = alpha * 1.0 / 3.0;
+    let v = decide(alpha, &[1.0; 3], &[Some(1.0 / level), Some(0.0), Some(0.0)]).unwrap();
+    assert!(v.rejected[0]);
+    assert!(v.e_value >= 1.0 / 0.05, "{}", v.e_value);
+
+    for alpha in [0.05, 0.005, 0.01, 0.1] {
+        for w in [[1.0, 1.0, 1.0], [3.0, 1.0, 1.0], [1.0, 2.0, 7.0]] {
+            let total: f64 = w.iter().sum();
+            for k in 0..3 {
+                let mut e = [Some(0.0); 3];
+                e[k] = Some(1.0 / (alpha * w[k] / total));
+                let v = decide(alpha, &w, &e).unwrap();
+                assert!(v.rejected[k], "{alpha} {w:?} {k}");
+                assert!(v.e_value >= 1.0 / alpha, "{alpha} {w:?} {k}: {}", v.e_value);
+            }
+        }
+    }
+}
