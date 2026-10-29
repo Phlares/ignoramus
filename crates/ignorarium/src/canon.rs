@@ -21,6 +21,12 @@ pub fn to_canonical(v: &serde_json::Value) -> Result<Vec<u8>, CanonError> {
     serde_json::to_vec(v).map_err(CanonError)
 }
 
+/// `to_canonical` of any serializable value.
+pub fn canonical_of<T: serde::Serialize>(v: &T) -> std::io::Result<Vec<u8>> {
+    let v = serde_json::to_value(v).map_err(std::io::Error::other)?;
+    to_canonical(&v).map_err(std::io::Error::other)
+}
+
 pub fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }

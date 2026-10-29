@@ -85,11 +85,7 @@ pub fn run(template: &str, id: &str) -> Run {
         other => CliError::usage(format!("cannot write {}: {other}", file.display())),
     })?;
     out(&format!("created {}\n", file.display()))?;
-    Ok(Done {
-        code: 0,
-        spec_hash: None,
-        leaf: None,
-    })
+    Ok(Done::exit(0))
 }
 
 #[cfg(test)]

@@ -42,8 +42,7 @@ pub fn run(ctx: &Ctx, phase: &str, files: &[PathBuf]) -> Run {
         .map_err(|e| CliError::usage(format!("planlog: {e}")))?;
     out(&format!("leaf {index}\n"))?;
     Ok(Done {
-        code: 0,
-        spec_hash: None,
         leaf: Some(index),
+        ..Done::exit(0)
     })
 }

@@ -16,13 +16,8 @@ pub fn run(ctx: &Ctx, study: Option<&str>) -> Run {
     let mut failed = Vec::new();
     match &key {
         None if study.is_none() && ["planlog", "testlog"].iter().all(|n| empty(home, n)) => {
-            out("nothing to verify: no box key and no log entries
-")?;
-            return Ok(Done {
-                code: 0,
-                spec_hash: None,
-                leaf: None,
-            });
+            out("nothing to verify: no box key and no log entries\n")?;
+            return Ok(Done::exit(0));
         }
         None => failed.push("no box key".to_string()),
         Some(k) => {
@@ -32,14 +27,12 @@ pub fn run(ctx: &Ctx, study: Option<&str>) -> Run {
                 match result {
                     Ok(v) => {
                         out(&format!(
-                            "{name}: {} signed, {} leaves
-",
+                            "{name}: {} signed, {} leaves\n",
                             v.signed, v.leaves
                         ))?;
                         if v.leaves > v.signed {
                             out(&format!(
-                                "warning: {name} has {} unsigned leaves; the next append signs them
-",
+                                "warning: {name} has {} unsigned leaves; the next append signs them\n",
                                 v.leaves - v.signed
                             ))?;
                         }
@@ -59,20 +52,13 @@ pub fn run(ctx: &Ctx, study: Option<&str>) -> Run {
             failed.push(format!("no study named {id:?} in the box"));
         } else if let Some(k) = &key {
             match records::verify(&dir.join("records.jsonl"), &k.verifying_key()) {
-                Ok(n) => out(&format!(
-                    "study {id}: {n} records
-"
-                ))?,
+                Ok(n) => out(&format!("study {id}: {n} records\n"))?,
                 Err(e) => failed.push(format!("study {id}: {e}")),
             }
         }
     }
     if failed.is_empty() {
-        Ok(Done {
-            code: 0,
-            spec_hash: None,
-            leaf: None,
-        })
+        Ok(Done::exit(0))
     } else {
         Err(CliError::refuse(format!(
             "verify failed: {}",

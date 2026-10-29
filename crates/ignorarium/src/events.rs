@@ -1,5 +1,5 @@
 //! Event log: one canonical JSON line per event.
-use crate::canon::to_canonical;
+use crate::canon::canonical_of;
 use crate::files::{Tail, locked_append};
 use serde::Serialize;
 use std::io;
@@ -19,8 +19,7 @@ pub struct Event {
 /// Append one event line under an exclusive lock. A log that ends in a
 /// partial line gets a LF first, so the fragment stays its own line.
 pub fn emit(path: &Path, e: Event) -> Result<(), io::Error> {
-    let mut line = to_canonical(&serde_json::to_value(&e).map_err(io::Error::other)?)
-        .map_err(io::Error::other)?;
+    let mut line = canonical_of(&e)?;
     line.push(b'\n');
     locked_append(path, |tail| {
         if matches!(tail, Tail::Partial(_)) {
@@ -29,6 +28,7 @@ pub fn emit(path: &Path, e: Event) -> Result<(), io::Error> {
         Ok::<_, io::Error>(line)
     })
 }
+
 fn random_hex<const N: usize>() -> String {
     let mut b = [0u8; N];
     getrandom::fill(&mut b).expect("operating system random source");

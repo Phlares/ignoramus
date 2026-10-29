@@ -1,7 +1,7 @@
 //! The box signing key: 32 raw bytes in `keys/box.ed25519`.
 use crate::files::{WriteOnceError, write_once};
 use crate::home::Home;
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use std::{fs, io};
 
 #[derive(Debug)]
@@ -67,4 +67,17 @@ pub fn load_or_create(home: &Home) -> Result<SigningKey, KeyError> {
         Err(WriteOnceError::Io(e)) => return Err(e.into()),
     }
     read_key(&path)
+}
+
+/// Hex of the ed25519 signature over `bytes`.
+pub fn sign_hex(key: &SigningKey, bytes: &[u8]) -> String {
+    hex::encode(key.sign(bytes).to_bytes())
+}
+
+/// True when `sig_hex` is a valid signature over `bytes`.
+pub fn verify_hex(key: &VerifyingKey, bytes: &[u8], sig_hex: &str) -> bool {
+    hex::decode(sig_hex)
+        .ok()
+        .and_then(|b| Signature::from_slice(&b).ok())
+        .is_some_and(|sig| key.verify(bytes, &sig).is_ok())
 }

@@ -48,6 +48,17 @@ pub struct Done {
     pub leaf: Option<u64>,
 }
 
+impl Done {
+    /// A verb that read no spec and added no leaf.
+    pub fn exit(code: i32) -> Self {
+        Done {
+            code,
+            spec_hash: None,
+            leaf: None,
+        }
+    }
+}
+
 type Run = Result<Done, CliError>;
 
 /// State shared by the verbs.
@@ -193,11 +204,7 @@ where
     };
     let done = cli.verb.run(&ctx).unwrap_or_else(|e| {
         eprintln!("error: {}", e.msg);
-        Done {
-            code: e.code,
-            spec_hash: None,
-            leaf: None,
-        }
+        Done::exit(e.code)
     });
     if let Err(e) = emit(&ctx, name, &done) {
         eprintln!("warning: cannot write the event log: {e}");

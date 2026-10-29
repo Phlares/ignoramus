@@ -1,10 +1,9 @@
 //! `check`: load a spec, run every rule, and report. Shared with `review`.
 use super::{CliError, Ctx, Done, Run, out};
 use crate::diag::{Diagnostic, Severity, render_human};
-use crate::estimate::{Estimate, estimate, units};
+use crate::estimate::{Estimate, defaults_json, estimate, units};
 use crate::planlog::store::PlanLog;
-use crate::prior::file_hashes;
-use crate::prior::{PriorError, PriorUse};
+use crate::prior::{PriorError, PriorUse, file_hashes};
 use crate::rules::{self, CheckCtx, input_bytes};
 use crate::spec::{self, LoadError, model::Spec};
 use serde_json::{Value, json};
@@ -87,11 +86,11 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
     let (value, filled, diags) = rules::check_all(&raw.value, rules::builtin(), &cc);
     let mut a = Assessed {
         hash: raw.hash,
-        value: value.clone(),
+        input_hashes: input_hashes(&cc.study_dir, &value),
+        value,
         filled,
         diags,
         estimate: None,
-        input_hashes: input_hashes(&cc.study_dir, &value),
     };
     if !a.has_errors() {
         let s = Spec::from_value(&a.value)
@@ -163,9 +162,7 @@ fn render_json(a: &Assessed) -> Result<String, CliError> {
     let v = json!({
         "diagnostics": a.diags,
         "estimate": estimate,
-        "defaults": a.filled.iter()
-            .map(|(path, value)| json!({ "path": path, "value": value }))
-            .collect::<Vec<_>>(),
+        "defaults": defaults_json(&a.filled),
         "hash": a.hash,
     });
     serde_json::to_string_pretty(&v).map_err(|e| CliError::usage(e.to_string()))
@@ -178,11 +175,7 @@ pub fn run(ctx: &Ctx, spec_path: &Path, json: bool) -> Run {
             let text =
                 serde_json::to_string_pretty(&v).map_err(|e| CliError::usage(e.to_string()))?;
             out(&format!("{text}\n"))?;
-            return Ok(Done {
-                code: e.code,
-                spec_hash: None,
-                leaf: None,
-            });
+            return Ok(Done::exit(e.code));
         }
         other => other?,
     };
@@ -192,9 +185,9 @@ pub fn run(ctx: &Ctx, spec_path: &Path, json: bool) -> Run {
         render(&a)
     };
     out(&text)?;
+    let code = a.exit_code();
     Ok(Done {
-        code: a.exit_code(),
         spec_hash: Some(a.hash),
-        leaf: None,
+        ..Done::exit(code)
     })
 }

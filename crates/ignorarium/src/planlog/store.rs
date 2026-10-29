@@ -1,11 +1,12 @@
 //! The plan log on disk: `leaves.jsonl`, `heads.jsonl` and a `lock` file.
 use super::merkle;
-use crate::canon::to_canonical;
+use crate::canon::{canonical_of, to_canonical};
 use crate::files::{locked_append, open_log};
 use crate::home::{HomeError, make_private_dir};
+use crate::keys::{sign_hex, verify_hex};
 use crate::prior::{PriorError, PriorUse};
 use crate::time::now_rfc3339;
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::io;
@@ -174,8 +175,7 @@ impl PlanLog {
     pub fn append(&self, leaf: Leaf, key: &SigningKey) -> Result<(u64, TreeHead), LogError> {
         let lock = open_log(&self.dir.join("lock"))?;
         lock.lock()?;
-        let data = to_canonical(&serde_json::to_value(&leaf).map_err(io::Error::other)?)
-            .map_err(io::Error::other)?;
+        let data = canonical_of(&leaf)?;
         // Both tails are checked before anything is written.
         let mut leaves = read_lines(&self.leaves_path())?;
         read_lines(&self.heads_path())?;
@@ -183,10 +183,7 @@ impl PlanLog {
         leaves.push(data.clone());
         let root = hex::encode(merkle::root(&leaves));
         let ts = now_rfc3339();
-        let sig = hex::encode(
-            key.sign(&head_bytes(leaves.len() as u64, &root, &ts)?)
-                .to_bytes(),
-        );
+        let sig = sign_hex(key, &head_bytes(leaves.len() as u64, &root, &ts)?);
         let head = TreeHead {
             size: leaves.len() as u64,
             root,
@@ -195,8 +192,7 @@ impl PlanLog {
         };
         locked_append(&self.leaves_path(), |_| Ok::<_, LogError>(line(data)))?;
         locked_append(&self.heads_path(), |_| {
-            let v = serde_json::to_value(&head).map_err(io::Error::other)?;
-            Ok::<_, LogError>(line(to_canonical(&v).map_err(io::Error::other)?))
+            Ok::<_, LogError>(line(canonical_of(&head)?))
         })?;
         Ok((index, head))
     }
@@ -220,11 +216,9 @@ impl PlanLog {
                 return Err(bad("root does not match the leaves"));
             }
             let bytes = head_bytes(head.size, &head.root, &head.ts)?;
-            hex::decode(&head.sig)
-                .ok()
-                .and_then(|b| Signature::from_slice(&b).ok())
-                .filter(|s| key.verify(&bytes, s).is_ok())
-                .ok_or_else(|| bad("signature does not match"))?;
+            if !verify_hex(key, &bytes, &head.sig) {
+                return Err(bad("signature does not match"));
+            }
             last = head.size;
         }
         Ok(Verified {

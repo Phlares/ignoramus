@@ -25,11 +25,11 @@ struct Hit {
     detail: Option<String>,
 }
 
-fn hit(path: impl Into<String>) -> Vec<Hit> {
-    vec![Hit {
+fn hit(path: impl Into<String>) -> Hit {
+    Hit {
         path: path.into(),
         detail: None,
-    }]
+    }
 }
 
 /// Spec, context, and the target pattern of the rule row that runs it.
@@ -123,7 +123,7 @@ fn flag(spec: &Value, pattern: &str, bad: impl Fn(&Value) -> bool) -> Vec<Hit> {
     nodes(spec, pattern)
         .into_iter()
         .filter(|(_, v)| bad(v))
-        .flat_map(|(p, _)| hit(p))
+        .map(|(p, _)| hit(p))
         .collect()
 }
 
@@ -207,7 +207,7 @@ fn input_hash_matches(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
             continue;
         };
         if read_file(&file).map(|b| sha256_hex(&b)).as_deref() != Some(want) {
-            out.extend(hit(path));
+            out.push(hit(path));
         }
     }
     out

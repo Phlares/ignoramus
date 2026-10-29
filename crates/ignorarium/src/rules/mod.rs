@@ -170,19 +170,20 @@ fn parse(text: &str) -> Result<Vec<Rule>, RulesError> {
             path: String::new(),
             msg: msg.into(),
         };
+        let rule = |path: String, check: Check| Rule {
+            code: row.code.clone(),
+            severity: row.severity,
+            path,
+            check,
+            problem: row.problem.clone(),
+            instruction: row.instruction.clone(),
+            why: row.why.clone(),
+            sources: row.sources.clone(),
+            when: row.when.clone(),
+        };
         match (row.check.as_deref(), row.target.is_empty()) {
             (Some("documented"), true) => {
-                out.push(Rule {
-                    code: row.code,
-                    severity: row.severity,
-                    path: String::new(),
-                    check: Check::Documented,
-                    problem: row.problem,
-                    instruction: row.instruction,
-                    why: row.why,
-                    sources: row.sources,
-                    when: row.when,
-                });
+                out.push(rule(String::new(), Check::Documented));
                 continue;
             }
             (Some("documented"), false) => {
@@ -200,17 +201,7 @@ fn parse(text: &str) -> Result<Vec<Rule>, RulesError> {
                 path: t.path.clone(),
                 msg,
             })?;
-            out.push(Rule {
-                code: row.code.clone(),
-                severity: row.severity,
-                path: t.path,
-                check,
-                problem: row.problem.clone(),
-                instruction: row.instruction.clone(),
-                why: row.why.clone(),
-                sources: row.sources.clone(),
-                when: row.when.clone(),
-            });
+            out.push(rule(t.path, check));
         }
     }
     Ok(out)

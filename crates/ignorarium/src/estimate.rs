@@ -32,6 +32,14 @@ pub fn apply_defaults(v: &mut Value) -> Vec<(String, Value)> {
     filled
 }
 
+/// `[{path, value}]` for the filled defaults.
+pub fn defaults_json(filled: &[(String, Value)]) -> Value {
+    filled
+        .iter()
+        .map(|(path, value)| json!({ "path": path, "value": value }))
+        .collect()
+}
+
 /// Sets `path` to `value` when absent, creating absent parent tables. True when set.
 fn insert_absent(node: &mut Value, path: &str, value: &Value) -> bool {
     let Some(map) = node.as_object_mut() else {

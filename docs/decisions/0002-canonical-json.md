@@ -13,7 +13,7 @@ Decision:
 
 Why:
 
-- Reviewers edit specs on Windows. A hash that changes with line endings would flag a plan as edited when it is not.
+- People edit specs on Windows. A hash that changes with line endings would flag a plan as edited when it is not.
 - Sorted compact output is one fixed form. It needs no custom serializer.
 
 Cost: the form is not RFC 8785. Another tool must use the same rules to reproduce a hash.

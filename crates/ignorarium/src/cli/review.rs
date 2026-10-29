@@ -155,9 +155,9 @@ fn page(a: &Assessed) -> String {
 pub fn run(ctx: &Ctx, spec: &Path) -> Run {
     let a = check::assess(ctx, spec)?;
     out(&page(&a))?;
+    let code = a.exit_code();
     Ok(Done {
-        code: a.exit_code(),
         spec_hash: Some(a.hash),
-        leaf: None,
+        ..Done::exit(code)
     })
 }

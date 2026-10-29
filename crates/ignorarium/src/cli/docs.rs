@@ -23,10 +23,7 @@ fn page(code: &str, rules: &[&Rule]) -> String {
     s.push_str("## Applies to\n\n");
     for r in rules {
         if matches!(r.check, Check::Documented) {
-            s.push_str(
-                "- the command line, not a spec field
-",
-            );
+            s.push_str("- the command line, not a spec field\n");
             continue;
         }
         s.push_str(&format!("- `{}` ({})", r.path, r.check.name()));
@@ -54,11 +51,7 @@ pub fn run(dir: &Path) -> Run {
         std::fs::write(dir.join(format!("{code}.md")), page(code, rs)).map_err(io)?;
     }
     out(&format!("wrote {} rule pages\n", by_code.len()))?;
-    Ok(Done {
-        code: 0,
-        spec_hash: None,
-        leaf: None,
-    })
+    Ok(Done::exit(0))
 }
 
 #[cfg(test)]

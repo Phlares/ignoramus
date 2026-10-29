@@ -1,8 +1,9 @@
 //! Signed, hash-chained record log: one JSON line per record.
-use crate::canon::{sha256_hex, to_canonical};
+use crate::canon::{canonical_of, sha256_hex};
 use crate::files::{Tail, locked_append};
+use crate::keys::{sign_hex, verify_hex};
 use crate::time::now_rfc3339;
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::Path;
@@ -101,11 +102,6 @@ impl From<io::Error> for VerifyError {
     }
 }
 
-fn record_bytes(r: &Record) -> io::Result<Vec<u8>> {
-    let v = serde_json::to_value(r).map_err(io::Error::other)?;
-    to_canonical(&v).map_err(io::Error::other)
-}
-
 fn parse_line(line: &[u8]) -> Option<Stored> {
     serde_json::from_slice(line.strip_suffix(b"\n")?).ok()
 }
@@ -131,14 +127,13 @@ pub fn append(path: &Path, key: &SigningKey, d: RecordDraft) -> Result<Record, R
             body: d.body,
             ts: now_rfc3339(),
         };
-        let bytes = record_bytes(&record)?;
+        let bytes = canonical_of(&record)?;
         let stored = Stored {
             hash: sha256_hex(&bytes),
-            sig: hex::encode(key.sign(&bytes).to_bytes()),
+            sig: sign_hex(key, &bytes),
             record,
         };
-        let mut line = to_canonical(&serde_json::to_value(&stored).map_err(io::Error::other)?)
-            .map_err(io::Error::other)?;
+        let mut line = canonical_of(&stored)?;
         line.push(b'\n');
         out = Some(stored.record);
         Ok(line)
@@ -159,15 +154,11 @@ pub fn verify(path: &Path, key: &VerifyingKey) -> Result<u64, VerifyError> {
         let parse = VerifyError::Parse { line: i + 1 };
         let s = parse_line(raw).ok_or(parse)?;
         let seq = s.record.seq;
-        let bytes = record_bytes(&s.record)?;
+        let bytes = canonical_of(&s.record)?;
         if sha256_hex(&bytes) != s.hash {
             return Err(VerifyError::BadHash { seq });
         }
-        let sig = hex::decode(&s.sig)
-            .ok()
-            .and_then(|b| Signature::from_slice(&b).ok())
-            .filter(|sig| key.verify(&bytes, sig).is_ok());
-        if sig.is_none() {
+        if !verify_hex(key, &bytes, &s.sig) {
             return Err(VerifyError::BadSig { seq });
         }
         if seq != count || s.record.prev != prev {

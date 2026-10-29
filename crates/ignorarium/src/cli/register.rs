@@ -3,6 +3,7 @@ use super::check::{self, Assessed};
 use super::{CliError, Ctx, Done};
 use crate::canon::to_canonical;
 use crate::diag::render_human;
+use crate::estimate::defaults_json;
 use crate::files::{WriteOnceError, write_once};
 use crate::home::Home;
 use crate::planlog::store::{Leaf, PlanLog};
@@ -66,9 +67,7 @@ fn record_body(
         "spec_hash": hash,
         "leaf": leaf,
         "log": log,
-        "defaults": filled.iter()
-            .map(|(path, value)| json!({ "path": path, "value": value }))
-            .collect::<Vec<_>>(),
+        "defaults": defaults_json(filled),
     });
     if confirmatory {
         body["timestamp"] = json!("pending");
