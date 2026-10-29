@@ -876,7 +876,8 @@ fn check_finds_a_secret_in_a_comment_and_never_echoes_it() {
 
 #[test]
 fn content_faults_that_break_the_model_exit_1_with_a_code() {
-    let cases: [(fn(String) -> String, &str, &str); 4] = [
+    type Case = (fn(String) -> String, &'static str, &'static str);
+    let cases: [Case; 4] = [
         (
             |t| {
                 t.replace(
