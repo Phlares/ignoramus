@@ -52,6 +52,7 @@ pub fn run(ctx: &Ctx, study: Option<&str>) -> Run {
             failed.push(format!("no study named {id:?} in the box"));
         } else if let Some(k) = &key {
             match records::verify(&dir.join("records.jsonl"), &k.verifying_key()) {
+                Ok(0) => failed.push(format!("study {id}: no register record")),
                 Ok(n) => out(&format!("study {id}: {n} records\n"))?,
                 Err(e) => failed.push(format!("study {id}: {e}")),
             }

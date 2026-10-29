@@ -232,6 +232,38 @@ fn a_second_register_of_the_same_id_is_refused() {
 }
 
 #[test]
+fn a_failure_before_the_log_append_leaves_no_study_folder() {
+    let (f, spec) = setup("numeric-ablation", same);
+    let key = f.home.root.join("keys/box.ed25519");
+    let heads = f.home.root.join("planlog/heads.jsonl");
+    let dir = f.home.study_dir("my-study");
+    // A short key, then a log whose head file lacks its final line feed.
+    std::fs::write(&key, [0u8; 31]).unwrap();
+    let (r, _) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap_err().code, 2);
+    assert!(!dir.exists());
+    std::fs::write(&key, [7u8; 32]).unwrap();
+    std::fs::create_dir_all(heads.parent().unwrap()).unwrap();
+    std::fs::write(&heads, b"{}").unwrap();
+    let (r, _) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap_err().code, 2);
+    assert!(!dir.exists());
+    // The same for the leaves file, and nothing was appended anywhere.
+    std::fs::write(&heads, b"").unwrap();
+    let leaves = f.home.root.join("planlog/leaves.jsonl");
+    std::fs::write(&leaves, b"{}").unwrap();
+    let (r, _) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap_err().code, 2);
+    assert!(!dir.exists());
+    assert_eq!(std::fs::read(&leaves).unwrap(), b"{}");
+    // Repaired, the same id registers.
+    std::fs::write(&leaves, b"").unwrap();
+    let (r, _) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap().code, 0);
+    assert!(dir.join("records.jsonl").is_file());
+}
+
+#[test]
 fn no_terminal_refuses_before_reading_anything() {
     let (f, spec) = setup("numeric-ablation", same);
     let (r, out) = go(&f, &spec, &answer(&spec), false);

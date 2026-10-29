@@ -170,6 +170,15 @@ impl PlanLog {
             .collect()
     }
 
+    /// Fail when `leaves.jsonl` or `heads.jsonl` ends in a partial line, the faults `append`
+    /// refuses. Takes the shared lock, so call it only when this process holds no lock on the log.
+    pub fn check_tails(&self) -> Result<(), LogError> {
+        let _lock = self.read_lock()?;
+        read_lines(&self.leaves_path())?;
+        read_lines(&self.heads_path())?;
+        Ok(())
+    }
+
     /// Add a leaf and a signed head for the new tree. One exclusive lock
     /// on `dir/lock` covers the whole operation. Returns the leaf index.
     pub fn append(&self, leaf: Leaf, key: &SigningKey) -> Result<(u64, TreeHead), LogError> {

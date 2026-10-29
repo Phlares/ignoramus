@@ -718,6 +718,24 @@ fn verify_study_fails_on_a_tampered_record() {
 }
 
 #[test]
+fn verify_study_fails_on_a_folder_with_no_register_record() {
+    let (_d, home, _) = registered();
+    let rp = home.join("studies/my-study/records.jsonl");
+    std::fs::write(&rp, b"").unwrap();
+    let a = bin(&home)
+        .args(["verify", "--study", "my-study"])
+        .assert()
+        .code(1);
+    assert!(stderr(&a).contains("no register record"), "{}", stderr(&a));
+    // A folder with no records file at all is the same.
+    std::fs::remove_file(&rp).unwrap();
+    bin(&home)
+        .args(["verify", "--study", "my-study"])
+        .assert()
+        .code(1);
+}
+
+#[test]
 fn verify_study_needs_a_known_id() {
     let (_d, home, _) = registered();
     for id in ["nope", "../x", ".."] {

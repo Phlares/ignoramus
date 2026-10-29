@@ -157,10 +157,11 @@ pub fn run(
     Ok(done(0, Some(leaf)))
 }
 
-/// Write the study folder, then the plan leaf, then the `register` record.
-/// Another process can register the same id between the check and the
-/// `create_dir`; the `create_dir` refuses it. The log appends are not atomic with
-/// the earlier-use lookup in `check`; v0 accepts that.
+/// Load the key and check both log tails, then write the study folder, the plan leaf and the
+/// `register` record. A fault in the key or a log must not leave a folder that burns the id.
+/// Another process can register the same id between the check and the `create_dir`; the
+/// `create_dir` refuses it. The log appends are not atomic with the earlier-use lookup in
+/// `check`; v0 accepts that. `check_tails` runs before `append` takes its lock.
 fn store(
     spec_path: &Path,
     home: &Home,
@@ -176,6 +177,15 @@ fn store(
     }
     let canon = to_canonical(&raw.value).map_err(|e| io("canonical form", e))?;
     let id = spec.study.id.as_str();
+    let log = if spec.study.test_log {
+        "testlog"
+    } else {
+        "planlog"
+    };
+    let key = keys::load_or_create(home).map_err(|e| io("box key", e))?;
+    let plan_log = PlanLog::open(&home.root.join(log))
+        .and_then(|l| l.check_tails().map(|()| l))
+        .map_err(|e| io(log, e))?;
     let dir = home.study_dir(id);
     let mut mk = std::fs::DirBuilder::new();
     #[cfg(unix)]
@@ -196,27 +206,19 @@ fn store(
         .iter()
         .filter_map(|(_, h)| h.clone())
         .collect();
-    let log = if spec.study.test_log {
-        "testlog"
-    } else {
-        "planlog"
-    };
-    let key = keys::load_or_create(home).map_err(|e| io("box key", e))?;
-    let (leaf, _) = PlanLog::open(&home.root.join(log))
-        .and_then(|l| {
-            l.append(
-                Leaf {
-                    kind: "plan".into(),
-                    commitment: Some(commitment(&salt, &canon)),
-                    family: Some(family(spec)),
-                    mode: Some(mode.into()),
-                    data_hashes,
-                    label: label.into(),
-                    ts: time::now_rfc3339(),
-                },
-                &key,
-            )
-        })
+    let (leaf, _) = plan_log
+        .append(
+            Leaf {
+                kind: "plan".into(),
+                commitment: Some(commitment(&salt, &canon)),
+                family: Some(family(spec)),
+                mode: Some(mode.into()),
+                data_hashes,
+                label: label.into(),
+                ts: time::now_rfc3339(),
+            },
+            &key,
+        )
         .map_err(|e| io(log, e))?;
     records::append(
         &dir.join("records.jsonl"),
