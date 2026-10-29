@@ -49,6 +49,7 @@ const NAMED: &[(&str, NamedFn)] = &[
     ),
     ("data-fresh", data_fresh),
     ("confirmatory-test-allowed", test_allowed),
+    ("reference-is-condition", reference_is_condition),
     ("budget-present", budget_present),
     ("route-valid", route_valid),
     ("follow-on-exists", follow_on_exists),
@@ -341,6 +342,14 @@ fn selection_confirmation_disjoint(spec: &Value, _: &CheckCtx, pat: &str) -> Vec
         } else {
             v.as_array().is_some_and(Vec::is_empty)
         }
+    })
+}
+
+/// The reference names no listed condition. With no condition ids, `non-empty` reports that.
+fn reference_is_condition(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let conditions = texts(spec, "design.conditions[*].id");
+    flag(spec, pat, |v| {
+        !conditions.is_empty() && v.as_str().is_some_and(|r| !conditions.contains(&r))
     })
 }
 

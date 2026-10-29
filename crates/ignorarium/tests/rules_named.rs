@@ -210,6 +210,17 @@ fn faults() -> Vec<Fault> {
             ],
         ),
         f(
+            vec![("/design/reference", j(json!("exakt")))],
+            vec![("E-REF-001", "design.reference")],
+        ),
+        // The reference may be any condition; an empty condition list is reported by non-empty alone.
+        f(vec![("/design/reference", j(json!("arm-a")))], vec![]),
+        f(vec![("/design/conditions", j(json!([])))], vec![]),
+        f(
+            vec![("/design/conditions", j(json!([{ "id": "exakt" }, 5])))],
+            vec![("E-REF-001", "design.reference")],
+        ),
+        f(
             vec![("/design/test", j(json!("descriptive")))],
             vec![("E-CNF-006", "design.test")],
         ),
@@ -427,6 +438,7 @@ fn the_named_rules_are_the_brief_table_and_rows_cover_the_pure_ones() {
         "E-CNF-004",
         "E-CNF-005",
         "E-CNF-006",
+        "E-REF-001",
         "E-BUD-001",
         "E-END-001",
         "E-END-002",

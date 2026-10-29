@@ -138,6 +138,12 @@ fn faults() -> Vec<Fault> {
             Some(json!("")),
             "inputs[0].licence.spdx",
         ),
+        (
+            "E-REF-001",
+            "/design/conditions",
+            Some(json!([])),
+            "design.conditions",
+        ),
     ]
 }
 
