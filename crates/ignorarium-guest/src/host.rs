@@ -3,8 +3,8 @@ use crate::agent::steps::now_nanos;
 use crate::image::{ext4, size_mib};
 use crate::pack;
 use crate::proto::{
-    CONTROL_PORT, GUEST_CID, Job, Report, SERIAL_IN, SERIAL_OUT, SERIAL_ROOTFS, ToHost, read_frame,
-    write_frame,
+    CONTROL_PORT, GUEST_CID, Job, MAX_FRAME, Report, SERIAL_IN, SERIAL_OUT, SERIAL_ROOTFS, ToHost,
+    read_frame, write_frame,
 };
 use crate::tree::{tree_hash, walk};
 use std::ffi::OsString;
@@ -333,14 +333,33 @@ fn check_inputs(vm: &Vm, job: &HostJob, work: &Path) -> io::Result<()> {
             return Err(invalid(format!("{what} {} is not empty", dir.display())));
         }
     }
-    // A tmpfs of size 0 has no limit, and /out and /tmp both live in guest memory.
-    if vm.out_mib == 0 || vm.out_mib.saturating_mul(2) > u64::from(vm.mem_mib) {
+    // A tmpfs of size 0 has no limit. /out and /tmp live in guest memory, each up to the
+    // disk size, and together they may take at most half of it.
+    if vm.out_mib == 0 || vm.out_mib.saturating_mul(4) > u64::from(vm.mem_mib) {
         return Err(invalid(format!(
-            "output disk of {} MiB: it needs at least 1 MiB and at most half of the {} MiB guest memory",
+            "output disk of {} MiB: it needs at least 1 MiB and at most a quarter of the {} MiB guest memory",
             vm.out_mib, vm.mem_mib
         )));
     }
+    // The clock field is widest at its maximum, so the job sent later is no longer.
+    let job_len = serde_json::to_vec(&wire_job(job, u64::MAX))?.len();
+    if job_len > MAX_FRAME {
+        return Err(invalid(format!(
+            "the job is {job_len} bytes of JSON, over the {MAX_FRAME}-byte frame limit"
+        )));
+    }
     readable_by_others(&job.input_dir)
+}
+
+/// The job as the guest receives it.
+fn wire_job(job: &HostJob, unix_nanos: u64) -> Job {
+    Job {
+        seed_hex: hex::encode(job.seed),
+        unix_nanos,
+        argv: job.argv.clone(),
+        env: job.env.clone(),
+        timeout_ms: job.wall_timeout.as_millis() as u64,
+    }
 }
 
 /// The payload runs as an unprivileged user, so every input below `dir` must be readable by
@@ -415,13 +434,7 @@ pub fn run_row(vm: &Vm, job: &HostJob, work: &Path) -> Result<VmOutcome, VmError
     let boot = started.elapsed();
 
     let sent = Instant::now();
-    let wire = Job {
-        seed_hex: hex::encode(job.seed),
-        unix_nanos: now_nanos(),
-        argv: job.argv.clone(),
-        env: job.env.clone(),
-        timeout_ms: job.wall_timeout.as_millis() as u64,
-    };
+    let wire = wire_job(job, now_nanos());
     let report_by = sent + job.wall_timeout + vm.report_slack;
     let mut until = Until {
         stream: &mut chan,

@@ -10,7 +10,7 @@
 //! - `/proc` with `hidepid=2`, so the payload sees only its own user's processes (nosuid,
 //!   nodev, noexec);
 //! - `/dev` is a tmpfs (nosuid, noexec) with `null zero full random urandom tty`, mode 0666;
-//! - `/tmp` is a tmpfs (nosuid, nodev), mode 1777.
+//! - `/tmp` is a tmpfs (nosuid, nodev), mode 1777, capped at the output disk's size like `/out`.
 //!
 //! The root is a tmpfs, remounted read-only once it holds all of the above.
 use super::{PAYLOAD_GID, PAYLOAD_UID};
@@ -43,7 +43,7 @@ pub fn build(env_root: &Path, sandbox: &Path, inputs: &Path, out_bytes: u64) -> 
         // A tmpfs of size 0 has no limit.
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "an output size of 0 would leave /out unlimited",
+            "an output size of 0 would leave /out and /tmp unlimited",
         ));
     }
     let (ro, no_suid_dev) = (MountFlags::RDONLY, MountFlags::NOSUID | MountFlags::NODEV);
@@ -84,7 +84,11 @@ pub fn build(env_root: &Path, sandbox: &Path, inputs: &Path, out_bytes: u64) -> 
         // mknod applies the umask.
         fs::set_permissions(&node, fs::Permissions::from_mode(0o666))?;
     }
-    tmpfs(&dir("tmp")?, no_suid_dev, "mode=1777")?;
+    tmpfs(
+        &dir("tmp")?,
+        no_suid_dev,
+        &format!("mode=1777,size={out_bytes}"),
+    )?;
     mount_remount(sandbox, ro, "").map_err(|e| named(e, "remount read-only", sandbox))
 }
 

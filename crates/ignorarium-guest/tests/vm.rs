@@ -8,6 +8,7 @@ use ignorarium_guest::host::{HostJob, REPORT_SLACK, Vm, VmError, VmOutcome, run_
 use ignorarium_guest::image::initramfs;
 use ignorarium_guest::proto::End;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -159,6 +160,8 @@ fn the_payload_view_is_the_documented_layout() {
         "stat -c %a /tmp /dev/null > /out/modes; ls /proc/self/fd > /out/fds; ",
         // Mount point and per-mount options.
         "cut -d' ' -f5,6 /proc/self/mountinfo | sort > /out/mounts; ",
+        "if head -c 17M /dev/zero > /tmp/big 2> /dev/null; then echo fits; else echo capped; fi ",
+        "> /out/tmp_cap; rm -f /tmp/big; ",
         "head -c 17M /dev/zero > /out/big 2> /dev/null || { rm -f /out/big; exit 9; }",
     ));
     let o = row.run();
@@ -185,7 +188,8 @@ fn the_payload_view_is_the_documented_layout() {
         row.out("mounts"),
         mounts.map(|m| m.to_owned() + "\n").concat()
     );
-    // A file larger than the 16 MiB output disk does not fit in /out.
+    // A file larger than the 16 MiB output disk fits neither in /tmp nor in /out.
+    assert_eq!(row.out("tmp_cap"), "capped\n");
     assert_eq!(o.report.end, Some(End::Code(9)));
 }
 
@@ -299,5 +303,17 @@ fn errors_after_connect_come_back_as_failures() {
     guest_failed(&row, "No such file");
     // The file fills the 16 MiB output disk, so the pack, with its headers, does not fit.
     let row = Row::sh("head -c 16M /dev/zero > /out/big");
-    guest_failed(&row, "No space left");
+    guest_failed(&row, "outputs exceed the output limit of 16777216 bytes");
+}
+
+#[test]
+#[ignore = "boots a VM; see the top of the file"]
+fn an_input_dir_closed_to_others_is_still_readable() {
+    // The image root does not take the mode of the input dir, so only the entries below it
+    // need other-read.
+    let row = Row::sh("cat /in/data.txt > /out/copy");
+    fs::set_permissions(&row.job.input_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let o = row.run();
+    assert_eq!(o.report.end, Some(End::Code(0)));
+    assert_eq!(row.out("copy"), "input bytes\n");
 }

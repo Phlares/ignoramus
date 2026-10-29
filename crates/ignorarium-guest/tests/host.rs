@@ -1,10 +1,12 @@
 mod common;
 use common::{file, pack, packed, write_exec};
 use ignorarium_guest::host::{HostJob, Vm, VmError, VmOutcome, run_row, vmm_args};
-use ignorarium_guest::proto::{End, Job, Report, SelfTest, ToHost, read_frame, write_frame};
+use ignorarium_guest::proto::{
+    End, Job, MAX_FRAME, Report, SelfTest, ToHost, read_frame, write_frame,
+};
 use ignorarium_guest::tree::tree_hash;
 use std::fs::{self, Permissions};
-use std::io::{Read, Seek, Write};
+use std::io::{ErrorKind, Read, Seek, Write};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -578,10 +580,19 @@ fn refused_before_boot(rig: &Rig, work: &Path) -> String {
     let Err(VmError::Io(e)) = res else {
         panic!("{res:?}")
     };
+    assert_eq!(e.kind(), ErrorKind::InvalidInput, "{e}");
     thread::sleep(ms(100));
     assert!(!rig.root.path().join("vmm.pid").exists());
     assert_eq!(fs::read_dir(work).unwrap().count(), 0);
     e.to_string()
+}
+
+#[test]
+fn a_job_over_the_frame_limit_is_refused_before_boot() {
+    let mut rig = Rig::new(&format!("touch $PIDFILE\n{SLEEPER}"));
+    rig.job.argv = vec!["a".repeat(MAX_FRAME)];
+    let msg = refused_before_boot(&rig, &rig.work);
+    assert!(msg.contains("frame limit"), "{msg}");
 }
 
 #[test]
@@ -674,10 +685,11 @@ fn channel_errors_hold_no_raw_guest_bytes() {
 }
 
 #[test]
-fn output_disks_of_zero_or_over_half_the_memory_are_refused_before_boot() {
+fn output_disks_of_zero_or_over_a_quarter_of_the_memory_are_refused_before_boot() {
     let mut rig = Rig::new(&format!("touch $PIDFILE\n{SLEEPER}"));
-    // A tmpfs of size 0 has no limit; /out and /tmp live in guest memory.
-    for (out_mib, mem_mib) in [(0, 256), (129, 256)] {
+    // A tmpfs of size 0 has no limit; /out and /tmp live in guest memory, each up to the
+    // disk size.
+    for (out_mib, mem_mib) in [(0, 256), (65, 256)] {
         (rig.vm.out_mib, rig.vm.mem_mib) = (out_mib, mem_mib);
         let msg = refused_before_boot(&rig, &rig.work);
         assert!(msg.contains("output disk"), "{msg}");
@@ -693,9 +705,9 @@ fn boots(rig: &mut Rig) {
 }
 
 #[test]
-fn an_output_disk_of_half_the_memory_boots() {
+fn an_output_disk_of_a_quarter_of_the_memory_boots() {
     let mut rig = Rig::sleeper();
-    (rig.vm.out_mib, rig.vm.mem_mib) = (128, 256);
+    (rig.vm.out_mib, rig.vm.mem_mib) = (64, 256);
     boots(&mut rig);
 }
 
