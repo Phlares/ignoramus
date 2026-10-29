@@ -8,7 +8,14 @@
 //! stream counts, in both passes, and so does `ENTRY` for every entry written (folder, file,
 //! symbolic link, hard link, and each parent folder a path implies) as an estimate of its inode
 //! and metadata. The one count bounds the data written, the decoding work and the number of
-//! entries. An image over the budget fails and publishes nothing.
+//! entries. Each layer is decoded twice, so `WRITE_CAP` admits about 16 GiB of decoded layer
+//! data, the parts outside the kept folders included. An image over the budget fails and
+//! publishes nothing.
+//!
+//! A fence bounds the memory of the tar reader. After it yields an entry, it may read that
+//! entry's declared data and `EXTENSION` (1 MiB) more before it yields the next one. It skips
+//! data through a fixed buffer, but holds long names, long link names and PAX records in
+//! memory. The outer archive and every layer stream have a fence.
 use crate::files::temp_beside;
 use crate::home::make_private_dir;
 use crate::store::{Store, StoreError};
@@ -30,20 +37,24 @@ const WHITEOUT: &[u8] = b".wh.";
 const OPAQUE: &[u8] = b".wh..wh..opq";
 /// Largest `manifest.json` read.
 const MANIFEST_MAX: u64 = 16 << 20;
-/// A layer that starts with these bytes is gzip-compressed; it is decoded in process.
-const GZIP: &[u8] = &[0x1f, 0x8b];
-/// Layers that start with these bytes are refused, by compression name.
-const REFUSED: [(&str, &[u8]); 3] = [
+/// Layer compressions by their leading bytes. Only gzip is decoded; the others are refused.
+const COMPRESSIONS: [(&str, &[u8]); 4] = [
+    ("gzip", &[0x1f, 0x8b]),
     ("zstd", &[0x28, 0xb5, 0x2f, 0xfd]),
     ("xz", &[0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00]),
     ("bzip2", b"BZh"),
 ];
-/// Bytes read to tell a layer's compression: the longest magic (xz).
-const HEAD: u64 = 6;
+/// A tar header holds this magic at `USTAR_AT` (POSIX `ustar\0`, GNU `ustar `).
+const USTAR: &[u8] = b"ustar";
+const USTAR_AT: usize = 257;
+/// Bytes read to tell a layer's format.
+const HEAD: u64 = (USTAR_AT + USTAR.len()) as u64;
 /// The extraction budget, in bytes (see the module doc).
 pub const WRITE_CAP: u64 = 32 << 30;
 /// What one entry written costs the budget.
 const ENTRY: u64 = 4 << 10;
+/// What the tar reader may read past an entry's declared data before it yields the next one.
+const EXTENSION: u64 = 1 << 20;
 
 #[derive(Debug)]
 pub enum RootfsError {
@@ -76,8 +87,26 @@ impl std::error::Error for RootfsError {}
 
 impl From<io::Error> for RootfsError {
     fn from(e: io::Error) -> Self {
-        RootfsError::Io(e)
+        limit(&e).map_or(RootfsError::Io(e), RootfsError::Format)
     }
+}
+
+/// A limit a read or a write crossed. It travels inside an `io::Error`, which the tar reader
+/// passes on unchanged, and becomes `RootfsError::Format`.
+#[derive(Debug)]
+struct Limit(String);
+
+impl fmt::Display for Limit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Limit {}
+
+/// The message of the limit `e` carries, if any.
+fn limit(e: &io::Error) -> Option<String> {
+    e.get_ref()?.downcast_ref::<Limit>().map(Limit::to_string)
 }
 
 impl From<StoreError> for RootfsError {
@@ -137,7 +166,7 @@ fn is_real_dir(p: &Path) -> bool {
 }
 
 fn tar_err(e: io::Error) -> RootfsError {
-    RootfsError::Tar(e.to_string())
+    limit(&e).map_or_else(|| RootfsError::Tar(e.to_string()), RootfsError::Format)
 }
 
 /// Call `f` with the bytes of the file `name` in the tar at `blob`. `None` when absent.
@@ -146,9 +175,14 @@ fn with_member<T>(
     name: &Path,
     f: impl FnOnce(&mut dyn Read) -> Result<T, RootfsError>,
 ) -> Result<Option<T>, RootfsError> {
-    let mut outer = Archive::new(fs::File::open(blob)?);
+    let fence = Meter::fence();
+    let mut outer = Archive::new(Metered {
+        inner: fs::File::open(blob)?,
+        meter: &fence,
+    });
     for entry in outer.entries().map_err(tar_err)? {
         let mut entry = entry.map_err(tar_err)?;
+        fence.past(&entry);
         let is_file = matches!(
             entry.header().entry_type(),
             EntryType::Regular | EntryType::Continuous
@@ -184,15 +218,11 @@ fn extract(blob: &Path, root: &Path, cap: u64) -> Result<(), RootfsError> {
         }
     }
     fs::create_dir(root)?;
-    let budget = Budget {
-        cap,
-        used: Cell::new(0),
-    };
+    let budget = Meter::budget(cap);
     let mut tree = Tree::new(root, &budget);
     for name in &names {
         for pass in [Pass::Whiteouts, Pass::Content] {
-            let seen =
-                with_member(blob, name, |r| tree.layer(r, pass)).map_err(|e| budget.explain(e))?;
+            let seen = with_member(blob, name, |r| tree.layer(r, pass))?;
             seen.ok_or_else(|| {
                 RootfsError::Format(format!("layer {} is missing", name.display()))
             })?;
@@ -201,48 +231,94 @@ fn extract(blob: &Path, root: &Path, cap: u64) -> Result<(), RootfsError> {
     Ok(())
 }
 
-/// What one extraction has spent of its `cap`.
-struct Budget {
-    cap: u64,
+/// A count of bytes against an end. A charge past the end fails with the `over` message.
+struct Meter {
     used: Cell<u64>,
+    end: Cell<u64>,
+    over: String,
 }
 
-impl Budget {
-    /// Spend `n`; an error once the total is over the cap.
-    fn spend(&self, n: u64) -> io::Result<()> {
+impl Meter {
+    fn new(end: u64, over: String) -> Meter {
+        Meter {
+            used: Cell::new(0),
+            end: Cell::new(end),
+            over,
+        }
+    }
+
+    /// The extraction budget: `cap` bytes in all.
+    fn budget(cap: u64) -> Meter {
+        Meter::new(
+            cap,
+            format!(
+                "the image is over the extraction budget of {cap} bytes (decoded layer bytes, \
+                 read in two passes, plus {ENTRY} per entry written)"
+            ),
+        )
+    }
+
+    /// The fence of one tar stream, counted from its start: `EXTENSION` bytes until the reader
+    /// yields the first entry.
+    fn fence() -> Meter {
+        Meter::new(
+            EXTENSION,
+            format!("a header extension is larger than {} MiB", EXTENSION >> 20),
+        )
+    }
+
+    /// Count `n`; an error once the count is past the end.
+    fn charge(&self, n: u64) -> io::Result<()> {
         self.used.set(self.used.get().saturating_add(n));
-        if self.used.get() > self.cap {
-            return Err(io::Error::other("over the extraction budget"));
+        if self.used.get() > self.end.get() {
+            return Err(io::Error::other(Limit(self.over.clone())));
         }
         Ok(())
     }
 
-    /// `e`, or the budget error when the budget is what failed (the tar reader hides the
-    /// cause of a read error).
-    fn explain(&self, e: RootfsError) -> RootfsError {
-        if self.used.get() <= self.cap {
-            return e;
-        }
-        RootfsError::Format(format!(
-            "the image is over the extraction budget of {} bytes (decoded layer bytes, read in \
-             two passes, plus {ENTRY} per entry written)",
-            self.cap
-        ))
+    /// Bytes the next read may take: up to the end, and one more to show it was crossed.
+    fn room(&self) -> u64 {
+        self.end
+            .get()
+            .saturating_sub(self.used.get())
+            .saturating_add(1)
+    }
+
+    /// For a fence: the reader yielded `entry`, so it may read the entry's declared data, then
+    /// `EXTENSION` more for the padding, the next header and its extensions.
+    fn past<R: Read>(&self, entry: &tar::Entry<'_, R>) {
+        let data_end = entry.raw_file_position().saturating_add(entry.size());
+        self.end.set(data_end.saturating_add(EXTENSION));
     }
 }
 
-/// A decoded layer stream that spends the budget on every byte it yields.
-struct Counted<'a, R> {
+/// A stream that charges every byte it yields to `meter`, and never reads more than one byte
+/// past the meter's end.
+struct Metered<'a, R> {
     inner: R,
-    budget: &'a Budget,
+    meter: &'a Meter,
 }
 
-impl<R: Read> Read for Counted<'_, R> {
+impl<R: Read> Read for Metered<'_, R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = self.inner.read(buf)?;
-        self.budget.spend(n as u64)?;
+        let room = usize::try_from(self.meter.room()).unwrap_or(usize::MAX);
+        let take = buf.len().min(room);
+        let n = self.inner.read(&mut buf[..take])?;
+        self.meter.charge(n as u64)?;
         Ok(n)
     }
+}
+
+/// The compression of a layer that starts with `head`, or `None` for a plain tar: one with the
+/// ustar magic, or one no compression claims (an old tar has no magic).
+fn compression(head: &[u8]) -> Option<&'static str> {
+    if head.get(USTAR_AT..).is_some_and(|m| m.starts_with(USTAR)) {
+        return None;
+    }
+    COMPRESSIONS
+        .iter()
+        .find(|(_, magic)| head.starts_with(magic))
+        .map(|(name, _)| *name)
 }
 
 /// A relative path of normal components. A leading `./` and empty parts drop out; `None`
@@ -281,11 +357,11 @@ struct Tree<'a> {
     root: &'a Path,
     links: BTreeSet<PathBuf>,
     files: BTreeSet<PathBuf>,
-    budget: &'a Budget,
+    budget: &'a Meter,
 }
 
 impl<'a> Tree<'a> {
-    fn new(root: &'a Path, budget: &'a Budget) -> Tree<'a> {
+    fn new(root: &'a Path, budget: &'a Meter) -> Tree<'a> {
         Tree {
             root,
             links: BTreeSet::new(),
@@ -298,24 +374,30 @@ impl<'a> Tree<'a> {
     fn layer(&mut self, layer: &mut dyn Read, pass: Pass) -> Result<(), RootfsError> {
         let mut head = Vec::new();
         layer.take(HEAD).read_to_end(&mut head)?;
-        if let Some((name, _)) = REFUSED.iter().find(|(_, magic)| head.starts_with(magic)) {
-            return Err(RootfsError::Format(format!(
-                "unsupported compression: {name}"
-            )));
-        }
-        let joined = io::Cursor::new(head.clone()).chain(layer);
+        let kind = compression(&head);
+        let joined = io::Cursor::new(head).chain(layer);
         // Decoded here, so the same reader parses a plain and a gzip layer.
-        let stream: Box<dyn Read + '_> = if head.starts_with(GZIP) {
-            Box::new(flate2::read::MultiGzDecoder::new(joined))
-        } else {
-            Box::new(joined)
+        let stream: Box<dyn Read + '_> = match kind {
+            None => Box::new(joined),
+            Some("gzip") => Box::new(flate2::read::MultiGzDecoder::new(joined)),
+            Some(name) => {
+                return Err(RootfsError::Format(format!(
+                    "unsupported compression: {name}"
+                )));
+            }
         };
-        let mut ar = Archive::new(Counted {
+        let fence = Meter::fence();
+        let counted = Metered {
             inner: stream,
-            budget: self.budget,
+            meter: self.budget,
+        };
+        let mut ar = Archive::new(Metered {
+            inner: counted,
+            meter: &fence,
         });
         for entry in ar.entries().map_err(tar_err)? {
             let mut entry = entry.map_err(tar_err)?;
+            fence.past(&entry);
             let Some(path) = normalize(&entry.path_bytes())? else {
                 continue;
             };
@@ -382,7 +464,7 @@ impl<'a> Tree<'a> {
             // come from the counted stream) are not part of the root.
             _ => return Ok(()),
         }
-        Ok(self.budget.spend(ENTRY)?)
+        Ok(self.budget.charge(ENTRY)?)
     }
 
     fn full(&self, rel: &Path) -> PathBuf {
@@ -417,7 +499,7 @@ impl<'a> Tree<'a> {
                 }
                 Err(e) if e.kind() == io::ErrorKind::NotFound && create => {
                     fs::create_dir(self.full(&at))?;
-                    self.budget.spend(ENTRY)?;
+                    self.budget.charge(ENTRY)?;
                 }
                 Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
                 Err(e) => return Err(e.into()),

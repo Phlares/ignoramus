@@ -3,7 +3,7 @@ mod common;
 use common::{Lab, edited, lab, named, skip_level1};
 use ignorarium::backend::level0::Level0;
 use ignorarium::backend::level1::Level1;
-use ignorarium::backend::rootfs::{RootfsError, from_store, from_store_capped};
+use ignorarium::backend::rootfs::{self, RootfsError, from_store, from_store_capped};
 use ignorarium::backend::{Backend, Probe, RowJob, RowOutcome, Watch};
 use ignorarium::environ::Builder;
 use ignorarium::runner::{self, RunError, RunStatus, environment, prepare_with};
@@ -1091,24 +1091,200 @@ fn a_hostile_gzip_layer_is_judged_like_a_plain_one() {
     refused(&store, &layers, &host);
 }
 
-/// The image is refused for its extraction budget at `cap`, and neither its tree nor a temp
+/// `from_store_capped` at `cap` fails with `message`, and neither the image's tree nor a temp
 /// folder for it is left in the store.
-fn over_budget(store: &Store, digest: &str, cap: u64) {
+fn fails_cleanly(store: &Store, digest: &str, cap: u64, message: &str) {
     let err = from_store_capped(store, digest, cap).unwrap_err();
     assert!(matches!(&err, RootfsError::Format(_)), "{err}");
-    assert_eq!(
-        err.to_string(),
-        format!(
-            "bad image archive: the image is over the extraction budget of {cap} bytes \
-             (decoded layer bytes, read in two passes, plus 4096 per entry written)"
-        )
-    );
+    assert_eq!(err.to_string(), message);
     let left: Vec<String> = fs::read_dir(store.root.join("rootfs"))
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .filter(|n| n.contains(digest))
         .collect();
     assert!(left.is_empty(), "{left:?}");
+}
+
+/// The image is refused for its extraction budget at `cap`.
+fn over_budget(store: &Store, digest: &str, cap: u64) {
+    let message = format!(
+        "bad image archive: the image is over the extraction budget of {cap} bytes \
+         (decoded layer bytes, read in two passes, plus 4096 per entry written)"
+    );
+    fails_cleanly(store, digest, cap, &message);
+}
+
+const FENCED: &str = "bad image archive: a header extension is larger than 1 MiB";
+const MIB: usize = 1 << 20;
+
+/// Append an extension entry of `kind` holding `data`, then a file `name` holding `text`.
+fn extended(b: &mut tar::Builder<Vec<u8>>, kind: tar::EntryType, data: &[u8], name: &str) {
+    let mut x = tar::Header::new_gnu();
+    x.set_entry_type(kind);
+    x.set_path("././@LongLink").unwrap();
+    x.set_mode(0o644);
+    x.set_size(data.len() as u64);
+    x.set_cksum();
+    b.append(&x, data).unwrap();
+    let mut h = tar::Header::new_gnu();
+    h.set_path(name).unwrap();
+    h.set_mode(0o644);
+    h.set_size(1);
+    h.set_cksum();
+    b.append(&h, &b"x"[..]).unwrap();
+}
+
+/// One PAX record, `<length> <key>=<value>\n`; the length counts its own digits.
+fn pax(key: &str, value: &str) -> Vec<u8> {
+    let body = format!(" {key}={value}\n");
+    let mut len = body.len();
+    while len != body.len() + len.to_string().len() {
+        len = body.len() + len.to_string().len();
+    }
+    format!("{len}{body}").into_bytes()
+}
+
+/// A path of about 3 KiB under `usr/`, in folders of 200 characters (a name may hold 255).
+fn long_path(c: char) -> String {
+    let part = c.to_string().repeat(200);
+    format!("usr/{}f", format!("{part}/").repeat(15))
+}
+
+#[test]
+fn long_names_of_a_few_kib_still_extract() {
+    let (_h, store) = store();
+    let (gnu, pax_path) = (long_path('a'), long_path('b'));
+    let mut b = tar::Builder::new(Vec::new());
+    extended(&mut b, tar::EntryType::GNULongName, gnu.as_bytes(), "usr/x");
+    extended(
+        &mut b,
+        tar::EntryType::XHeader,
+        &pax("path", &pax_path),
+        "usr/y",
+    );
+    let digest = image_of(&store, &[b.into_inner().unwrap()]);
+    let root = from_store(&store, &digest).unwrap();
+    assert!(gnu.len() > 3000, "{}", gnu.len());
+    assert_eq!(fs::read_to_string(root.join(&gnu)).unwrap(), "x");
+    assert_eq!(fs::read_to_string(root.join(&pax_path)).unwrap(), "x");
+    assert!(!root.join("usr/x").exists() && !root.join("usr/y").exists());
+}
+
+#[test]
+fn an_oversized_long_name_or_pax_record_is_refused_before_it_is_read() {
+    let (_h, store) = store();
+    let big = "a".repeat(4 * MIB);
+    for (kind, data) in [
+        (tar::EntryType::GNULongName, big.clone().into_bytes()),
+        (tar::EntryType::XHeader, pax("comment", &big)),
+    ] {
+        let mut b = tar::Builder::new(Vec::new());
+        extended(&mut b, kind, &data, "usr/x");
+        let digest = image_of(&store, &[b.into_inner().unwrap()]);
+        // A budget one byte past the fence: the fence error shows the stream gave the crate
+        // at most that byte past the fence, so it never held the extension.
+        fails_cleanly(&store, &digest, (MIB + 1) as u64, FENCED);
+    }
+}
+
+#[test]
+fn the_fence_is_exact_and_moves_with_each_entry() {
+    let (_h, store) = store();
+    // Before the first entry: the long-name header, its data, the file header = 1 MiB.
+    let layer = |n: usize| {
+        let mut b = tar::Builder::new(Vec::new());
+        extended(
+            &mut b,
+            tar::EntryType::GNULongName,
+            "v".repeat(n).as_bytes(),
+            "var/x",
+        );
+        b.into_inner().unwrap()
+    };
+    let at = image_of(
+        &store,
+        &[layer(MIB - 1024), layer_bytes(&[M::File("usr/a", "A")])],
+    );
+    assert_eq!(
+        files_under(&from_store(&store, &at).unwrap()),
+        ["usr", "usr/a"]
+    );
+    let past = image_of(&store, &[layer(MIB - 1023)]);
+    fails_cleanly(&store, &past, rootfs::WRITE_CAP, FENCED);
+    // Each entry opens a new window past its own declared data.
+    let mut b = tar::Builder::new(Vec::new());
+    extended(
+        &mut b,
+        tar::EntryType::GNULongName,
+        &[b'v'; 600 << 10],
+        "var/x",
+    );
+    extended(
+        &mut b,
+        tar::EntryType::GNULongName,
+        &[b'w'; 600 << 10],
+        "var/y",
+    );
+    let mut h = tar::Header::new_gnu();
+    h.set_path("var/big").unwrap();
+    h.set_mode(0o644);
+    h.set_size(4 * MIB as u64);
+    h.set_cksum();
+    b.append(&h, &vec![0u8; 4 * MIB][..]).unwrap();
+    let digest = image_of(
+        &store,
+        &[
+            b.into_inner().unwrap(),
+            layer_bytes(&[M::File("usr/a", "A")]),
+        ],
+    );
+    assert_eq!(
+        files_under(&from_store(&store, &digest).unwrap()),
+        ["usr", "usr/a"]
+    );
+}
+
+#[test]
+fn the_outer_archive_is_fenced_too() {
+    let (_h, store) = store();
+    let mut b = tar::Builder::new(Vec::new());
+    extended(
+        &mut b,
+        tar::EntryType::GNULongName,
+        &vec![b'a'; 4 * MIB],
+        "x",
+    );
+    let manifest = br#"[{"Layers":["l0/layer.tar"]}]"#;
+    let layer = layer_bytes(&[M::File("usr/a", "A")]);
+    for (name, data) in [
+        ("manifest.json", &manifest[..]),
+        ("l0/layer.tar", &layer[..]),
+    ] {
+        let mut h = tar::Header::new_gnu();
+        h.set_path(name).unwrap();
+        h.set_mode(0o644);
+        h.set_size(data.len() as u64);
+        h.set_cksum();
+        b.append(&h, data).unwrap();
+    }
+    let digest = store.put(&b.into_inner().unwrap()).unwrap();
+    fails_cleanly(&store, &digest, rootfs::WRITE_CAP, FENCED);
+}
+
+#[test]
+fn a_plain_tar_whose_first_name_starts_like_bzip2_extracts() {
+    let (_h, store) = store();
+    let digest = image_of(
+        &store,
+        &[layer_bytes(&[
+            M::File("BZh91AY&SY", "x"),
+            M::File("usr/a", "A"),
+        ])],
+    );
+    assert_eq!(
+        files_under(&from_store(&store, &digest).unwrap()),
+        ["usr", "usr/a"]
+    );
 }
 
 #[test]
