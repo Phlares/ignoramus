@@ -311,10 +311,11 @@ pub fn environment(
     pin: &str,
     builder: Option<&Builder>,
 ) -> Result<Environment, RunError> {
+    let given = pin;
     let pin = pin.strip_prefix("sha256:").unwrap_or(pin);
     let (digest, built) = if !pin.is_empty() {
         if store.path(pin).is_err() {
-            return Err(RunError::EnvironmentPin(pin.into()));
+            return Err(RunError::EnvironmentPin(given.into()));
         }
         if !store.has(pin) {
             return Err(RunError::EnvironmentMissing(pin.into()));

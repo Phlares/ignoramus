@@ -261,6 +261,40 @@ fn from_store_refuses_a_layer_path_that_leaves_the_archive() {
 fn from_store_refuses_to_write_through_a_link() {
     let (_h, store) = store();
     let outside = TempDir::new().unwrap();
+    let t = TempDir::new().unwrap();
+    let target = outside.path().to_str().unwrap();
+    // Layer 1 leaves a link; layer 2 holds only `etc/l/pwn`, with no folder entry for `etc/l`.
+    let (a, b) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    put(a.path(), "etc/l", "", Some(target));
+    put(b.path(), "etc/l/pwn", "x", None);
+    let (t1, t2) = (t.path().join("1.tar"), t.path().join("2.tar"));
+    layer(a.path(), &t1, &[], &["."]);
+    layer(b.path(), &t2, &[], &["etc/l/pwn"]);
+    let digest = image(&store, &[t1, t2], None);
+    let err = from_store(&store, &digest).unwrap_err();
+    assert!(matches!(err, RootfsError::Unsafe(_)), "{err}");
+    assert!(!outside.path().join("pwn").exists());
+    // The same layer holding the link and the write: `etc/mm` is renamed to `etc/m`.
+    let c = TempDir::new().unwrap();
+    put(c.path(), "etc/m", "", Some(target));
+    put(c.path(), "etc/mm/pwn", "x", None);
+    let t3 = t.path().join("3.tar");
+    layer(
+        c.path(),
+        &t3,
+        &["--transform=s,^etc/mm,etc/m,"],
+        &["etc/m", "etc/mm/pwn"],
+    );
+    let digest = image(&store, &[t3], None);
+    let err = from_store(&store, &digest).unwrap_err();
+    assert!(matches!(err, RootfsError::Unsafe(_)), "{err}");
+    assert!(!outside.path().join("pwn").exists());
+}
+
+#[test]
+fn a_folder_entry_replaces_a_link_instead_of_following_it() {
+    let (_h, store) = store();
+    let outside = TempDir::new().unwrap();
     let (a, b) = (TempDir::new().unwrap(), TempDir::new().unwrap());
     put(
         a.path(),
@@ -268,29 +302,12 @@ fn from_store_refuses_to_write_through_a_link() {
         "",
         Some(outside.path().to_str().unwrap()),
     );
-    put(b.path(), "etc/l/pwn", "x", None);
+    put(b.path(), "etc/l/f", "x", None);
     let digest = archive(&store, &[a.path(), b.path()], None);
-    let err = from_store(&store, &digest).unwrap_err();
-    assert!(matches!(err, RootfsError::Unsafe(_)), "{err}");
-    assert!(!outside.path().join("pwn").exists());
-    // The same layer holding the link and the write: `etc/mm` is renamed to `etc/m` in the tar.
-    let c = TempDir::new().unwrap();
-    put(
-        c.path(),
-        "etc/m",
-        "",
-        Some(outside.path().to_str().unwrap()),
-    );
-    put(c.path(), "etc/mm/pwn", "x", None);
-    let digest = archive_as(
-        &store,
-        &[c.path()],
-        None,
-        &["--transform=s,^./etc/mm,./etc/m,"],
-    );
-    let err = from_store(&store, &digest).unwrap_err();
-    assert!(matches!(err, RootfsError::Unsafe(_)), "{err}");
-    assert!(!outside.path().join("pwn").exists());
+    let root = from_store(&store, &digest).unwrap();
+    assert!(fs::symlink_metadata(root.join("etc/l")).unwrap().is_dir());
+    assert_eq!(fs::read_to_string(root.join("etc/l/f")).unwrap(), "x");
+    assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
 }
 
 #[test]
@@ -730,26 +747,20 @@ fn a_root_level_whiteout_removes_a_whole_kept_folder() {
 }
 
 #[test]
-fn a_name_with_a_newline_is_refused() {
+fn a_name_with_a_newline_extracts_under_that_name() {
     let (_h, store) = store();
     let a = TempDir::new().unwrap();
     put(a.path(), "etc/ok", "k", None);
     put(a.path(), "etc/a\nb", "x", None);
+    put(a.path(), "etc/l", "", Some("t\nu"));
     let digest = archive(&store, &[a.path()], None);
-    let err = from_store(&store, &digest).unwrap_err();
-    assert!(
-        matches!(&err, RootfsError::Unsafe(m) if m.contains("newline")),
-        "{err}"
+    let root = from_store(&store, &digest).unwrap();
+    assert_eq!(fs::read_to_string(root.join("etc/a\nb")).unwrap(), "x");
+    assert_eq!(
+        fs::read_link(root.join("etc/l")).unwrap(),
+        Path::new("t\nu")
     );
-    // A newline in a link target is refused too.
-    let c = TempDir::new().unwrap();
-    put(c.path(), "etc/l", "", Some("a\nb"));
-    let digest = archive(&store, &[c.path()], None);
-    let err = from_store(&store, &digest).unwrap_err();
-    assert!(
-        matches!(&err, RootfsError::Unsafe(m) if m.contains("newline")),
-        "{err}"
-    );
+    assert_eq!(files_under(&root), ["etc", "etc/a\nb", "etc/l", "etc/ok"]);
 }
 
 #[test]
@@ -768,7 +779,7 @@ fn a_pin_that_is_not_a_digest_is_not_reported_as_absent() {
     let lab = lab();
     let dir = common::plain(&lab, "badpin");
     let store = store_of(&lab);
-    for pin in ["busybox:latest", "ABCDEF", &ABSENT[..63]] {
+    for pin in ["busybox:latest", "ABCDEF", &ABSENT[..63], "sha256:ABC"] {
         let err = environment(&store, &dir, pin, None).err().unwrap();
         assert!(
             matches!(&err, RunError::EnvironmentPin(p) if p == pin),
@@ -779,4 +790,253 @@ fn a_pin_that_is_not_a_digest_is_not_reported_as_absent() {
             format!("pins.environment {pin:?} is not a store digest")
         );
     }
+}
+
+// -- hostile archives, written with the tar crate ------------------------------------------
+
+enum M<'a> {
+    File(&'a str, &'a str),
+    Sym(&'a str, &'a str),
+    /// A hard link: name, target, owner name.
+    Hard(&'a str, &'a str, &'a str),
+}
+
+/// A layer tar holding `members`. Names and targets are written into the header as given.
+fn layer_bytes(members: &[M]) -> Vec<u8> {
+    let mut b = tar::Builder::new(Vec::new());
+    for m in members {
+        let mut h = tar::Header::new_gnu();
+        let (name, link, kind, data, owner) = match m {
+            M::File(n, d) => (*n, "", tar::EntryType::Regular, d.as_bytes(), "box"),
+            M::Sym(n, t) => (*n, *t, tar::EntryType::Symlink, &b""[..], "box"),
+            M::Hard(n, t, o) => (*n, *t, tar::EntryType::Link, &b""[..], *o),
+        };
+        h.set_entry_type(kind);
+        h.set_mode(0o644);
+        h.set_size(data.len() as u64);
+        h.set_username(owner).unwrap();
+        let old = h.as_old_mut();
+        old.name[..name.len()].copy_from_slice(name.as_bytes());
+        old.linkname[..link.len()].copy_from_slice(link.as_bytes());
+        h.set_cksum();
+        b.append(&h, data).unwrap();
+    }
+    b.into_inner().unwrap()
+}
+
+/// An image in the store whose layers are the given tar bytes.
+fn image_of(store: &Store, layers: &[Vec<u8>]) -> String {
+    let t = TempDir::new().unwrap();
+    let tars: Vec<PathBuf> = layers
+        .iter()
+        .enumerate()
+        .map(|(i, bytes)| {
+            let p = t.path().join(format!("{i}.tar"));
+            fs::write(&p, bytes).unwrap();
+            p
+        })
+        .collect();
+    image(store, &tars, None)
+}
+
+fn host_dir() -> TempDir {
+    let host = TempDir::new().unwrap();
+    fs::write(host.path().join("secret"), "host data").unwrap();
+    host
+}
+
+/// The image is refused as unsafe, and no host file appeared in the host folder.
+fn refused(store: &Store, layers: &[Vec<u8>], host: &TempDir) {
+    let digest = image_of(store, layers);
+    let err = from_store(store, &digest).unwrap_err();
+    assert!(matches!(err, RootfsError::Unsafe(_)), "{err}");
+    assert!(!store.root.join("rootfs").join(&digest).exists());
+    assert_eq!(fs::read_dir(host.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn a_hard_link_with_a_crafted_owner_name_is_judged_by_its_real_target() {
+    let (_h, store) = store();
+    let host = host_dir();
+    let h = host.path().to_str().unwrap();
+    // The owner text mimics the human listing: "usr/ok link to ..." must not matter.
+    let owner = "a b usr/ok link to usr/ok";
+    refused(
+        &store,
+        &[
+            layer_bytes(&[M::File("usr/ok", "fine"), M::Sym("etc/x", h)]),
+            layer_bytes(&[M::Hard("usr/pull", "etc/x/secret", owner)]),
+        ],
+        &host,
+    );
+}
+
+#[test]
+fn a_hard_link_through_a_symlink_of_the_same_layer_is_refused() {
+    let (_h, store) = store();
+    let host = host_dir();
+    let h = host.path().to_str().unwrap();
+    refused(
+        &store,
+        &[layer_bytes(&[
+            M::Sym("etc/x", h),
+            M::Hard("usr/pull", "etc/x/secret", "box"),
+        ])],
+        &host,
+    );
+}
+
+#[test]
+fn a_hard_link_through_a_lower_layer_symlink_is_refused() {
+    let (_h, store) = store();
+    let host = host_dir();
+    let h = host.path().to_str().unwrap();
+    refused(
+        &store,
+        &[
+            layer_bytes(&[M::File("usr/real/f", "x")]),
+            layer_bytes(&[
+                M::Sym("usr/real", h),
+                M::Hard("etc/pull", "usr/real/secret", "box"),
+            ]),
+        ],
+        &host,
+    );
+    // Even a name that exists as a file below the link is not reachable through it.
+    refused(
+        &store,
+        &[
+            layer_bytes(&[M::File("usr/real/f", "x")]),
+            layer_bytes(&[
+                M::Sym("usr/real", h),
+                M::Hard("etc/pull", "usr/real/f", "box"),
+            ]),
+        ],
+        &host,
+    );
+}
+
+#[test]
+fn a_hard_link_to_a_symlink_is_refused() {
+    let (_h, store) = store();
+    let host = host_dir();
+    refused(
+        &store,
+        &[layer_bytes(&[
+            M::File("usr/a", "x"),
+            M::Sym("usr/s", "a"),
+            M::Hard("etc/p", "usr/s", "box"),
+        ])],
+        &host,
+    );
+}
+
+#[test]
+fn a_hard_link_with_an_absolute_or_parent_target_is_refused() {
+    let (_h, store) = store();
+    let host = host_dir();
+    for target in [
+        "/etc/hostname",
+        "../x",
+        "usr/../../x",
+        "usr/a/../../../x",
+        ".",
+    ] {
+        refused(
+            &store,
+            &[layer_bytes(&[
+                M::File("usr/a", "x"),
+                M::Hard("etc/p", target, "box"),
+            ])],
+            &host,
+        );
+    }
+}
+
+#[test]
+fn a_hard_link_to_a_file_not_yet_written_or_outside_the_kept_folders_is_refused() {
+    let (_h, store) = store();
+    let host = host_dir();
+    refused(
+        &store,
+        &[layer_bytes(&[
+            M::Hard("etc/p", "usr/later", "box"),
+            M::File("usr/later", "x"),
+        ])],
+        &host,
+    );
+    refused(
+        &store,
+        &[layer_bytes(&[
+            M::File("var/x", "x"),
+            M::Hard("etc/p", "var/x", "box"),
+        ])],
+        &host,
+    );
+}
+
+#[test]
+fn a_later_member_replacing_a_hard_link_target_leaves_the_link_on_the_old_file() {
+    let (_h, store) = store();
+    let host = host_dir();
+    let h = host.path().to_str().unwrap();
+    let digest = image_of(
+        &store,
+        &[layer_bytes(&[
+            M::File("usr/a", "old"),
+            M::Hard("usr/b", "usr/a", "box"),
+            M::File("usr/a", "new"),
+        ])],
+    );
+    let root = from_store(&store, &digest).unwrap();
+    assert_eq!(fs::read_to_string(root.join("usr/a")).unwrap(), "new");
+    assert_eq!(fs::read_to_string(root.join("usr/b")).unwrap(), "old");
+    // A target replaced by a link to the host is not a file any more.
+    refused(
+        &store,
+        &[layer_bytes(&[
+            M::File("usr/a", "old"),
+            M::Sym("usr/a", h),
+            M::Hard("usr/c", "usr/a", "box"),
+        ])],
+        &host,
+    );
+}
+
+#[test]
+fn a_compressed_layer_is_refused_with_its_kind() {
+    let (_h, store) = store();
+    for (kind, magic) in [
+        ("gzip", [0x1f, 0x8b, 8, 0]),
+        ("zstd", [0x28, 0xb5, 0x2f, 0xfd]),
+    ] {
+        let mut bytes = magic.to_vec();
+        bytes.extend_from_slice(&[0; 600]);
+        let digest = image_of(&store, &[bytes]);
+        let err = from_store(&store, &digest).unwrap_err();
+        assert!(
+            matches!(&err, RootfsError::Format(m) if m.contains(kind)),
+            "{kind}: {err}"
+        );
+    }
+}
+
+#[test]
+fn files_keep_only_permission_bits_and_the_box_owns_them() {
+    use std::os::unix::fs::MetadataExt;
+    let (_h, store) = store();
+    let mut b = tar::Builder::new(Vec::new());
+    let mut h = tar::Header::new_gnu();
+    h.set_path("usr/bin/su").unwrap();
+    h.set_mode(0o7755);
+    h.set_uid(0);
+    h.set_gid(0);
+    h.set_size(1);
+    h.set_cksum();
+    b.append(&h, &b"s"[..]).unwrap();
+    let digest = image_of(&store, &[b.into_inner().unwrap()]);
+    let root = from_store(&store, &digest).unwrap();
+    let m = fs::metadata(root.join("usr/bin/su")).unwrap();
+    assert_eq!(m.mode() & 0o7777, 0o755);
+    assert_eq!(m.uid(), fs::metadata(&root).unwrap().uid());
 }
