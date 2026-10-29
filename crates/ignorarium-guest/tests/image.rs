@@ -73,17 +73,18 @@ fn check_pin_names_both_hashes_on_a_mismatch() {
 }
 
 #[test]
-fn initramfs_is_newc_with_console_and_init() {
+fn initramfs_is_newc_with_console_null_and_init() {
     let agent = b"agent bytes!!";
     let es = parse_newc(&initramfs(agent));
     let names: Vec<_> = es.iter().map(|e| e.name.as_str()).collect();
-    assert_eq!(names, ["dev", "dev/console", "init", "TRAILER!!!"]);
+    assert_eq!(names, ["dev", "dev/console", "dev/null", "init", "TRAILER!!!"]);
     assert_eq!(es[0].mode, 0o040755);
-    assert_eq!((es[0].nlink, es[1].nlink, es[2].nlink), (2, 1, 1));
-    assert_eq!(es[1].mode, 0o020600);
-    assert_eq!(es[1].rdev, (5, 1));
-    assert_eq!(es[2].mode, 0o100755);
-    assert_eq!(es[2].data, agent);
+    let nlinks: Vec<_> = es[..4].iter().map(|e| e.nlink).collect();
+    assert_eq!(nlinks, [2, 1, 1, 1]);
+    assert_eq!((es[1].mode, es[1].rdev), (0o020600, (5, 1)));
+    assert_eq!((es[2].mode, es[2].rdev), (0o020666, (1, 3)));
+    assert_eq!(es[3].mode, 0o100755);
+    assert_eq!(es[3].data, agent);
     for e in &es {
         assert_eq!((e.uid, e.gid, e.mtime), (0, 0, 0));
     }

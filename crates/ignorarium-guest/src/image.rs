@@ -85,13 +85,15 @@ fn newc_entry(out: &mut Vec<u8>, ino: u32, name: &str, mode: u32, rdev: (u32, u3
     out.resize(out.len().next_multiple_of(4), 0);
 }
 
-/// A boot archive holding `/dev/console` and the agent as `/init`.
+/// A boot archive holding `/dev/console`, `/dev/null` and the agent as `/init`. When PID 1
+/// starts with any of fds 0-2 closed, std opens `/dev/null` there, or aborts if it cannot.
 pub fn initramfs(agent: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     newc_entry(&mut out, 1, "dev", 0o040755, (0, 0), &[]);
     newc_entry(&mut out, 2, "dev/console", 0o020600, (5, 1), &[]);
-    newc_entry(&mut out, 3, "init", 0o100755, (0, 0), agent);
-    newc_entry(&mut out, 4, "TRAILER!!!", 0, (0, 0), &[]);
+    newc_entry(&mut out, 3, "dev/null", 0o020666, (1, 3), &[]);
+    newc_entry(&mut out, 4, "init", 0o100755, (0, 0), agent);
+    newc_entry(&mut out, 5, "TRAILER!!!", 0, (0, 0), &[]);
     out
 }
 
