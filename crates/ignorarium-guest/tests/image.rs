@@ -204,3 +204,14 @@ fn empty_ext4_has_extents_and_no_journal() {
     assert!(!features.contains("has_journal"), "{features}");
     assert!(root_names(&img).is_empty());
 }
+
+#[test]
+fn sha256_file_matches_a_known_vector() {
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("f");
+    fs::write(&f, "hi\n").unwrap();
+    assert_eq!(
+        sha256_file(&f).unwrap(),
+        "98ea6e4f216f2fb4b69fff9b3a44842c38686ca685f3f55dc48c5d3fb1107be4"
+    );
+}

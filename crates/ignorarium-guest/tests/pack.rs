@@ -82,6 +82,18 @@ fn an_empty_dir_packs_to_magic_and_end() {
     assert_eq!(v, b"IGNPACK1e");
 }
 
+/// Counts every byte offered to it.
+struct Offered(u64);
+impl std::io::Write for Offered {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len() as u64;
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// `write` and `unpack` both accept `dir` at its cost (stream bytes plus a block per entry)
 /// and both refuse it one byte below.
 fn same_limit_on_both_sides(dir: &Path, entries: u64) {
@@ -94,12 +106,18 @@ fn same_limit_on_both_sides(dir: &Path, entries: u64) {
         limit,
     )
     .unwrap();
-    let mut short = Vec::new();
+    let mut short = Offered(0);
     let e = write(dir, &mut short, limit - 1).unwrap_err();
     assert_eq!(e.kind(), ErrorKind::InvalidData);
     let want = format!("outputs exceed the output limit of {} bytes", limit - 1);
     assert_eq!(e.to_string(), want);
-    assert!((short.len() as u64) < limit, "wrote past the limit");
+    // Entries are charged a block each, so the bytes offered must fit in what is left.
+    let offered = short.0 + entries * 4096;
+    assert!(
+        offered < limit,
+        "offered {offered} bytes against a limit of {}",
+        limit - 1
+    );
     let out = tempfile::tempdir().unwrap();
     let e = unpack(&mut v.as_slice(), out.path(), limit - 1).unwrap_err();
     assert_eq!(e.kind(), ErrorKind::InvalidData);
@@ -337,4 +355,52 @@ fn each_entry_costs_a_block_of_the_limit() {
     let out = tempfile::tempdir().unwrap();
     let e = unpack(&mut bytes.as_slice(), out.path(), exact - 1).unwrap_err();
     assert_eq!(e.kind(), ErrorKind::InvalidData);
+}
+
+fn refusal(bytes: &[u8]) -> String {
+    let out = tempfile::tempdir().unwrap();
+    let e = unpack(&mut &bytes[..], out.path(), 1 << 20).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::InvalidData, "{e}");
+    e.to_string()
+}
+
+#[test]
+fn a_path_part_of_255_bytes_is_accepted_and_256_refused() {
+    let name = [b'p'; 255];
+    let out = tempfile::tempdir().unwrap();
+    unpack(
+        &mut pack(&[file(&name, b"x")]).as_slice(),
+        out.path(),
+        1 << 20,
+    )
+    .unwrap();
+    assert!(out.path().join(OsStr::from_bytes(&name)).is_file());
+    let msg = refusal(&pack(&[file(&[b'p'; 256], b"x")]));
+    assert!(msg.contains("path part is too long"), "{msg}");
+}
+
+/// A target of 4096 bytes passes the length cap on names and fails the target check;
+/// 4097 bytes fail the cap first. The two refusals say which check fired.
+#[test]
+fn a_name_may_be_4096_bytes_but_not_4097() {
+    let msg = refusal(&pack(&[link(b"l", &[b't'; 4096])]));
+    assert!(msg.contains("link target is too long"), "{msg}");
+    let msg = refusal(&pack(&[link(b"l", &[b't'; 4097])]));
+    assert!(
+        msg.contains("link target is longer than 4096 bytes"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn a_bad_link_target_field_names_the_entry() {
+    let msg = refusal(&pack(&[link(b"l", b"a\0b")]));
+    assert!(msg.starts_with("entry \"l\": "), "{msg}");
+    assert!(msg.contains("holds a NUL byte"), "{msg}");
+    // A pack cut inside the target is named the same way.
+    let mut cut = entry(b'l', b"l");
+    cut.extend_from_slice(&9u32.to_be_bytes());
+    cut.extend_from_slice(b"ab");
+    let msg = refusal(&pack(&[cut]));
+    assert!(msg.starts_with("entry \"l\": "), "{msg}");
 }

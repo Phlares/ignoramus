@@ -154,3 +154,31 @@ fn selftest_ok_needs_all_three() {
         .ok()
     );
 }
+
+/// A message whose JSON body is exactly `n` bytes.
+fn failed_of_len(n: usize) -> ToHost {
+    let bare = serde_json::to_vec(&ToHost::Failed { reason: "".into() })
+        .unwrap()
+        .len();
+    ToHost::Failed {
+        reason: "a".repeat(n - bare),
+    }
+}
+
+#[test]
+fn a_frame_of_exactly_the_limit_is_written_and_read() {
+    let msg = failed_of_len(MAX_FRAME);
+    let mut buf = Vec::new();
+    write_frame(&mut buf, &msg).unwrap();
+    assert_eq!(buf.len(), 4 + MAX_FRAME);
+    assert_eq!(read_frame::<ToHost>(&mut Cursor::new(buf)).unwrap(), msg);
+}
+
+#[test]
+fn a_frame_one_byte_over_the_limit_is_refused_by_write() {
+    let mut buf = Vec::new();
+    let e = write_frame(&mut buf, &failed_of_len(MAX_FRAME + 1)).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::InvalidData);
+    assert!(e.to_string().contains("1048577"), "{e}");
+    assert!(buf.is_empty(), "bytes written before the refusal");
+}

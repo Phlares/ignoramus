@@ -747,3 +747,84 @@ fn readable_inputs_and_links_boot() {
     symlink("missing", input.join("link")).unwrap();
     boots(&mut rig);
 }
+
+/// A directory below `root` whose path is exactly `len` bytes.
+fn dir_of_len(root: &Path, len: usize) -> PathBuf {
+    let name = len - root.as_os_str().len() - 1;
+    assert!(
+        (1..=255).contains(&name),
+        "root is {} bytes",
+        root.as_os_str().len()
+    );
+    let dir = root.join("w".repeat(name));
+    fs::create_dir(&dir).unwrap();
+    assert_eq!(dir.as_os_str().len(), len);
+    dir
+}
+
+/// The control socket path is the work dir plus `/vsock.sock_7201` (16 bytes); a Unix
+/// socket path holds 107 bytes.
+#[test]
+fn a_work_dir_at_the_socket_path_limit_boots_and_one_byte_more_is_refused() {
+    let rig = Rig::sleeper();
+    let long = dir_of_len(rig.root.path(), 107 - 16 + 1);
+    let msg = refused_before_boot(&rig, &long);
+    assert!(msg.contains("too deep for a Unix socket"), "{msg}");
+    let mut rig = rig;
+    let ok = dir_of_len(rig.root.path(), 107 - 16);
+    rig.vm.boot_timeout = ms(200);
+    let res = run_row(&rig.vm, &rig.job, &ok);
+    assert!(matches!(res, Err(VmError::Boot(_))), "{res:?}");
+    rig.pid_gone();
+}
+
+/// The job as the host sends it, with the clock field at its widest.
+fn wire_len(job: &HostJob) -> usize {
+    let wire = Job {
+        seed_hex: hex::encode(job.seed),
+        unix_nanos: u64::MAX,
+        argv: job.argv.clone(),
+        env: job.env.clone(),
+        timeout_ms: job.wall_timeout.as_millis() as u64,
+    };
+    serde_json::to_vec(&wire).unwrap().len()
+}
+
+#[test]
+fn a_job_of_exactly_the_frame_limit_boots() {
+    let mut rig = Rig::sleeper();
+    rig.job.argv = vec![String::new()];
+    let pad = MAX_FRAME - wire_len(&rig.job);
+    rig.job.argv = vec!["a".repeat(pad)];
+    assert_eq!(wire_len(&rig.job), MAX_FRAME);
+    boots(&mut rig);
+}
+
+#[test]
+fn a_job_one_byte_over_the_frame_limit_is_refused() {
+    let mut rig = Rig::new(&format!("touch $PIDFILE\n{SLEEPER}"));
+    rig.job.argv = vec![String::new()];
+    let pad = MAX_FRAME - wire_len(&rig.job) + 1;
+    rig.job.argv = vec!["a".repeat(pad)];
+    assert_eq!(wire_len(&rig.job), MAX_FRAME + 1);
+    let msg = refused_before_boot(&rig, &rig.work);
+    assert!(msg.contains("frame limit"), "{msg}");
+}
+
+#[test]
+fn the_output_disk_has_the_size_asked_for() {
+    let mut rig = Rig::sleeper();
+    rig.vm.out_mib = 8;
+    let h = rig.guest(|s, c| {
+        hello(s);
+        read_job(s, c);
+        let len = fs::metadata(c.work.join("out.img")).unwrap().len();
+        write_frame(s, &failed(&len.to_string())).unwrap();
+    });
+    let res = rig.run();
+    h.join().unwrap();
+    match res {
+        Err(VmError::Guest(m)) => assert!(m.contains(&(8u64 << 20).to_string()), "{m}"),
+        other => panic!("{other:?}"),
+    }
+}
