@@ -371,112 +371,34 @@ fn only_firing_parents_run_undeclared_children() {
     }
 }
 
+/// `base()` with one change.
+fn with(change: impl FnOnce(&mut Scenario)) -> Scenario {
+    let mut s = base();
+    change(&mut s);
+    s
+}
+
 #[test]
 fn rejects_bad_scenarios() {
-    let ok = base();
     let cases = [
-        (
-            Scenario {
-                alpha: 0.0,
-                ..base()
-            },
-            "alpha",
-        ),
-        (
-            Scenario {
-                alpha: 1.0,
-                ..base()
-            },
-            "alpha",
-        ),
-        (
-            Scenario {
-                alpha: f64::NAN,
-                ..base()
-            },
-            "alpha",
-        ),
-        (
-            Scenario {
-                gamma: Gamma::Bounded { m: 0 },
-                ..base()
-            },
-            "gamma",
-        ),
-        (Scenario { trees: 0, ..base() }, "trees"),
-        (Scenario { depth: 3, ..base() }, "depth"),
-        (Scenario { units: 0, ..base() }, "units"),
-        (
-            Scenario {
-                rho: -0.1,
-                ..base()
-            },
-            "rho",
-        ),
-        (Scenario { rho: 1.0, ..base() }, "rho"),
-        (
-            Scenario {
-                rho: f64::NAN,
-                ..base()
-            },
-            "rho",
-        ),
-        (
-            Scenario {
-                theta: 1.0,
-                ..base()
-            },
-            "theta",
-        ),
-        (
-            Scenario {
-                theta: f64::NAN,
-                ..base()
-            },
-            "theta",
-        ),
-        (
-            Scenario {
-                non_null: -0.1,
-                ..base()
-            },
-            "non_null",
-        ),
-        (
-            Scenario {
-                non_null: 1.1,
-                ..base()
-            },
-            "non_null",
-        ),
-        (
-            Scenario {
-                non_null: f64::NAN,
-                ..base()
-            },
-            "non_null",
-        ),
-        (
-            Scenario {
-                effect: f64::INFINITY,
-                ..base()
-            },
-            "effect",
-        ),
-        (
-            Scenario {
-                effect: f64::NAN,
-                ..base()
-            },
-            "effect",
-        ),
-        (
-            Scenario {
-                children: usize::MAX,
-                ..base()
-            },
-            "children",
-        ),
+        (with(|s| s.alpha = 0.0), "alpha"),
+        (with(|s| s.alpha = 1.0), "alpha"),
+        (with(|s| s.alpha = f64::NAN), "alpha"),
+        (with(|s| s.gamma = Gamma::Bounded { m: 0 }), "gamma"),
+        (with(|s| s.trees = 0), "trees"),
+        (with(|s| s.depth = 3), "depth"),
+        (with(|s| s.units = 0), "units"),
+        (with(|s| s.rho = -0.1), "rho"),
+        (with(|s| s.rho = 1.0), "rho"),
+        (with(|s| s.rho = f64::NAN), "rho"),
+        (with(|s| s.theta = 1.0), "theta"),
+        (with(|s| s.theta = f64::NAN), "theta"),
+        (with(|s| s.non_null = -0.1), "non_null"),
+        (with(|s| s.non_null = 1.1), "non_null"),
+        (with(|s| s.non_null = f64::NAN), "non_null"),
+        (with(|s| s.effect = f64::INFINITY), "effect"),
+        (with(|s| s.effect = f64::NAN), "effect"),
+        (with(|s| s.children = usize::MAX), "children"),
     ];
     for (s, name) in cases {
         assert_eq!(
@@ -486,57 +408,25 @@ fn rejects_bad_scenarios() {
         );
     }
     assert_eq!(
-        simulate(&ok, 0, &mut seed(OTHER, 7)),
+        simulate(&base(), 0, &mut seed(OTHER, 7)),
         Err(Error::Parameter("reps"))
     );
 
     let edges = [
-        ok.clone(),
-        Scenario {
-            alpha: 1e-9,
-            ..base()
-        },
-        Scenario {
-            alpha: 1.0f64.next_down(),
-            ..base()
-        },
-        Scenario {
-            gamma: Gamma::Unbounded,
-            ..base()
-        },
-        Scenario { depth: 0, ..base() },
-        Scenario { depth: 2, ..base() },
-        Scenario { units: 1, ..base() },
-        Scenario {
-            rho: 1.0f64.next_down(),
-            ..base()
-        },
-        Scenario {
-            theta: 1.0f64.next_up(),
-            ..base()
-        },
-        Scenario {
-            theta: f64::INFINITY,
-            ..base()
-        },
-        Scenario {
-            non_null: 1.0,
-            ..base()
-        },
-        Scenario {
-            non_null: 1.0,
-            effect: -f64::MAX,
-            ..base()
-        },
-        Scenario {
-            children: 0,
-            ..base()
-        },
-        Scenario {
-            children: usize::MAX,
-            depth: 0,
-            ..base()
-        },
+        base(),
+        with(|s| s.alpha = 1e-9),
+        with(|s| s.alpha = 1.0f64.next_down()),
+        with(|s| s.gamma = Gamma::Unbounded),
+        with(|s| s.depth = 0),
+        with(|s| s.depth = 2),
+        with(|s| s.units = 1),
+        with(|s| s.rho = 1.0f64.next_down()),
+        with(|s| s.theta = 1.0f64.next_up()),
+        with(|s| s.theta = f64::INFINITY),
+        with(|s| s.non_null = 1.0),
+        with(|s| (s.non_null, s.effect) = (1.0, -f64::MAX)),
+        with(|s| s.children = 0),
+        with(|s| (s.children, s.depth) = (usize::MAX, 0)),
     ];
     for s in edges {
         assert!(simulate(&s, 1, &mut seed(OTHER, 7)).is_ok(), "{s:?}");

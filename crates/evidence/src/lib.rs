@@ -11,6 +11,7 @@ pub mod scan;
 pub mod sim;
 pub mod tree;
 
+/// Why a call refused its input.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
     Parameter(&'static str),
@@ -30,6 +31,7 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// Which side of the null counts as evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tail {
     Upper,

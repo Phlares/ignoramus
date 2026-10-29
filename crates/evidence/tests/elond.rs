@@ -23,7 +23,7 @@ fn unbounded_gamma_matches_published_sequence() {
     close_to(g.at(10), 0.0038982519052638913, 1e-15);
     assert_eq!(g.at(0), 0.0);
     let sum: f64 = (1..=1_000_000).map(|t| g.at(t)).sum();
-    assert!(sum > 0.52 && sum < 0.53 && sum < 1.0, "{sum}");
+    assert!(sum > 0.52 && sum < 0.53, "{sum}");
 }
 
 #[test]

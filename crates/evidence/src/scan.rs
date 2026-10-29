@@ -5,6 +5,7 @@
 use crate::rng::Rng;
 use crate::{Error, Tail};
 
+/// P-values per condition: `local` for one condition, `global` over the whole scan.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Scan {
     pub local: Vec<f64>,
@@ -61,7 +62,7 @@ pub fn sign_flip(
         .iter()
         .map(|c| c.iter().map(|d| d * d).sum::<f64>().sqrt())
         .collect();
-    if diffs.iter().flatten().any(|d| !d.is_finite()) || norms.iter().any(|v| !v.is_finite()) {
+    if norms.iter().any(|v| !v.is_finite()) {
         return Err(Error::NotFinite);
     }
     let stat = |c: &[f64], norm: f64, plus: &dyn Fn(usize) -> bool| {

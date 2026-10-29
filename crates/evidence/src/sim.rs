@@ -95,15 +95,19 @@ pub struct Report {
 /// mean is not 0. An undeclared rejection counts as a discovery of its tree but not as
 /// one of the stream's.
 pub fn simulate(s: &Scenario, reps: usize, rng: &mut Rng) -> Result<Report, Error> {
-    let fresh = Stream::new(s.alpha, s.gamma).map_err(|e| match e {
-        Error::Parameter("m") => Error::Parameter("gamma"),
-        e => e,
-    })?;
-    let parents = parents(s, reps)?;
+    let new_stream = || {
+        Stream::new(s.alpha, s.gamma).map_err(|e| match e {
+            Error::Parameter("m") => Error::Parameter("gamma"),
+            e => e,
+        })
+    };
+    new_stream()?;
+    validate(s, reps)?;
+    let parents = parents(s)?;
     let weights = vec![1.0; s.children * parents + 1];
     let (mut fwer, mut fdr, mut power, mut powered) = (0.0, 0.0, 0.0, 0);
     for _ in 0..reps {
-        let mut stream = fresh.clone();
+        let mut stream = new_stream()?;
         let mut false_rejection = false;
         let (mut found, mut false_found, mut true_found, mut effects) = (0, 0, 0, 0);
         for _ in 0..s.trees {
@@ -136,9 +140,8 @@ pub fn simulate(s: &Scenario, reps: usize, rng: &mut Rng) -> Result<Report, Erro
     })
 }
 
-/// Validates the fields the stream does not and returns the number of declared nodes
-/// above `depth`.
-fn parents(s: &Scenario, reps: usize) -> Result<usize, Error> {
+/// Validates the fields the stream does not.
+fn validate(s: &Scenario, reps: usize) -> Result<(), Error> {
     let checks = [
         (s.trees >= 1, "trees"),
         (s.depth <= 2, "depth"),
@@ -149,9 +152,14 @@ fn parents(s: &Scenario, reps: usize) -> Result<usize, Error> {
         (s.effect.is_finite(), "effect"),
         (reps >= 1, "reps"),
     ];
-    if let Some(&(_, name)) = checks.iter().find(|(ok, _)| !ok) {
-        return Err(Error::Parameter(name));
+    match checks.iter().find(|(ok, _)| !ok) {
+        Some(&(_, name)) => Err(Error::Parameter(name)),
+        None => Ok(()),
     }
+}
+
+/// Number of declared nodes above `depth`.
+fn parents(s: &Scenario) -> Result<usize, Error> {
     let grow = |p: usize| s.children.checked_mul(p)?.checked_add(1);
     (0..s.depth)
         .try_fold(0, |p, _| grow(p))

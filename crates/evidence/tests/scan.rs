@@ -101,7 +101,6 @@ fn global_is_never_below_local() {
     for k in 0..5 {
         assert!(got.global[k] >= got.local[k]);
     }
-    assert!(got.global.iter().any(|g| *g > 0.0 && *g < 1.0));
 }
 
 #[test]

@@ -2,6 +2,7 @@
 //! hypotheses that never ran (Choodari-Oskooei et al., arXiv:1902.05336).
 use crate::Error;
 
+/// Outcome of one tree decision.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Verdict {
     /// Level of each hypothesis, in the order of the weights.

@@ -6,6 +6,7 @@ use crate::Error;
 /// Published constant; the series sums to about 0.976.
 const UNBOUNDED_C: f64 = 0.07720838;
 
+/// Weight series that splits alpha over the slots of a stream.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Gamma {
     /// 1/m for slots 1 to m, then 0.
@@ -36,6 +37,7 @@ impl Gamma {
     }
 }
 
+/// One open test slot. Closing it consumes it.
 #[derive(Debug)]
 pub struct Slot {
     index: u64,
@@ -52,7 +54,8 @@ impl Slot {
     }
 }
 
-#[derive(Debug, Clone)]
+/// An online FDR stream. It is not `Clone`: a slot belongs to the stream that opened it.
+#[derive(Debug)]
 pub struct Stream {
     alpha: f64,
     gamma: Gamma,
