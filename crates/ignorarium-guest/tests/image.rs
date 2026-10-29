@@ -2,6 +2,7 @@ use ignorarium_guest::image::{Pin, check_pin, ext4, initramfs, sha256_file, size
 use std::ffi::OsStr;
 use std::fs;
 use std::io::ErrorKind;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 
@@ -135,6 +136,13 @@ fn debugfs(img: &Path, cmd: &str) -> String {
         .arg(img)
         .output()
         .unwrap();
+    assert!(out.status.success(), "debugfs {cmd}: {}", out.status);
+    let err = String::from_utf8_lossy(&out.stderr);
+    // debugfs prints its version banner on stderr; anything else is a failure.
+    assert!(
+        err.lines().all(|l| l.starts_with("debugfs ")),
+        "debugfs {cmd}: {err}"
+    );
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
@@ -174,12 +182,12 @@ fn ext4_keeps_odd_names() {
     let d = tempfile::tempdir().unwrap();
     let src = d.path().join("src");
     fs::create_dir(&src).unwrap();
-    for name in ["a b", "x  y"] {
-        fs::write(src.join(OsStr::new(name)), name).unwrap();
+    for name in [&b"a b"[..], b"x\xff"] {
+        fs::write(src.join(OsStr::from_bytes(name)), name).unwrap();
     }
     let img = d.path().join("i.ext4");
     ext4(Some(&src), &img, size_mib(&src).unwrap()).unwrap();
-    assert_eq!(root_names(&img), ["a b", "x  y"]);
+    assert_eq!(root_names(&img), ["a b", "x\u{fffd}"]);
 }
 
 #[test]

@@ -17,6 +17,10 @@ use std::path::Path;
 
 const MAGIC: &[u8; 8] = b"IGNPACK1";
 const MAX_PATH: usize = 4096;
+const MAX_PART: usize = 255;
+/// Charged to the limit for every entry: an entry costs the host an inode and a directory
+/// block however few stream bytes it takes.
+const ENTRY_COST: u64 = 4096;
 
 struct Counter<'a, W> {
     inner: &'a mut W,
@@ -142,6 +146,7 @@ impl<R: Read> Reader<'_, R> {
 fn check_path(path: &[u8]) -> Result<(), &'static str> {
     for part in path.split(|&b| b == b'/') {
         match part {
+            p if p.len() > MAX_PART => return Err("path part is too long"),
             b"" => return Err("empty or absolute path part"),
             b"." | b".." => return Err("dot path part"),
             _ => {}
@@ -150,7 +155,8 @@ fn check_path(path: &[u8]) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Unpacks a pack into the empty directory `dest`. `limit` caps the bytes read.
+/// Unpacks a pack into the empty directory `dest`. `limit` caps the bytes read plus a fixed
+/// cost per entry.
 /// Every entry is checked before anything is made for it; nothing is made outside `dest`.
 pub fn unpack(r: &mut impl Read, dest: &Path, limit: u64) -> io::Result<()> {
     if fs::read_dir(dest)?.next().is_some() {
@@ -179,6 +185,7 @@ pub fn unpack(r: &mut impl Read, dest: &Path, limit: u64) -> io::Result<()> {
         if !matches!(kind[0], b'd' | b'f' | b'l' | b'o') {
             return Err(bad(format!("unknown entry kind {:#04x}", kind[0])));
         }
+        r.charge(ENTRY_COST)?;
         let path = r.name("path")?;
         let shown = String::from_utf8_lossy(&path).into_owned();
         let entry = |why: &str| bad(format!("entry {shown:?}: {why}"));
@@ -221,7 +228,13 @@ pub fn unpack(r: &mut impl Read, dest: &Path, limit: u64) -> io::Result<()> {
                 }
             }
             b'l' => {
-                let target = r.name("link target").map_err(|e| entry(&e.to_string()))?;
+                let target = r.name("link target").map_err(|e| match e.kind() {
+                    io::ErrorKind::InvalidData => entry(&e.to_string()),
+                    _ => e,
+                })?;
+                if target.is_empty() {
+                    return Err(entry("empty link target"));
+                }
                 symlink(OsStr::from_bytes(&target), &to)?;
             }
             _ => mknodat(CWD, &to, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0)

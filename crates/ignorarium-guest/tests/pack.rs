@@ -39,6 +39,9 @@ fn pack_round_trip_keeps_the_tree() {
             .success()
     );
     round_trip(p);
+    let out = tempfile::tempdir().unwrap();
+    unpack(&mut packed(p).as_slice(), out.path(), 1 << 30).unwrap();
+    assert!(out.path().join("empty").is_dir());
 }
 
 #[test]
@@ -151,6 +154,8 @@ fn hostile_packs_are_refused() {
             1 << 20,
         ),
         ("lone slash", pack(&[entry(b'd', b"/")]), 1 << 20),
+        ("long part", pack(&[file(&[b'p'; 256], b"x")]), 1 << 20),
+        ("empty link target", pack(&[link(b"l", b"")]), 1 << 20),
         ("nul", pack(&[file(b"a\0b", b"x")]), 1 << 20),
         ("long", pack(&[file(&long_name, b"x")]), 1 << 20),
         ("dup", pack(&[file(b"a", b"x"), file(b"a", b"y")]), 1 << 20),
@@ -161,7 +166,7 @@ fn hostile_packs_are_refused() {
         ),
         (
             "under link",
-            pack(&[link(b"l", b"/tmp"), file(b"l/x", b"x")]),
+            pack(&[link(b"l", b".."), file(b"l/x", b"x")]),
             1 << 20,
         ),
         (
@@ -217,4 +222,29 @@ fn unpack_needs_an_empty_dest() {
     fs::write(d.path().join("x"), "").unwrap();
     assert!(unpack(&mut bytes.as_slice(), d.path(), 1 << 20).is_err());
     assert!(unpack(&mut bytes.as_slice(), &d.path().join("missing"), 1 << 20).is_err());
+}
+
+#[test]
+fn an_absolute_path_into_the_outer_dir_is_refused() {
+    let outer = tempfile::tempdir().unwrap();
+    let dest = outer.path().join("dest");
+    fs::create_dir(&dest).unwrap();
+    let target = outer.path().join("x");
+    let bytes = pack(&[file(target.as_os_str().as_bytes(), b"x")]);
+    let e = unpack(&mut bytes.as_slice(), &dest, 1 << 20).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::InvalidData);
+    assert!(!target.exists());
+}
+
+#[test]
+fn each_entry_costs_a_block_of_the_limit() {
+    let names: Vec<Vec<u8>> = (0..100).map(|i| format!("{i:04}").into_bytes()).collect();
+    let bytes = pack(&names.iter().map(|n| entry(b'd', n)).collect::<Vec<_>>());
+    let exact = 100 * 4096 + bytes.len() as u64;
+    let out = tempfile::tempdir().unwrap();
+    unpack(&mut bytes.as_slice(), out.path(), exact).unwrap();
+    assert_eq!(fs::read_dir(out.path()).unwrap().count(), 100);
+    let out = tempfile::tempdir().unwrap();
+    let e = unpack(&mut bytes.as_slice(), out.path(), exact - 1).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::InvalidData);
 }
