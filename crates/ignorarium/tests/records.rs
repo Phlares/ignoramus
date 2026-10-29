@@ -409,6 +409,27 @@ fn symlinked_key_errors() {
     std::fs::write(&real, [1u8; 32]).unwrap();
     std::os::unix::fs::symlink(&real, h.root.join("keys/box.ed25519")).unwrap();
     assert!(matches!(keys::load_or_create(&h), Err(KeyError::Link)));
+    assert!(matches!(keys::load(&h), Err(KeyError::Link)));
+}
+
+#[test]
+fn load_reads_a_key_and_never_creates_one() {
+    let d = tempfile::tempdir().unwrap();
+    let h = Home::open_at(d.path()).unwrap();
+    assert!(keys::load(&h).unwrap().is_none());
+    assert!(!h.root.join("keys/box.ed25519").exists());
+    let made = keys::load_or_create(&h).unwrap();
+    assert_eq!(keys::load(&h).unwrap().unwrap().to_bytes(), made.to_bytes());
+}
+
+#[cfg(unix)]
+#[test]
+fn load_reports_an_unreadable_key_path() {
+    let d = tempfile::tempdir().unwrap();
+    let h = Home::open_at(d.path()).unwrap();
+    std::fs::remove_dir(h.root.join("keys")).unwrap();
+    std::fs::write(h.root.join("keys"), "x").unwrap();
+    assert!(matches!(keys::load(&h), Err(KeyError::Io(_))));
 }
 
 #[test]

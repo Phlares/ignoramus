@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 
 mod generic;
 mod named;
-pub use generic::check_generic;
+pub use generic::{check_generic, safe_key};
 pub use named::{CheckCtx, check_named, input_bytes};
 
 #[derive(Debug, Clone)]
@@ -128,6 +128,9 @@ struct Row {
     why: String,
     sources: Vec<String>,
     when: Option<When>,
+    /// `"documented"` marks a code the CLI raises itself; it takes no targets.
+    check: Option<String>,
+    #[serde(default)]
     target: Vec<Target>,
 }
 
@@ -162,19 +165,34 @@ fn parse(text: &str) -> Result<Vec<Rule>, RulesError> {
     })?;
     let mut out = Vec::new();
     for row in file.rule {
-        if row.target.is_empty() {
-            out.push(Rule {
-                code: row.code,
-                severity: row.severity,
-                path: String::new(),
-                check: Check::Documented,
-                problem: row.problem,
-                instruction: row.instruction,
-                why: row.why,
-                sources: row.sources,
-                when: row.when,
-            });
-            continue;
+        let invalid = |msg: &str| RulesError::Invalid {
+            code: row.code.clone(),
+            path: String::new(),
+            msg: msg.into(),
+        };
+        match (row.check.as_deref(), row.target.is_empty()) {
+            (Some("documented"), true) => {
+                out.push(Rule {
+                    code: row.code,
+                    severity: row.severity,
+                    path: String::new(),
+                    check: Check::Documented,
+                    problem: row.problem,
+                    instruction: row.instruction,
+                    why: row.why,
+                    sources: row.sources,
+                    when: row.when,
+                });
+                continue;
+            }
+            (Some("documented"), false) => {
+                return Err(invalid("a documented rule takes no target"));
+            }
+            (Some(other), _) => return Err(invalid(&format!("unknown rule check \"{other}\""))),
+            (None, true) => {
+                return Err(invalid("a rule needs a target, or check = \"documented\""));
+            }
+            (None, false) => {}
         }
         for t in row.target {
             let check = parse_check(&t).map_err(|msg| RulesError::Invalid {

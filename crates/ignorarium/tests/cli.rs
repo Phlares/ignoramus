@@ -680,6 +680,88 @@ fn verify_study_fails_on_a_tampered_record() {
 fn verify_study_needs_a_known_id() {
     let (_d, home, _) = registered();
     for id in ["nope", "../x", ".."] {
-        bin(&home).args(["verify", "--study", id]).assert().code(2);
+        bin(&home).args(["verify", "--study", id]).assert().code(1);
     }
+}
+
+#[test]
+fn review_never_prints_an_unsafe_key_or_a_flagged_array_value() {
+    let (k, v, c) = (
+        token(),
+        format!("ghp_{}", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"),
+        token().replace("AKIA", "AKIB"),
+    );
+    let (_d, home, spec) = setup(|s| {
+        s.replace(
+            "test_log = false",
+            &format!(
+                "test_log = false
+\"UP_{k}\" = \"{v}\""
+            ),
+        )
+        .replace("creators = []", &format!("creators = [\"owner {c}\"]"))
+    });
+    let a = bin(&home).arg("review").arg(&spec).assert().code(1);
+    let out = stdout(&a);
+    for secret in [&k, &v, &c] {
+        assert!(!out.contains(secret.as_str()), "{out}");
+    }
+}
+
+#[test]
+fn register_checks_for_a_terminal_before_opening_the_home() {
+    let d = TempDir::new().unwrap();
+    let not_a_dir = d.path().join("file");
+    std::fs::write(&not_a_dir, "x").unwrap();
+    let a = bin(&not_a_dir)
+        .arg("register")
+        .arg(d.path().join("spec.toml"))
+        .write_stdin("")
+        .assert()
+        .code(1);
+    assert!(stderr(&a).contains("E-REG-001"), "{}", stderr(&a));
+}
+
+#[cfg(unix)]
+#[test]
+fn import_history_refuses_a_symlink() {
+    let (d, home, _) = setup(|t| t);
+    let real = d.path().join("real.txt");
+    std::fs::write(&real, "x").unwrap();
+    let link = d.path().join("link.txt");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    bin(&home)
+        .args(["import-history", "--phase", "p"])
+        .arg(&link)
+        .assert()
+        .code(2);
+    assert!(leaf_lines(&home, "planlog").is_empty());
+}
+
+#[test]
+fn verify_never_creates_a_box_key() {
+    let (_d, home, _) = setup(|t| t);
+    let a = bin(&home).arg("verify").assert().code(0);
+    assert!(stdout(&a).contains("nothing to verify"), "{}", stdout(&a));
+    assert!(!home.join("keys/box.ed25519").exists());
+    // With log entries and no key, verify fails and still makes no key.
+    let (_d2, home2, _) = registered();
+    std::fs::remove_file(home2.join("keys/box.ed25519")).unwrap();
+    let a = bin(&home2).arg("verify").assert().code(1);
+    assert!(stderr(&a).contains("no box key"), "{}", stderr(&a));
+    assert!(!home2.join("keys/box.ed25519").exists());
+}
+
+#[test]
+fn verify_reports_every_failure_even_for_an_unknown_study() {
+    let (_d, home, _) = registered();
+    let p = home.join("planlog/leaves.jsonl");
+    let text = std::fs::read_to_string(&p).unwrap();
+    std::fs::write(&p, text.replace("signal", "signaL")).unwrap();
+    let a = bin(&home)
+        .args(["verify", "--study", "nope"])
+        .assert()
+        .code(1);
+    let err = stderr(&a);
+    assert!(err.contains("planlog") && err.contains("nope"), "{err}");
 }

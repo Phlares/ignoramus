@@ -3,8 +3,9 @@ use super::{CliError, Ctx, Done, Run, out};
 use crate::diag::{Diagnostic, Severity, render_human};
 use crate::estimate::{Estimate, estimate, units};
 use crate::planlog::store::PlanLog;
+use crate::prior::file_hashes;
 use crate::prior::{PriorError, PriorUse};
-use crate::rules::{self, CheckCtx};
+use crate::rules::{self, CheckCtx, input_bytes};
 use crate::spec::{self, LoadError, model::Spec};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -19,6 +20,9 @@ pub struct Assessed {
     pub diags: Vec<Diagnostic>,
     /// Present only when the plan has no errors.
     pub estimate: Option<Estimate>,
+    /// `(path, (exact, normalized) SHA-256)` of each input, read once here; `None`
+    /// when the file is absent or its path is unsafe. `register` stores these.
+    pub input_hashes: Vec<(String, Option<(String, String)>)>,
 }
 
 impl Assessed {
@@ -38,6 +42,21 @@ impl PriorUse for Unreadable {
     fn used(&self, _: &str, _: &str) -> Result<Option<String>, PriorError> {
         Err(PriorError(self.0.clone()))
     }
+}
+
+/// Hash every input the spec lists. This is the one read `register` relies on.
+pub fn input_hashes(study_dir: &Path, spec: &Value) -> Vec<(String, Option<(String, String)>)> {
+    let paths = spec["inputs"].as_array().map_or(&[][..], Vec::as_slice);
+    paths
+        .iter()
+        .filter_map(|i| i["path"].as_str())
+        .map(|p| {
+            (
+                p.to_string(),
+                input_bytes(study_dir, p).map(|b| file_hashes(&b)),
+            )
+        })
+        .collect()
 }
 
 /// The folder an input path is relative to: the spec's own folder.
@@ -68,10 +87,11 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
     let (value, filled, diags) = rules::check_all(&raw.value, rules::builtin(), &cc);
     let mut a = Assessed {
         hash: raw.hash,
-        value,
+        value: value.clone(),
         filled,
         diags,
         estimate: None,
+        input_hashes: input_hashes(&cc.study_dir, &value),
     };
     if !a.has_errors() {
         let s = Spec::from_value(&a.value)

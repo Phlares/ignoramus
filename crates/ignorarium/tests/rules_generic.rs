@@ -983,7 +983,7 @@ fn a_rule_with_no_targets_is_documented_only_and_checks_nothing() {
     let text = format!(
         "[[rule]]
 {HEAD}
-target = []
+check = \"documented\"
 "
     );
     let rules = local_rules(&text);
@@ -991,4 +991,40 @@ target = []
     assert!(matches!(rules[0].check, Check::Documented));
     assert_eq!(rules[0].check.name(), "documented");
     assert!(rules::check_generic(&serde_json::json!({}), &rules).is_empty());
+}
+
+#[test]
+fn an_empty_target_list_without_the_marker_is_a_load_error() {
+    let dir = tempfile::tempdir().unwrap();
+    for extra in [
+        "target = []",
+        "check = \"documented\"
+[[rule.target]]
+path = \"a\"
+check = \"required\"",
+        "",
+    ] {
+        let file = dir.path().join("r.toml");
+        std::fs::write(
+            &file,
+            format!(
+                "[[rule]]
+{HEAD}{extra}
+"
+            ),
+        )
+        .unwrap();
+        assert!(rules::load(&file).is_err(), "{extra}");
+    }
+}
+
+#[test]
+fn the_documented_codes_are_exactly_the_register_refusals() {
+    let mut codes: Vec<&str> = rules::builtin()
+        .iter()
+        .filter(|r| matches!(r.check, Check::Documented))
+        .map(|r| r.code.as_str())
+        .collect();
+    codes.sort_unstable();
+    assert_eq!(codes, ["E-REG-001", "E-REG-002"]);
 }

@@ -20,6 +20,7 @@ const PROMPT: &str = "Type the first 8 characters of the spec hash to approve:";
 
 /// True when `typed` is exactly the first 8 lowercase hex characters after `sha256:`.
 pub fn approve(typed: &str, spec_hash: &str) -> bool {
+    let typed = typed.trim();
     spec_hash
         .strip_prefix("sha256:")
         .and_then(|h| h.get(..8))
@@ -78,12 +79,17 @@ fn record_body(
 /// `register` on the real stdin and stdout.
 pub fn run_stdio(ctx: &Ctx, spec_path: &Path) -> Result<Done, CliError> {
     let stdin = std::io::stdin();
+    // The terminal check comes before anything else, the home included.
+    let is_tty = stdin.is_terminal();
+    if !is_tty {
+        return Err(refusal("E-REG-001"));
+    }
     run(
         spec_path,
         ctx.home()?,
         &mut stdin.lock(),
         &mut std::io::stdout().lock(),
-        stdin.is_terminal(),
+        is_tty,
     )
 }
 
@@ -134,8 +140,18 @@ pub fn run(
     output.flush().map_err(say)?;
     let mut typed = String::new();
     input.read_line(&mut typed).map_err(|e| io("stdin", e))?;
-    if !approve(typed.trim_end_matches(['\n', '\r']), &a.hash) {
+    if !approve(&typed, &a.hash) {
         return Err(CliError::refuse("approval not given; nothing was written"));
+    }
+    // An input that changed since the check would make the stored hashes a lie.
+    let study_dir = check::study_dir(spec_path);
+    for (path, checked) in &a.input_hashes {
+        let now = input_bytes(&study_dir, path).map(|b| file_hashes(&b));
+        if &now != checked {
+            return Err(CliError::refuse(format!(
+                "input {path} changed or became unreadable since the check; nothing was written"
+            )));
+        }
     }
     let leaf = store(spec_path, home, &spec, &a, label, mode)?;
     writeln!(output, "registered {id}: leaf {leaf}").map_err(say)?;
@@ -162,13 +178,13 @@ fn store(
     let canon = to_canonical(&raw.value).map_err(|e| io("canonical form", e))?;
     let id = spec.study.id.as_str();
     let dir = home.study_dir(id);
-    std::fs::create_dir(&dir).map_err(|e| match e.kind() {
+    let mut mk = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut mk, 0o700);
+    mk.create(&dir).map_err(|e| match e.kind() {
         std::io::ErrorKind::AlreadyExists => refusal("E-REG-002"),
         _ => io("cannot create the study folder", e),
     })?;
-    #[cfg(unix)]
-    std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))
-        .map_err(|e| io("cannot set the study folder mode", e))?;
     let mut salt = [0u8; 32];
     getrandom::fill(&mut salt).map_err(|e| io("random bytes", e))?;
     put(&dir, "spec.toml", &bytes, 0o644)?;
@@ -176,12 +192,10 @@ fn store(
     put(&dir, "spec.hash", format!("{}\n", a.hash).as_bytes(), 0o644)?;
     put(&dir, "salt", &salt, 0o600)?;
 
-    let study_dir = check::study_dir(spec_path);
-    let data_hashes = spec
-        .inputs
+    let data_hashes = a
+        .input_hashes
         .iter()
-        .filter_map(|i| input_bytes(&study_dir, &i.path))
-        .map(|b| file_hashes(&b))
+        .filter_map(|(_, h)| h.clone())
         .collect();
     let log = if spec.study.test_log {
         "testlog"

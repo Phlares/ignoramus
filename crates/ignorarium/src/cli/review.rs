@@ -3,6 +3,7 @@
 use super::check::{self, Assessed};
 use super::{Ctx, Done, Run, out};
 use crate::diag::{Diagnostic, Severity};
+use crate::rules::safe_key;
 use serde_json::Value;
 use std::path::Path;
 
@@ -52,23 +53,30 @@ fn problems(diags: &[Diagnostic]) -> String {
     if s.is_empty() { "None.\n".into() } else { s }
 }
 
-/// The spec with each value that E-SEC-001 flagged replaced by a marker.
-/// Diagnostic paths use dots and `[i]`; a path with a `<key>` segment matches nothing.
-fn withheld(a: &Assessed) -> Value {
-    let mut v = a.value.clone();
-    for d in a.diags.iter().filter(|d| d.code == "E-SEC-001") {
-        let pointer = format!("/{}", d.path.replace(['.', '['], "/").replace(']', ""));
-        if let Some(node) = v.pointer_mut(&pointer) {
-            *node = Value::String(format!("(withheld: {})", d.code));
+/// The spec with every string the secret scan flags replaced by a marker, and every
+/// key that is not safe to print renamed `<key>`. Nothing else of the spec is printed.
+fn withheld(v: &Value) -> Value {
+    match v {
+        Value::String(s) if !crate::scan::scan_str(s, crate::scan::builtin()).is_empty() => {
+            Value::String("(withheld: E-SEC-001)".into())
         }
+        Value::Array(a) => Value::Array(a.iter().map(withheld).collect()),
+        Value::Object(m) => Value::Object(
+            m.iter()
+                .map(|(k, x)| {
+                    let k = if safe_key(k) { k.as_str() } else { "<key>" };
+                    (k.to_string(), withheld(x))
+                })
+                .collect(),
+        ),
+        other => other.clone(),
     }
-    v
 }
 
 const NO_ESTIMATE: &str = "Not available: the plan has errors.\n";
 
 fn page(a: &Assessed) -> String {
-    let v = &withheld(a);
+    let v = &withheld(&a.value);
     let est = a.estimate.as_ref();
     let hypotheses = items(v, "/question/hypotheses").iter().map(|h| {
         format!(

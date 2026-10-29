@@ -122,11 +122,15 @@ pub(super) fn join(prefix: &str, key: &str) -> String {
 /// `a-z 0-9 _ -` shows as `<key>`: a secret pasted as a key must not
 /// reach any output. Paths from this function are for display only.
 pub(super) fn join_key(prefix: &str, key: &str) -> String {
-    let safe = (1..=40).contains(&key.len())
+    join(prefix, if safe_key(key) { key } else { "<key>" })
+}
+
+/// A key that is 1 to 40 of `a-z 0-9 _ -` is safe to print.
+pub fn safe_key(key: &str) -> bool {
+    (1..=40).contains(&key.len())
         && key
             .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
-    join(prefix, if safe { key } else { "<key>" })
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
 }
 
 /// Nodes a path selects, as (concrete path, value). `None` marks a missing key.

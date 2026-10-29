@@ -31,10 +31,34 @@ impl From<io::Error> for KeyError {
     }
 }
 
+fn key_path(home: &Home) -> std::path::PathBuf {
+    home.root.join("keys").join("box.ed25519")
+}
+
+fn read_key(path: &std::path::Path) -> Result<SigningKey, KeyError> {
+    let bytes = fs::read(path)?;
+    let seed: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| KeyError::BadLength(bytes.len()))?;
+    Ok(SigningKey::from_bytes(&seed))
+}
+
+/// Load the box key, or `None` when there is none. Never creates one.
+pub fn load(home: &Home) -> Result<Option<SigningKey>, KeyError> {
+    let path = key_path(home);
+    match fs::symlink_metadata(&path) {
+        Ok(m) if m.file_type().is_symlink() => Err(KeyError::Link),
+        Ok(_) => read_key(&path).map(Some),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Load the box key, or create it. A key file of the wrong length is an
 /// error and is never replaced.
 pub fn load_or_create(home: &Home) -> Result<SigningKey, KeyError> {
-    let path = home.root.join("keys").join("box.ed25519");
+    let path = key_path(home);
     let mut seed = [0u8; 32];
     getrandom::fill(&mut seed).map_err(|e| io::Error::other(e.to_string()))?;
     match write_once(&path, &seed, 0o600) {
@@ -42,10 +66,5 @@ pub fn load_or_create(home: &Home) -> Result<SigningKey, KeyError> {
         Err(WriteOnceError::Link) => return Err(KeyError::Link),
         Err(WriteOnceError::Io(e)) => return Err(e.into()),
     }
-    let bytes = fs::read(&path)?;
-    let seed: [u8; 32] = bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| KeyError::BadLength(bytes.len()))?;
-    Ok(SigningKey::from_bytes(&seed))
+    read_key(&path)
 }

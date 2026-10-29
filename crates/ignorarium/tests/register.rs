@@ -7,7 +7,7 @@ use ignorarium::planlog::commitment;
 use ignorarium::planlog::store::{Leaf, PlanLog};
 use ignorarium::prior::normalized_sha256;
 use serde_json::Value;
-use std::io::Cursor;
+use std::io::{BufRead, Cursor, Read};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
@@ -81,6 +81,13 @@ fn approve_needs_the_exact_prefix() {
     assert!(!approve("zzzzzzzz", "sha256:zzzzzzzz"));
     assert!(!approve("7ce680b2", "7ce680b2aaaa"));
     assert!(!approve("7ce680", "sha256:7ce680"));
+    assert!(approve(" 7ce680b2 ", h));
+    assert!(approve(
+        "	7ce680b2
+",
+        h
+    ));
+    assert!(!approve("7ce 680b2", h));
 }
 
 #[test]
@@ -246,4 +253,158 @@ fn a_spec_with_an_error_refuses_before_the_prompt() {
     assert!(out.contains("error[E-OUT-001]"), "{out}");
     assert!(!out.contains(PROMPT), "{out}");
     assert!(!f.home.study_dir("my-study").exists());
+}
+
+/// A reader that runs `hook` when the program first reads, that is, at the prompt.
+struct Hooked<R, F: FnOnce()> {
+    inner: R,
+    hook: Option<F>,
+}
+
+impl<R: Read, F: FnOnce()> Read for Hooked<R, F> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl<R: BufRead, F: FnOnce()> BufRead for Hooked<R, F> {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        if let Some(h) = self.hook.take() {
+            h();
+        }
+        self.inner.fill_buf()
+    }
+    fn consume(&mut self, n: usize) {
+        self.inner.consume(n);
+    }
+}
+
+#[test]
+fn an_input_changed_after_the_check_is_refused_and_nothing_is_written() {
+    type Edit = fn(&Path);
+    let edits: [(&str, Edit); 3] = [
+        ("changed", |p| std::fs::write(p, "other").unwrap()),
+        ("removed", |p| std::fs::remove_file(p).unwrap()),
+        ("pinned-then-changed", |p| {
+            std::fs::write(p, "Hello  World!").unwrap()
+        }),
+    ];
+    for (name, edit) in edits {
+        let (f, spec) = setup("numeric-ablation", same);
+        let data = spec.parent().unwrap().join("data/example.txt");
+        let mut input = Hooked {
+            inner: Cursor::new(answer(&spec).into_bytes()),
+            hook: Some(move || edit(&data)),
+        };
+        let mut out = Vec::new();
+        let e = register::run(&spec, &f.home, &mut input, &mut out, true).unwrap_err();
+        assert_eq!(e.code, 1, "{name}");
+        assert!(e.msg.contains("example.txt"), "{name}: {}", e.msg);
+        assert!(!f.home.study_dir("my-study").exists(), "{name}");
+        assert!(leaves(&f.home.root.join("planlog")).is_empty(), "{name}");
+    }
+}
+
+#[test]
+fn an_input_that_appears_after_the_check_is_refused() {
+    let (f, spec) = setup("numeric-ablation", same);
+    let data = spec.parent().unwrap().join("data/example.txt");
+    std::fs::remove_file(&data).unwrap();
+    let mut input = Hooked {
+        inner: Cursor::new(answer(&spec).into_bytes()),
+        hook: Some(|| std::fs::write(&data, "late").unwrap()),
+    };
+    let mut out = Vec::new();
+    let e = register::run(&spec, &f.home, &mut input, &mut out, true).unwrap_err();
+    assert_eq!(e.code, 1);
+    assert!(!f.home.study_dir("my-study").exists());
+}
+
+#[test]
+fn the_commitment_binds_the_authors_spec_not_the_defaulted_one() {
+    let (f, spec) = setup("numeric-ablation", |t| {
+        t.replace(
+            "alpha = 0.005
+",
+            "",
+        )
+    });
+    go(&f, &spec, &answer(&spec), true).0.unwrap();
+    let dir = f.home.study_dir("my-study");
+    let salt: [u8; 32] = std::fs::read(dir.join("salt")).unwrap().try_into().unwrap();
+    let stored = std::fs::read(dir.join("spec.json")).unwrap();
+    let leaf = &leaves(&f.home.root.join("planlog"))[0];
+    assert_eq!(
+        leaf.commitment.as_deref(),
+        Some(commitment(&salt, &stored).as_str())
+    );
+    // The defaulted spec has other bytes, and would give another commitment.
+    let mut filled = ignorarium::spec::load(&spec).unwrap().value;
+    ignorarium::estimate::apply_defaults(&mut filled);
+    let filled = to_canonical(&filled).unwrap();
+    assert_ne!(filled, stored);
+    assert_ne!(
+        leaf.commitment.as_deref(),
+        Some(commitment(&salt, &filled).as_str())
+    );
+}
+
+#[test]
+fn a_confirmatory_plan_registers_with_a_pending_timestamp() {
+    let (f, spec) = setup("numeric-ablation", |t| {
+        let ids = |p: &str, n: usize| {
+            format!(
+                "clusters = [{}]",
+                (0..n)
+                    .map(|i| format!("\"{p}{i:02}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        t.replace("mode = \"exploratory\"", "mode = \"confirmatory\"")
+            .replace("label = \"signal\"", "label = \"confirmed\"")
+            .replace("sesoi = 0.0", "sesoi = 1.0")
+            .replace("value = 0.0", "value = 4.0")
+            .replace(
+                "source = \"stated\"",
+                &format!("source = \"record:{}\"", "a".repeat(64)),
+            )
+            .replace("units_per_cluster = 1", "units_per_cluster = 5")
+            .replacen("clusters = []", &ids("s", 3), 1)
+            .replacen("clusters = []", &ids("c", 11), 1)
+            .replace(
+                "triggers = []",
+                "triggers = [{ id = \"T1\", metric = \"ppl-ratio\", threshold_e = 1.0 }]",
+            )
+    });
+    let (r, out) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap().code, 0, "{out}");
+    let rp = f.home.study_dir("my-study").join("records.jsonl");
+    let rec = &records(&rp)[0]["record"];
+    assert_eq!(rec["body"]["timestamp"], "pending");
+    assert_eq!(
+        leaves(&f.home.root.join("planlog"))[0].mode.as_deref(),
+        Some("confirmatory")
+    );
+}
+
+#[test]
+fn the_salt_appears_in_no_output_record_or_log() {
+    let (f, spec) = setup("numeric-ablation", same);
+    let (r, out) = go(&f, &spec, &answer(&spec), true);
+    r.unwrap();
+    let salt = std::fs::read(f.home.study_dir("my-study").join("salt")).unwrap();
+    let hex = salt.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let mut seen = vec![out];
+    for rel in [
+        "studies/my-study/records.jsonl",
+        "studies/my-study/spec.hash",
+        "planlog/leaves.jsonl",
+        "planlog/heads.jsonl",
+    ] {
+        seen.push(std::fs::read_to_string(f.home.root.join(rel)).unwrap());
+    }
+    for text in seen {
+        assert!(!text.contains(&hex), "salt leaked");
+    }
 }
