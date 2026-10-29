@@ -13,6 +13,10 @@ pub struct RawSpec {
 #[derive(Debug)]
 pub enum LoadError {
     Io(std::io::Error),
+    /// Byte offset of the first invalid UTF-8 sequence.
+    Utf8 {
+        offset: usize,
+    },
     /// 1-based line and column of the parse error.
     Toml {
         line: usize,
@@ -26,6 +30,7 @@ impl std::fmt::Display for LoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LoadError::Io(e) => write!(f, "cannot read spec: {e}"),
+            LoadError::Utf8 { offset } => write!(f, "spec is not UTF-8 at byte {offset}"),
             LoadError::Toml { line, col, msg } => write!(f, "TOML error at {line}:{col}: {msg}"),
             LoadError::Canon(e) => e.fmt(f),
         }
@@ -36,9 +41,13 @@ impl std::error::Error for LoadError {}
 
 pub fn load(path: &Path) -> Result<RawSpec, LoadError> {
     let bytes = std::fs::read(path).map_err(LoadError::Io)?;
-    let text = String::from_utf8_lossy(&bytes);
-    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
-    let table: toml::Table = toml::from_str(text).map_err(|e| {
+    let text = std::str::from_utf8(&bytes).map_err(|e| LoadError::Utf8 {
+        offset: e.valid_up_to(),
+    })?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    // A raw CR is illegal in TOML, so this only touches line endings.
+    let text = text.replace("\r\n", "\n");
+    let table: toml::Table = toml::from_str(&text).map_err(|e| {
         let offset = e.span().map_or(0, |s| s.start).min(text.len());
         let before = text.get(..offset).unwrap_or("");
         LoadError::Toml {
@@ -55,6 +64,8 @@ pub fn load(path: &Path) -> Result<RawSpec, LoadError> {
     Ok(RawSpec { value, hash })
 }
 
+/// Integer vs float and the sign of zero are part of the hash (`1` and `1.0` differ).
+/// Datetimes hash as written, normalized only by the toml crate's Display.
 /// Non-finite floats become `"!nonfinite:…"` strings so loading never fails;
 /// the `Finite` check reports them later.
 fn to_json(v: toml::Value) -> Value {
