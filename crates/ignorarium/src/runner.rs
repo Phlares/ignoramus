@@ -506,11 +506,14 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
     Ok(RunStatus::Done)
 }
 
-/// Before each attempt: the budget has room, and the payload and inputs are the bytes the
-/// run began with. Otherwise the run pauses and the attempt never starts.
+/// Before each attempt: the budget has room, the payload and inputs are the bytes the run
+/// began with, and no signal arrived. Otherwise the run pauses and the attempt never starts.
+/// The signal comes last, so one that lands during the re-hash still counts.
 fn gate(plan: &RunPlan, dir: &Path, books: &mut Books) -> Result<Option<Halt>, RunError> {
     let budget = books.check(plan, dir)?;
-    Ok(budget.or_else(|| stale(plan, dir).map(Halt::Pause)))
+    Ok(budget
+        .or_else(|| stale(plan, dir).map(Halt::Pause))
+        .or_else(|| sys::interrupted().then(|| Halt::Pause(INTERRUPTED.into()))))
 }
 
 /// This session's spend: the signed records' tally, the alerts already fired, and the row
@@ -565,15 +568,14 @@ impl Books {
     }
 }
 
-/// Between rows: a stop or a pause ends the run, and so do a signal and a control file that
-/// cannot be read, as a pause.
+/// Between rows: a stop or a pause ends the run, and so does a control file that cannot be
+/// read, as a pause.
 fn at_boundary(control: &ControlFile) -> Option<Halt> {
     match control.take() {
         Ok(Some(Signal::Stop(why))) => Some(Halt::Stop {
             why,
             in_flight: None,
         }),
-        _ if sys::interrupted() => Some(Halt::Pause(INTERRUPTED.into())),
         Ok(Some(Signal::Pause)) => Some(Halt::Pause(PAUSE_REQUESTED.into())),
         Ok(_) => None,
         Err(e) => Some(Halt::Pause(format!("the control file cannot be read: {e}"))),

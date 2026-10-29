@@ -341,8 +341,13 @@ fn a_retry_that_would_reach_a_cap_pauses_instead() {
 }
 
 /// Runs level 0. Once row 0 has ended, this process gets SIGTERM, as from a supervisor,
-/// and the backend returns only after the box has seen it.
-struct SignalAfterRow0;
+/// and the backend returns only after the box has seen it, with `exit` in place of row 0's
+/// exit when set. `calls` counts the attempts.
+#[derive(Default)]
+struct SignalAfterRow0 {
+    exit: Option<Exit>,
+    calls: Rc<std::cell::Cell<u32>>,
+}
 
 impl Backend for SignalAfterRow0 {
     fn level(&self) -> u8 {
@@ -352,12 +357,16 @@ impl Backend for SignalAfterRow0 {
         Probe::Available
     }
     fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> std::io::Result<RowOutcome> {
-        let o = Level0.run_row(job, watch)?;
+        self.calls.set(self.calls.get() + 1);
+        let mut o = Level0.run_row(job, watch)?;
         if job
             .env
             .iter()
             .any(|(k, v)| k == "IGNORARIUM_ROW" && v == "0")
         {
+            if let Some(exit) = &self.exit {
+                o.exit = exit.clone();
+            }
             let me = std::process::id().to_string();
             let sent = std::process::Command::new("kill")
                 .args(["-TERM", &me])
@@ -386,13 +395,41 @@ fn a_signal_between_rows_pauses_at_the_next_boundary() {
     let lab = lab();
     plain(&lab, "between");
     let mut plan = plan_of(&lab, "between");
-    plan.backend = Box::new(SignalAfterRow0);
+    plan.backend = Box::new(SignalAfterRow0::default());
     let why = "interrupted by a signal";
     assert_eq!(run(&plan).unwrap(), RunStatus::Paused(why.into()));
     // Row 0 ended before the signal counted, so it has its record; row 1 never started.
     assert_eq!(indices(&lab, "between"), vec![0]);
     assert!(kind_of(&lab, "between", "spend").is_empty());
     assert!(!lab.home.study_dir("between").join("run/rows/1").exists());
+}
+
+#[test]
+fn a_signal_during_a_failed_attempt_stops_the_retry() {
+    const NAME: &str = "a_signal_during_a_failed_attempt_stops_the_retry";
+    if !common::is_child(NAME) {
+        let here = std::env::current_dir().unwrap();
+        assert!(common::in_child(NAME, &here, &[]));
+        return;
+    }
+    ignorarium::sys::catch_interrupts().unwrap();
+    let lab = lab();
+    plain(&lab, "no-retry");
+    let mut plan = plan_of(&lab, "no-retry");
+    let backend = SignalAfterRow0 {
+        exit: Some(Exit::Infra("box fault".into())),
+        ..Default::default()
+    };
+    let calls = backend.calls.clone();
+    plan.backend = Box::new(backend);
+    let why = "interrupted by a signal";
+    assert_eq!(run(&plan).unwrap(), RunStatus::Paused(why.into()));
+    // The failed attempt is spend; the retry never starts.
+    assert_eq!(calls.get(), 1);
+    assert!(rows_of(&lab, "no-retry").is_empty());
+    let spend = kind_of(&lab, "no-retry", "spend");
+    assert_eq!(spend.len(), 1);
+    assert_eq!(spend[0].body["reason"], "infrastructure fault: box fault");
 }
 
 /// The signal mask `field` (`SigCgt`, `SigIgn`) of this process, from `/proc/self/status`.
