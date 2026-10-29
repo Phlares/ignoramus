@@ -290,6 +290,32 @@ fn attachments_must_stay_in_their_folders() {
 }
 
 #[test]
+fn attachments_never_nest_with_study_files_or_each_other() {
+    let tmp = tempfile::tempdir().unwrap();
+    let study = study_copy(tmp.path());
+    fs::create_dir(study.join("results/sub")).unwrap();
+    fs::write(study.join("results/sub/a.txt"), "a\n").unwrap();
+    for (added, at) in [
+        (vec!["results/summary.json/x"], "results/summary.json/x"),
+        (vec!["results/sub"], "results/sub"),
+        (vec!["records/a", "records/a/b"], "records/a"),
+    ] {
+        let mut f = facts();
+        for a in added {
+            f.attachments.push((a.into(), b"x".to_vec()));
+        }
+        let out = tmp.path().join("out");
+        let (problems, _) = refused(build(&study, &out, &f, &release()));
+        assert_eq!(problems.len(), 1, "{at}");
+        assert_eq!(
+            (problems[0].code, problems[0].path.as_str()),
+            ("E-PUB-010", at)
+        );
+        assert!(!out.exists(), "{at}");
+    }
+}
+
+#[test]
 fn artifacts_are_hashed_and_listed() {
     let tmp = tempfile::tempdir().unwrap();
     let art = tmp.path().join("image.tar");
