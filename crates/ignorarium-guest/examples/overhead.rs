@@ -40,8 +40,22 @@ struct Summary {
     max: f64,
 }
 
-/// Mean with a 95% Student t half-width (1.96 above 30 degrees of freedom). One sample has no
-/// interval, so `ci95` is 0 there. `xs` must not be empty.
+/// The Student t quantile at 0.975 for `df` degrees of freedom (at least 1): the table up to
+/// 30, above it the Cornish-Fisher expansion around the normal quantile to the `df^-3` term.
+/// The term in `df^-3` moves df 31 from 2.0394 to 2.0395, the true value.
+fn t975(df: usize) -> f64 {
+    if let Some(&t) = T975.get(df - 1) {
+        return t;
+    }
+    let (z, n) = (1.959964_f64, df as f64);
+    let g1 = (z.powi(3) + z) / 4.0;
+    let g2 = (5.0 * z.powi(5) + 16.0 * z.powi(3) + 3.0 * z) / 96.0;
+    let g3 = (3.0 * z.powi(7) + 19.0 * z.powi(5) + 17.0 * z.powi(3) - 15.0 * z) / 384.0;
+    z + g1 / n + g2 / n.powi(2) + g3 / n.powi(3)
+}
+
+/// Mean with a 95% Student t half-width. One sample has no interval, so `ci95` is 0 there.
+/// `xs` must not be empty.
 fn summary(xs: &[f64]) -> Summary {
     let n = xs.len();
     let mean = xs.iter().sum::<f64>() / n as f64;
@@ -49,8 +63,7 @@ fn summary(xs: &[f64]) -> Summary {
         0.0
     } else {
         let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
-        let t = T975.get(n - 2).copied().unwrap_or(1.96);
-        t * (var / n as f64).sqrt()
+        t975(n - 1) * (var / n as f64).sqrt()
     };
     let mut s = xs.to_vec();
     s.sort_by(f64::total_cmp);
@@ -325,10 +338,18 @@ mod tests {
     }
 
     #[test]
-    fn forty_samples_use_1_96() {
+    fn forty_samples_use_the_expansion_for_39_degrees() {
         let xs: Vec<f64> = (0..40).map(f64::from).collect();
         let sd = (40.0f64 * 41.0 / 12.0).sqrt();
-        assert!((summary(&xs).ci95 - 1.96 * sd / 40f64.sqrt()).abs() < 1e-9);
+        assert!((summary(&xs).ci95 - t975(39) * sd / 40f64.sqrt()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn above_30_degrees_the_quantile_follows_the_expansion() {
+        for (df, want) in [(31, "2.040"), (40, "2.021"), (60, "2.000")] {
+            assert_eq!(format!("{:.3}", t975(df)), want, "df {df}");
+        }
+        assert_eq!(t975(30), 2.042);
     }
 
     #[test]
