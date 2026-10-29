@@ -81,7 +81,7 @@ pub fn write(dir: &Path, w: &mut impl Write, limit: u64) -> io::Result<u64> {
         } else if ty.is_symlink() {
             let target = fs::read_link(path)?;
             let target = target.as_os_str().as_bytes();
-            check_target(rel, target).map_err(entry_error(rel))?;
+            check_target(target).map_err(entry_error(rel))?;
             put_path(&mut w, b'l', rel)?;
             put_bytes(&mut w, target)
         } else if ty.is_file()
@@ -178,9 +178,9 @@ fn check_path(path: &[u8]) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// A link target must stay inside the tree when read from the link's own directory: not
-/// absolute, and no `..` that climbs above the top. The check is lexical.
-fn check_target(link: &[u8], target: &[u8]) -> Result<(), &'static str> {
+/// A link target must be relative and hold no `..` part. Then any chain of links resolves
+/// in or below the link's own directory, never above the output root.
+fn check_target(target: &[u8]) -> Result<(), &'static str> {
     if target.is_empty() {
         return Err("empty link target");
     }
@@ -190,17 +190,8 @@ fn check_target(link: &[u8], target: &[u8]) -> Result<(), &'static str> {
     if target[0] == b'/' {
         return Err("absolute link target");
     }
-    let mut depth = link.iter().filter(|&&b| b == b'/').count();
-    for part in target.split(|&b| b == b'/') {
-        match part {
-            b"" | b"." => {}
-            b".." => {
-                depth = depth
-                    .checked_sub(1)
-                    .ok_or("link target climbs out of the output dir")?
-            }
-            _ => depth += 1,
-        }
+    if target.split(|&b| b == b'/').any(|part| part == b"..") {
+        return Err("link target holds a .. part");
     }
     Ok(())
 }
@@ -270,7 +261,7 @@ pub fn unpack(r: &mut impl Read, dest: &Path, limit: u64) -> io::Result<()> {
                     io::ErrorKind::InvalidData => entry(&e.to_string()),
                     _ => e,
                 })?;
-                check_target(&path, &target).map_err(&entry)?;
+                check_target(&target).map_err(&entry)?;
                 symlink(OsStr::from_bytes(&target), &to)?;
             }
             _ => mknodat(CWD, &to, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0)
