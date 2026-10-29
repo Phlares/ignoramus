@@ -1,7 +1,7 @@
 //! Host-side parts of a guest image: pinned downloads, the initramfs and the ext4 disks.
-use sha2::{Digest, Sha256};
+use crate::tree::{sha256_hex, walk};
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -25,16 +25,7 @@ pub const VMM: Pin = Pin {
 };
 
 pub fn sha256_file(path: &Path) -> io::Result<String> {
-    let mut f = File::open(path)?;
-    let mut h = Sha256::new();
-    let mut buf = [0u8; 65536];
-    loop {
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            return Ok(hex::encode(h.finalize()));
-        }
-        h.update(&buf[..n]);
-    }
+    sha256_hex(File::open(path)?)
 }
 
 pub fn check_pin(path: &Path, pin: &Pin) -> io::Result<()> {
@@ -101,14 +92,10 @@ const BLOCK: u64 = 4096;
 
 fn tree_bytes(dir: &Path) -> io::Result<u64> {
     let mut sum = 0;
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let meta = entry.metadata()?;
-        sum += meta.len().next_multiple_of(BLOCK) + BLOCK;
-        if meta.is_dir() {
-            sum += tree_bytes(&entry.path())?;
-        }
-    }
+    walk(dir, &mut |_, path, _| {
+        sum += fs::symlink_metadata(path)?.len().next_multiple_of(BLOCK) + BLOCK;
+        Ok(())
+    })?;
     Ok(sum)
 }
 
@@ -127,13 +114,12 @@ fn run(cmd: &mut Command) -> io::Result<()> {
         return Ok(());
     }
     let err = String::from_utf8_lossy(&out.stderr);
-    let tail: Vec<&str> = err.lines().rev().take(10).collect();
-    let tail: Vec<&str> = tail.into_iter().rev().collect();
+    let lines: Vec<&str> = err.lines().collect();
+    let tail = lines[lines.len().saturating_sub(10)..].join("\n");
     Err(io::Error::other(format!(
-        "{:?} failed ({}): {}",
+        "{:?} failed ({}): {tail}",
         cmd.get_program(),
-        out.status,
-        tail.join("\n")
+        out.status
     )))
 }
 

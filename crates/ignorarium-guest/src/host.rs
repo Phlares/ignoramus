@@ -1,11 +1,12 @@
 //! Host side of level 2: VMM arguments, the one control connection, output read-back.
+use crate::agent::steps::now_nanos;
 use crate::image::{ext4, size_mib};
 use crate::pack;
 use crate::proto::{
     CONTROL_PORT, GUEST_CID, Job, Report, SERIAL_IN, SERIAL_OUT, SERIAL_ROOTFS, ToHost, read_frame,
     write_frame,
 };
-use crate::tree::tree_hash;
+use crate::tree::{tree_hash, walk};
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, BufReader, Read, Write};
@@ -15,7 +16,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 pub const REPORT_SLACK: Duration = Duration::from_secs(30);
 
@@ -104,19 +105,21 @@ const LOG_TAIL_CHARS: usize = 2000;
 const POLL: Duration = Duration::from_millis(5);
 /// Guest-written text enters host errors at most this long.
 const SHOWN_CHARS: usize = 200;
+/// The VMM's vsock socket in the work dir. A guest connect to port P reaches the host at
+/// `<socket>_P`.
+const VSOCK_SOCKET: &str = "vsock.sock";
 
-/// At most `SHOWN_CHARS` characters of guest-written text.
-fn cap(s: &str) -> String {
-    let mut out: String = s.chars().take(SHOWN_CHARS).collect();
-    if s.chars().count() > SHOWN_CHARS {
-        out.push_str("...");
-    }
-    out
+fn listen_path(work: &Path) -> PathBuf {
+    work.join(format!("{VSOCK_SOCKET}_{CONTROL_PORT}"))
 }
 
-/// Guest-written text for an error message: capped and escaped.
+/// Guest-written text for an error message: at most `SHOWN_CHARS` characters, escaped.
 fn shown(s: &str) -> String {
-    format!("{:?}", cap(s))
+    let mut out: String = s.chars().take(SHOWN_CHARS).collect();
+    if s.chars().nth(SHOWN_CHARS).is_some() {
+        out.push_str("...");
+    }
+    format!("{out:?}")
 }
 
 /// A guest-side failure, with the VMM log tail.
@@ -144,7 +147,7 @@ pub fn vmm_args(vm: &Vm, work: &Path) -> Vec<OsString> {
         None => ("quiet", OsString::from("off")),
     };
     let mut vsock = OsString::from(format!("cid={GUEST_CID},"));
-    vsock.push(kv("socket=", &work.join("vsock.sock")));
+    vsock.push(kv("socket=", &work.join(VSOCK_SOCKET)));
     let mut args: Vec<OsString> = vec![
         "--kernel".into(),
         vm.kernel.clone().into(),
@@ -308,10 +311,7 @@ fn boot_timed_out(msg: String) -> VmError {
 }
 
 fn check_inputs(vm: &Vm, job: &HostJob, work: &Path) -> io::Result<()> {
-    let listen_len = work
-        .join(format!("vsock.sock_{CONTROL_PORT}"))
-        .as_os_str()
-        .len();
+    let listen_len = listen_path(work).as_os_str().len();
     if listen_len > SOCKET_PATH_MAX {
         return Err(invalid(format!(
             "work dir is too deep for a Unix socket: {listen_len} bytes, at most {SOCKET_PATH_MAX}"
@@ -347,40 +347,36 @@ fn check_inputs(vm: &Vm, job: &HostJob, work: &Path) -> io::Result<()> {
 /// others: a file needs other-read, a directory other-read and other-execute. Links are not
 /// followed.
 fn readable_by_others(dir: &Path) -> io::Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let meta = entry.metadata()?;
-        let need = match meta.file_type() {
+    walk(dir, &mut |_, path, ty| {
+        let need = match ty {
             t if t.is_dir() => 0o005,
             t if t.is_symlink() => 0,
             _ => 0o004,
         };
-        if meta.mode() & need != need {
+        let mode = fs::symlink_metadata(path)?.mode();
+        if mode & need != need {
             return Err(invalid(format!(
                 "input {} has mode {:o}, which the unprivileged payload cannot read",
-                entry.path().display(),
-                meta.mode() & 0o7777
+                path.display(),
+                mode & 0o7777
             )));
         }
-        if meta.is_dir() {
-            readable_by_others(&entry.path())?;
-        }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Runs one row in one VM. `work` must exist and be empty.
 pub fn run_row(vm: &Vm, job: &HostJob, work: &Path) -> Result<VmOutcome, VmError> {
     let t0 = Instant::now();
     check_inputs(vm, job, work)?;
-    let listen_path = work.join(format!("vsock.sock_{CONTROL_PORT}"));
+    let listen_at = listen_path(work);
 
     let in_img = work.join("in.img");
     ext4(Some(&job.input_dir), &in_img, size_mib(&job.input_dir)?)?;
     File::create(work.join("out.img"))?.set_len(vm.out_mib << 20)?;
     let prepare = t0.elapsed();
 
-    let listener = UnixListener::bind(&listen_path)?;
+    let listener = UnixListener::bind(&listen_at)?;
     listener.set_nonblocking(true)?;
     let log = File::create(work.join("vmm.log"))?;
     let started = Instant::now();
@@ -395,7 +391,7 @@ pub fn run_row(vm: &Vm, job: &HostJob, work: &Path) -> Result<VmOutcome, VmError
     let mut chan = accept(&listener, &mut vmm, started, vm, work)?;
     // Later connects must fail: the self-test checks that no host path is left.
     drop(listener);
-    fs::remove_file(&listen_path)?;
+    fs::remove_file(&listen_at)?;
     chan.set_nonblocking(false)?;
 
     match recv(
@@ -421,9 +417,7 @@ pub fn run_row(vm: &Vm, job: &HostJob, work: &Path) -> Result<VmOutcome, VmError
     let sent = Instant::now();
     let wire = Job {
         seed_hex: hex::encode(job.seed),
-        unix_nanos: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos() as u64),
+        unix_nanos: now_nanos(),
         argv: job.argv.clone(),
         env: job.env.clone(),
         timeout_ms: job.wall_timeout.as_millis() as u64,

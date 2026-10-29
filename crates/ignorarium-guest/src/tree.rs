@@ -1,14 +1,12 @@
-//! Output-tree hash: SHA-256 of the sorted rows `[relpath, kind, digest]`.
+//! Directory trees: one walk, and the output hash, SHA-256 of the sorted rows
+//! `[relpath, kind, digest]`.
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::ffi::OsStr;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, FileType, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
-
-type Row = (String, &'static str, String);
 
 pub fn tree_hash(dir: &Path) -> io::Result<String> {
     if fs::symlink_metadata(dir)?.file_type().is_symlink() {
@@ -17,37 +15,65 @@ pub fn tree_hash(dir: &Path) -> io::Result<String> {
             "top dir is a link",
         ));
     }
-    let mut rows = Vec::new();
-    walk(dir, "", &mut rows)?;
+    let mut rows: Vec<(String, &str, String)> = Vec::new();
+    walk(dir, &mut |rel, path, ty| {
+        let (kind, digest) = if ty.is_dir() {
+            return Ok(());
+        } else if ty.is_symlink() {
+            ("link", String::new())
+        } else if ty.is_file()
+            && let Some(f) = open_regular(path)?
+        {
+            ("file", sha256_hex(f)?)
+        } else {
+            ("other", String::new())
+        };
+        rows.push((rel_text(rel), kind, digest));
+        Ok(())
+    })?;
     rows.sort_by(|a, b| a.0.cmp(&b.0));
     let rows: Vec<Value> = rows.into_iter().map(|(p, k, d)| json!([p, k, d])).collect();
     let bytes = serde_json::to_vec(&Value::Array(rows))?;
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
-fn name_text(n: &OsStr) -> String {
-    match n.to_str() {
-        Some(s) => s.to_string(),
-        None => format!("!bytes:{}", hex::encode(n.as_bytes())),
-    }
+/// `rel` as text, part by part; a part that is not UTF-8 becomes `!bytes:<hex>`.
+fn rel_text(rel: &[u8]) -> String {
+    let parts: Vec<String> = rel
+        .split(|&b| b == b'/')
+        .map(|p| match std::str::from_utf8(p) {
+            Ok(s) => s.to_string(),
+            Err(_) => format!("!bytes:{}", hex::encode(p)),
+        })
+        .collect();
+    parts.join("/")
 }
 
-fn walk(dir: &Path, prefix: &str, rows: &mut Vec<Row>) -> io::Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let rel = format!("{prefix}{}", name_text(&entry.file_name()));
-        let ty = entry.file_type()?;
+/// Calls `visit` for every entry below `dir`, depth first: names in byte order, a directory
+/// before what it holds. `visit` gets the path below `dir` (`/`-separated bytes), the full
+/// path and the type. Links are not followed.
+pub(crate) fn walk(
+    dir: &Path,
+    visit: &mut impl FnMut(&[u8], &Path, FileType) -> io::Result<()>,
+) -> io::Result<()> {
+    walk_below(dir, b"", visit)
+}
+
+fn walk_below(
+    dir: &Path,
+    prefix: &[u8],
+    visit: &mut impl FnMut(&[u8], &Path, FileType) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut entries = fs::read_dir(dir)?
+        .map(|e| e.and_then(|e| Ok((e.file_name(), e.file_type()?))))
+        .collect::<io::Result<Vec<_>>>()?;
+    entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    for (name, ty) in entries {
+        let rel = [prefix, name.as_bytes()].concat();
+        let path = dir.join(&name);
+        visit(&rel, &path, ty)?;
         if ty.is_dir() {
-            walk(&entry.path(), &format!("{rel}/"), rows)?;
-        } else if ty.is_symlink() {
-            rows.push((rel, "link", String::new()));
-        } else if ty.is_file() {
-            match open_regular(&entry.path())? {
-                Some(f) => rows.push((rel, "file", digest(f)?)),
-                None => rows.push((rel, "other", String::new())),
-            }
-        } else {
-            rows.push((rel, "other", String::new()));
+            walk_below(&path, &[&rel[..], b"/"].concat(), visit)?;
         }
     }
     Ok(())
@@ -67,14 +93,8 @@ pub(crate) fn open_regular(path: &Path) -> io::Result<Option<File>> {
     Ok(f.metadata()?.file_type().is_file().then_some(f))
 }
 
-fn digest(mut f: File) -> io::Result<String> {
+pub(crate) fn sha256_hex(mut r: impl Read) -> io::Result<String> {
     let mut h = Sha256::new();
-    let mut buf = [0u8; 65536];
-    loop {
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            return Ok(hex::encode(h.finalize()));
-        }
-        h.update(&buf[..n]);
-    }
+    io::copy(&mut r, &mut h)?;
+    Ok(hex::encode(h.finalize()))
 }

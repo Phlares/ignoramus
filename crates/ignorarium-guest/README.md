@@ -5,7 +5,7 @@ Runs one experiment row inside a fresh virtual machine (isolation level 2). The 
 | Module | Side | Job |
 |---|---|---|
 | `proto` | both | Control frames (4-byte length + JSON, at most 1 MiB) and the messages. |
-| `tree` | both | The output hash, the same rule as level 0. |
+| `tree` | both | The one directory walk, and the output hash, the same rule as level 0. |
 | `pack` | both | The output stream: `write` in the guest, strict `unpack` on the host. |
 | `image` | host | Pinned kernel and hypervisor, the initramfs with the agent, ext4 disks. |
 | `host` | host | `run_row`: build the disks, start Cloud Hypervisor, serve the one connection, read the outputs back. |

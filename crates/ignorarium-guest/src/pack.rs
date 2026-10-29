@@ -5,9 +5,9 @@
 //! `d` dir, `f` file, `l` link, `o` other. Every kind but `e` is followed by the path
 //! (u32 big-endian length, raw bytes, `/`-separated). `f` adds a u64 big-endian length
 //! and the bytes. `l` adds a u32 big-endian length and the target bytes.
-use crate::tree::open_regular;
+use crate::tree::{open_regular, walk};
 use rustix::fs::{CWD, FileType, Mode, mknodat};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -42,51 +42,40 @@ impl<W: Write> Write for Counter<'_, W> {
 pub fn write(dir: &Path, w: &mut impl Write) -> io::Result<u64> {
     let mut w = Counter { inner: w, n: 0 };
     w.write_all(MAGIC)?;
-    write_dir(dir, b"", &mut w)?;
+    walk(dir, &mut |rel, path, ty| {
+        if ty.is_dir() {
+            put_path(&mut w, b'd', rel)
+        } else if ty.is_symlink() {
+            put_path(&mut w, b'l', rel)?;
+            put_bytes(&mut w, fs::read_link(path)?.as_os_str().as_bytes())
+        } else if ty.is_file()
+            && let Some(f) = open_regular(path)?
+        {
+            let len = f.metadata()?.len();
+            put_path(&mut w, b'f', rel)?;
+            w.write_all(&len.to_be_bytes())?;
+            // A file that shrinks after the length is written is an error, not a short entry.
+            if io::copy(&mut f.take(len), &mut w)? != len {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
+            Ok(())
+        } else {
+            put_path(&mut w, b'o', rel)
+        }
+    })?;
     w.write_all(b"e")?;
     Ok(w.n)
 }
 
-fn put_path(w: &mut impl Write, kind: u8, path: &[u8]) -> io::Result<()> {
-    w.write_all(&[kind])?;
-    w.write_all(&(path.len() as u32).to_be_bytes())?;
-    w.write_all(path)
+/// A u32 big-endian length, then the bytes.
+fn put_bytes(w: &mut impl Write, b: &[u8]) -> io::Result<()> {
+    w.write_all(&(b.len() as u32).to_be_bytes())?;
+    w.write_all(b)
 }
 
-fn write_dir(dir: &Path, prefix: &[u8], w: &mut impl Write) -> io::Result<()> {
-    let mut names: Vec<_> = fs::read_dir(dir)?
-        .map(|e| e.map(|e| e.file_name()))
-        .collect::<io::Result<_>>()?;
-    names.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
-    for name in names {
-        let mut rel = prefix.to_vec();
-        rel.extend_from_slice(name.as_bytes());
-        let path = dir.join(&name);
-        let ty = fs::symlink_metadata(&path)?.file_type();
-        if ty.is_dir() {
-            put_path(w, b'd', &rel)?;
-            rel.push(b'/');
-            write_dir(&path, &rel, w)?;
-        } else if ty.is_symlink() {
-            put_path(w, b'l', &rel)?;
-            let target = fs::read_link(&path)?;
-            w.write_all(&(target.as_os_str().len() as u32).to_be_bytes())?;
-            w.write_all(target.as_os_str().as_bytes())?;
-        } else if ty.is_file()
-            && let Some(f) = open_regular(&path)?
-        {
-            let len = f.metadata()?.len();
-            put_path(w, b'f', &rel)?;
-            w.write_all(&len.to_be_bytes())?;
-            // A file that shrinks after the length is written is an error, not a short entry.
-            if io::copy(&mut f.take(len), w)? != len {
-                return Err(io::ErrorKind::UnexpectedEof.into());
-            }
-        } else {
-            put_path(w, b'o', &rel)?;
-        }
-    }
-    Ok(())
+fn put_path(w: &mut impl Write, kind: u8, path: &[u8]) -> io::Result<()> {
+    w.write_all(&[kind])?;
+    put_bytes(w, path)
 }
 
 fn bad(msg: impl std::fmt::Display) -> io::Error {
@@ -174,8 +163,8 @@ pub fn unpack(r: &mut impl Read, dest: &Path, limit: u64) -> io::Result<()> {
     if &magic != MAGIC {
         return Err(bad("missing pack magic"));
     }
-    let mut seen: HashSet<Vec<u8>> = HashSet::new();
-    let mut dirs: HashSet<Vec<u8>> = HashSet::new();
+    // Each path so far, with its kind byte.
+    let mut seen: HashMap<Vec<u8>, u8> = HashMap::new();
     loop {
         let mut kind = [0];
         r.exact(&mut kind)?;
@@ -191,22 +180,19 @@ pub fn unpack(r: &mut impl Read, dest: &Path, limit: u64) -> io::Result<()> {
         let entry = |why: &str| bad(format!("entry {shown:?}: {why}"));
         check_path(&path).map_err(entry)?;
         if let Some(at) = path.iter().rposition(|&b| b == b'/')
-            && !dirs.contains(&path[..at])
+            && seen.get(&path[..at]) != Some(&b'd')
         {
             return Err(entry("parent is not an earlier directory"));
         }
-        if !seen.insert(path.clone()) {
+        let to = dest.join(OsStr::from_bytes(&path));
+        if seen.insert(path, kind[0]).is_some() {
             return Err(entry("duplicate path"));
         }
-        let to = dest.join(OsStr::from_bytes(&path));
         if to.as_os_str().len() >= MAX_PATH {
             return Err(entry("path with the destination is too long"));
         }
         match kind[0] {
-            b'd' => {
-                fs::create_dir(&to)?;
-                dirs.insert(path);
-            }
+            b'd' => fs::create_dir(&to)?,
             b'f' => {
                 let len = r.u64()?;
                 r.charge(len).map_err(|_| entry("file is past the limit"))?;
@@ -214,20 +200,8 @@ pub fn unpack(r: &mut impl Read, dest: &Path, limit: u64) -> io::Result<()> {
                     .write(true)
                     .create_new(true)
                     .open(&to)?;
-                let mut buf = [0u8; 65536];
-                let mut left = len;
-                while left > 0 {
-                    let n = left.min(buf.len() as u64) as usize;
-                    r.inner
-                        .read_exact(&mut buf[..n])
-                        .map_err(|e| match e.kind() {
-                            io::ErrorKind::UnexpectedEof => {
-                                entry("file is past the end of the pack")
-                            }
-                            _ => e,
-                        })?;
-                    f.write_all(&buf[..n])?;
-                    left -= n as u64;
+                if io::copy(&mut r.inner.by_ref().take(len), &mut f)? != len {
+                    return Err(entry("file is past the end of the pack"));
                 }
             }
             b'l' => {
