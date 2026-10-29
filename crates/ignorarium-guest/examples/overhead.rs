@@ -290,6 +290,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "{}",
         json!({
             "summary": stats,
+            "ci95_is": "95% Student t half-width of the mean",
             "unit": "ms",
             "runs_kept": kept.len(),
             "cpus": a.cpus,
