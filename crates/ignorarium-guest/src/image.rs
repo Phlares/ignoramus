@@ -117,7 +117,10 @@ pub fn size_mib(dir: &Path) -> io::Result<u64> {
 }
 
 fn run(cmd: &mut Command) -> io::Result<()> {
-    let out = cmd.stdin(Stdio::null()).output()?;
+    let out = cmd
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| io::Error::new(e.kind(), format!("{:?}: {e}", cmd.get_program())))?;
     if out.status.success() {
         return Ok(());
     }
@@ -137,7 +140,17 @@ fn run(cmd: &mut Command) -> io::Result<()> {
 pub fn ext4(src: Option<&Path>, dest: &Path, size_mib: u64) -> io::Result<()> {
     File::create(dest)?.set_len(size_mib << 20)?;
     let mut cmd = Command::new("mkfs.ext4");
-    cmd.args(["-q", "-F", "-O", "^has_journal", "-E", "root_owner=0:0"]);
+    // One inode per block: the size formula gives every entry at least a block.
+    cmd.args([
+        "-q",
+        "-F",
+        "-i",
+        "4096",
+        "-O",
+        "^has_journal",
+        "-E",
+        "root_owner=0:0",
+    ]);
     if let Some(src) = src {
         cmd.arg("-d").arg(src);
     }

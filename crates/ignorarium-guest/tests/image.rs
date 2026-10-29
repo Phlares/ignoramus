@@ -114,6 +114,20 @@ fn size_mib_leaves_room() {
     fs::create_dir(&big).unwrap();
     fs::write(big.join("blob"), vec![7u8; 40 << 20]).unwrap();
     ext4(Some(&big), &img, size_mib(&big).unwrap()).unwrap();
+    // Past 512 MiB, mkfs.ext4 by default gives one inode per 16 KiB; tiny files need more.
+    let tiny = d.path().join("tiny");
+    fs::create_dir(&tiny).unwrap();
+    // Spread over 100 directories: mkfs.ext4 -d is slow on one directory of 51000 entries.
+    for i in 0..100 {
+        let sub = tiny.join(format!("d{i}"));
+        fs::create_dir(&sub).unwrap();
+        for j in 0..510 {
+            fs::write(sub.join(format!("f{j}")), "x").unwrap();
+        }
+    }
+    let mib = size_mib(&tiny).unwrap();
+    assert!(mib > 512, "{mib}");
+    ext4(Some(&tiny), &img, mib).unwrap();
     // (4 MiB + 4 KiB for the entry) * 5/4 = 5 MiB + 5 KiB, rounded up to 6 MiB, plus 16 MiB.
     let four = d.path().join("four");
     fs::create_dir(&four).unwrap();
