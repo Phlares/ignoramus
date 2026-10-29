@@ -7,6 +7,9 @@ pub const MAX_BET: f64 = 0.5;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Score {
+    /// The nulls are stated for Upper. Lower reverses the inequality. Both needs equality
+    /// (P(x > 0) = P(x < 0), symmetry, or E[x | past] = mean).
+    ///
     /// s = sign(x). Null: P(x > 0) <= P(x < 0).
     Sign,
     /// s = clamp(x / scale, -1, 1). Null: x is symmetric about 0 given the past.
@@ -19,7 +22,7 @@ pub enum Score {
 pub struct EProcess {
     score: Score,
     sides: &'static [f64],
-    ln_stop: f64,
+    stop: f64,
     s_sum: f64,
     q_sum: f64,
     log_wealth: [f64; 2],
@@ -41,8 +44,7 @@ impl EProcess {
                 }
             }
             Score::Bounded { lo, hi, mean } => {
-                if !(lo.is_finite() && hi.is_finite() && mean.is_finite() && lo < mean && mean < hi)
-                {
+                if !(lo < mean && mean < hi && (hi - lo).is_finite()) {
                     return Err(Error::Parameter("bounds"));
                 }
             }
@@ -55,7 +57,7 @@ impl EProcess {
         Ok(EProcess {
             score,
             sides,
-            ln_stop: stop.ln(),
+            stop,
             s_sum: 0.0,
             q_sum: 0.0,
             log_wealth: [0.0; 2],
@@ -66,11 +68,11 @@ impl EProcess {
     }
 
     pub fn observe(&mut self, x: f64) -> Result<(), Error> {
-        if self.stopped {
-            return Ok(());
-        }
         if !x.is_finite() {
             return Err(Error::NotFinite);
+        }
+        if self.stopped {
+            return Ok(());
         }
         let s = match self.score {
             Score::Sign => {
@@ -92,23 +94,19 @@ impl EProcess {
         };
         for (w, &sigma) in self.log_wealth.iter_mut().zip(self.sides) {
             let bet = (sigma * self.s_sum / (1.0 + self.q_sum)).clamp(0.0, MAX_BET);
-            *w += (bet * sigma * s).ln_1p();
+            *w += (bet * (sigma * s)).ln_1p();
         }
         self.s_sum += s;
         self.q_sum += s * s;
         self.observed += 1;
-        let log_value = self.log_value();
-        self.peak_log = self.peak_log.max(log_value);
-        self.stopped = log_value >= self.ln_stop;
+        self.peak_log = self.peak_log.max(self.log_value());
+        self.stopped = self.stop.is_finite() && self.value() >= self.stop;
         Ok(())
     }
 
     fn log_value(&self) -> f64 {
         let ws = &self.log_wealth[..self.sides.len()];
         let m = ws.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        if m.is_infinite() {
-            return m;
-        }
         let sum: f64 = ws.iter().map(|w| (w - m).exp()).sum();
         m + (sum / ws.len() as f64).ln()
     }

@@ -67,7 +67,7 @@ fn bounded_uses_the_longer_side_when_mean_is_high() {
     };
     let mut p = EProcess::new(s, Tail::Upper, f64::INFINITY).unwrap();
     let v = run(&mut p, &[1.0, 1.0]);
-    // s = 0.25 / 0.75 = 1/3; lambda_2 = (1/3) / (1 + 1/9) = 0.3
+    // D = 1.5, s = 0.5 / 1.5 = 1/3; lambda_2 = (1/3) / (1 + 1/9) = 0.3
     close(v[1], 1.0 + 0.3 / 3.0);
 }
 
@@ -95,13 +95,15 @@ fn stop_freezes_the_value() {
     p.observe(-1.0).unwrap();
     close(p.value(), 1.5);
     assert_eq!(p.observed(), 2);
-    // After the stop, even a bad value is ignored.
-    assert_eq!(p.observe(f64::NAN), Ok(()));
+    assert_eq!(p.observe(f64::NAN), Err(Error::NotFinite));
+    assert_eq!(p.observe(f64::INFINITY), Err(Error::NotFinite));
+    assert_eq!(p.observe(5.0), Ok(()));
     assert_eq!(p.observed(), 2);
+    assert!(p.value() >= 1.4);
 
     let mut q = EProcess::new(Score::Sign, Tail::Upper, 1.5).unwrap();
     run(&mut q, &[1.0, 1.0]);
-    assert!(q.stopped());
+    assert!(q.stopped() && q.value() >= 1.5);
     let mut r = EProcess::new(Score::Sign, Tail::Upper, 1.6).unwrap();
     run(&mut r, &[1.0, 1.0]);
     assert!(!r.stopped());
@@ -111,12 +113,13 @@ fn stop_freezes_the_value() {
 fn bet_is_set_before_the_observation() {
     let lambda_after = |last: f64| {
         let mut p = EProcess::new(Score::Clip { scale: 1.0 }, Tail::Upper, f64::INFINITY).unwrap();
-        run(&mut p, &[0.5, 0.5, 0.5]);
+        run(&mut p, &[0.5, -0.5, 0.5]);
         let old = p.value();
         p.observe(last).unwrap();
         (p.value() / old - 1.0) / last.clamp(-1.0, 1.0)
     };
     close(lambda_after(0.9), lambda_after(-0.3));
+    close(lambda_after(0.9), 2.0 / 7.0);
 }
 
 #[test]
@@ -138,6 +141,7 @@ fn rejects_bad_parameters_and_observations() {
     assert_eq!(b(0.0, 1.0, 0.0), bad);
     assert_eq!(b(0.0, 1.0, 1.0), bad);
     assert_eq!(b(0.0, 1.0, f64::NAN), bad);
+    assert_eq!(b(-f64::MAX, f64::MAX, 0.0), bad);
     assert_eq!(b(f64::NEG_INFINITY, 1.0, 0.5), bad);
     assert_eq!(b(0.0, f64::INFINITY, 0.5), bad);
     assert!(b(0.0, 1.0, 0.5).is_none());
@@ -232,4 +236,16 @@ fn detects_a_one_sd_effect() {
         4,
     );
     assert!(share >= 0.9, "{share}");
+}
+
+#[test]
+fn a_stopped_process_never_reads_below_its_stop() {
+    let mut p = EProcess::new(Score::Sign, Tail::Upper, 20.0).unwrap();
+    let mut i = 0;
+    while !p.stopped() {
+        p.observe(1.0).unwrap();
+        i += 1;
+        assert!(i < 100);
+    }
+    assert!(p.value() >= 20.0);
 }
