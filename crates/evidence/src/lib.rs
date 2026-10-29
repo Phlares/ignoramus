@@ -5,6 +5,7 @@ use std::fmt;
 pub mod elond;
 pub mod eprocess;
 pub mod rng;
+pub mod scan;
 pub mod tree;
 
 #[derive(Debug, Clone, PartialEq)]
