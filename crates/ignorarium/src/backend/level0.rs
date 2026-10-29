@@ -33,15 +33,18 @@ impl Backend for Level0 {
         let start = Instant::now();
         let (mut exit, cpu_seconds) = run_child(job, start, watch);
         let wall_seconds = start.elapsed().as_secs_f64();
-        // The payload ran: an output it left unhashable is its own result, not a box fault.
-        let output_hash = match output_hash(&job.output_dir) {
-            Ok(h) => h,
-            Err(e) => {
+        // A row the box ended is not data: nothing reads its hash, and a large output would
+        // hold up the spend record. Otherwise the payload ran, and an output it left
+        // unhashable is its own result, not a box fault.
+        let output_hash = if exit == Exit::Stopped {
+            String::new()
+        } else {
+            output_hash(&job.output_dir).unwrap_or_else(|e| {
                 if exit == Exit::Ok {
                     exit = Exit::Void(format!("cannot hash output: {e}"));
                 }
                 String::new()
-            }
+            })
         };
         Ok(RowOutcome {
             exit,

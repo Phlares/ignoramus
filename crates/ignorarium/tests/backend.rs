@@ -326,6 +326,8 @@ fn level0_stops_the_group_when_the_watch_says_stop() {
         )
         .unwrap();
     assert_eq!(o.exit, Exit::Stopped);
+    // A row the box ended is not data, so its output is not hashed.
+    assert_eq!(o.output_hash, "");
     assert_eq!(ticks.get(), 20);
     assert!(o.wall_seconds < 2.0, "{}", o.wall_seconds);
     std::thread::sleep(Duration::from_millis(1500));
