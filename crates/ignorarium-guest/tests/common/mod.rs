@@ -25,7 +25,7 @@ pub fn write_exec(path: &Path, text: &str) {
 /// `dir` as a pack, by the crate's writer.
 pub fn packed(dir: &Path) -> Vec<u8> {
     let mut v = Vec::new();
-    let n = pack::write(dir, &mut v).unwrap();
+    let n = pack::write(dir, &mut v, u64::MAX).unwrap();
     assert_eq!(n, v.len() as u64);
     v
 }

@@ -22,32 +22,68 @@ const MAX_PART: usize = 255;
 /// block however few stream bytes it takes.
 const ENTRY_COST: u64 = 4096;
 
-struct Counter<'a, W> {
+/// What a pack costs against its limit: every stream byte, plus `ENTRY_COST` for each entry.
+/// `write` and `unpack` both charge through it, so a pack that one accepts, the other accepts.
+struct Budget {
+    limit: u64,
+    left: u64,
+}
+
+impl Budget {
+    fn new(limit: u64) -> Budget {
+        Budget { limit, left: limit }
+    }
+
+    fn charge(&mut self, n: u64) -> io::Result<()> {
+        if n > self.left {
+            let limit = self.limit;
+            return Err(bad(format!(
+                "outputs exceed the output limit of {limit} bytes"
+            )));
+        }
+        self.left -= n;
+        Ok(())
+    }
+}
+
+/// Charges each byte to the budget before it passes it on, and counts it.
+struct Charged<'a, W> {
     inner: &'a mut W,
+    budget: Budget,
     n: u64,
 }
 
-impl<W: Write> Write for Counter<'_, W> {
+impl<W: Write> Write for Charged<'_, W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let n = self.inner.write(buf)?;
-        self.n += n as u64;
-        Ok(n)
+        self.budget.charge(buf.len() as u64)?;
+        self.inner.write_all(buf)?;
+        self.n += buf.len() as u64;
+        Ok(buf.len())
     }
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
     }
 }
 
-/// Writes `dir` as a pack and returns the number of bytes written.
-pub fn write(dir: &Path, w: &mut impl Write) -> io::Result<u64> {
-    let mut w = Counter { inner: w, n: 0 };
+/// Writes `dir` as a pack and returns the number of bytes written. A pack that would cost
+/// more than `limit` is refused before any byte past the limit is written.
+pub fn write(dir: &Path, w: &mut impl Write, limit: u64) -> io::Result<u64> {
+    let mut w = Charged {
+        inner: w,
+        budget: Budget::new(limit),
+        n: 0,
+    };
     w.write_all(MAGIC)?;
     walk(dir, &mut |rel, path, ty| {
+        w.budget.charge(ENTRY_COST)?;
         if ty.is_dir() {
             put_path(&mut w, b'd', rel)
         } else if ty.is_symlink() {
+            let target = fs::read_link(path)?;
+            let target = target.as_os_str().as_bytes();
+            check_target(rel, target).map_err(entry_error(rel))?;
             put_path(&mut w, b'l', rel)?;
-            put_bytes(&mut w, fs::read_link(path)?.as_os_str().as_bytes())
+            put_bytes(&mut w, target)
         } else if ty.is_file()
             && let Some(f) = open_regular(path)?
         {
@@ -82,23 +118,21 @@ fn bad(msg: impl std::fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.to_string())
 }
 
-/// Reads at most `left` more bytes; going past that is an error.
+/// Errors that name the entry at `path`.
+fn entry_error(path: &[u8]) -> impl Fn(&str) -> io::Error + use<> {
+    let shown = String::from_utf8_lossy(path).into_owned();
+    move |why: &str| bad(format!("entry {shown:?}: {why}"))
+}
+
+/// Charges each byte it reads to the budget.
 struct Reader<'a, R> {
     inner: &'a mut R,
-    left: u64,
+    budget: Budget,
 }
 
 impl<R: Read> Reader<'_, R> {
-    fn charge(&mut self, n: u64) -> io::Result<()> {
-        if n > self.left {
-            return Err(bad("pack is larger than the limit"));
-        }
-        self.left -= n;
-        Ok(())
-    }
-
     fn exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
-        self.charge(buf.len() as u64)?;
+        self.budget.charge(buf.len() as u64)?;
         self.inner.read_exact(buf).map_err(|e| match e.kind() {
             io::ErrorKind::UnexpectedEof => bad("truncated pack"),
             _ => e,
@@ -144,8 +178,34 @@ fn check_path(path: &[u8]) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Unpacks a pack into the empty directory `dest`. `limit` caps the bytes read plus a fixed
-/// cost per entry.
+/// A link target must stay inside the tree when read from the link's own directory: not
+/// absolute, and no `..` that climbs above the top. The check is lexical.
+fn check_target(link: &[u8], target: &[u8]) -> Result<(), &'static str> {
+    if target.is_empty() {
+        return Err("empty link target");
+    }
+    if target.len() >= MAX_PATH {
+        return Err("link target is too long");
+    }
+    if target[0] == b'/' {
+        return Err("absolute link target");
+    }
+    let mut depth = link.iter().filter(|&&b| b == b'/').count();
+    for part in target.split(|&b| b == b'/') {
+        match part {
+            b"" | b"." => {}
+            b".." => {
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or("link target climbs out of the output dir")?
+            }
+            _ => depth += 1,
+        }
+    }
+    Ok(())
+}
+
+/// Unpacks a pack into the empty directory `dest`, charging `limit` as `write` does.
 /// Every entry is checked before anything is made for it; nothing is made outside `dest`.
 pub fn unpack(r: &mut impl Read, dest: &Path, limit: u64) -> io::Result<()> {
     if fs::read_dir(dest)?.next().is_some() {
@@ -156,7 +216,7 @@ pub fn unpack(r: &mut impl Read, dest: &Path, limit: u64) -> io::Result<()> {
     }
     let mut r = Reader {
         inner: r,
-        left: limit,
+        budget: Budget::new(limit),
     };
     let mut magic = [0; 8];
     r.exact(&mut magic)?;
@@ -174,20 +234,19 @@ pub fn unpack(r: &mut impl Read, dest: &Path, limit: u64) -> io::Result<()> {
         if !matches!(kind[0], b'd' | b'f' | b'l' | b'o') {
             return Err(bad(format!("unknown entry kind {:#04x}", kind[0])));
         }
-        r.charge(ENTRY_COST)?;
+        r.budget.charge(ENTRY_COST)?;
         let path = r.name("path")?;
-        let shown = String::from_utf8_lossy(&path).into_owned();
-        let entry = |why: &str| bad(format!("entry {shown:?}: {why}"));
-        check_path(&path).map_err(entry)?;
+        let entry = entry_error(&path);
+        check_path(&path).map_err(&entry)?;
         if let Some(at) = path.iter().rposition(|&b| b == b'/')
             && seen.get(&path[..at]) != Some(&b'd')
         {
             return Err(entry("parent is not an earlier directory"));
         }
-        let to = dest.join(OsStr::from_bytes(&path));
-        if seen.insert(path, kind[0]).is_some() {
+        if seen.insert(path.clone(), kind[0]).is_some() {
             return Err(entry("duplicate path"));
         }
+        let to = dest.join(OsStr::from_bytes(&path));
         if to.as_os_str().len() >= MAX_PATH {
             return Err(entry("path with the destination is too long"));
         }
@@ -195,7 +254,9 @@ pub fn unpack(r: &mut impl Read, dest: &Path, limit: u64) -> io::Result<()> {
             b'd' => fs::create_dir(&to)?,
             b'f' => {
                 let len = r.u64()?;
-                r.charge(len).map_err(|_| entry("file is past the limit"))?;
+                r.budget
+                    .charge(len)
+                    .map_err(|_| entry("file is past the limit"))?;
                 let mut f = fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
@@ -209,12 +270,7 @@ pub fn unpack(r: &mut impl Read, dest: &Path, limit: u64) -> io::Result<()> {
                     io::ErrorKind::InvalidData => entry(&e.to_string()),
                     _ => e,
                 })?;
-                if target.is_empty() {
-                    return Err(entry("empty link target"));
-                }
-                if target.len() >= MAX_PATH {
-                    return Err(entry("link target is too long"));
-                }
+                check_target(&path, &target).map_err(&entry)?;
                 symlink(OsStr::from_bytes(&target), &to)?;
             }
             _ => mknodat(CWD, &to, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0)

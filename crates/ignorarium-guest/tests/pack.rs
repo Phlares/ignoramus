@@ -7,6 +7,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::symlink;
+use std::path::Path;
 use std::process::Command;
 
 fn round_trip(src: &std::path::Path) {
@@ -25,7 +26,7 @@ fn pack_round_trip_keeps_the_tree() {
     fs::write(p.join("sub/deeper/b"), "yo\n").unwrap();
     fs::create_dir(p.join("empty")).unwrap();
     symlink("a.txt", p.join("l")).unwrap();
-    symlink("/etc/passwd", p.join("sub/abs")).unwrap();
+    symlink("../a.txt", p.join("sub/up")).unwrap();
     assert!(
         Command::new("mkfifo")
             .arg(p.join("f"))
@@ -77,8 +78,86 @@ fn the_pack_lists_names_in_byte_order() {
 fn an_empty_dir_packs_to_magic_and_end() {
     let d = tempfile::tempdir().unwrap();
     let mut v = Vec::new();
-    assert_eq!(write(d.path(), &mut v).unwrap(), 9);
+    assert_eq!(write(d.path(), &mut v, u64::MAX).unwrap(), 9);
     assert_eq!(v, b"IGNPACK1e");
+}
+
+/// `write` and `unpack` both accept `dir` at its cost (stream bytes plus a block per entry)
+/// and both refuse it one byte below.
+fn same_limit_on_both_sides(dir: &Path, entries: u64) {
+    let limit = packed(dir).len() as u64 + entries * 4096;
+    let mut v = Vec::new();
+    write(dir, &mut v, limit).unwrap();
+    unpack(
+        &mut v.as_slice(),
+        tempfile::tempdir().unwrap().path(),
+        limit,
+    )
+    .unwrap();
+    let mut short = Vec::new();
+    let e = write(dir, &mut short, limit - 1).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::InvalidData);
+    let want = format!("outputs exceed the output limit of {} bytes", limit - 1);
+    assert_eq!(e.to_string(), want);
+    assert!((short.len() as u64) < limit, "wrote past the limit");
+    let out = tempfile::tempdir().unwrap();
+    let e = unpack(&mut v.as_slice(), out.path(), limit - 1).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::InvalidData);
+}
+
+#[test]
+fn write_and_unpack_charge_the_same_limit() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path();
+    fs::write(p.join("a"), vec![1u8; 10_000]).unwrap();
+    fs::create_dir(p.join("sub")).unwrap();
+    fs::write(p.join("sub/b"), "").unwrap();
+    symlink("../a", p.join("sub/l")).unwrap();
+    same_limit_on_both_sides(p, 4);
+}
+
+#[test]
+fn many_empty_dirs_meet_the_same_limit_on_both_sides() {
+    let d = tempfile::tempdir().unwrap();
+    for i in 0..300 {
+        fs::create_dir(d.path().join(format!("d{i}"))).unwrap();
+    }
+    same_limit_on_both_sides(d.path(), 300);
+}
+
+#[test]
+fn link_targets_must_stay_inside_the_tree() {
+    let refused: [(&[u8], &[u8]); 4] = [
+        (b"a", b"/etc"),
+        (b"a", b"../x"),
+        (b"d/a", b"../../x"),
+        (b"a", b"d/../../x"),
+    ];
+    for (path, target) in refused {
+        let bytes = pack(&[entry(b'd', b"d"), link(path, target)]);
+        let out = tempfile::tempdir().unwrap();
+        let e = unpack(&mut bytes.as_slice(), out.path(), 1 << 20).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::InvalidData, "{e}");
+        let named = format!("{:?}", String::from_utf8_lossy(path));
+        assert!(e.to_string().contains(&named), "{e}");
+        assert!(fs::symlink_metadata(out.path().join(OsStr::from_bytes(path))).is_err());
+    }
+    let ok = pack(&[entry(b'd', b"d"), link(b"d/a", b"../b")]);
+    let out = tempfile::tempdir().unwrap();
+    unpack(&mut ok.as_slice(), out.path(), 1 << 20).unwrap();
+    assert_eq!(
+        fs::read_link(out.path().join("d/a")).unwrap(),
+        Path::new("../b")
+    );
+}
+
+#[test]
+fn write_refuses_a_link_that_unpack_would_refuse() {
+    let d = tempfile::tempdir().unwrap();
+    symlink("/etc", d.path().join("a")).unwrap();
+    let e = write(d.path(), &mut Vec::new(), u64::MAX).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::InvalidData);
+    assert!(e.to_string().contains("\"a\""), "{e}");
 }
 
 #[test]
@@ -158,7 +237,7 @@ fn hostile_packs_are_refused() {
         ),
         (
             "under link",
-            pack(&[link(b"l", b".."), file(b"l/x", b"x")]),
+            pack(&[link(b"l", b"."), file(b"l/x", b"x")]),
             1 << 20,
         ),
         (

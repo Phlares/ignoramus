@@ -81,7 +81,7 @@ fn run() -> io::Result<()> {
     let mut chan = File::from(connect()?);
     let agent = env!("CARGO_PKG_VERSION").to_string();
     write_frame(&mut chan, &ToHost::Hello { agent })?;
-    match caught(|| row(&mut chan, &mut out_disk)) {
+    match caught(|| row(&mut chan, &mut out_disk, out_bytes)) {
         Ok(report) => write_frame(&mut chan, &ToHost::Report(report)),
         Err(e) => {
             let reason = e.to_string();
@@ -114,7 +114,7 @@ fn connect() -> io::Result<OwnedFd> {
 
 /// Takes the job, seeds and sets the clock, then runs the payload behind the self-test and
 /// packs `/out` onto the output disk.
-fn row(chan: &mut File, out_disk: &mut File) -> io::Result<Report> {
+fn row(chan: &mut File, out_disk: &mut File, out_bytes: u64) -> io::Result<Report> {
     let job: Job = read_frame(chan)?;
     let seed = seed_from_hex(&job.seed_hex)?;
     mix_seed(&seed, &OpenOptions::new().write(true).open("/dev/urandom")?)?;
@@ -133,7 +133,7 @@ fn row(chan: &mut File, out_disk: &mut File) -> io::Result<Report> {
         let out = Path::new("/out");
         let hash = tree_hash(out)?;
         let mut w = BufWriter::new(out_disk);
-        pack::write(out, &mut w)?;
+        pack::write(out, &mut w, out_bytes)?;
         w.into_inner()?.sync_all()?;
         Ok((ran, hash))
     })
