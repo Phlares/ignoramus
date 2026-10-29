@@ -105,12 +105,24 @@ fn file_of(dir: &TempDir, text: &str) -> std::path::PathBuf {
 }
 
 fn call(method: Method, url: &str, token: Option<&str>, body: Body, keep: bool) -> Call {
+    call_with(method, url, token, body, keep, false)
+}
+
+fn call_with(
+    method: Method,
+    url: &str,
+    token: Option<&str>,
+    body: Body,
+    keep: bool,
+    follow: bool,
+) -> Call {
     Call {
         method,
         url: url.to_string(),
         token: token.map(str::to_string),
         body,
         keep_body: keep,
+        follow,
     }
 }
 
@@ -448,19 +460,21 @@ fn verify_hashes_each_download() {
         fake.calls(),
         vec![
             call(Method::Get, BUCKET, st, Body::None, true),
-            call(
+            call_with(
                 Method::Get,
                 &format!("{BUCKET}/b.zip"),
                 st,
                 Body::None,
-                false
+                false,
+                true
             ),
-            call(
+            call_with(
                 Method::Get,
                 &format!("{BUCKET}/a.txt"),
                 st,
                 Body::None,
-                false
+                false,
+                true
             ),
         ]
     );
@@ -679,4 +693,38 @@ fn a_refused_url_is_shown_escaped() {
         Error::Protocol { what, .. } => assert!(!what.contains('\x1b'), "{what:?}"),
         e => panic!("{e:?}"),
     }
+}
+
+#[test]
+fn a_redirect_to_an_upload_is_a_status_error() {
+    let dir = TempDir::new().unwrap();
+    let path = file_of(&dir, "hello world");
+    let fake = Fake::new(vec![reply(302, "")]);
+    let err = Zenodo::sandbox(&fake)
+        .upload(&stage(), &draft(), "b.zip", &path)
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Status {
+                step: "upload",
+                status: 302,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(!fake.calls()[0].follow);
+}
+
+#[test]
+fn verify_refuses_duplicate_expected_names() {
+    let fake = Fake::new(vec![]);
+    let mut want = expected();
+    want.push(want[0].clone());
+    let err = Zenodo::sandbox(&fake)
+        .verify(&stage(), &draft(), &want)
+        .unwrap_err();
+    assert!(matches!(err, Error::Request(_)), "{err:?}");
+    assert!(fake.calls().is_empty());
 }

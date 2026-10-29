@@ -26,6 +26,8 @@ pub struct Request<'a> {
     pub token: Option<&'a Secret>,
     pub body: Body,
     pub keep_body: bool,
+    /// Follow up to 3 redirects. Only for requests that send no body and change nothing.
+    pub follow: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -91,8 +93,14 @@ fn config(req: &Request, max_secs: u32) -> Result<String, Error> {
         Method::Post => "POST",
         Method::Put => "PUT",
     };
+    // curl drops a custom Authorization header when a redirect changes host (curl 7.58 and later).
+    let follow = if req.follow {
+        "location\nmax-redirs = 3\n"
+    } else {
+        ""
+    };
     let mut c = format!(
-        "silent\nshow-error\ngloboff\nproto = \"=https\"\nproto-redir = \"=https\"\nlocation\nmax-redirs = 3\nmax-time = {max_secs}\nurl = {}\nrequest = \"{method}\"\n",
+        "silent\nshow-error\ngloboff\nproto = \"=https\"\nproto-redir = \"=https\"\n{follow}max-time = {max_secs}\nurl = {}\nrequest = \"{method}\"\n",
         quote(&req.url)?
     );
     if let Some(t) = req.token {

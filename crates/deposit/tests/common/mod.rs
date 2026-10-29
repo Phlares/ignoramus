@@ -36,6 +36,7 @@ pub struct Call {
     pub token: Option<String>,
     pub body: Body,
     pub keep_body: bool,
+    pub follow: bool,
 }
 
 /// A response with its hash and size computed from the bytes.
@@ -86,6 +87,7 @@ impl Transport for Fake {
             token: req.token.map(|t| t.expose().to_string()),
             body: req.body.clone(),
             keep_body: req.keep_body,
+            follow: req.follow,
         });
         Ok(self
             .script

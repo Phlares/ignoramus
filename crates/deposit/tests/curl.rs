@@ -23,6 +23,7 @@ fn req<'a>(url: &str, token: Option<&'a Secret>, body: Body, keep: bool) -> Requ
         token,
         body,
         keep_body: keep,
+        follow: true,
     }
 }
 
@@ -250,5 +251,25 @@ fn a_missing_program_is_a_transport_error() {
     match curl.send(&req("https://h/x", None, Body::None, true)) {
         Err(Error::Transport(m)) => assert!(m.starts_with("cannot run "), "{m}"),
         other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn redirects_are_followed_only_when_asked() {
+    for follow in [true, false] {
+        let dir = TempDir::new().unwrap();
+        let curl = Curl::with_program(fake(dir.path(), r"printf '\n200'"));
+        let mut r = req("https://sandbox.zenodo.org/f", None, Body::None, false);
+        r.follow = follow;
+        curl.send(&r).unwrap();
+        let cfg = std::fs::read_to_string(dir.path().join("stdin")).unwrap();
+        let want = if follow {
+            head()
+        } else {
+            head().replace("location\nmax-redirs = 3\n", "")
+        };
+        assert!(cfg.starts_with(&want), "{follow}: {cfg}");
+        assert_eq!(cfg.contains("location"), follow);
+        assert_eq!(cfg.contains("max-redirs"), follow);
     }
 }

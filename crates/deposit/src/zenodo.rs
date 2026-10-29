@@ -114,6 +114,7 @@ impl<T: Transport> Zenodo<T> {
                 token: Some(&t.0),
                 body: Body::Json(body),
                 keep_body: true,
+                follow: false,
             },
         )?;
         let v = parse("create", &r)?;
@@ -161,6 +162,7 @@ impl<T: Transport> Zenodo<T> {
                 token: Some(&t.0),
                 body: Body::Json(body),
                 keep_body: true,
+                follow: false,
             },
         )?;
         let v = parse("describe", &r)?;
@@ -211,6 +213,7 @@ impl<T: Transport> Zenodo<T> {
                 token: Some(&t.0),
                 body: Body::File(path.to_path_buf()),
                 keep_body: true,
+                follow: false,
             },
         )?;
         let v = parse("upload", &r)?;
@@ -240,6 +243,14 @@ impl<T: Transport> Zenodo<T> {
         d: &Draft,
         expected: &[(String, String)],
     ) -> Result<Step, Error> {
+        for (i, (name, _)) in expected.iter().enumerate() {
+            if expected[..i].iter().any(|(n, _)| n == name) {
+                return Err(Error::Request(format!(
+                    "the expected files name {} twice",
+                    esc(name)
+                )));
+            }
+        }
         let r = self.send(
             "verify",
             &[200],
@@ -249,6 +260,7 @@ impl<T: Transport> Zenodo<T> {
                 token: Some(&t.0),
                 body: Body::None,
                 keep_body: true,
+                follow: false,
             },
         )?;
         let v = parse("verify", &r)?;
@@ -295,6 +307,7 @@ impl<T: Transport> Zenodo<T> {
                     token: Some(&t.0),
                     body: Body::None,
                     keep_body: false,
+                    follow: true,
                 },
             )?;
             if &got.sha256 != want {
@@ -330,6 +343,7 @@ impl<T: Transport> Zenodo<T> {
                 token: Some(&t.0),
                 body: Body::None,
                 keep_body: true,
+                follow: false,
             },
         )?;
         let v = parse("publish", &r)?;
