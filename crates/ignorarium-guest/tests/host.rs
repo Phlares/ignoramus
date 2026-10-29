@@ -1,7 +1,6 @@
 mod common;
-use common::write_exec;
+use common::{file, pack, packed, write_exec};
 use ignorarium_guest::host::{HostJob, Vm, VmError, VmOutcome, run_row, vmm_args};
-use ignorarium_guest::pack;
 use ignorarium_guest::proto::{End, Job, Report, SelfTest, ToHost, read_frame, write_frame};
 use ignorarium_guest::tree::tree_hash;
 use std::fs::{self, Permissions};
@@ -203,12 +202,6 @@ fn put_out(work: &Path, bytes: &[u8]) {
     f.sync_all().unwrap();
 }
 
-fn packed(src: &Path) -> Vec<u8> {
-    let mut v = Vec::new();
-    pack::write(src, &mut v).unwrap();
-    v
-}
-
 fn failed(reason: &str) -> ToHost {
     ToHost::Failed {
         reason: reason.into(),
@@ -344,12 +337,7 @@ fn a_hostile_pack_is_a_guest_error() {
     let h = rig.guest(|s, c| {
         hello(s);
         read_job(s, c);
-        let mut p = b"IGNPACK1f".to_vec();
-        p.extend_from_slice(&4u32.to_be_bytes());
-        p.extend_from_slice(b"../x");
-        p.extend_from_slice(&1u64.to_be_bytes());
-        p.extend_from_slice(b"xe");
-        put_out(&c.work, &p);
+        put_out(&c.work, &pack(&[file(b"../x", b"x")]));
         write_frame(s, &report("00", Some(End::Code(0)))).unwrap();
     });
     let res = rig.run();

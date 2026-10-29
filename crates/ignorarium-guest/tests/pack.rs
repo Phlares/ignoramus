@@ -1,3 +1,5 @@
+mod common;
+use common::{entry, file, link, pack, packed};
 use ignorarium_guest::pack::{unpack, write};
 use ignorarium_guest::tree::tree_hash;
 use std::ffi::OsStr;
@@ -6,13 +8,6 @@ use std::io::ErrorKind;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::symlink;
 use std::process::Command;
-
-fn packed(dir: &std::path::Path) -> Vec<u8> {
-    let mut v = Vec::new();
-    let n = write(dir, &mut v).unwrap();
-    assert_eq!(n, v.len() as u64);
-    v
-}
 
 fn round_trip(src: &std::path::Path) {
     let out = tempfile::tempdir().unwrap();
@@ -69,6 +64,16 @@ fn the_pack_lists_a_dir_before_its_children() {
 }
 
 #[test]
+fn the_pack_lists_names_in_byte_order() {
+    let d = tempfile::tempdir().unwrap();
+    for name in ["b", "a", "B", "a-c"] {
+        fs::write(d.path().join(name), "").unwrap();
+    }
+    let want = pack(&["B", "a", "a-c", "b"].map(|n| file(n.as_bytes(), b"")));
+    assert_eq!(packed(d.path()), want);
+}
+
+#[test]
 fn an_empty_dir_packs_to_magic_and_end() {
     let d = tempfile::tempdir().unwrap();
     let mut v = Vec::new();
@@ -85,36 +90,6 @@ fn bytes_after_the_end_are_ignored() {
     let out = tempfile::tempdir().unwrap();
     unpack(&mut v.as_slice(), out.path(), 1 << 20).unwrap();
     assert_eq!(tree_hash(out.path()).unwrap(), tree_hash(d.path()).unwrap());
-}
-
-fn entry(kind: u8, path: &[u8]) -> Vec<u8> {
-    let mut v = vec![kind];
-    v.extend_from_slice(&(path.len() as u32).to_be_bytes());
-    v.extend_from_slice(path);
-    v
-}
-
-fn file(path: &[u8], body: &[u8]) -> Vec<u8> {
-    let mut v = entry(b'f', path);
-    v.extend_from_slice(&(body.len() as u64).to_be_bytes());
-    v.extend_from_slice(body);
-    v
-}
-
-fn link(path: &[u8], target: &[u8]) -> Vec<u8> {
-    let mut v = entry(b'l', path);
-    v.extend_from_slice(&(target.len() as u32).to_be_bytes());
-    v.extend_from_slice(target);
-    v
-}
-
-fn pack(parts: &[Vec<u8>]) -> Vec<u8> {
-    let mut v = b"IGNPACK1".to_vec();
-    for p in parts {
-        v.extend_from_slice(p);
-    }
-    v.push(b'e');
-    v
 }
 
 /// Sixteen 255-byte parts: every prefix is a legal path, but the last is too long once

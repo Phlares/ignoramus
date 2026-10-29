@@ -58,6 +58,18 @@ fn non_utf8_names_hash_as_bytes() {
 }
 
 #[test]
+fn a_nested_non_utf8_name_hashes_part_by_part() {
+    let d = tempfile::tempdir().unwrap();
+    let dir = d.path().join(OsStr::from_bytes(b"d\xfe"));
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join(OsStr::from_bytes(b"x\xff")), "hi\n").unwrap();
+    let digest = hex::encode(sha2::Sha256::digest(b"hi\n"));
+    let rows = serde_json::json!([["!bytes:64fe/!bytes:78ff", "file", digest]]);
+    let want = hex::encode(sha2::Sha256::digest(serde_json::to_vec(&rows).unwrap()));
+    assert_eq!(tree_hash(d.path()).unwrap(), want);
+}
+
+#[test]
 fn a_linked_top_dir_is_an_error() {
     let d = tempfile::tempdir().unwrap();
     std::fs::create_dir(d.path().join("real")).unwrap();
