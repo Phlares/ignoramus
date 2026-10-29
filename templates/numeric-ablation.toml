@@ -16,7 +16,7 @@ statement = ""
 rival = ""
 
 [[outcomes]]
-id = "ppl_ratio"
+id = "ppl-ratio"
 unit = "ratio"                  # required
 direction = "lower"             # lower | higher (which is better)
 registered = true

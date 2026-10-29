@@ -1,0 +1,88 @@
+[study]
+id = "my-study"                 # ASCII kebab-case
+template = "numeric-ablation"   # numeric-ablation | planted-spawn
+mode = "exploratory"            # exploratory | confirmatory
+label = "signal"                # signal | confirmed | replicated | generalized
+test_log = false                # true: register into the test log, never counts
+
+[question]
+population = ""
+intervention = ""
+comparator = ""
+negative_control = ""
+[[question.hypotheses]]
+id = "H1"
+statement = ""
+rival = ""
+
+[[outcomes]]
+id = "ppl-ratio"
+direction = "lower"             # lower | higher (which is better)
+registered = true
+
+[scope]
+min_isolation = 1               # 0..3
+stop_rule = "budget-only"       # budget-only | e-process
+[scope.budget]
+cpu_hours = 1.0
+wall_hours = 1.0
+money_usd = 0.0
+[scope.end_of_run]
+route = "report"                # report | follow-on | share
+follow_on = []                  # [{ when = "H1.pass", spec = "follow/next.toml" }]
+
+[design]
+unit = "window"
+cluster = "text"                # optional; "" if none
+stratum = "genre"               # optional; "" if none
+reference = "exact"             # condition id of the reference arm
+repeats = 1
+row_seconds = 60.0              # estimate per row, until a record gives one
+test = "paired-mean"            # paired-mean | descriptive (exploratory only)
+alpha = 0.005
+power = 0.8
+sesoi = 0.0                     # smallest effect of interest, in outcome units
+icc = 0.0
+units_per_cluster = 1
+[design.variance]
+value = 0.0                     # variance of the paired difference per unit
+source = "stated"               # stated | record:<sha256>
+[[design.conditions]]
+id = "exact"
+[[design.conditions]]
+id = "arm-a"
+[design.selection]
+clusters = []                   # cluster ids used to pick a winner
+[design.confirmation]
+clusters = []                   # cluster ids used to confirm; disjoint from selection
+
+[[inputs]]
+path = "data/example.txt"       # relative to the study folder
+sha256 = ""
+role = "calibration"            # calibration | selection | confirmation | model
+[inputs.licence]
+spdx = ""                       # SPDX id, or "" when none was given
+type = "unspecified"            # common | custom | request-form | unspecified
+source = ""
+creators = []
+
+[pins]
+environment = ""
+payload = ""
+rule_base = ""
+
+[mutations]
+depth_cap = 2
+operators = []                  # [{ name, type = "int"|"float"|"enum", range = [..], acts_on }]
+triggers = []                   # [{ id, metric, threshold_e }]
+[mutations.seeds]
+spawn = "spawn/"
+report = "report/"
+
+[access]
+blind = false
+
+[report]
+licence_code = "Apache-2.0"
+licence_data = "CC0-1.0"
+publish = "none"                # none | zenodo-sandbox

@@ -16,7 +16,7 @@ statement = ""
 rival = ""
 
 [[outcomes]]
-id = "ppl_ratio"
+id = "ppl-ratio"
 unit = "ratio"                  # required
 direction = "lower"             # lower | higher (which is better)
 registered = true
@@ -75,7 +75,7 @@ rule_base = ""
 [mutations]
 depth_cap = 2
 operators = [{ name = "window_tokens", type = "int", range = [64, 512], acts_on = "arm-a" }]
-triggers = [{ id = "T1", metric = "ppl_ratio", threshold_e = 1.0 }]
+triggers = [{ id = "T1", metric = "ppl-ratio", threshold_e = 1.0 }]
 [mutations.seeds]
 spawn = "spawn/"
 report = "report/"

@@ -1,0 +1,780 @@
+# Rules for ignorarium v0. One [[rule]] per code, one [[rule.target]] per checked path.
+# Paths use dots and [*] for every array element. "**" means any depth.
+# Checks: required, non-empty, type, enum, range, format, finite, known-key, named:<name>.
+
+[[rule]]
+code = "E-REQ-001"
+severity = "error"
+problem = "A required field is missing."
+instruction = "Add the field. Copy its shape from the template."
+why = "The checker and the run need every field. A silent default would hide a gap in the plan."
+sources = ["https://toml.io/en/v1.0.0"]
+[[rule.target]]
+path = "study"
+check = "required"
+[[rule.target]]
+path = "study.id"
+check = "required"
+[[rule.target]]
+path = "study.template"
+check = "required"
+[[rule.target]]
+path = "study.mode"
+check = "required"
+[[rule.target]]
+path = "study.label"
+check = "required"
+[[rule.target]]
+path = "study.test_log"
+check = "required"
+[[rule.target]]
+path = "question"
+check = "required"
+[[rule.target]]
+path = "question.population"
+check = "required"
+[[rule.target]]
+path = "question.intervention"
+check = "required"
+[[rule.target]]
+path = "question.comparator"
+check = "required"
+[[rule.target]]
+path = "question.negative_control"
+check = "required"
+[[rule.target]]
+path = "question.hypotheses"
+check = "required"
+[[rule.target]]
+path = "question.hypotheses[*].id"
+check = "required"
+[[rule.target]]
+path = "question.hypotheses[*].statement"
+check = "required"
+[[rule.target]]
+path = "question.hypotheses[*].rival"
+check = "required"
+[[rule.target]]
+path = "outcomes"
+check = "required"
+[[rule.target]]
+path = "outcomes[*].id"
+check = "required"
+[[rule.target]]
+path = "outcomes[*].registered"
+check = "required"
+[[rule.target]]
+path = "scope"
+check = "required"
+[[rule.target]]
+path = "scope.stop_rule"
+check = "required"
+[[rule.target]]
+path = "scope.budget"
+check = "required"
+[[rule.target]]
+path = "scope.budget.cpu_hours"
+check = "required"
+[[rule.target]]
+path = "scope.budget.wall_hours"
+check = "required"
+[[rule.target]]
+path = "scope.budget.money_usd"
+check = "required"
+[[rule.target]]
+path = "scope.end_of_run"
+check = "required"
+[[rule.target]]
+path = "scope.end_of_run.route"
+check = "required"
+[[rule.target]]
+path = "scope.end_of_run.follow_on"
+check = "required"
+[[rule.target]]
+path = "scope.end_of_run.follow_on[*].when"
+check = "required"
+[[rule.target]]
+path = "scope.end_of_run.follow_on[*].spec"
+check = "required"
+[[rule.target]]
+path = "design"
+check = "required"
+[[rule.target]]
+path = "design.unit"
+check = "required"
+[[rule.target]]
+path = "design.cluster"
+check = "required"
+[[rule.target]]
+path = "design.stratum"
+check = "required"
+[[rule.target]]
+path = "design.reference"
+check = "required"
+[[rule.target]]
+path = "design.row_seconds"
+check = "required"
+[[rule.target]]
+path = "design.test"
+check = "required"
+[[rule.target]]
+path = "design.sesoi"
+check = "required"
+[[rule.target]]
+path = "design.icc"
+check = "required"
+[[rule.target]]
+path = "design.units_per_cluster"
+check = "required"
+[[rule.target]]
+path = "design.variance"
+check = "required"
+[[rule.target]]
+path = "design.variance.value"
+check = "required"
+[[rule.target]]
+path = "design.variance.source"
+check = "required"
+[[rule.target]]
+path = "design.conditions"
+check = "required"
+[[rule.target]]
+path = "design.conditions[*].id"
+check = "required"
+[[rule.target]]
+path = "design.selection"
+check = "required"
+[[rule.target]]
+path = "design.selection.clusters"
+check = "required"
+[[rule.target]]
+path = "design.confirmation"
+check = "required"
+[[rule.target]]
+path = "design.confirmation.clusters"
+check = "required"
+[[rule.target]]
+path = "inputs"
+check = "required"
+[[rule.target]]
+path = "inputs[*].path"
+check = "required"
+[[rule.target]]
+path = "inputs[*].sha256"
+check = "required"
+[[rule.target]]
+path = "inputs[*].role"
+check = "required"
+[[rule.target]]
+path = "inputs[*].licence"
+check = "required"
+[[rule.target]]
+path = "inputs[*].licence.spdx"
+check = "required"
+[[rule.target]]
+path = "inputs[*].licence.type"
+check = "required"
+[[rule.target]]
+path = "inputs[*].licence.source"
+check = "required"
+[[rule.target]]
+path = "inputs[*].licence.creators"
+check = "required"
+[[rule.target]]
+path = "pins"
+check = "required"
+[[rule.target]]
+path = "pins.environment"
+check = "required"
+[[rule.target]]
+path = "pins.payload"
+check = "required"
+[[rule.target]]
+path = "pins.rule_base"
+check = "required"
+[[rule.target]]
+path = "mutations"
+check = "required"
+[[rule.target]]
+path = "mutations.operators"
+check = "required"
+[[rule.target]]
+path = "mutations.operators[*].name"
+check = "required"
+[[rule.target]]
+path = "mutations.operators[*].type"
+check = "required"
+[[rule.target]]
+path = "mutations.operators[*].range"
+check = "required"
+[[rule.target]]
+path = "mutations.operators[*].acts_on"
+check = "required"
+[[rule.target]]
+path = "mutations.triggers"
+check = "required"
+[[rule.target]]
+path = "mutations.triggers[*].id"
+check = "required"
+[[rule.target]]
+path = "mutations.triggers[*].metric"
+check = "required"
+[[rule.target]]
+path = "mutations.triggers[*].threshold_e"
+check = "required"
+[[rule.target]]
+path = "mutations.seeds"
+check = "required"
+[[rule.target]]
+path = "mutations.seeds.spawn"
+check = "required"
+[[rule.target]]
+path = "mutations.seeds.report"
+check = "required"
+[[rule.target]]
+path = "report"
+check = "required"
+[[rule.target]]
+path = "report.licence_code"
+check = "required"
+[[rule.target]]
+path = "report.licence_data"
+check = "required"
+[[rule.target]]
+path = "report.publish"
+check = "required"
+
+[[rule]]
+code = "E-TYP-001"
+severity = "error"
+problem = "A field has the wrong type."
+instruction = "Use the type the template shows for this field."
+why = "A wrong type changes what the value means, and later checks cannot read it."
+sources = ["https://toml.io/en/v1.0.0"]
+[[rule.target]]
+path = "study"
+check = "type"
+kind = "table"
+[[rule.target]]
+path = "study.id"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "study.template"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "study.mode"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "study.label"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "study.test_log"
+check = "type"
+kind = "bool"
+[[rule.target]]
+path = "question"
+check = "type"
+kind = "table"
+[[rule.target]]
+path = "question.population"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "question.intervention"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "question.comparator"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "question.negative_control"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "question.hypotheses"
+check = "type"
+kind = "array"
+[[rule.target]]
+path = "question.hypotheses[*].id"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "question.hypotheses[*].statement"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "question.hypotheses[*].rival"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "outcomes"
+check = "type"
+kind = "array"
+[[rule.target]]
+path = "outcomes[*].id"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "outcomes[*].unit"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "outcomes[*].direction"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "outcomes[*].registered"
+check = "type"
+kind = "bool"
+[[rule.target]]
+path = "scope"
+check = "type"
+kind = "table"
+[[rule.target]]
+path = "scope.min_isolation"
+check = "type"
+kind = "int"
+[[rule.target]]
+path = "scope.stop_rule"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "scope.budget"
+check = "type"
+kind = "table"
+[[rule.target]]
+path = "scope.budget.cpu_hours"
+check = "type"
+kind = "float"
+[[rule.target]]
+path = "scope.budget.wall_hours"
+check = "type"
+kind = "float"
+[[rule.target]]
+path = "scope.budget.money_usd"
+check = "type"
+kind = "float"
+[[rule.target]]
+path = "scope.end_of_run"
+check = "type"
+kind = "table"
+[[rule.target]]
+path = "scope.end_of_run.route"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "scope.end_of_run.follow_on"
+check = "type"
+kind = "array"
+[[rule.target]]
+path = "scope.end_of_run.follow_on[*].when"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "scope.end_of_run.follow_on[*].spec"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "design"
+check = "type"
+kind = "table"
+[[rule.target]]
+path = "design.unit"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "design.cluster"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "design.stratum"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "design.reference"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "design.repeats"
+check = "type"
+kind = "int"
+[[rule.target]]
+path = "design.row_seconds"
+check = "type"
+kind = "float"
+[[rule.target]]
+path = "design.test"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "design.alpha"
+check = "type"
+kind = "float"
+[[rule.target]]
+path = "design.power"
+check = "type"
+kind = "float"
+[[rule.target]]
+path = "design.sesoi"
+check = "type"
+kind = "float"
+[[rule.target]]
+path = "design.icc"
+check = "type"
+kind = "float"
+[[rule.target]]
+path = "design.units_per_cluster"
+check = "type"
+kind = "int"
+[[rule.target]]
+path = "design.variance"
+check = "type"
+kind = "table"
+[[rule.target]]
+path = "design.variance.value"
+check = "type"
+kind = "float"
+[[rule.target]]
+path = "design.variance.source"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "design.conditions"
+check = "type"
+kind = "array"
+[[rule.target]]
+path = "design.conditions[*].id"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "design.selection"
+check = "type"
+kind = "table"
+[[rule.target]]
+path = "design.selection.clusters"
+check = "type"
+kind = "array"
+[[rule.target]]
+path = "design.confirmation"
+check = "type"
+kind = "table"
+[[rule.target]]
+path = "design.confirmation.clusters"
+check = "type"
+kind = "array"
+[[rule.target]]
+path = "inputs"
+check = "type"
+kind = "array"
+[[rule.target]]
+path = "inputs[*].path"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "inputs[*].sha256"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "inputs[*].role"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "inputs[*].licence"
+check = "type"
+kind = "table"
+[[rule.target]]
+path = "inputs[*].licence.spdx"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "inputs[*].licence.type"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "inputs[*].licence.source"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "inputs[*].licence.creators"
+check = "type"
+kind = "array"
+[[rule.target]]
+path = "pins"
+check = "type"
+kind = "table"
+[[rule.target]]
+path = "pins.environment"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "pins.payload"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "pins.rule_base"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "mutations"
+check = "type"
+kind = "table"
+[[rule.target]]
+path = "mutations.depth_cap"
+check = "type"
+kind = "int"
+[[rule.target]]
+path = "mutations.operators"
+check = "type"
+kind = "array"
+[[rule.target]]
+path = "mutations.operators[*].name"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "mutations.operators[*].type"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "mutations.operators[*].range"
+check = "type"
+kind = "array"
+[[rule.target]]
+path = "mutations.operators[*].acts_on"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "mutations.triggers"
+check = "type"
+kind = "array"
+[[rule.target]]
+path = "mutations.triggers[*].id"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "mutations.triggers[*].metric"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "mutations.triggers[*].threshold_e"
+check = "type"
+kind = "float"
+[[rule.target]]
+path = "mutations.seeds"
+check = "type"
+kind = "table"
+[[rule.target]]
+path = "mutations.seeds.spawn"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "mutations.seeds.report"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "access"
+check = "type"
+kind = "table"
+[[rule.target]]
+path = "access.blind"
+check = "type"
+kind = "bool"
+[[rule.target]]
+path = "report"
+check = "type"
+kind = "table"
+[[rule.target]]
+path = "report.licence_code"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "report.licence_data"
+check = "type"
+kind = "string"
+[[rule.target]]
+path = "report.publish"
+check = "type"
+kind = "string"
+
+[[rule]]
+code = "E-ENM-001"
+severity = "error"
+problem = "The value is not one of the allowed values."
+instruction = "Use one of the values listed in the template comment for this field."
+why = "A value outside the set has no defined meaning in the checker or the run."
+sources = ["https://toml.io/en/v1.0.0"]
+[[rule.target]]
+path = "study.template"
+check = "enum"
+values = ["numeric-ablation", "planted-spawn"]
+[[rule.target]]
+path = "study.mode"
+check = "enum"
+values = ["exploratory", "confirmatory"]
+[[rule.target]]
+path = "study.label"
+check = "enum"
+values = ["signal", "confirmed", "replicated", "generalized"]
+[[rule.target]]
+path = "scope.stop_rule"
+check = "enum"
+values = ["budget-only", "e-process"]
+[[rule.target]]
+path = "scope.end_of_run.route"
+check = "enum"
+values = ["report", "follow-on", "share"]
+[[rule.target]]
+path = "design.test"
+check = "enum"
+values = ["paired-mean", "descriptive"]
+[[rule.target]]
+path = "inputs[*].role"
+check = "enum"
+values = ["calibration", "selection", "confirmation", "model"]
+[[rule.target]]
+path = "inputs[*].licence.type"
+check = "enum"
+values = ["common", "custom", "request-form", "unspecified"]
+[[rule.target]]
+path = "mutations.operators[*].type"
+check = "enum"
+values = ["int", "float", "enum"]
+[[rule.target]]
+path = "report.publish"
+check = "enum"
+values = ["none", "zenodo-sandbox"]
+
+[[rule]]
+code = "E-RNG-001"
+severity = "error"
+problem = "A number is outside its allowed range."
+instruction = "Bring the value into range: min_isolation 0 to 3, alpha above 0 up to 0.5, power 0.5 to 0.999, icc 0 up to but below 1, repeats at least 1."
+why = "Values outside these ranges are meaningless or make the sample-size maths fail. The default alpha is 0.005, because 0.05 gives too many false findings."
+sources = ["https://doi.org/10.1038/s41562-017-0189-z", "https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661"]
+[[rule.target]]
+path = "scope.min_isolation"
+check = "range"
+interval = "[0, 3]"
+[[rule.target]]
+path = "design.alpha"
+check = "range"
+interval = "(0, 0.5]"
+[[rule.target]]
+path = "design.power"
+check = "range"
+interval = "[0.5, 0.999]"
+[[rule.target]]
+path = "design.icc"
+check = "range"
+interval = "[0, 1)"
+[[rule.target]]
+path = "design.repeats"
+check = "range"
+interval = "[1, inf)"
+
+[[rule]]
+code = "E-FMT-001"
+severity = "error"
+problem = "An id is not ASCII kebab-case."
+instruction = "Use ASCII lowercase letters and digits, joined by single hyphens, for example my-study."
+why = "Ids become file names and seed inputs. Accents and look-alike letters would make two ids that look the same differ."
+sources = ["https://toml.io/en/v1.0.0"]
+[[rule.target]]
+path = "study.id"
+check = "format"
+pattern = "^[a-z0-9]+(-[a-z0-9]+)*$"
+[[rule.target]]
+path = "design.conditions[*].id"
+check = "format"
+pattern = "^[a-z0-9]+(-[a-z0-9]+)*$"
+[[rule.target]]
+path = "outcomes[*].id"
+check = "format"
+pattern = "^[a-z0-9]+(-[a-z0-9]+)*$"
+
+[[rule]]
+code = "E-FMT-002"
+severity = "error"
+problem = "The variance source is not in a known form."
+instruction = "Use stated, or record:<sha256> with the 64 lowercase hex characters of a record."
+why = "A variance must say where it came from. A record reference must name one exact record."
+sources = ["https://toml.io/en/v1.0.0"]
+[[rule.target]]
+path = "design.variance.source"
+check = "format"
+pattern = "^(stated|record:[0-9a-f]{64})$"
+
+[[rule]]
+code = "E-FMT-003"
+severity = "error"
+problem = "An input hash is not a SHA-256 digest."
+instruction = "Use 64 lowercase hex characters, or leave it empty until the input is pinned."
+why = "The run compares this hash with the file it reads. Any other form can never match."
+sources = ["https://toml.io/en/v1.0.0"]
+[[rule.target]]
+path = "inputs[*].sha256"
+check = "format"
+pattern = "^([0-9a-f]{64})?$"
+
+[[rule]]
+code = "E-NUM-001"
+severity = "error"
+problem = "A number is not finite (nan or inf)."
+instruction = "Replace nan or inf with a finite value."
+why = "TOML allows nan and inf, but JSON does not. The spec hash and the sample-size maths need finite numbers."
+sources = ["https://www.rfc-editor.org/rfc/rfc8259#section-6", "https://toml.io/en/v1.0.0#float"]
+[[rule.target]]
+path = "**"
+check = "finite"
+
+[[rule]]
+code = "E-KEY-001"
+severity = "error"
+problem = "The spec has a field the schema does not define."
+instruction = "Remove the field, or fix its name. The template lists every field."
+why = "A misspelt field is silently ignored by most readers. Rejecting it keeps the plan and the run in step."
+sources = ["https://toml.io/en/v1.0.0"]
+[[rule.target]]
+path = "**"
+check = "known-key"
+
+[[rule]]
+code = "E-OUT-001"
+severity = "error"
+problem = "An outcome has no unit."
+instruction = "Give every outcome a unit, for example ratio or seconds."
+why = "An effect size has no meaning without its unit. The smallest effect of interest is stated in this unit."
+sources = ["https://doi.org/10.1136/bmj.e7586"]
+[[rule.target]]
+path = "outcomes[*].unit"
+check = "non-empty"
+
+[[rule]]
+code = "E-OUT-002"
+severity = "error"
+problem = "An outcome does not say which direction is better."
+instruction = "Set direction to lower or higher, whichever is better for this outcome."
+why = "The test needs to know which way counts as an improvement. Choosing after the data are in would bias the result."
+sources = ["https://doi.org/10.1136/bmj.e7586"]
+[[rule.target]]
+path = "outcomes[*].direction"
+check = "non-empty"
+[[rule.target]]
+path = "outcomes[*].direction"
+check = "enum"
+values = ["lower", "higher"]
+
+[[rule]]
+code = "W-LIC-001"
+severity = "warning"
+problem = "An input has no licence id."
+instruction = "Add the licence the authors gave the data, as an SPDX id. Publishing is blocked until you do."
+why = "Re-sharing data without its licence can break the terms the authors set. The run itself does not need it."
+sources = ["https://spdx.org/licenses/"]
+[[rule.target]]
+path = "inputs[*].licence.spdx"
+check = "non-empty"
