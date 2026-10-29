@@ -330,6 +330,14 @@ fn registered<'a>(
     Ok((home, key, all))
 }
 
+/// Refuse a study that has a stop record.
+fn refuse_if_stopped(id: &str, all: &[crate::records::Record]) -> Result<(), CliError> {
+    match stopped_why(all) {
+        Some(why) => Err(CliError::refuse(format!("study {id} is stopped: {why}"))),
+        None => Ok(()),
+    }
+}
+
 /// The reason in the study's stop record, when it has one.
 fn stopped_why(all: &[crate::records::Record]) -> Option<String> {
     all.iter()

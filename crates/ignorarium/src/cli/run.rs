@@ -1,5 +1,5 @@
 //! `run`: prepare a registered study and run its rows.
-use super::{CliError, Ctx, Done, Run, out, registered, stopped_why};
+use super::{CliError, Ctx, Done, Run, out, refuse_if_stopped, registered};
 use crate::control::{ControlFile, Signal, run_is_live};
 use crate::machine;
 use crate::runner::{self, RunError, RunStatus};
@@ -12,15 +12,16 @@ pub fn run(ctx: &Ctx, id: &str, max_level: Option<u8>) -> Run {
 /// clears the pending pause that `run` refuses on.
 pub fn go(ctx: &Ctx, id: &str, max_level: Option<u8>, resume: bool) -> Run {
     let (home, _, all) = registered(ctx, id)?;
-    if let Some(why) = stopped_why(&all) {
-        return Err(CliError::refuse(format!("study {id} is stopped: {why}")));
-    }
+    refuse_if_stopped(id, &all)?;
     let control = ControlFile::of(home, id);
-    // A live run reads the request at its next row boundary; this call starts nothing.
-    if resume && run_is_live(home, id).map_err(|e| CliError::usage(e.to_string()))? {
+    let request_resume = || {
         control
             .request_resume()
-            .map_err(|e| CliError::usage(format!("cannot write the resume request: {e}")))?;
+            .map_err(|e| CliError::usage(format!("cannot write the resume request: {e}")))
+    };
+    // A live run reads the request at its next row boundary; this call starts nothing.
+    if resume && run_is_live(home, id).map_err(|e| CliError::usage(e.to_string()))? {
+        request_resume()?;
         out("the live run continues
 ")?;
         return Ok(Done::exit(0));
@@ -43,9 +44,7 @@ pub fn go(ctx: &Ctx, id: &str, max_level: Option<u8>, resume: bool) -> Run {
         e => run_error(e),
     })?;
     if resume {
-        control
-            .request_resume()
-            .map_err(|e| CliError::usage(format!("cannot write the resume request: {e}")))?;
+        request_resume()?;
     }
     let status = runner::run(&plan).map_err(run_error)?;
     match status {

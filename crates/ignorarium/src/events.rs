@@ -1,5 +1,4 @@
 //! Event log: one canonical JSON line per event.
-use crate::canon::canonical_of;
 use crate::files::append_line;
 use serde::Serialize;
 use std::io;
@@ -18,7 +17,7 @@ pub struct Event {
 
 /// Append one event line under an exclusive lock.
 pub fn emit(path: &Path, e: Event) -> Result<(), io::Error> {
-    append_line(path, canonical_of(&e)?)
+    append_line(path, &e)
 }
 
 /// A study's trace id: the first 16 bytes of its spec hash, in hex.

@@ -1,7 +1,8 @@
 //! Write-once files: atomic publish, no overwrite, no symlink following.
+use crate::canon::canonical_line;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Written {
@@ -48,30 +49,14 @@ pub fn write_once(path: &Path, bytes: &[u8], mode: u32) -> Result<Written, Write
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }
-    let name = path
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?
-        .to_string_lossy();
-    let mut rnd = [0u8; 8];
-    getrandom::fill(&mut rnd).map_err(|e| io::Error::other(e.to_string()))?;
-    let tmp = path.with_file_name(format!(
-        ".{name}.{}.{}.tmp",
-        std::process::id(),
-        hex::encode(rnd)
-    ));
+    let tmp = temp_beside(path)?;
     let out = publish(&tmp, path, bytes, mode);
     let _ = fs::remove_file(&tmp);
     out
 }
 
 fn publish(tmp: &Path, path: &Path, bytes: &[u8], mode: u32) -> Result<Written, WriteOnceError> {
-    let mut opts = OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, mode);
-    #[cfg(not(unix))]
-    let _ = mode;
-    let mut f = opts.open(tmp)?;
+    let mut f = create_new(tmp, mode)?;
     f.write_all(bytes)?;
     f.sync_all()?;
     drop(f);
@@ -186,10 +171,10 @@ pub fn locked_append<E: From<io::Error>>(
     Ok(())
 }
 
-/// Append `line` and a LF under an exclusive lock. A log that ends in a partial
-/// line gets a LF first, so the fragment stays its own line.
-pub fn append_line(path: &Path, mut line: Vec<u8>) -> io::Result<()> {
-    line.push(b'\n');
+/// Append `v` as one canonical JSON line under an exclusive lock. A log that ends in a
+/// partial line gets a LF first, so the fragment stays its own line.
+pub fn append_line<T: serde::Serialize>(path: &Path, v: &T) -> io::Result<()> {
+    let mut line = canonical_line(v)?;
     locked_append(path, |tail| {
         if matches!(tail, Tail::Partial(_)) {
             line.insert(0, b'\n');
@@ -213,17 +198,7 @@ pub fn replace_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
-    let name = path
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?
-        .to_string_lossy();
-    let mut rnd = [0u8; 8];
-    getrandom::fill(&mut rnd).map_err(|e| io::Error::other(e.to_string()))?;
-    let tmp = path.with_file_name(format!(
-        ".{name}.{}.{}.tmp",
-        std::process::id(),
-        hex::encode(rnd)
-    ));
+    let tmp = temp_beside(path)?;
     let out = stage(&tmp, bytes, mode).and_then(|()| fs::rename(&tmp, path));
     if out.is_err() {
         let _ = fs::remove_file(&tmp);
@@ -237,13 +212,33 @@ pub fn replace_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
 }
 
 fn stage(tmp: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+    let mut f = create_new(tmp, mode)?;
+    f.write_all(bytes)?;
+    f.sync_all()
+}
+
+/// A unique sibling of `path` for staging a write: `.<name>.<pid>.<random>.tmp`.
+pub fn temp_beside(path: &Path) -> io::Result<PathBuf> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?
+        .to_string_lossy();
+    let mut rnd = [0u8; 8];
+    getrandom::fill(&mut rnd).map_err(|e| io::Error::other(e.to_string()))?;
+    Ok(path.with_file_name(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        hex::encode(rnd)
+    )))
+}
+
+/// Create `path` for writing; fails if it exists. `mode` applies on unix only.
+pub fn create_new(path: &Path, mode: u32) -> io::Result<fs::File> {
     let mut opts = OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, mode);
     #[cfg(not(unix))]
     let _ = mode;
-    let mut f = opts.open(tmp)?;
-    f.write_all(bytes)?;
-    f.sync_all()
+    opts.open(path)
 }

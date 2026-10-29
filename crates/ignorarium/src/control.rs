@@ -2,7 +2,7 @@
 //! flight and the deviation log. The files live in `<study>/run/`, except
 //! `deviations.jsonl` in the study folder. A stop is final: no later request replaces it,
 //! and a study with a stop record runs no further row.
-use crate::canon::canonical_of;
+use crate::canon::canonical_line;
 use crate::events::{self, Event};
 use crate::files::{append_line, open_log, replace_atomic};
 use crate::home::Home;
@@ -120,9 +120,7 @@ impl ControlFile {
         if new != old {
             file.set_len(0)?;
             if let Some(s) = &new {
-                let mut line = canonical_of(s)?;
-                line.push(b'\n');
-                file.write_all(&line)?;
+                file.write_all(&canonical_line(s)?)?;
             }
             file.sync_all()?;
         }
@@ -368,13 +366,8 @@ impl State {
     }
 
     pub fn write(&self, home: &Home, study_id: &str) -> io::Result<()> {
-        let mut bytes = canonical_of(self)?;
-        bytes.push(b'\n');
-        replace_atomic(
-            &run_path(home, study_id, "state.json", true)?,
-            &bytes,
-            0o600,
-        )
+        let path = run_path(home, study_id, "state.json", true)?;
+        replace_atomic(&path, &canonical_line(self)?, 0o600)
     }
 }
 
@@ -400,9 +393,8 @@ pub fn row_started(home: &Home, study_id: &str, row: u64, span: &str, pid: u32) 
         pgid,
         start,
     };
-    let mut bytes = canonical_of(&file)?;
-    bytes.push(b'\n');
-    replace_atomic(&run_path(home, study_id, "row.json", true)?, &bytes, 0o600)
+    let path = run_path(home, study_id, "row.json", true)?;
+    replace_atomic(&path, &canonical_line(&file)?, 0o600)
 }
 
 /// The row's process group is gone. A file left behind is harmless: its leader is reaped,
@@ -505,10 +497,7 @@ pub struct DeviationRow {
 
 /// Append one row to the study's `deviations.jsonl`.
 pub fn deviation(home: &Home, study_id: &str, row: &DeviationRow) -> io::Result<()> {
-    append_line(
-        &home.study_dir(study_id).join("deviations.jsonl"),
-        canonical_of(row)?,
-    )
+    append_line(&home.study_dir(study_id).join("deviations.jsonl"), row)
 }
 
 #[derive(Debug)]

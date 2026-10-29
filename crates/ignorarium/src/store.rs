@@ -3,7 +3,7 @@ use crate::canon::sha256_hex;
 use crate::files::{self, WriteOnceError};
 use crate::home::{HomeError, make_private_dir};
 use sha2::{Digest, Sha256};
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -78,37 +78,20 @@ impl Store {
 
     /// Stream `r` to a temp file while hashing, then publish under the digest.
     pub fn put_reader(&self, r: &mut impl Read) -> Result<String, StoreError> {
-        let mut rnd = [0u8; 8];
-        getrandom::fill(&mut rnd).map_err(|e| io::Error::other(e.to_string()))?;
-        let tmp = self
-            .root
-            .join(format!(".{}.{}.tmp", std::process::id(), hex::encode(rnd)));
+        let tmp = files::temp_beside(&self.root.join("blob"))?;
         let out = self.stream_and_publish(&tmp, r);
         let _ = fs::remove_file(&tmp);
         out
     }
 
     fn stream_and_publish(&self, tmp: &Path, r: &mut impl Read) -> Result<String, StoreError> {
-        let mut opts = OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut opts, MODE);
-        let mut f = opts.open(tmp)?;
-        let mut hasher = Sha256::new();
-        let mut buf = vec![0u8; 64 * 1024];
-        loop {
-            let n = match r.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => n,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e.into()),
-            };
-            hasher.update(&buf[..n]);
-            f.write_all(&buf[..n])?;
-        }
-        f.sync_all()?;
-        drop(f);
-        let digest = hex::encode(hasher.finalize());
+        let mut tee = Tee {
+            file: files::create_new(tmp, MODE)?,
+            hasher: Sha256::new(),
+        };
+        io::copy(r, &mut tee)?;
+        tee.file.sync_all()?;
+        let digest = hex::encode(tee.hasher.finalize());
         match fs::hard_link(tmp, self.root.join(&digest)) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
@@ -141,5 +124,23 @@ impl Store {
     /// True when a blob with this digest exists. A bad digest is never present.
     pub fn has(&self, digest: &str) -> bool {
         self.path(digest).is_ok_and(|p| p.is_file())
+    }
+}
+
+/// A writer that hashes what it writes.
+struct Tee {
+    file: fs::File,
+    hasher: Sha256,
+}
+
+impl Write for Tee {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.file.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
     }
 }
