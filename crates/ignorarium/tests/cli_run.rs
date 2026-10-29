@@ -76,6 +76,14 @@ fn run_a_registered_study_to_completion() {
         .collect();
     assert_eq!(traces.len(), 1);
     assert_eq!(common::named(&events, "row.start").len() as u64, s["total"]);
+    // The verb's own event names the spec it ran.
+    let hash = ignorarium::spec::load(&lab.home.study_dir("s1").join("spec.toml"))
+        .unwrap()
+        .hash;
+    let calls = common::events_of(&lab.home.root);
+    let run = common::named(&calls, "run");
+    assert_eq!(run.len(), 1);
+    assert_eq!(run[0]["attrs"]["spec_hash"], hash.as_str());
 }
 
 #[test]
@@ -305,11 +313,18 @@ fn plant(lab: &Lab, id: &str, rows: &[(u64, &str, &str, f64, f64, u64)]) {
         };
         ignorarium::records::append(&log, &key, draft).unwrap();
     }
+    plant_spend(lab, id, 1800.0, 0.0);
+}
+
+/// A signed spend record, as a stopped row leaves.
+fn plant_spend(lab: &Lab, id: &str, cpu: f64, wall: f64) {
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let log = lab.home.study_dir(id).join("records.jsonl");
     let spend = ignorarium::records::RecordDraft {
         study: id.into(),
         row: Some(99),
         kind: "spend".into(),
-        body: serde_json::json!({ "cpu_seconds": 1800.0, "wall_seconds": 0.0, "reason": "x" }),
+        body: serde_json::json!({ "cpu_seconds": cpu, "wall_seconds": wall, "reason": "x" }),
     };
     ignorarium::records::append(&log, &key, spend).unwrap();
 }
@@ -351,6 +366,8 @@ fn status_values_are_exact_for_planted_records() {
     );
     assert_eq!(s["conditions"][0]["done"], 1);
     assert_eq!(s["conditions"][1]["done"], 1);
+    assert_eq!(s["conditions"][0]["total"], 3);
+    assert_eq!(s["conditions"][1]["total"], 3);
     let a = bin(&lab).args(["status", "ex"]).assert().success();
     let t = text(&a);
     for want in [
@@ -366,6 +383,47 @@ fn status_values_are_exact_for_planted_records() {
     ] {
         assert!(t.contains(&want), "{want} in {t}");
     }
+}
+
+#[test]
+fn status_rates_and_shares_divide_by_hours_and_caps() {
+    let lab = lab();
+    let caps = |t: String| {
+        t.replace("cpu_hours = 1.0", "cpu_hours = 2.0")
+            .replace("wall_hours = 1.0", "wall_hours = 4.0")
+    };
+    register_study(&lab, "half", caps, &[], common::PAYLOAD);
+    // Two rows in half an hour of wall; with the spend record, one cpu hour.
+    plant(
+        &lab,
+        "half",
+        &[
+            (0, "exact", "ok", 900.0, 900.0, 1),
+            (1, "arm-a", "ok", 900.0, 900.0, 1),
+        ],
+    );
+    let s = status(&lab, "half");
+    assert_eq!(s["rows_per_hour"], 4.0);
+    assert_eq!(s["used"]["cpu_hours"], 0.5);
+    assert_eq!(s["used"]["wall_hours"], 0.125);
+}
+
+#[test]
+fn status_gives_no_rate_without_both_rows_and_time() {
+    let lab = lab();
+    // Spend but no row: no rate.
+    plain(&lab, "spent");
+    plant_spend(&lab, "spent", 0.0, 600.0);
+    let s = status(&lab, "spent");
+    assert_eq!(s["done"], 0);
+    assert!(s["rows_per_hour"].is_null(), "{s}");
+    // A row but no wall time: no rate, so no time left either.
+    plain(&lab, "instant");
+    plant(&lab, "instant", &[(0, "exact", "ok", 0.0, 0.0, 1)]);
+    let s = status(&lab, "instant");
+    assert_eq!(s["done"], 1);
+    assert!(s["rows_per_hour"].is_null(), "{s}");
+    assert!(s["eta_seconds"].is_null(), "{s}");
 }
 
 #[test]
