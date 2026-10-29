@@ -587,6 +587,18 @@ fn home_root_is_created_0700() {
     assert_eq!(m & 0o777, 0o700);
 }
 
+#[cfg(unix)]
+#[test]
+fn an_existing_home_root_keeps_its_mode_and_its_state_folders_are_tightened() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tempfile::tempdir().unwrap();
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    Home::open_at(d.path()).unwrap();
+    assert_eq!(mode(d.path()), 0o755);
+    assert_eq!(mode(&d.path().join("keys")), 0o700);
+}
+
 #[test]
 fn time_helper_does_not_panic_at_the_extremes() {
     assert_eq!(

@@ -56,16 +56,17 @@ impl Home {
     }
 
     /// Create the state folders (mode 0700 on unix; existing ones are
-    /// tightened to 0700). A symbolic link as root or subfolder is an error.
+    /// tightened to 0700). The root gets 0700 only when this call creates it: it may be a
+    /// shared folder. A symbolic link as root or subfolder is an error.
     pub fn open_at(root: &Path) -> Result<Home, HomeError> {
         if let Ok(release) = fs::read_to_string("/proc/sys/kernel/osrelease")
             && refuse_mount(&release, root)
         {
             return Err(HomeError::WindowsMount(root.to_path_buf()));
         }
-        make_private_dir(root, true)?;
+        make_private_dir(root, true, false)?;
         for name in SUBDIRS {
-            make_private_dir(&root.join(name), false)?;
+            make_private_dir(&root.join(name), false, true)?;
         }
         Ok(Home {
             root: root.to_path_buf(),
@@ -96,10 +97,11 @@ pub fn is_windows_mount(path: &Path) -> bool {
 }
 
 /// Create `dir` (and parents when `parents`) with mode 0700; tighten an
-/// existing one. Refuses a symbolic link.
-pub(crate) fn make_private_dir(dir: &Path, parents: bool) -> Result<(), HomeError> {
+/// existing one when `tighten`. Refuses a symbolic link.
+pub(crate) fn make_private_dir(dir: &Path, parents: bool, tighten: bool) -> Result<(), HomeError> {
     match fs::symlink_metadata(dir) {
         Ok(m) if m.file_type().is_symlink() => return Err(HomeError::Link(dir.to_path_buf())),
+        Ok(_) if !tighten => return Ok(()),
         Ok(_) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             let mut b = fs::DirBuilder::new();

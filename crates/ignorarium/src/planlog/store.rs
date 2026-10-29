@@ -131,7 +131,7 @@ fn line(mut bytes: Vec<u8>) -> Vec<u8> {
 impl PlanLog {
     /// Open the log in `dir`, creating `dir` with mode 0700 if absent.
     pub fn open(dir: &Path) -> Result<PlanLog, LogError> {
-        make_private_dir(dir, true)?;
+        make_private_dir(dir, true, true)?;
         Ok(PlanLog {
             dir: dir.to_path_buf(),
         })
