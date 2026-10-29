@@ -787,8 +787,8 @@ fn the_recorded_mean_counts_cpu_as_well_as_wall() {
     let lab = lab();
     plain(&lab, "b6c");
     let mut plan = plan_of(&lab, "b6c");
-    // Rows take 500 cpu seconds. After two rows 3200 s are spent and the mean says the
-    // third reaches 3700 s, past the 3600 s cap.
+    // Rows take 500 cpu seconds. After two rows the meter reads 3200 s, and the mean says
+    // the third reaches 3700 s, past the 3600 s cap.
     plan.meter = Box::new(FakeMeter::new(vec![
         cost(0.0, 0.0),
         cost(500.0, 0.0),
@@ -846,7 +846,7 @@ fn the_recorded_mean_prices_wall_time_at_the_machine_rate() {
     priced(&lab, "usd-mean");
     let mut plan = plan_of(&lab, "usd-mean");
     // Rows take 100 s of wall: 1.00 USD each at 36 USD an hour, over the 0.60 estimate.
-    // After two rows 8.00 fits the 10 USD cap; after three, 9.20 + 1.00 does not.
+    // Before row 2, 7.00 + 1.00 fits the 10 USD cap; before row 3, 9.20 + 1.00 does not.
     plan.meter = Box::new(FakeMeter::new(vec![
         spent(0.0, 0.0, 0.0),
         spent(0.0, 0.0, 1.0),
