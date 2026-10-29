@@ -19,9 +19,10 @@ use rustix::process::{WaitOptions, wait};
 use rustix::system::{RebootCommand, reboot};
 use rustix::thread::set_no_new_privs;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufWriter};
+use std::io::{self, BufWriter, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::chroot;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::thread::sleep;
 use std::time::Duration;
@@ -37,13 +38,16 @@ const CONNECT_PAUSE: Duration = Duration::from_millis(50);
 /// PID 1 of the guest: sets up, runs one row, reports, and powers off. It never exits:
 /// PID 1 exiting is a kernel panic, and the VMM does not stop on a guest panic.
 pub fn main() -> ! {
+    // A failed console write must not panic PID 1, so nothing here uses `eprintln!`.
     if std::process::id() != 1 {
-        eprintln!("ignorarium-guest runs only as PID 1 of a guest");
+        let _ = writeln!(
+            io::stderr(),
+            "ignorarium-guest runs only as PID 1 of a guest"
+        );
         std::process::exit(2);
     }
-    // A panic has printed its message already.
-    if let Ok(Err(e)) = std::panic::catch_unwind(run) {
-        eprintln!("ignorarium-guest: {e}");
+    if let Err(e) = caught(run) {
+        let _ = writeln!(io::stderr(), "ignorarium-guest: {e}");
     }
     rustix::fs::sync();
     loop {
@@ -75,7 +79,7 @@ fn run() -> io::Result<()> {
     let mut chan = File::from(connect()?);
     let agent = env!("CARGO_PKG_VERSION").to_string();
     write_frame(&mut chan, &ToHost::Hello { agent })?;
-    match row(&mut chan, out_disk) {
+    match caught(|| row(&mut chan, out_disk)) {
         Ok(report) => write_frame(&mut chan, &ToHost::Report(report)),
         Err(e) => {
             let reason = e.to_string();
@@ -83,6 +87,16 @@ fn run() -> io::Result<()> {
             Err(e)
         }
     }
+}
+
+/// Runs `f`, turning a panic into an error, so PID 1 can still report and power off.
+fn caught<T>(f: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    panic::catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|p| {
+        let text = p.downcast_ref::<&str>().copied();
+        let text = text.or_else(|| p.downcast_ref::<String>().map(String::as_str));
+        let text = text.unwrap_or("no message");
+        Err(io::Error::other(format!("agent panicked: {text}")))
+    })
 }
 
 /// The host listens before it starts the VMM, so a failure means the device is not up yet.
@@ -160,4 +174,19 @@ pub fn gate(
         cpu_seconds,
         output_hash,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::caught;
+    use std::io;
+
+    #[test]
+    fn a_panic_becomes_an_error_that_quotes_it() {
+        let e = caught(|| -> io::Result<()> { panic!("boom {}", 7) }).unwrap_err();
+        assert_eq!(e.to_string(), "agent panicked: boom 7");
+        let e = caught(|| -> io::Result<()> { panic!("static") }).unwrap_err();
+        assert_eq!(e.to_string(), "agent panicked: static");
+        assert_eq!(caught(|| Ok(3)).unwrap(), 3);
+    }
 }
