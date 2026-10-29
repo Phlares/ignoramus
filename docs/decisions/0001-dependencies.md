@@ -20,8 +20,4 @@ Development:
 - `predicates`: states what the binary output must contain.
 - `tempfile`: makes scratch folders in tests.
 
-Tools:
-
-- `cargo-mutants`: changes the code and checks that tests fail.
-
 Minimum Rust version: 1.89, for `std::fs::File::lock`.
