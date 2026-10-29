@@ -260,19 +260,18 @@ impl<T: Transport> Zenodo<T> {
             "verify",
             &[200],
             Method::Get,
-            d.bucket.clone(),
+            format!("{API}/deposit/depositions/{}/files", d.id),
             &t.0,
             Body::None,
         )?;
-        let contents = v
-            .get("contents")
-            .and_then(Value::as_array)
-            .ok_or_else(|| protocol("verify", "no contents list"))?;
+        let entries = v
+            .as_array()
+            .ok_or_else(|| protocol("verify", "the file list is not a list"))?;
         let mut listed: Vec<(&str, &str)> = Vec::new();
-        for c in contents {
+        for e in entries {
             listed.push((
-                text("verify", c, "/key")?,
-                text("verify", c, "/links/self")?,
+                text("verify", e, "/filename")?,
+                text("verify", e, "/links/download")?,
             ));
         }
         let mut problems: Vec<String> = Vec::new();

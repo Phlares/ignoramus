@@ -10,10 +10,11 @@ use tempfile::TempDir;
 const CREATE: &str = include_str!("fixtures/zenodo/create.json");
 const DESCRIBE: &str = include_str!("fixtures/zenodo/describe.json");
 const UPLOAD: &str = include_str!("fixtures/zenodo/upload.json");
-const BUCKET_LIST: &str = include_str!("fixtures/zenodo/bucket.json");
+const FILES: &str = include_str!("fixtures/zenodo/files.json");
 const PUBLISH: &str = include_str!("fixtures/zenodo/publish.json");
 
 const BUCKET: &str = "https://sandbox.zenodo.org/api/files/568377dd-daf8-4a0d-9d9d-c1c1d8b3c2c1";
+const FILES_URL: &str = "https://sandbox.zenodo.org/api/deposit/depositions/123456/files";
 const DOI: &str = "10.5072/zenodo.123456";
 const HELLO_SHA: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
 const WORLD_SHA: &str = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
@@ -434,10 +435,28 @@ fn expected() -> Vec<(String, String)> {
     ]
 }
 
+/// The `what` of a verify mismatch.
+fn verify_mismatch(err: Error) -> String {
+    match err {
+        Error::Mismatch {
+            step: "verify",
+            what,
+        } => what,
+        e => panic!("{e:?}"),
+    }
+}
+
+/// The fixture file list with `edit` applied.
+fn files_with(edit: impl Fn(&mut Vec<Value>)) -> String {
+    let mut list: Vec<Value> = serde_json::from_str(FILES).unwrap();
+    edit(&mut list);
+    serde_json::to_string(&list).unwrap()
+}
+
 #[test]
 fn verify_hashes_each_download() {
     let fake = Fake::new(vec![
-        reply(200, BUCKET_LIST),
+        reply(200, FILES),
         download(WORLD_SHA, 11),
         download(HELLO_SHA, 5),
     ]);
@@ -446,7 +465,7 @@ fn verify_hashes_each_download() {
         .unwrap();
     assert_eq!(step.step, "verify");
     assert_eq!(step.method, "GET");
-    assert_eq!(step.url, BUCKET);
+    assert_eq!(step.url, FILES_URL);
     assert_eq!(step.status, 200);
     assert_eq!(
         step.detail,
@@ -459,7 +478,7 @@ fn verify_hashes_each_download() {
     assert_eq!(
         fake.calls(),
         vec![
-            call(Method::Get, BUCKET, st, Body::None, true),
+            call(Method::Get, FILES_URL, st, Body::None, true),
             call_with(
                 Method::Get,
                 &format!("{BUCKET}/b.zip"),
@@ -482,46 +501,78 @@ fn verify_hashes_each_download() {
 
 #[test]
 fn verify_finds_a_missing_file() {
-    let fake = Fake::new(vec![reply(200, BUCKET_LIST)]);
+    let fake = Fake::new(vec![reply(200, FILES)]);
     let mut want = expected();
     want.push(("c.txt".to_string(), HELLO_SHA.to_string()));
     let err = Zenodo::sandbox(&fake)
         .verify(&stage(), &draft(), &want)
         .unwrap_err();
-    assert!(
-        matches!(err, Error::Mismatch { step: "verify", .. }),
-        "{err:?}"
-    );
+    assert_eq!(verify_mismatch(err), "missing c.txt");
     assert_eq!(fake.calls().len(), 1);
 }
 
 #[test]
 fn verify_finds_an_extra_file() {
-    let fake = Fake::new(vec![reply(200, BUCKET_LIST)]);
+    let fake = Fake::new(vec![reply(200, FILES)]);
     let want = vec![("b.zip".to_string(), WORLD_SHA.to_string())];
     let err = Zenodo::sandbox(&fake)
         .verify(&stage(), &draft(), &want)
         .unwrap_err();
-    assert!(
-        matches!(err, Error::Mismatch { step: "verify", .. }),
-        "{err:?}"
-    );
+    assert_eq!(verify_mismatch(err), "extra a.txt");
     assert_eq!(fake.calls().len(), 1);
+}
+
+#[test]
+fn verify_finds_a_file_listed_twice() {
+    let list = files_with(|l| l.push(l[0].clone()));
+    let fake = Fake::new(vec![reply(200, list)]);
+    let err = Zenodo::sandbox(&fake)
+        .verify(&stage(), &draft(), &expected())
+        .unwrap_err();
+    assert_eq!(verify_mismatch(err), "listed twice a.txt");
+    assert_eq!(fake.calls().len(), 1);
+}
+
+#[test]
+fn verify_lists_every_difference_at_once() {
+    let fake = Fake::new(vec![reply(200, FILES)]);
+    let want = vec![
+        ("b.zip".to_string(), WORLD_SHA.to_string()),
+        ("c.txt".to_string(), HELLO_SHA.to_string()),
+    ];
+    let err = Zenodo::sandbox(&fake)
+        .verify(&stage(), &draft(), &want)
+        .unwrap_err();
+    assert_eq!(verify_mismatch(err), "missing c.txt, extra a.txt");
+}
+
+#[test]
+fn verify_wants_a_file_list() {
+    for body in [r#"{"contents": []}"#, r#"[{"filename": "a.txt"}]"#] {
+        let fake = Fake::new(vec![reply(200, body)]);
+        let err = Zenodo::sandbox(&fake)
+            .verify(&stage(), &draft(), &expected())
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Protocol { step: "verify", .. }),
+            "{body}: {err:?}"
+        );
+    }
 }
 
 #[test]
 fn verify_finds_a_wrong_hash() {
     let fake = Fake::new(vec![
-        reply(200, BUCKET_LIST),
+        reply(200, FILES),
         download(WORLD_SHA, 11),
         download(WORLD_SHA, 5),
     ]);
     let err = Zenodo::sandbox(&fake)
         .verify(&stage(), &draft(), &expected())
         .unwrap_err();
-    assert!(
-        matches!(err, Error::Mismatch { step: "verify", .. }),
-        "{err:?}"
+    assert_eq!(
+        verify_mismatch(err),
+        format!("a.txt downloads as SHA-256 {WORLD_SHA}, expected {HELLO_SHA}")
     );
 }
 
@@ -529,7 +580,7 @@ fn verify_finds_a_wrong_hash() {
 fn verify_rejects_a_bad_download_status() {
     let mut bad = download(HELLO_SHA, 0);
     bad.status = 404;
-    let fake = Fake::new(vec![reply(200, BUCKET_LIST), bad]);
+    let fake = Fake::new(vec![reply(200, FILES), bad]);
     let err = Zenodo::sandbox(&fake)
         .verify(&stage(), &draft(), &expected())
         .unwrap_err();
@@ -644,7 +695,7 @@ fn urls_outside_the_sandbox_are_refused() {
 
 #[test]
 fn a_file_link_outside_the_sandbox_is_refused() {
-    let list = BUCKET_LIST.replace(&format!("{BUCKET}/a.txt"), "https://evil.example/a.txt");
+    let list = FILES.replace(&format!("{BUCKET}/a.txt"), "https://evil.example/a.txt");
     let fake = Fake::new(vec![reply(200, list), download(WORLD_SHA, 11)]);
     let err = Zenodo::sandbox(&fake)
         .verify(&stage(), &draft(), &expected())
@@ -664,33 +715,50 @@ fn a_file_link_outside_the_sandbox_is_refused() {
 
 #[test]
 fn a_look_alike_host_is_refused() {
+    let look_alike = "https://sandbox.zenodo.org.evil.example/x";
+    let dir = TempDir::new().unwrap();
+    let path = file_of(&dir, "hello world");
     let fake = Fake::new(vec![]);
     let d = Draft {
-        bucket: "https://sandbox.zenodo.org.evil.example/x".to_string(),
+        bucket: look_alike.to_string(),
         ..draft()
     };
     let err = Zenodo::sandbox(&fake)
-        .verify(&stage(), &d, &expected())
+        .upload(&stage(), &d, "b.zip", &path)
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::Protocol { step: "upload", .. }),
+        "{err:?}"
+    );
+    assert!(fake.calls().is_empty());
+
+    let list = FILES.replace(&format!("{BUCKET}/b.zip"), look_alike);
+    let fake = Fake::new(vec![reply(200, list)]);
+    let err = Zenodo::sandbox(&fake)
+        .verify(&stage(), &draft(), &expected())
         .unwrap_err();
     assert!(
         matches!(err, Error::Protocol { step: "verify", .. }),
         "{err:?}"
     );
-    assert!(fake.calls().is_empty());
+    assert_eq!(fake.calls().len(), 1);
 }
 
 #[test]
 fn a_refused_url_is_shown_escaped() {
-    let fake = Fake::new(vec![]);
-    let d = Draft {
-        bucket: "https://evil.example/\x1b[2J".to_string(),
-        ..draft()
-    };
+    let list = FILES.replace(
+        &format!("{BUCKET}/b.zip"),
+        r"https://evil.example/\u001b[2J",
+    );
+    let fake = Fake::new(vec![reply(200, list)]);
     match Zenodo::sandbox(&fake)
-        .verify(&stage(), &d, &expected())
+        .verify(&stage(), &draft(), &expected())
         .unwrap_err()
     {
-        Error::Protocol { what, .. } => assert!(!what.contains('\x1b'), "{what:?}"),
+        Error::Protocol { what, .. } => assert_eq!(
+            what,
+            r"refusing a URL outside the sandbox: https://evil.example/\u{1b}[2J"
+        ),
         e => panic!("{e:?}"),
     }
 }
