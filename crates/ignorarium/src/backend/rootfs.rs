@@ -28,6 +28,7 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io::{self, Read};
+use std::ops::Bound;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
@@ -528,10 +529,19 @@ impl<'a> Tree<'a> {
         Ok(())
     }
 
-    /// Forget every record at or under `rel`.
+    /// Forget every record at or under `rel`. Paths order by component, so `rel` and its
+    /// descendants form one range that starts at `rel`.
     fn forget(&mut self, rel: &Path) {
-        self.links.retain(|p| !p.starts_with(rel));
-        self.files.retain(|p| !p.starts_with(rel));
+        for set in [&mut self.links, &mut self.files] {
+            let under: Vec<PathBuf> = set
+                .range::<Path, _>((Bound::Included(rel), Bound::Unbounded))
+                .take_while(|p| p.starts_with(rel))
+                .cloned()
+                .collect();
+            for p in &under {
+                set.remove(p);
+            }
+        }
     }
 
     /// Remove what is at `rel` without following a link; absent is fine.
@@ -639,5 +649,33 @@ impl<'a> Tree<'a> {
         fs::hard_link(self.full(&to), self.full(rel))?;
         self.files.insert(rel.to_path_buf());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forget_drops_a_path_and_its_descendants_and_keeps_its_neighbours() {
+        let budget = Meter::budget(WRITE_CAP);
+        let mut tree = Tree::new(Path::new("/nonexistent"), &budget);
+        let all = [
+            "usr", "usr/a", "usr/a/b", "usr/a-b", "usr/a.b", "usr/a0", "usr/ab",
+        ];
+        for p in all {
+            tree.links.insert(p.into());
+            tree.files.insert(p.into());
+        }
+        tree.forget(Path::new("usr/a"));
+        let kept = ["usr", "usr/a-b", "usr/a.b", "usr/a0", "usr/ab"].map(PathBuf::from);
+        assert!(tree.links.iter().eq(&kept), "{:?}", tree.links);
+        assert!(tree.files.iter().eq(&kept), "{:?}", tree.files);
+        // Only the descendants left: they go too. An absent path takes nothing.
+        tree.links.insert("usr/a0/x".into());
+        tree.forget(Path::new("usr/a0"));
+        tree.forget(Path::new("usr/b"));
+        let kept = ["usr", "usr/a-b", "usr/a.b", "usr/ab"].map(PathBuf::from);
+        assert!(tree.links.iter().eq(&kept), "{:?}", tree.links);
     }
 }

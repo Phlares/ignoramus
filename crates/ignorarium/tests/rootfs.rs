@@ -12,6 +12,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 const BOX: &str = env!("CARGO_BIN_EXE_ignorarium");
@@ -1599,6 +1600,21 @@ fn many_empty_entries_are_stopped_by_the_entry_charge() {
     // written (1000 files and `usr`) at 4096 each do not.
     over_budget(&store, &digest, 2 << 20);
     assert!(from_store_capped(&store, &digest, 1_025_024 + 1001 * 4096).is_ok());
+}
+
+#[test]
+fn fifty_thousand_files_extract_in_linear_time() {
+    let (_h, store) = store();
+    let names: Vec<String> = (0..50_000).map(|i| format!("usr/f{i:05}")).collect();
+    let members: Vec<M> = names.iter().map(|n| M::File(n, "")).collect();
+    let digest = image_of(&store, &[layer_bytes(&members)]);
+    let t = Instant::now();
+    let root = from_store(&store, &digest).unwrap();
+    let took = t.elapsed();
+    assert_eq!(fs::read_dir(root.join("usr")).unwrap().count(), 50_000);
+    // Seconds when each written path forgets only the records under it; many minutes when
+    // it scanned every record.
+    assert!(took < Duration::from_secs(60), "{took:?}");
 }
 
 #[test]
