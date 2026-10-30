@@ -33,8 +33,8 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use tar::{Archive, EntryType};
 
-/// The folders of an image that level 1 binds into the sandbox.
-const KEPT: [&str; 5] = ["usr", "bin", "lib", "lib64", "etc"];
+/// The folders of an image that level 1 binds into the sandbox: the only ones extracted.
+pub(super) const KEPT: [&str; 5] = ["usr", "bin", "lib", "lib64", "etc"];
 const WHITEOUT: &[u8] = b".wh.";
 const OPAQUE: &[u8] = b".wh..wh..opq";
 /// Largest `manifest.json` read.
@@ -177,22 +177,36 @@ fn tar_err(e: io::Error) -> RootfsError {
 fn with_member<T>(
     blob: &Path,
     name: &Path,
-    f: impl FnOnce(&mut dyn Read) -> Result<T, RootfsError>,
+    mut f: impl FnMut(&mut dyn Read) -> Result<T, RootfsError>,
 ) -> Result<Option<T>, RootfsError> {
-    let fence = Meter::fence();
-    let mut outer = Archive::new(Metered {
-        inner: fs::File::open(blob)?,
-        meter: &fence,
-    });
-    for entry in outer.entries().map_err(tar_err)? {
-        let mut entry = entry.map_err(tar_err)?;
-        fence.past(&entry)?;
+    each_entry(fs::File::open(blob)?, |entry| {
         let is_file = matches!(
             entry.header().entry_type(),
             EntryType::Regular | EntryType::Continuous
         );
         if is_file && normalize(&entry.path_bytes())?.as_deref() == Some(name) {
-            return f(&mut entry).map(Some);
+            return f(entry).map(Some);
+        }
+        Ok(None)
+    })
+}
+
+/// Call `each` on the entries of the tar in `reader`, behind a fence, until it returns
+/// `Some`; that value comes back.
+fn each_entry<R: Read, T>(
+    reader: R,
+    mut each: impl FnMut(&mut tar::Entry<'_, Metered<'_, R>>) -> Result<Option<T>, RootfsError>,
+) -> Result<Option<T>, RootfsError> {
+    let fence = Meter::fence();
+    let mut ar = Archive::new(Metered {
+        inner: reader,
+        meter: &fence,
+    });
+    for entry in ar.entries().map_err(tar_err)? {
+        let mut entry = entry.map_err(tar_err)?;
+        fence.past(&entry)?;
+        if let Some(found) = each(&mut entry)? {
+            return Ok(Some(found));
         }
     }
     Ok(None)
@@ -402,26 +416,19 @@ impl<'a> Tree<'a> {
                 )));
             }
         };
-        let fence = Meter::fence();
         let counted = Metered {
             inner: stream,
             meter: self.budget,
         };
-        let mut ar = Archive::new(Metered {
-            inner: counted,
-            meter: &fence,
-        });
-        for entry in ar.entries().map_err(tar_err)? {
-            let mut entry = entry.map_err(tar_err)?;
-            fence.past(&entry)?;
-            let Some(path) = normalize(&entry.path_bytes())? else {
-                continue;
-            };
-            match pass {
-                Pass::Whiteouts => self.whiteout(&path)?,
-                Pass::Content => self.member(&mut entry, &path)?,
+        each_entry(counted, |entry| {
+            if let Some(path) = normalize(&entry.path_bytes())? {
+                match pass {
+                    Pass::Whiteouts => self.whiteout(&path)?,
+                    Pass::Content => self.member(entry, &path)?,
+                }
             }
-        }
+            Ok(None::<()>)
+        })?;
         Ok(())
     }
 
@@ -464,17 +471,15 @@ impl<'a> Tree<'a> {
         match entry.header().entry_type() {
             EntryType::Directory => self.dir(path, mode)?,
             EntryType::Regular | EntryType::Continuous => self.file(entry, path, mode)?,
-            EntryType::Symlink => {
+            kind @ (EntryType::Symlink | EntryType::Link) => {
                 let target = entry.link_name_bytes().ok_or_else(|| {
                     RootfsError::Format(format!("link {} has no target", path.display()))
                 })?;
-                self.symlink(path, &target)?
-            }
-            EntryType::Link => {
-                let target = entry.link_name_bytes().ok_or_else(|| {
-                    RootfsError::Format(format!("link {} has no target", path.display()))
-                })?;
-                self.hard_link(path, &target)?
+                if kind == EntryType::Symlink {
+                    self.symlink(path, &target)?
+                } else {
+                    self.hard_link(path, &target)?
+                }
             }
             // Devices, pipes, sockets and the rest are not part of the root.
             _ => return Ok(()),
