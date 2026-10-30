@@ -1098,6 +1098,85 @@ fn a_pause_sticks_when_the_event_log_cannot_be_written() {
     }
 }
 
+/// Every attempt is an infrastructure fault with an unknown CPU count. After the first one,
+/// `probe`, which the retry path calls right before the gate, breaks the event log.
+struct BreakAtRetry {
+    dir: PathBuf,
+    runs: Cell<u32>,
+}
+
+impl Backend for BreakAtRetry {
+    fn level(&self) -> u8 {
+        1
+    }
+    fn probe(&self) -> Probe {
+        if self.runs.get() == 1 && !self.dir.join("events.old").exists() {
+            std::fs::rename(self.dir.join("events.jsonl"), self.dir.join("events.old")).unwrap();
+            std::fs::create_dir(self.dir.join("events.jsonl")).unwrap();
+        }
+        Probe::Available
+    }
+    fn launcher(&self) -> String {
+        "stub".into()
+    }
+    fn run_row(&self, job: &RowJob, _: &dyn Watch) -> std::io::Result<RowOutcome> {
+        self.runs.set(self.runs.get() + 1);
+        Ok(RowOutcome {
+            exit: Exit::Infra("lost".into()),
+            cpu_seconds: 0.0,
+            wall_seconds: 0.1,
+            output_hash: output_hash(&job.output_dir)?,
+            selftest: None,
+            cpu_unknown: Some(UNKNOWN.into()),
+        })
+    }
+}
+
+#[test]
+fn an_unknown_cpu_pause_survives_a_failed_alert_at_the_retry_gate() {
+    let lab = lab();
+    let dir = plain(&lab, "gate");
+    let mut plan = prepare(&lab.home, "gate", 0).unwrap();
+    plan.backend = Box::new(BreakAtRetry {
+        dir: dir.clone(),
+        runs: Cell::new(0),
+    });
+    // The row's gate reads 0 s; the retry gate reads 1900 of 3600 CPU seconds, past the 50 %
+    // alert, whose write fails.
+    let cpu = |s| {
+        Ok(ignorarium::budget::Cost {
+            cpu_seconds: s,
+            wall_seconds: 0.0,
+            usd: 0.0,
+        })
+    };
+    plan.meter = Box::new(ignorarium::budget::FakeMeter::new(vec![
+        cpu(0.0),
+        cpu(1900.0),
+    ]));
+    let err = runner::run(&plan).expect_err("the alert write fails");
+    assert!(matches!(err, RunError::Io(_)), "{err}");
+    let state = ignorarium::control::State::read(&lab.home, "gate").unwrap();
+    let why = "row 0 has an unknown CPU count; it is charged the row estimate";
+    assert_eq!(state, Some(ignorarium::control::State::Paused(why.into())));
+    let spends = common::kind_of(&lab, "gate", "spend");
+    assert_eq!(spends.len(), 1);
+    assert_eq!(spends[0].body["cpu_unknown"], UNKNOWN);
+    // With the event log back, the next run does not go past the pause.
+    assert_eq!(
+        ControlFile::of(&lab.home, "gate").peek().unwrap(),
+        Some(ignorarium::control::Signal::Pause)
+    );
+    std::fs::remove_dir(dir.join("events.jsonl")).unwrap();
+    std::fs::rename(dir.join("events.old"), dir.join("events.jsonl")).unwrap();
+    let again = prepare(&lab.home, "gate", 0).unwrap();
+    assert_eq!(
+        runner::run(&again).unwrap(),
+        RunStatus::Paused("a pause was requested".into())
+    );
+    assert!(common::indices(&lab, "gate").is_empty());
+}
+
 fn why(b: &Level1) -> String {
     match b.probe() {
         Probe::Unavailable(why) => why,

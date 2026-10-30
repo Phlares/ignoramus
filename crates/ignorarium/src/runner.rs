@@ -1038,15 +1038,31 @@ fn attempt_row(
             &format!("infrastructure fault: {why}"),
         )?;
         watch.keep(noted(&o));
-        // No new attempt once the event log fails; the run pauses after the row.
-        if watch.failed.borrow().is_some() {
-            let h = Halt::Pause(EVENT_LOG.into());
-            return Ok((h.exit().into(), Some(h)));
-        }
-        let halt = match plan.backend.probe() {
-            Probe::Unavailable(why) => Some(Halt::Pause(format!("backend unavailable: {why}"))),
-            Probe::Available => gate(plan, dir, books)?,
+        let failed = || watch.failed.borrow().is_some();
+        let halt = if failed() {
+            None
+        } else {
+            match plan.backend.probe() {
+                Probe::Unavailable(why) => Some(Halt::Pause(format!("backend unavailable: {why}"))),
+                // The gate fails only on an alert write, held as any failed event write is.
+                Probe::Available => gate(plan, dir, books).unwrap_or_else(|e| {
+                    watch.keep(Err(e));
+                    None
+                }),
+            }
         };
+        // No new attempt once the event log fails: the run pauses after the row, for the
+        // attempt's unknown CPU count when it has one.
+        let event_log = || Halt::Pause(EVENT_LOG.into());
+        let halt = halt.or_else(|| {
+            failed().then(|| {
+                if unknown {
+                    unknown_cpu(row)
+                } else {
+                    event_log()
+                }
+            })
+        });
         if let Some(h) = halt {
             return Ok((h.exit().into(), Some(h)));
         }
@@ -1096,14 +1112,17 @@ fn attempt_row(
             "row {} voided by infrastructure faults: {why}",
             row.index
         ))),
-        _ => unknown.then(|| {
-            Halt::Pause(format!(
-                "row {} has an unknown CPU count; it is charged the row estimate",
-                row.index
-            ))
-        }),
+        _ => unknown.then(|| unknown_cpu(row)),
     };
     Ok((exit, halt))
+}
+
+/// The pause for a row whose CPU count the backend could not read.
+fn unknown_cpu(row: &Row) -> Halt {
+    Halt::Pause(format!(
+        "row {} has an unknown CPU count; it is charged the row estimate",
+        row.index
+    ))
 }
 
 /// The events of one recorded attempt: what the self-test found, and the charge for a CPU
