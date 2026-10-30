@@ -74,12 +74,11 @@ pub struct Estimate {
 /// declared condition, and per `selected` when the confirmation stage runs the pick.
 pub fn estimate(spec: &Spec, machine: &Machine, rows: &[Row]) -> Estimate {
     let d = &spec.design;
-    let picks = d.confirmation.conditions.iter().any(|c| c == SELECTED);
     let rows_per_condition: Vec<(String, u64)> = d
         .conditions
         .iter()
         .map(|c| c.id.as_str())
-        .chain(picks.then_some(SELECTED))
+        .chain(d.confirmation.runs_pick().then_some(SELECTED))
         .map(|id| {
             let n = rows.iter().filter(|r| r.condition == id).count();
             (id.to_string(), n as u64)

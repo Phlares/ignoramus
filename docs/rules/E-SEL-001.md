@@ -12,7 +12,7 @@ Give design.selection two or more candidates from design.conditions other than t
 
 ## Why
 
-The selection stage picks one candidate on the selection inputs by a rule fixed before the data come in; the confirmation stage then tests the pick on other data. Only a declared rule over declared candidates shows that the confirmation data did not shape the choice. The reference runs in every stage.
+The selection stage picks one candidate on the selection inputs by a rule fixed before the data come in, and the confirmation stage then tests the pick on other data. Only a declared rule over declared candidates shows that the confirmation data did not shape the choice. The rule best-mean takes only the selection units that have a paired metric value for every candidate, and each mean is over those units. The best mean in the metric outcome's direction wins, and a tie goes to the candidate listed first. With no such unit the run pauses before any confirmation row. The reference runs in every stage.
 
 ## Sources
 

@@ -95,9 +95,9 @@ fn a_register_record_with_a_missing_or_extra_field_does_not_parse() {
 
 fn selection_body() -> Value {
     json!({
-        "metric": "ppl-ratio",
+        "metric": "ppl-ratio", "rule": "best-mean", "direction": "lower",
         "candidates": [{ "id": "a", "mean": 1.5 }, { "id": "b", "mean": -2.0 }],
-        "selected": "b", "complete_units": 7, "incomplete_units": 1
+        "selected": "b", "units": ["s#0", "s#3"], "complete_units": 2, "incomplete_units": 1
     })
 }
 
@@ -105,7 +105,8 @@ fn selection_body() -> Value {
 fn a_selection_record_parses_and_only_as_its_kind() {
     let s = Selection::of(&rec("selection", selection_body())).unwrap();
     assert_eq!(s.selected, "b");
-    assert_eq!((s.complete_units, s.incomplete_units), (7, 1));
+    assert_eq!((s.complete_units, s.incomplete_units), (2, 1));
+    assert_eq!(s.units, ["s#0", "s#3"]);
     assert_eq!(s.candidates[1].mean, -2.0);
     assert_eq!(serde_json::to_value(&s).unwrap(), selection_body());
     assert_eq!(Selection::of(&rec("estimate", selection_body())), None);

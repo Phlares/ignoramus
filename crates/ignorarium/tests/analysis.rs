@@ -1,7 +1,7 @@
 use ignorarium::analysis::{paired, select};
 use ignorarium::derived::{Candidate, Selection};
 use ignorarium::records::Record;
-use ignorarium::spec::model::Spec;
+use ignorarium::spec::model::{Direction, SelectionRule, Spec};
 use serde_json::json;
 
 fn spec(kind: &str) -> Spec {
@@ -194,6 +194,8 @@ fn select_picks_the_best_mean_by_the_outcome_direction() {
         lower,
         Selection {
             metric: "ppl-ratio".into(),
+            rule: SelectionRule::BestMean,
+            direction: Direction::Lower,
             candidates: vec![
                 Candidate {
                     id: "a".into(),
@@ -205,12 +207,14 @@ fn select_picks_the_best_mean_by_the_outcome_direction() {
                 },
             ],
             selected: "a".into(),
+            units: vec!["s#0".into(), "s#1".into()],
             complete_units: 2,
             incomplete_units: 0,
         }
     );
     let higher = select(&staged(&["a", "b"], "higher"), &rows).unwrap();
     assert_eq!(higher.selected, "b");
+    assert_eq!(higher.direction, Direction::Higher);
     assert_eq!(candidates(&higher), [("a", 0.0), ("b", 3.0)]);
 }
 
@@ -255,6 +259,7 @@ fn incomplete_units_stay_out_of_the_pick() {
     assert_eq!(candidates(&s), [("a", 5.0), ("b", 1.0)]);
     assert_eq!(s.selected, "b");
     assert_eq!((s.complete_units, s.incomplete_units), (1, 2));
+    assert_eq!(s.units, ["s#2"]);
 }
 
 #[test]

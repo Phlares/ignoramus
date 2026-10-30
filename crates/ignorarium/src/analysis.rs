@@ -2,6 +2,7 @@
 //! condition's value for the same unit and repeat.
 use crate::derived::{Candidate, Selection};
 use crate::records::Record;
+use crate::schedule::SELECTION_STAGE;
 use crate::spec::model::{Direction, Paired as Rule, Spec};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -95,16 +96,18 @@ pub fn select(spec: &Spec, rows: &[Record]) -> Result<Selection, String> {
         .ok_or("the selection metric is not an outcome of the plan")?;
     let units: BTreeSet<&str> = rows
         .iter()
-        .filter(|r| r.kind == "row" && r.body["stage"] == "selection")
+        .filter(|r| r.kind == "row" && r.body["stage"] == SELECTION_STAGE)
         .filter_map(|r| r.body["unit"].as_str())
         .collect();
     let pairs = paired(spec, rows);
-    let complete: Vec<Vec<f64>> = units
+    // (unit, its paired value per candidate) of each complete unit, sorted by unit.
+    let complete: Vec<(&str, Vec<f64>)> = units
         .iter()
         .filter_map(|u| {
-            (stage.conditions.iter())
+            let values = (stage.conditions.iter())
                 .map(|c| pairs.get(u, c, &outcome.id))
-                .collect()
+                .collect::<Option<_>>()?;
+            Some((*u, values))
         })
         .collect();
     if complete.is_empty() {
@@ -117,7 +120,7 @@ pub fn select(spec: &Spec, rows: &[Record]) -> Result<Selection, String> {
     let n = complete.len() as f64;
     let mut candidates = Vec::new();
     for (i, id) in stage.conditions.iter().enumerate() {
-        let mean = complete.iter().map(|v| v[i]).sum::<f64>() / n;
+        let mean = complete.iter().map(|(_, v)| v[i]).sum::<f64>() / n;
         if !mean.is_finite() {
             return Err(format!(
                 "the mean {} of candidate {id} is not finite",
@@ -138,7 +141,10 @@ pub fn select(spec: &Spec, rows: &[Record]) -> Result<Selection, String> {
         .ok_or("the selection stage lists no candidate")?;
     Ok(Selection {
         metric: outcome.id.clone(),
+        rule: stage.rule,
+        direction: outcome.direction,
         selected: best.id.clone(),
+        units: complete.iter().map(|(u, _)| u.to_string()).collect(),
         complete_units: complete.len() as u64,
         incomplete_units: (units.len() - complete.len()) as u64,
         candidates,

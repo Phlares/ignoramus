@@ -15,7 +15,7 @@ use crate::payload::{self, PayloadError};
 use crate::planlog::store::{Leaf, LogError, PlanLog};
 use crate::prior::same_data;
 use crate::records::{self, RecordDraft, RecordError, VerifyError};
-use crate::schedule::{self, Row, Schedule, ScheduleError};
+use crate::schedule::{self, CONFIRMATION_STAGE, Row, SELECTION_STAGE, Schedule, ScheduleError};
 use crate::spec::model::{Mode, Role, SELECTED, Spec};
 use crate::store::Store;
 use crate::view::{self, ViewError};
@@ -559,7 +559,8 @@ pub fn progress(
 /// same data (E-CNF-004): `check` cannot compare a file that was absent at registration, and a
 /// late copy of a registered file has a registered hash. Then a selection or confirmation
 /// input that the registered plan leaf did not hold is late: refuse it if another study used
-/// it, else record it under this study's id once. `all` are the inputs' hashes in spec order.
+/// it, else record it under this study's id once. The study's own leaves, its plan leaf and
+/// its late-data leaves, are no earlier use. `all` are the inputs' hashes in spec order.
 /// Every lookup finishes before the append takes its lock.
 fn gate_late_data(
     home: &Home,
@@ -596,7 +597,9 @@ fn gate_late_data(
     let mut new = Vec::new();
     for (path, _, hashes) in late {
         let uses = log.uses(&hashes.0, &hashes.1)?;
-        if let Some((i, leaf)) = uses.iter().find(|(_, l)| !is_own(l, &own)) {
+        let earlier =
+            |(i, l): &&(usize, Leaf)| u64::try_from(*i) != Ok(leaf_index) && !is_own(l, &own);
+        if let Some((i, leaf)) = uses.iter().find(earlier) {
             let label = match (leaf.kind.as_str(), leaf.label.strip_prefix(OWN_PREFIX)) {
                 ("legacy", Some(study)) => format!("study {study}"),
                 ("legacy", None) => format!("phase {}", leaf.label),
@@ -625,7 +628,7 @@ fn own_label(id: &str) -> String {
     format!("{OWN_PREFIX}{id}")
 }
 
-/// A late-data leaf this study appended. A plan leaf is never its own use.
+/// A late-data leaf this study appended. A plan leaf counts by its index, never its label.
 fn is_own(leaf: &Leaf, own: &str) -> bool {
     leaf.kind == "legacy" && leaf.label == own
 }
@@ -742,7 +745,11 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
         if let Some(h) = gate(plan, &dir, &mut books)? {
             return halt(plan, &dir, lock, h, None);
         }
-        if row.condition == SELECTED && pick.is_none() {
+        // The pick comes at the stage boundary: no confirmation row runs before its record.
+        if row.stage == CONFIRMATION_STAGE
+            && plan.spec.design.confirmation.runs_pick()
+            && pick.is_none()
+        {
             match selection(plan, &log)? {
                 Ok(p) => pick = Some(p),
                 Err(why) => return halt(plan, &dir, lock, Halt::Pause(why), None),
@@ -1091,13 +1098,25 @@ struct Pick {
 }
 
 /// The pick from the study's `selection` record, or from a new one made from the selection
-/// rows recorded so far: every selection row has its record by the first `selected` row, as
-/// rows run in schedule order. `Ok(Err(why))` when no pick can be made; the run pauses.
+/// rows. A new pick needs a row record for every selection row of the schedule.
+/// `Ok(Err(why))` when no pick can be made; the run pauses.
 fn selection(plan: &RunPlan, log: &Path) -> Result<Result<Pick, String>, RunError> {
     let all = records::read_all(log, &plan.key.verifying_key())?;
     let record = match all.iter().find(|r| r.kind == SELECTION) {
         Some(r) => r.clone(),
         None => {
+            let done: BTreeSet<u64> = (all.iter())
+                .filter(|r| r.kind == "row")
+                .filter_map(|r| r.row)
+                .collect();
+            let missing = (plan.schedule.rows.iter())
+                .find(|r| r.stage == SELECTION_STAGE && !done.contains(&r.index));
+            if let Some(r) = missing {
+                return Ok(Err(format!(
+                    "selection row {} has no record; the pick needs every selection row",
+                    r.index
+                )));
+            }
             let s = match analysis::select(&plan.spec, &all) {
                 Ok(s) => s,
                 Err(why) => return Ok(Err(why)),

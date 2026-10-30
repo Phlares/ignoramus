@@ -1663,3 +1663,33 @@ fn the_row_cap_counts_units_conditions_and_repeats_per_stage() {
     let max = u64::from(u32::MAX);
     assert_eq!(codes_paths(&named(&at(max, max, max), dir.path())), cap);
 }
+
+#[test]
+fn the_template_selection_example_passes_once_uncommented() {
+    let dir = study_dir();
+    for t in ["numeric-ablation", "planted-spawn"] {
+        let text = std::fs::read_to_string(format!("../../templates/{t}.toml")).unwrap();
+        let (start, end) = ("# params = ", "# rule = \"best-mean\"");
+        let from = text.find(start).unwrap();
+        let to = from + text[from..].find(end).unwrap() + end.len();
+        let block: Vec<&str> = text[from..to]
+            .lines()
+            .map(|l| l.strip_prefix("# ").unwrap())
+            .collect();
+        let text = format!("{}{}{}", &text[..from], block.join("\n"), &text[to..]);
+        let mut v = ignorarium::spec::parse(text.as_bytes()).unwrap().value;
+        // The stage needs a selection input, and its pick goes forward.
+        set(&mut v, "/inputs/0/role", j(json!("selection")));
+        set(&mut v, "/inputs/0/units", j(json!(3)));
+        set(&mut v, "/inputs/0/stratum", j(json!("fiction")));
+        set(
+            &mut v,
+            "/design/confirmation/conditions",
+            j(json!(["selected"])),
+        );
+        let (_, _, d) = rules::check_all(&v, v0(), &ctx(dir.path()));
+        let errors: Vec<_> = d.iter().filter(|x| x.severity == Severity::Error).collect();
+        assert!(errors.is_empty(), "{t}: {errors:?}");
+        assert!(v["design"]["selection"].is_object(), "{t}");
+    }
+}

@@ -1,5 +1,6 @@
 //! Typed bodies of the records that carry derived values. One parser per record kind.
 use crate::records::Record;
+use crate::spec::model::{Direction, SelectionRule};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -66,14 +67,20 @@ impl Register {
 }
 
 /// The selection stage's pick: each candidate's mean paired metric over the complete units.
+/// The record alone shows the pick: the best mean in `direction`, the first listed on a tie.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Selection {
     pub metric: String,
+    pub rule: SelectionRule,
+    /// The metric outcome's direction: which mean is best.
+    pub direction: Direction,
     /// In the order the stage lists them.
     pub candidates: Vec<Candidate>,
     pub selected: String,
-    /// Selection units with a paired metric value for every candidate.
+    /// The complete units, sorted: selection units with a paired metric value for every
+    /// candidate. The means are over these units.
+    pub units: Vec<String>,
     pub complete_units: u64,
     pub incomplete_units: u64,
 }

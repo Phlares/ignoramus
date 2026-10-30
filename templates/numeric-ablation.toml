@@ -56,10 +56,12 @@ id = "exact"
 [[design.conditions]]
 id = "arm-a"
 # params = { bits = 4 }        # optional; the payload gets them as JSON in IGNORARIUM_PARAMS
+# [[design.conditions]]        # a second candidate for the selection stage below
+# id = "arm-b"
 # [design.selection]           # optional: a stage that picks one candidate on the selection inputs first
 # metric = "ppl-ratio"         # the outcome whose mean paired value ranks the candidates
 # conditions = ["arm-a", "arm-b"]  # two or more candidates, not the reference; a tie goes to the first
-# rule = "best-mean"
+# rule = "best-mean"           # best mean in the outcome's direction, over units with a value for every candidate
 [design.confirmation]
 conditions = ["arm-a"]          # run after the reference on the confirmation inputs; "selected" runs the pick
 

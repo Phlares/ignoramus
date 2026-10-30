@@ -8,10 +8,14 @@ use serde::Serialize;
 use std::fmt;
 use std::path::Path;
 
+/// The stage names a row carries: the roles of the clusters each stage runs on.
+pub const SELECTION_STAGE: &str = "selection";
+pub const CONFIRMATION_STAGE: &str = "confirmation";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Row {
     pub index: u64,
-    /// `"selection"` or `"confirmation"`: the role of the row's cluster.
+    /// `SELECTION_STAGE` or `CONFIRMATION_STAGE`.
     pub stage: String,
     pub unit: String,
     pub cluster: String,
@@ -79,8 +83,8 @@ fn stage(spec: &Spec, role: Role) -> Option<(&'static str, &[String])> {
             .design
             .selection
             .as_ref()
-            .map(|s| ("selection", &s.conditions[..])),
-        Role::Confirmation => Some(("confirmation", &spec.design.confirmation.conditions[..])),
+            .map(|s| (SELECTION_STAGE, &s.conditions[..])),
+        Role::Confirmation => Some((CONFIRMATION_STAGE, &spec.design.confirmation.conditions[..])),
         Role::Calibration | Role::Model => None,
     }
 }

@@ -101,7 +101,7 @@ pub enum Paired {
     Percent,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Direction {
     Lower,
@@ -190,7 +190,7 @@ pub struct Selection {
     pub rule: SelectionRule,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SelectionRule {
     /// The best mean, in the metric outcome's direction.
@@ -202,6 +202,13 @@ pub enum SelectionRule {
 #[serde(deny_unknown_fields)]
 pub struct Stage {
     pub conditions: Vec<String>,
+}
+
+impl Stage {
+    /// The stage runs the selection stage's pick.
+    pub fn runs_pick(&self) -> bool {
+        self.conditions.iter().any(|c| c == SELECTED)
+    }
 }
 
 /// Which of a cluster's units the study takes.

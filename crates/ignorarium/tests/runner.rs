@@ -24,7 +24,7 @@ fn conf_input(t: String) -> String {
 
 /// The template with a selection stage: `arm-a` and `arm-b` (each with params) on the 2 units
 /// of the selection input `data/select.txt`, then `selected` on the confirmation input. The
-/// schedule: rows 0 to 5 select, rows 6 to 11 confirm, the first `selected` row is row 7.
+/// schedule: rows 0 to 5 select, rows 6 to 11 confirm.
 fn staged(t: String) -> String {
     let stage = r#"id = "arm-a"
 params = { bits = 4, mode = "fast" }
@@ -85,16 +85,19 @@ fn selected_rows_run_the_pick_and_name_the_record() {
         sel[0].body,
         serde_json::json!({
             "metric": "ppl-ratio",
+            "rule": "best-mean",
+            "direction": "lower",
             "candidates": [{ "id": "arm-a", "mean": 25.0 }, { "id": "arm-b", "mean": -25.0 }],
             "selected": "arm-b",
+            "units": ["data/select.txt#0", "data/select.txt#1"],
             "complete_units": 2,
             "incomplete_units": 0,
         })
     );
-    // Written after the last selection row and the first confirmation row, before row 7.
+    // Written at the stage boundary: after the last selection row, before any confirmation row.
     let all = common::records_of(&lab, "pick");
     let at = all.iter().position(|r| r.kind == "selection").unwrap();
-    assert_eq!((all[at - 1].row, all[at + 1].row), (Some(6), Some(7)));
+    assert_eq!((all[at - 1].row, all[at + 1].row), (Some(5), Some(6)));
     let hash = records::hash(&sel[0]);
     for r in rows_of(&lab, "pick") {
         let i = r.row.unwrap();
@@ -137,12 +140,12 @@ fn a_resumed_run_reuses_the_selection_record() {
     let lab = lab();
     register_study(&lab, "reuse", staged, &[], STAGED);
     let mut plan = plan_of(&lab, "reuse");
-    // The box dies in row 7, the first `selected` row, after the selection record.
+    // The box dies in row 6, the first confirmation row, after the selection record.
     let (mut b, _) = fake(vec![]);
-    b.panic_at = Some(7);
+    b.panic_at = Some(6);
     plan.backend = Box::new(b);
     assert!(catch_unwind(AssertUnwindSafe(|| run(&plan))).is_err());
-    assert_eq!(indices(&lab, "reuse"), (0..7).collect::<Vec<_>>());
+    assert_eq!(indices(&lab, "reuse"), (0..6).collect::<Vec<_>>());
     let first = selections_of(&lab, "reuse");
     assert_eq!(first.len(), 1);
     plan.backend = Box::new(Level0);
@@ -166,15 +169,29 @@ fn no_complete_unit_pauses_the_run() {
     let plan = plan_of(&lab, "nopick");
     let why = "no selection unit has a ppl-ratio value for every candidate; incomplete units: 2";
     assert_eq!(run(&plan).unwrap(), RunStatus::Paused(why.into()));
-    // The first confirmation row ran; the first `selected` row did not.
-    assert_eq!(indices(&lab, "nopick"), (0..7).collect::<Vec<_>>());
+    // No confirmation row ran, the reference's included.
+    assert_eq!(indices(&lab, "nopick"), (0..6).collect::<Vec<_>>());
     assert!(selections_of(&lab, "nopick").is_empty());
     let dir = lab.home.study_dir("nopick");
     let pauses = events_of(&dir);
     assert_eq!(named(&pauses, "run.pause")[0]["attrs"]["reason"], why);
     // A resume pauses again, at the same row.
     assert_eq!(run(&plan).unwrap(), RunStatus::Paused(why.into()));
-    assert_eq!(indices(&lab, "nopick").len(), 7);
+    assert_eq!(indices(&lab, "nopick").len(), 6);
+}
+
+#[test]
+fn the_pick_waits_for_every_selection_row() {
+    let lab = lab();
+    register_study(&lab, "partial", staged, &[], STAGED);
+    let mut plan = plan_of(&lab, "partial");
+    // Selection row 5 moves past the stage boundary: the pick would miss its unit.
+    let row5 = plan.schedule.rows.remove(5);
+    plan.schedule.rows.push(row5);
+    let why = "selection row 5 has no record; the pick needs every selection row";
+    assert_eq!(run(&plan).unwrap(), RunStatus::Paused(why.into()));
+    assert_eq!(indices(&lab, "partial"), (0..5).collect::<Vec<_>>());
+    assert!(selections_of(&lab, "partial").is_empty());
 }
 
 /// Runs level 0, then replaces the exit with the next scripted one.
@@ -1070,6 +1087,34 @@ fn a_late_input_with_the_data_of_the_other_role_is_refused() {
     std::fs::write(work("loose").join(sel), "both").unwrap();
     std::fs::write(work("loose").join(conf), "both").unwrap();
     plan_of(&lab, "loose");
+}
+
+#[test]
+fn a_late_near_copy_of_the_studys_own_data_is_not_an_earlier_use() {
+    let lab = lab();
+    let (sel, conf) = ("data/select.txt", "data/confirm.txt");
+    // An exploratory plan may share data between roles. The late selection file is the
+    // registered confirmation text in other case and spacing: its normalized hash is in the
+    // study's own plan leaf, which is no earlier study.
+    register_study(&lab, "own", staged, &[(conf, "Own  Text")], PAYLOAD);
+    std::fs::write(common::work(&lab, "own").join(sel), "own text").unwrap();
+    let plan = plan_of(&lab, "own");
+    let late = file_hashes(b"own text");
+    assert!(
+        plan.inputs
+            .iter()
+            .any(|(p, h)| p == sel && h.as_ref() == Some(&late))
+    );
+    // Another study's use of the same text is still refused.
+    register_study(&lab, "other", staged, &[], PAYLOAD);
+    std::fs::write(common::work(&lab, "other").join(sel), "OWN text").unwrap();
+    match err_of(&lab, "other") {
+        RunError::DataReused { path, label } => {
+            assert_eq!(path, sel);
+            assert_eq!(label, "registered plan, leaf 0");
+        }
+        e => panic!("{e}"),
+    }
 }
 
 #[test]
