@@ -4,7 +4,7 @@
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, FileType, OpenOptions};
 use std::io::{self, Read};
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
@@ -41,17 +41,11 @@ pub fn tree_rows(dir: &Path) -> io::Result<Vec<TreeRow>> {
     }
     let mut rows = Vec::new();
     walk(dir, &mut |rel, path, ty| {
-        if ty.is_dir() {
-            return Ok(());
-        }
-        rows.push(if ty.is_symlink() {
-            link_row(rel, fs::read_link(path)?.as_os_str().as_bytes())
-        } else if ty.is_file()
-            && let Some(f) = open_regular(path)?
-        {
-            row(rel, "file", sha256_hex(f)?)
-        } else {
-            row(rel, "other", String::new())
+        rows.push(match Entry::of(path, ty)? {
+            Entry::Dir => return Ok(()),
+            Entry::Link(target) => link_row(rel, &target),
+            Entry::File(f) => row(rel, "file", sha256_hex(f)?),
+            Entry::Other => row(rel, "other", String::new()),
         });
         Ok(())
     })?;
@@ -60,10 +54,13 @@ pub fn tree_rows(dir: &Path) -> io::Result<Vec<TreeRow>> {
 }
 
 /// SHA-256 of the rows as compact JSON, taken in sorted order whatever order they come in.
+/// The JSON goes straight into the hasher, so no copy of it is held.
 pub fn hash_rows(rows: &[TreeRow]) -> io::Result<String> {
     let mut rows: Vec<_> = rows.iter().map(|r| (&r.path, r.kind, &r.digest)).collect();
     rows.sort();
-    Ok(hex::encode(Sha256::digest(serde_json::to_vec(&rows)?)))
+    let mut h = Sha256::new();
+    serde_json::to_writer(&mut h, &rows)?;
+    Ok(hex::encode(h.finalize()))
 }
 
 pub fn tree_hash(dir: &Path) -> io::Result<String> {
@@ -112,8 +109,37 @@ fn walk_below(
     Ok(())
 }
 
+/// What a walked entry is, read without following a link. The hash and the pack both decide
+/// an entry's kind here, so they cannot disagree.
+pub(crate) enum Entry {
+    Dir,
+    /// The target bytes.
+    Link(Vec<u8>),
+    /// Open for reading.
+    File(File),
+    Other,
+}
+
+impl Entry {
+    /// The entry at `path`, which the walk listed as `ty`. A file that stopped being a regular
+    /// file after the listing is `Other`.
+    pub(crate) fn of(path: &Path, ty: FileType) -> io::Result<Entry> {
+        Ok(if ty.is_dir() {
+            Entry::Dir
+        } else if ty.is_symlink() {
+            Entry::Link(fs::read_link(path)?.into_os_string().into_vec())
+        } else if ty.is_file()
+            && let Some(f) = open_regular(path)?
+        {
+            Entry::File(f)
+        } else {
+            Entry::Other
+        })
+    }
+}
+
 /// `None` when the path stopped being a regular file between listing and open.
-pub(crate) fn open_regular(path: &Path) -> io::Result<Option<File>> {
+fn open_regular(path: &Path) -> io::Result<Option<File>> {
     let f = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)

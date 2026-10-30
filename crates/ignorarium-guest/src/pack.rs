@@ -7,7 +7,7 @@
 //! `d` dir, `f` file, `l` link, `o` other. Every kind but `e` is followed by the path
 //! (u32 big-endian length, raw bytes, `/`-separated). `f` adds a u64 big-endian length
 //! and the bytes. `l` adds a u32 big-endian length and the target bytes.
-use crate::tree::{TreeRow, hash_rows, link_row, open_regular, row, walk};
+use crate::tree::{Entry, TreeRow, hash_rows, link_row, row, walk};
 use rustix::fs::{CWD, FileType, Mode, mknodat};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -77,32 +77,30 @@ impl<W: Write> Write for Charged<'_, W> {
     }
 }
 
-/// Passes bytes on to `inner` and hashes the ones it took.
-struct Hashed<W> {
-    inner: W,
+/// Hashes each byte it reads.
+struct Hashed<R> {
+    inner: R,
     hash: Sha256,
 }
 
-impl<W: Write> Write for Hashed<W> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let n = self.inner.write(buf)?;
+impl<R: Read> Read for Hashed<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
         self.hash.update(&buf[..n]);
         Ok(n)
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
     }
 }
 
 /// Copies at most `len` bytes from `r` to `w`. Returns how many it copied and their SHA-256,
-/// a file row's digest.
-fn copy_hashed(r: impl Read, w: impl Write, len: u64) -> io::Result<(u64, String)> {
-    let mut w = Hashed {
-        inner: w,
+/// a file row's digest. `io::copy` writes every byte it reads or fails, so the hash covers
+/// exactly the bytes copied.
+fn copy_hashed(r: impl Read, mut w: impl Write, len: u64) -> io::Result<(u64, String)> {
+    let mut r = Hashed {
+        inner: r.take(len),
         hash: Sha256::new(),
     };
-    let n = io::copy(&mut r.take(len), &mut w)?;
-    Ok((n, hex::encode(w.hash.finalize())))
+    let n = io::copy(&mut r, &mut w)?;
+    Ok((n, hex::encode(r.hash.finalize())))
 }
 
 /// What `write` wrote: the stream's length, and the hash of the entries' rows.
@@ -125,31 +123,30 @@ pub fn write(dir: &Path, w: &mut impl Write, limit: u64) -> io::Result<Packed> {
     w.write_all(MAGIC)?;
     walk(dir, &mut |rel, path, ty| {
         w.budget.charge(ENTRY_COST)?;
-        if ty.is_dir() {
-            return put_path(&mut w, b'd', rel);
-        }
-        rows.push(if ty.is_symlink() {
-            let target = fs::read_link(path)?;
-            let target = target.as_os_str().as_bytes();
-            check_target(target).map_err(entry_error(rel))?;
-            put_path(&mut w, b'l', rel)?;
-            put_bytes(&mut w, target)?;
-            link_row(rel, target)
-        } else if ty.is_file()
-            && let Some(f) = open_regular(path)?
-        {
-            let len = f.metadata()?.len();
-            put_path(&mut w, b'f', rel)?;
-            w.write_all(&len.to_be_bytes())?;
-            let (n, digest) = copy_hashed(f, &mut w, len)?;
-            // A file that shrinks after the length is written is an error, not a short entry.
-            if n != len {
-                return Err(io::ErrorKind::UnexpectedEof.into());
+        rows.push(match Entry::of(path, ty)? {
+            Entry::Dir => return put_path(&mut w, b'd', rel),
+            Entry::Link(target) => {
+                check_target(&target).map_err(entry_error(rel))?;
+                put_path(&mut w, b'l', rel)?;
+                put_bytes(&mut w, &target)?;
+                link_row(rel, &target)
             }
-            row(rel, "file", digest)
-        } else {
-            put_path(&mut w, b'o', rel)?;
-            row(rel, "other", String::new())
+            Entry::File(f) => {
+                let len = f.metadata()?.len();
+                put_path(&mut w, b'f', rel)?;
+                w.write_all(&len.to_be_bytes())?;
+                let (n, digest) = copy_hashed(f, &mut w, len)?;
+                // A file that shrinks after the length is written is an error, not a short
+                // entry.
+                if n != len {
+                    return Err(io::ErrorKind::UnexpectedEof.into());
+                }
+                row(rel, "file", digest)
+            }
+            Entry::Other => {
+                put_path(&mut w, b'o', rel)?;
+                row(rel, "other", String::new())
+            }
         });
         Ok(())
     })?;
@@ -235,9 +232,9 @@ fn check_path(path: &[u8]) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// A link target is data: any bytes pass but none, and `MAX_PATH` bytes or more. That is the
-/// kernel limit, which no real link reaches: a target and its NUL fit in `PATH_MAX`. The name
-/// reader refuses a NUL.
+/// A link target is data. Any target passes except an empty one and one of `MAX_PATH` bytes or
+/// more. That is the kernel limit, which no real link reaches: a target and its NUL fit in
+/// `PATH_MAX`. The name reader refuses a NUL.
 fn check_target(target: &[u8]) -> Result<(), &'static str> {
     if target.is_empty() {
         return Err("empty link target");

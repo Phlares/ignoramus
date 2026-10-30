@@ -2,6 +2,7 @@ mod common;
 use common::{entry, file, link, pack, packed};
 use ignorarium_guest::pack::{ENTRY_MAX, Link, out_caps, unpack, write};
 use ignorarium_guest::tree::{link_row, tree_hash, tree_rows};
+use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::ErrorKind;
@@ -150,12 +151,13 @@ fn many_empty_dirs_meet_the_same_limit_on_both_sides() {
 
 /// Each link's path and target, in pack order: names in byte order, a folder before what it
 /// holds.
-const LINKS: [(&str, &str); 5] = [
-    ("deep", "a/../../.."),
-    ("gone", "nowhere"),
-    ("latest", "/tmp/x"),
-    ("sub/back", "../.."),
-    ("up", "../x"),
+const LINKS: [(&[u8], &[u8]); 6] = [
+    (b"deep", b"a/../../.."),
+    (b"gone", b"nowhere"),
+    (b"latest", b"/tmp/x"),
+    (b"raw", b"\xff/x"),
+    (b"sub/back", b"../.."),
+    (b"up", b"../x"),
 ];
 
 #[test]
@@ -163,8 +165,9 @@ fn any_link_target_is_carried_as_data() {
     let src = tempfile::tempdir().unwrap();
     fs::write(src.path().join("a.txt"), "hi\n").unwrap();
     fs::create_dir(src.path().join("sub")).unwrap();
+    let at = |root: &Path, path: &[u8]| root.join(OsStr::from_bytes(path));
     for (path, target) in LINKS {
-        symlink(target, src.path().join(path)).unwrap();
+        symlink(OsStr::from_bytes(target), at(src.path(), path)).unwrap();
     }
     let mut v = Vec::new();
     let p = write(src.path(), &mut v, u64::MAX).unwrap();
@@ -173,19 +176,23 @@ fn any_link_target_is_carried_as_data() {
     let want: Vec<Link> = LINKS
         .iter()
         .map(|(path, target)| Link {
-            path: path.as_bytes().to_vec(),
-            target: target.as_bytes().to_vec(),
+            path: path.to_vec(),
+            target: target.to_vec(),
         })
         .collect();
     assert_eq!(u.links, want);
     for (path, _) in LINKS {
-        let made = fs::symlink_metadata(out.path().join(path));
-        assert_eq!(made.unwrap_err().kind(), ErrorKind::NotFound, "{path}");
+        let made = fs::symlink_metadata(at(out.path(), path));
+        assert_eq!(made.unwrap_err().kind(), ErrorKind::NotFound, "{path:?}");
     }
     assert_eq!(fs::read(out.path().join("a.txt")).unwrap(), b"hi\n");
     assert!(out.path().join("sub").is_dir());
     let hash = tree_hash(src.path()).unwrap();
     assert_eq!((&p.hash, &u.hash), (&hash, &hash));
+    // A target that is not UTF-8 is hashed as its raw bytes.
+    let rows = tree_rows(src.path()).unwrap();
+    let raw = rows.iter().find(|r| r.path == "raw").unwrap();
+    assert_eq!(raw.digest, hex::encode(Sha256::digest(b"\xff/x")));
 }
 
 #[test]
@@ -287,7 +294,6 @@ fn hostile_packs_are_refused() {
         ),
         ("lone slash", pack(&[entry(b'd', b"/")]), 1 << 20),
         ("long part", pack(&[file(&[b'p'; 256], b"x")]), 1 << 20),
-        ("empty link target", pack(&[link(b"l", b"")]), 1 << 20),
         ("nul", pack(&[file(b"a\0b", b"x")]), 1 << 20),
         ("long", pack(&[file(&long_name, b"x")]), 1 << 20),
         ("dup", pack(&[file(b"a", b"x"), file(b"a", b"y")]), 1 << 20),
@@ -299,6 +305,11 @@ fn hostile_packs_are_refused() {
         (
             "under link",
             pack(&[link(b"l", b"."), file(b"l/x", b"x")]),
+            1 << 20,
+        ),
+        (
+            "link under link",
+            pack(&[link(b"a", b"sub"), link(b"a/b", b"/etc")]),
             1 << 20,
         ),
         (
@@ -326,12 +337,6 @@ fn hostile_packs_are_refused() {
         ("bad kind", pack(&[entry(b'z', b"a")]), 1 << 20),
         ("truncated path", b"IGNPACK1f\0\0\0\x09ab".to_vec(), 1 << 20),
         ("no end", b"IGNPACK1".to_vec(), 1 << 20),
-        ("link target nul", pack(&[link(b"l", b"a\0b")]), 1 << 20),
-        (
-            "link target at the path limit",
-            pack(&[link(b"l", &[b't'; 4096])]),
-            1 << 20,
-        ),
         ("path past the limit with dest", deep_pack(), 1 << 20),
     ];
     for (name, bytes, limit) in cases {

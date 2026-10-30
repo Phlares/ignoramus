@@ -967,6 +967,8 @@ fn started_names_one_group() {
 /// socket then, so the payload is most likely running by the stop. No channel reaches the
 /// host from the payload, so no marker can prove it; the host's path while the guest runs
 /// is pinned by the fake-VMM test `a_stop_while_the_guest_runs_kills_the_group`.
+/// `started` can come before the kernel sets the VMM's arguments, so `tick` looks for the
+/// socket path until it finds it.
 #[derive(Default)]
 struct StopOnceRunning {
     pid: Cell<Option<u32>>,
@@ -974,10 +976,25 @@ struct StopOnceRunning {
     stop_at: Cell<Option<Instant>>,
 }
 
+/// The host's control socket, from the `--vsock` argument of process `pid`. `None` while
+/// the process's arguments hold no `--vsock`.
+fn control_socket(pid: u32) -> Option<PathBuf> {
+    let cmdline = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let mut args = cmdline.split(|&b| b == 0);
+    args.position(|a| a == b"--vsock")?;
+    let vsock = std::str::from_utf8(args.next()?).ok()?;
+    let socket = vsock.split_once("socket=")?.1;
+    Some(PathBuf::from(format!("{socket}_7201")))
+}
+
 impl Watch for StopOnceRunning {
     fn tick(&self) -> bool {
         if let Some(at) = self.stop_at.get() {
             return Instant::now() < at;
+        }
+        if self.listen.borrow().is_none() {
+            let found = self.pid.get().and_then(control_socket);
+            *self.listen.borrow_mut() = found;
         }
         if self.listen.borrow().as_ref().is_some_and(|p| !p.exists()) {
             self.stop_at
@@ -988,13 +1005,36 @@ impl Watch for StopOnceRunning {
 
     fn started(&self, pid: u32) {
         self.pid.set(Some(pid));
-        let cmdline = fs::read(format!("/proc/{pid}/cmdline")).unwrap();
-        let args: Vec<&[u8]> = cmdline.split(|&b| b == 0).collect();
-        let at = args.iter().position(|a| *a == b"--vsock").unwrap();
-        let vsock = String::from_utf8(args[at + 1].to_vec()).unwrap();
-        let socket = vsock.split_once("socket=").unwrap().1;
-        *self.listen.borrow_mut() = Some(PathBuf::from(format!("{socket}_7201")));
     }
+}
+
+#[test]
+fn the_stop_watch_reads_the_vmm_arguments_once_they_are_set() {
+    // A VMM whose arguments the kernel has not set yet holds no `--vsock`, as this process.
+    let watch = StopOnceRunning::default();
+    watch.started(std::process::id());
+    assert!(watch.tick());
+    assert_eq!(*watch.listen.borrow(), None);
+    assert_eq!(watch.stop_at.get(), None);
+    // The compound command keeps `sh` from replacing itself with `sleep`.
+    let mut child = std::process::Command::new("sh")
+        .args(["-c", "sleep 10; exit 0", "sh", "--vsock"])
+        .arg("cid=3,socket=/nowhere/vsock.sock")
+        .spawn()
+        .unwrap();
+    let watch = StopOnceRunning::default();
+    watch.started(child.id());
+    let t = Instant::now();
+    while watch.listen.borrow().is_none() {
+        assert!(t.elapsed() < Duration::from_secs(5), "no --vsock seen");
+        assert!(watch.tick());
+    }
+    let listen = watch.listen.borrow().clone();
+    assert_eq!(listen, Some(PathBuf::from("/nowhere/vsock.sock_7201")));
+    // That socket does not exist, as after the guest connects: the stop is due.
+    assert!(watch.stop_at.get().is_some());
+    child.kill().unwrap();
+    child.wait().unwrap();
 }
 
 #[test]
