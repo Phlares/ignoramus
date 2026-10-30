@@ -160,28 +160,93 @@ fn verify_hashes_each_file_and_names_one_that_changed() {
 }
 
 #[test]
-fn a_scan_sees_a_new_size_but_not_a_new_mode() {
+fn a_name_that_is_not_utf8_moves_the_view_aside() {
+    use std::os::unix::ffi::OsStrExt;
     let b = bench();
     let a = stored(&b, "a.txt", "alpha");
-    let inputs = [("data/a.txt".to_string(), a.clone())];
+    let inputs = [("data/a.txt".to_string(), a)];
     let dir = view::build(&b.store, &b.study, &inputs).unwrap();
-    let seen = view::scan(&dir).unwrap();
-    assert_eq!(view::scan(&dir).unwrap(), seen);
+    std::fs::set_permissions(&dir, PermissionsExt::from_mode(0o755)).unwrap();
+    let odd = dir.join(std::ffi::OsStr::from_bytes(b"\xff"));
+    std::fs::write(&odd, "").unwrap();
+    view::build(&b.store, &b.study, &inputs).unwrap();
+    assert!(
+        b.study
+            .join("in.old-0")
+            .join(odd.file_name().unwrap())
+            .is_file()
+    );
+    assert_eq!(listing(&dir), ["data", "data/a.txt"]);
+}
+
+/// File times come from a clock that ticks every few milliseconds: wait past one tick, so
+/// the next change moves them.
+fn tick() {
+    std::thread::sleep(std::time::Duration::from_millis(30));
+}
+
+/// Set the modification time of `p`, which takes write access.
+fn set_mtime(p: &Path, t: std::time::SystemTime) {
+    std::fs::set_permissions(p, PermissionsExt::from_mode(0o644)).unwrap();
+    let f = std::fs::OpenOptions::new().write(true).open(p).unwrap();
+    f.set_modified(t).unwrap();
+}
+
+#[test]
+fn changes_name_what_moved_and_hash_a_file_whose_ctime_alone_moved() {
+    let b = bench();
+    let a = stored(&b, "a.txt", "alpha");
+    // Empty segments in an input path name the same file.
+    let inputs = [("data//a.txt".to_string(), a.clone())];
+    let dir = view::build(&b.store, &b.study, &inputs).unwrap();
+    let seen = view::verify(&dir, &inputs).unwrap();
     let blob = b.store.path(&a).unwrap();
+    let none: &[String] = &[];
+    let c = view::changes(&dir, &inputs, &seen).unwrap();
+    assert_eq!((c.inputs.as_slice(), c.other), (none, false));
+    assert_eq!(c.now, seen);
+    // A mode change moves the ctime alone: the file is hashed and its bytes are the same.
+    tick();
     std::fs::set_permissions(&blob, PermissionsExt::from_mode(0o644)).unwrap();
-    // A changed mode alone is not a change of content.
-    assert_eq!(view::scan(&dir).unwrap(), seen);
-    let key = view::key("data/a.txt");
-    assert_eq!(key, view::key("data//a.txt"));
-    std::fs::OpenOptions::new()
-        .append(true)
-        .open(&blob)
-        .unwrap()
-        .set_len(6)
-        .unwrap();
-    let grown = view::scan(&dir).unwrap();
-    assert_ne!(grown.get(&key), seen.get(&key));
-    // A missing view scans as an error.
-    let other = b.study.join("none");
-    assert!(view::scan(&other).is_err());
+    let c = view::changes(&dir, &inputs, &seen).unwrap();
+    assert_eq!((c.inputs.as_slice(), c.other), (none, false));
+    assert_ne!(c.now, seen);
+    // A new modification time counts without a hash, even over the same bytes.
+    let seen = c.now;
+    let then = blob.metadata().unwrap().modified().unwrap();
+    set_mtime(&blob, then + std::time::Duration::from_secs(10));
+    let c = view::changes(&dir, &inputs, &seen).unwrap();
+    assert_eq!(c.inputs, ["data//a.txt"]);
+    assert!(!c.other);
+    // Same size, other bytes, the old time put back: only the ctime moved, and the hash
+    // differs.
+    let seen = c.now;
+    let then = blob.metadata().unwrap().modified().unwrap();
+    tick();
+    std::fs::write(&blob, "alphA").unwrap();
+    set_mtime(&blob, then);
+    let c = view::changes(&dir, &inputs, &seen).unwrap();
+    assert_eq!(c.inputs, ["data//a.txt"]);
+    // A file that is no longer the blob counts, even with the same bytes and time.
+    let fresh = bench();
+    let a = stored(&fresh, "a.txt", "alpha");
+    let inputs = [("data/a.txt".to_string(), a)];
+    let dir = view::build(&fresh.store, &fresh.study, &inputs).unwrap();
+    let seen = view::verify(&dir, &inputs).unwrap();
+    let file = dir.join("data/a.txt");
+    let then = file.metadata().unwrap().modified().unwrap();
+    std::fs::set_permissions(dir.join("data"), PermissionsExt::from_mode(0o755)).unwrap();
+    std::fs::rename(&file, fresh.dir.path().join("old-link")).unwrap();
+    std::fs::write(&file, "alpha").unwrap();
+    set_mtime(&file, then);
+    let c = view::changes(&dir, &inputs, &seen).unwrap();
+    assert_eq!(c.inputs, ["data/a.txt"]);
+    // An entry that is not an input file counts as the view's own change.
+    let seen = c.now;
+    std::fs::set_permissions(&dir, PermissionsExt::from_mode(0o755)).unwrap();
+    std::fs::write(dir.join("extra"), "").unwrap();
+    let c = view::changes(&dir, &inputs, &seen).unwrap();
+    assert_eq!((c.inputs.as_slice(), c.other), (none, true));
+    // A missing view is an error.
+    assert!(view::changes(&fresh.study.join("none"), &inputs, &seen).is_err());
 }

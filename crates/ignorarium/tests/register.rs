@@ -349,8 +349,149 @@ impl<R: BufRead, F: FnOnce()> BufRead for Hooked<R, F> {
     }
 }
 
+/// Run `register` on `spec` with `hook` called at the approval prompt.
+fn at_prompt(f: &Fixture, spec: &Path, hook: impl FnOnce()) -> (Result<Done, CliError>, String) {
+    let mut input = Hooked {
+        inner: Cursor::new(answer(spec).into_bytes()),
+        hook: Some(hook),
+    };
+    let mut out = Vec::new();
+    let r = register::run(spec, &f.home, &mut input, &mut out, true);
+    (r, String::from_utf8(out).unwrap())
+}
+
+/// The names in the box's studies folder.
+fn studies(f: &Fixture) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(f.home.root.join("studies"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Nothing is registered under `my-study`, and only one staging folder is left, which the
+/// error names.
+fn only_staging_left(f: &Fixture, e: &CliError) {
+    let names = studies(f);
+    assert_eq!(names.len(), 1, "{names:?}");
+    assert!(
+        names[0].starts_with(".my-study.") && names[0].ends_with(".tmp"),
+        "{names:?}"
+    );
+    assert!(
+        e.msg.contains(&names[0]),
+        "names the staging folder: {}",
+        e.msg
+    );
+    assert!(e.msg.contains("the study was not registered"), "{}", e.msg);
+    assert!(!f.home.study_dir("my-study").exists());
+    assert!(leaves(&f.home.root.join("planlog")).is_empty());
+}
+
 #[test]
-fn an_input_changed_after_the_check_is_refused_and_nothing_is_written() {
+fn a_payload_edited_at_the_prompt_is_refused_and_the_id_stays_free() {
+    let (f, spec) = setup("numeric-ablation", same);
+    let run = spec.parent().unwrap().join("payload/run");
+    let shown = common::PAYLOAD.to_string();
+    let (r, out) = at_prompt(&f, &spec, || {
+        common::write_exec(&run, &format!("{shown}# edited\n"))
+    });
+    assert!(out.contains(PROMPT), "{out}");
+    let e = r.unwrap_err();
+    assert_eq!(e.code, 1);
+    assert!(
+        e.msg.contains("the payload changed after the check"),
+        "{}",
+        e.msg
+    );
+    only_staging_left(&f, &e);
+    // The id is free: with the payload back, the same plan registers.
+    common::write_exec(&run, &shown);
+    let (r, out) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap().code, 0, "{out}");
+    assert_eq!(leaves(&f.home.root.join("planlog")).len(), 1);
+}
+
+#[test]
+fn a_fault_before_publish_leaves_only_the_staging_folder() {
+    use std::os::unix::fs::PermissionsExt;
+    let (f, spec) = setup("numeric-ablation", same);
+    let helper = spec.parent().unwrap().join("payload/helper.sh");
+    std::fs::write(&helper, "echo helper\n").unwrap();
+    // The copy cannot read the helper: an I/O fault while the study is staged.
+    let locked = helper.clone();
+    let (r, _) = at_prompt(&f, &spec, move || {
+        std::fs::set_permissions(&locked, PermissionsExt::from_mode(0o000)).unwrap()
+    });
+    let e = r.unwrap_err();
+    assert_eq!(e.code, 2, "{}", e.msg);
+    only_staging_left(&f, &e);
+    std::fs::set_permissions(&helper, PermissionsExt::from_mode(0o644)).unwrap();
+    let (r, out) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap().code, 0, "{out}");
+}
+
+#[test]
+fn a_study_folder_made_during_the_prompt_is_refused_at_publish() {
+    type Make = fn(&Path);
+    let cases: [(&str, Make); 2] = [
+        ("a folder with a file", |d| {
+            std::fs::create_dir(d).unwrap();
+            std::fs::write(d.join("x"), "").unwrap();
+        }),
+        ("a file", |d| std::fs::write(d, "").unwrap()),
+    ];
+    for (name, make) in cases {
+        let (f, spec) = setup("numeric-ablation", same);
+        let dir = f.home.study_dir("my-study");
+        let (r, _) = at_prompt(&f, &spec, || make(&dir));
+        let e = r.unwrap_err();
+        assert_eq!(e.code, 1, "{name}");
+        assert!(e.msg.starts_with("E-REG-002: "), "{name}: {}", e.msg);
+        // No plan leaf: the rename is the claim, and it was lost.
+        assert!(leaves(&f.home.root.join("planlog")).is_empty(), "{name}");
+        assert!(!dir.join("records.jsonl").exists(), "{name}");
+    }
+    // An empty folder there holds nothing, so the publish replaces it.
+    let (f, spec) = setup("numeric-ablation", same);
+    let dir = f.home.study_dir("my-study");
+    let (r, out) = at_prompt(&f, &spec, || std::fs::create_dir(&dir).unwrap());
+    assert_eq!(r.unwrap().code, 0, "{out}");
+    assert!(dir.join("records.jsonl").is_file());
+    assert_eq!(studies(&f), ["my-study"]);
+}
+
+#[test]
+fn a_store_fault_at_register_is_an_io_error_not_a_changed_input() {
+    let (f, spec) = setup("numeric-ablation", same);
+    // The import log cannot be appended: it is a folder.
+    std::fs::create_dir_all(f.home.root.join("store/imports.jsonl")).unwrap();
+    let (r, _) = go(&f, &spec, &answer(&spec), true);
+    let e = r.unwrap_err();
+    assert_eq!(e.code, 2, "{}", e.msg);
+    assert!(e.msg.starts_with("store: "), "{}", e.msg);
+    assert!(e.msg.contains("imports.jsonl"), "{}", e.msg);
+    assert!(!e.msg.contains("changed"), "{}", e.msg);
+    assert!(!f.home.study_dir("my-study").exists());
+}
+
+#[test]
+fn the_copy_modes_do_not_depend_on_the_umask() {
+    // Run the copy test again in a child whose umask takes every group and other bit.
+    let name = "register_copies_the_payload_folder_and_records_its_hash";
+    let out = std::process::Command::new("sh")
+        .args(["-c", "umask 077 && exec \"$0\" \"$@\""])
+        .arg(std::env::current_exe().unwrap())
+        .args([name, "--exact"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && text.contains(" 1 passed"), "{text}");
+}
+
+#[test]
+fn an_input_changed_after_the_check_is_refused_and_the_study_is_not_registered() {
     type Edit = fn(&Path);
     let edits: [(&str, Edit); 3] = [
         ("changed", |p| std::fs::write(p, "other").unwrap()),
@@ -370,6 +511,11 @@ fn an_input_changed_after_the_check_is_refused_and_nothing_is_written() {
         let e = register::run(&spec, &f.home, &mut input, &mut out, true).unwrap_err();
         assert_eq!(e.code, 1, "{name}");
         assert!(e.msg.contains("example.txt"), "{name}: {}", e.msg);
+        assert!(
+            e.msg.ends_with("; the study was not registered"),
+            "{name}: {}",
+            e.msg
+        );
         assert!(!f.home.study_dir("my-study").exists(), "{name}");
         assert!(leaves(&f.home.root.join("planlog")).is_empty(), "{name}");
     }
@@ -528,12 +674,29 @@ fn register_copies_the_payload_folder_and_records_its_hash() {
 
 #[test]
 fn register_refuses_without_a_payload_folder() {
+    use std::os::unix::fs::PermissionsExt;
     type Edit = fn(&Path);
-    let cases: [(&str, Edit, &str); 3] = [
+    let cases: [(&str, Edit, &str); 5] = [
         (
             "no folder",
             |w| std::fs::rename(w.join("payload"), w.join("payload.off")).unwrap(),
             "Found: the study root has no payload folder.",
+        ),
+        (
+            "a file named payload",
+            |w| {
+                std::fs::rename(w.join("payload"), w.join("payload.off")).unwrap();
+                std::fs::write(w.join("payload"), "").unwrap();
+            },
+            "Found: payload is a file, not a folder.",
+        ),
+        (
+            "a run file that is not executable",
+            |w| {
+                let p = PermissionsExt::from_mode(0o644);
+                std::fs::set_permissions(w.join("payload/run"), p).unwrap();
+            },
+            "Found: payload/run is not executable.",
         ),
         (
             "no run file",

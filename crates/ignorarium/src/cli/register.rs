@@ -7,21 +7,22 @@ use crate::canon::to_canonical;
 use crate::derived::{REGISTER, Register};
 use crate::diag::render_human;
 use crate::estimate::defaults_json;
-use crate::files::{WriteOnceError, write_once};
+use crate::files::{self, WriteOnceError, write_once};
 use crate::home::Home;
 use crate::inputs::{self, Found};
 use crate::payload::{self, PayloadError};
 use crate::planlog::store::{Leaf, PlanLog};
 use crate::planlog::{commitment, family};
 use crate::records::{self, RecordDraft};
-use crate::rules::{self, input_path};
+use crate::rules;
 use crate::spec::{self, model::Spec};
 use crate::store::Store;
 use crate::{keys, time};
 use ed25519_dalek::SigningKey;
 use serde_json::Value;
 use std::io::{BufRead, IsTerminal, Write};
-use std::path::Path;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 
 const PROMPT: &str = "Type the first 8 characters of the spec hash to approve:";
 
@@ -117,9 +118,11 @@ pub fn run_stdio(ctx: &Ctx, spec_path: &Path) -> Result<Done, CliError> {
     )
 }
 
-/// Every step that can refuse runs before the study folder exists: the rules, the payload
-/// hash and its pin, the approval, the input imports. Then the folder, the spec files, the
-/// payload copy, the plan leaf and the `register` record.
+/// Nothing named `studies/<id>` exists until every local write has succeeded. Every check
+/// that can refuse comes first: the rules, the payload hash and its pin, the approval, the
+/// input imports, the spec re-read and the log tails. Then the study is staged under a
+/// temporary name and published by one rename, and only the plan leaf and the `register`
+/// record are appended after it.
 pub fn run(
     spec_path: &Path,
     home: &Home,
@@ -188,28 +191,40 @@ fn label_of(a: &Assessed) -> &str {
 }
 
 /// The tree hash of the payload folder under the study root. E-REG-003 when there is no
-/// folder or no `payload/run`, the folder holds a link or another non-regular file, or
-/// `pins.payload` is set to another hash.
+/// folder, `payload` is a file, there is no executable `payload/run`, the folder holds a
+/// link or another non-regular file, or `pins.payload` is set to another hash.
 fn payload_hash(root: &Path, spec: &Spec) -> Result<String, CliError> {
-    let hash = payload::tree_hash(&root.join(payload::DIR)).map_err(|e| match e {
-        PayloadError::Io(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            refusal("E-REG-003", "the study root has no payload folder")
+    let dir = root.join(payload::DIR);
+    let found = |what: &str| refusal("E-REG-003", what);
+    match dir.symlink_metadata() {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(found("the study root has no payload folder"));
         }
+        Ok(m) if m.is_file() => return Err(found("payload is a file, not a folder")),
+        _ => {}
+    }
+    let hash = payload::tree_hash(&dir).map_err(|e| match e {
         PayloadError::Io(e) => io("payload", e),
-        e => refusal("E-REG-003", &e.to_string()),
+        e => found(&e.to_string()),
     })?;
+    let run = dir.join("run").metadata().map_err(|e| io("payload", e))?;
+    if run.permissions().mode() & 0o111 == 0 {
+        return Err(found("payload/run is not executable"));
+    }
     let pin = spec.pins.payload.trim();
     let pin = pin.strip_prefix("sha256:").unwrap_or(pin);
     if !pin.is_empty() && pin != hash {
-        let found = format!("pins.payload is {pin}, and the folder hashes to {hash}");
-        return Err(refusal("E-REG-003", &found));
+        return Err(found(&format!(
+            "pins.payload is {pin}, and the folder hashes to {hash}"
+        )));
     }
     Ok(hash)
 }
 
 /// Bring every input into the store, and check that each still holds the bytes the check
-/// hashed: a file under the root is imported, in one streamed read, with a signed import
-/// record; a stored blob is hashed again in full, once. A pin must name the stored copy.
+/// hashed. A pin the store knows names a blob, which is hashed again in full, once. Any
+/// other input is the regular file under the root, imported in one streamed read and signed
+/// the first time the store sees it. A store fault is an I/O error, not a changed input.
 /// Returns the path and digest of each input present.
 fn hold_inputs(
     store: &Store,
@@ -220,29 +235,29 @@ fn hold_inputs(
     let source = format!("register {}", spec.study.id);
     let mut held = Vec::new();
     for (input, (path, checked)) in spec.inputs.iter().zip(&a.input_hashes) {
-        let changed = || {
-            CliError::refuse(format!(
-                "input {path} changed or became unreadable since the check; nothing was written"
-            ))
-        };
-        let now = match inputs::resolve(store, &a.root, path, &input.sha256) {
-            Found::Stored { digest, meta } => {
-                let blob = store.path(&digest).map_err(|_| changed())?;
+        let now = match inputs::stored(store, &input.sha256) {
+            Some(Found::Stored { digest, meta }) => {
+                let blob = store.path(&digest).map_err(|e| io("store", e))?;
                 let same = file_digest(&blob).ok().flatten().as_ref() == Some(&digest);
                 same.then_some((digest, meta.normalized_sha256))
             }
-            Found::File { .. } => {
-                let file = input_path(&a.root, path).ok_or_else(changed)?;
-                let (digest, meta) = store
-                    .import_signed(&file, key, &source)
-                    .map_err(|_| changed())?;
-                Some((digest, meta.normalized_sha256))
-            }
-            Found::Missing | Found::Unsafe | Found::Damaged(_) => None,
+            Some(_) => None,
+            None => match inputs::regular_file(&a.root, path) {
+                Some(file) => {
+                    let (digest, meta) = store
+                        .import_signed(&file, key, &source)
+                        .map_err(|e| io("store", e))?;
+                    Some((digest, meta.normalized_sha256))
+                }
+                None => None,
+            },
         };
-        let pinned = input.sha256.is_empty() || now.as_ref().is_some_and(|h| h.0 == input.sha256);
-        if now != *checked || !pinned {
-            return Err(changed());
+        // A pin cannot differ here: E-HSH-001 tied the checked hash to it.
+        if now != *checked {
+            return Err(CliError::refuse(format!(
+                "input {path} changed or became unreadable since the check; \
+                 the study was not registered"
+            )));
         }
         if let Some((digest, _)) = now {
             held.push((path.clone(), digest));
@@ -251,12 +266,12 @@ fn hold_inputs(
     Ok(held)
 }
 
-/// Load the key and check both log tails, then write the study folder, the payload copy, the
-/// plan leaf and the `register` record. A fault in the key or a log must not leave a folder
-/// that burns the id. Another process can register the same id between the check and the
-/// `create_dir`; the `create_dir` refuses it. The log appends are not atomic with the
-/// earlier-use lookup in `check`; v0 accepts that. `check_tails` runs before `append` takes
-/// its lock.
+/// Re-read the spec and check both log tails, stage and publish the study folder, then
+/// append the plan leaf and the `register` record. Another process can register the same id
+/// between the check and the publish; the rename refuses it, before any leaf is appended. A
+/// fault after the rename is an I/O fault in an append and leaves a folder without a record.
+/// The log appends are not atomic with the earlier-use lookup in `check`; v0 accepts that.
+/// `check_tails` runs before `append` takes its lock.
 fn store(
     spec_path: &Path,
     home: &Home,
@@ -282,30 +297,15 @@ fn store(
         .and_then(|l| l.check_tails().map(|()| l))
         .map_err(|e| io(log, e))?;
     let dir = home.study_dir(id);
-    let mut mk = std::fs::DirBuilder::new();
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut mk, 0o700);
-    mk.create(&dir).map_err(|e| match e.kind() {
-        std::io::ErrorKind::AlreadyExists => refusal("E-REG-002", ""),
-        _ => io("cannot create the study folder", e),
+    let (staged, salt) = stage(&dir, a, &bytes, &canon, frozen)?;
+    std::fs::rename(&staged, &dir).map_err(|e| {
+        let kept = kept(&staged);
+        match e.raw_os_error() {
+            Some(libc::ENOTEMPTY | libc::EEXIST | libc::ENOTDIR) => refusal("E-REG-002", &kept),
+            _ => io("cannot publish the study folder", format!("{e}; {kept}")),
+        }
     })?;
-    let mut salt = [0u8; 32];
-    getrandom::fill(&mut salt).map_err(|e| io("random bytes", e))?;
-    put(&dir, "spec.toml", &bytes, 0o644)?;
-    put(&dir, "spec.json", &canon, 0o644)?;
-    put(&dir, "spec.hash", format!("{}\n", a.hash).as_bytes(), 0o644)?;
-    put(&dir, "salt", &salt, 0o600)?;
-    // The folder now exists: a payload edited since the check leaves it without a record.
-    let copied = payload::snapshot(&a.root, &dir).map_err(|e| match e {
-        PayloadError::Io(e) => io("payload copy", e),
-        e => refusal("E-REG-003", &e.to_string()),
-    })?;
-    if copied != frozen.payload {
-        return Err(CliError::refuse(format!(
-            "the payload changed after the check; the study folder of {id} has no register record"
-        )));
-    }
-
+    // Only appends from here: a lost rename above appended no leaf.
     let data_hashes = a
         .input_hashes
         .iter()
@@ -345,6 +345,59 @@ fn store(
     )
     .map_err(|e| io("records.jsonl", e))?;
     Ok(leaf)
+}
+
+/// What a refusal after staging says: no study, and where the staged files are.
+fn kept(staged: &Path) -> String {
+    format!(
+        "the study was not registered, and {} is kept",
+        staged.display()
+    )
+}
+
+/// Write the spec files, the salt and the sealed payload copy into a new private folder
+/// beside the study folder (`studies/.<id>.<pid>.<random>.tmp`), and check that the copy is
+/// the payload approved at the prompt. A study id never starts with `.`, and no reader
+/// takes a folder without `records.jsonl` for a study. Returns the folder and the salt.
+fn stage(
+    dir: &Path,
+    a: &Assessed,
+    bytes: &[u8],
+    canon: &[u8],
+    frozen: &Frozen,
+) -> Result<(PathBuf, [u8; 32]), CliError> {
+    let staged = files::temp_beside(dir).map_err(|e| io("staging folder", e))?;
+    let mut mk = std::fs::DirBuilder::new();
+    std::os::unix::fs::DirBuilderExt::mode(&mut mk, 0o700);
+    mk.create(&staged).map_err(|e| io("staging folder", e))?;
+    let fill = || -> Result<[u8; 32], CliError> {
+        let mut salt = [0u8; 32];
+        getrandom::fill(&mut salt).map_err(|e| io("random bytes", e))?;
+        put(&staged, "spec.toml", bytes, 0o644)?;
+        put(&staged, "spec.json", canon, 0o644)?;
+        put(
+            &staged,
+            "spec.hash",
+            format!("{}\n", a.hash).as_bytes(),
+            0o644,
+        )?;
+        put(&staged, "salt", &salt, 0o600)?;
+        let copied = payload::snapshot(&a.root, &staged).map_err(|e| match e {
+            PayloadError::Io(e) => io("payload copy", e),
+            e => refusal("E-REG-003", &e.to_string()),
+        })?;
+        if copied != frozen.payload {
+            return Err(CliError::refuse("the payload changed after the check"));
+        }
+        Ok(salt)
+    };
+    match fill() {
+        Ok(salt) => Ok((staged, salt)),
+        Err(mut e) => {
+            e.msg = format!("{}; {}", e.msg, kept(&staged));
+            Err(e)
+        }
+    }
 }
 
 #[cfg(test)]

@@ -14,7 +14,6 @@ use crate::machine::{self, Machine};
 use crate::payload::{self, PayloadError};
 use crate::planlog::store::{Leaf, LogError, PlanLog};
 use crate::records::{self, RecordDraft, RecordError, VerifyError};
-use crate::rules::input_path;
 use crate::schedule::{self, Row, Schedule, ScheduleError};
 use crate::spec::model::{Role, Spec};
 use crate::store::Store;
@@ -39,8 +38,6 @@ const PAUSE_REQUESTED: &str = "a pause was requested";
 const EVENT_LOG: &str = "the event log cannot be written";
 const INTERRUPTED: &str = "interrupted by a signal";
 const REAPED: &str = "SIGCHLD is ignored; the box cannot see a row end";
-/// The payload, relative to the study folder.
-const PAYLOAD: &str = "payload/run";
 /// The recipe folder, relative to the study folder.
 const RECIPE: &str = "env";
 /// The environment name of a run on the host root.
@@ -58,7 +55,9 @@ pub struct RunPlan {
     /// The input view rows see: `<study>/in`, one link per input present.
     pub view: PathBuf,
     /// The scan of the view that `prepare` took before every file in it hashed to its digest.
-    pub view_seen: view::Scan,
+    /// A later scan that differs only in ctimes over the same bytes replaces it, so a chmod
+    /// or another study's link to a blob costs one full hash, not one per attempt.
+    pub view_seen: RefCell<view::Scan>,
     pub payload: PathBuf,
     pub payload_sha256: String,
     /// The environment root rows run in; `None` is the host root.
@@ -304,7 +303,7 @@ pub fn prepare_with(
         key,
         inputs,
         view,
-        view_seen,
+        view_seen: RefCell::new(view_seen),
         payload,
         payload_sha256,
         rootfs,
@@ -380,11 +379,12 @@ pub fn environment(
 /// The payload's absolute `run` path and the hash of its whole folder. A link anywhere in the
 /// folder is refused.
 fn read_payload(dir: &Path) -> Result<(PathBuf, String), RunError> {
-    let hash = payload::tree_hash(&dir.join("payload")).map_err(|e| match e {
+    let folder = dir.join(payload::DIR);
+    let hash = payload::tree_hash(&folder).map_err(|e| match e {
         PayloadError::Unsafe(p) => RunError::Unsafe(p),
         e => RunError::NoPayload(e.to_string()),
     })?;
-    let path = std::path::absolute(dir.join(PAYLOAD)).map_err(io)?;
+    let path = std::path::absolute(folder.join("run")).map_err(io)?;
     Ok((path, hash))
 }
 
@@ -408,8 +408,9 @@ fn view_error(e: ViewError) -> RunError {
 /// Each input's hashes. A registered input comes from its stored copy, which must still be
 /// in the store with its size. An input absent at registration is read from the study root
 /// the register record names, never from the box's copy of the study, and imported when it
-/// is there now; it is then late data for `gate_late_data`. A pin always resolves at
-/// registration (E-HSH-001), so such an input is unpinned.
+/// is there now (signed the first time the store sees it); it is then late data for
+/// `gate_late_data`. A pin always resolves at registration (E-HSH-001), so such an input is
+/// unpinned.
 fn held_inputs(
     store: &Store,
     key: &SigningKey,
@@ -422,24 +423,21 @@ fn held_inputs(
     for i in &spec.inputs {
         let digest = register.inputs.iter().find(|(p, _)| *p == i.path);
         let hashes = match digest {
-            // The blob first: `resolve` reads a missing blob and a resized one alike.
+            // The blob first: the store reads a missing blob and a resized one alike.
             Some((path, digest)) if !store.has(digest) => {
                 return Err(RunError::InputMissing(path.clone()));
             }
-            Some((path, digest)) => match inputs::resolve(store, root, path, digest) {
-                Found::Stored { digest, meta } => Some((digest, meta.normalized_sha256)),
-                Found::Damaged(_) => return Err(RunError::InputChanged(path.clone())),
-                _ => return Err(RunError::InputMissing(path.clone())),
+            Some((path, digest)) => match inputs::stored(store, digest) {
+                Some(Found::Stored { digest, meta }) => Some((digest, meta.normalized_sha256)),
+                Some(_) => return Err(RunError::InputChanged(path.clone())),
+                None => return Err(RunError::InputMissing(path.clone())),
             },
-            None => match inputs::resolve(store, root, &i.path, &i.sha256) {
-                Found::Stored { digest, meta } => Some((digest, meta.normalized_sha256)),
-                Found::File { .. } => {
-                    let file = input_path(root, &i.path)
-                        .ok_or_else(|| RunError::Unsafe(i.path.clone()))?;
+            None => match inputs::regular_file(root, &i.path) {
+                Some(file) => {
                     let (digest, meta) = store.import_signed(&file, key, &source).map_err(io)?;
                     Some((digest, meta.normalized_sha256))
                 }
-                Found::Missing | Found::Unsafe | Found::Damaged(_) => None,
+                None => None,
             },
         };
         all.push((i.path.clone(), hashes));
@@ -448,32 +446,34 @@ fn held_inputs(
 }
 
 /// What no longer matches what `prepare` saw, as a pause reason. The payload is hashed in
-/// full, and an unreadable or linked payload counts as changed. The input view is only
-/// scanned: a file whose device, inode, size or modification time differs is named; an entry
-/// added or removed elsewhere names the view. A large input is hashed in full at `prepare`
-/// only.
+/// full, and an unreadable or linked payload counts as changed. The input view is scanned
+/// (`view::changes`): an input whose file changed is named, and an entry added or removed
+/// elsewhere names the view. A large input is read in full only at `prepare`, or when its
+/// ctime alone moved.
 fn stale(plan: &RunPlan, dir: &Path) -> Option<String> {
     let mut changed = Vec::new();
+    let mut faults = Vec::new();
     if !read_payload(dir).is_ok_and(|(_, h)| h == plan.payload_sha256) {
-        changed.push("payload");
+        changed.push("payload".to_string());
     }
-    let now = view::scan(&plan.view).unwrap_or_default();
-    if now != plan.view_seen {
-        let named: Vec<&str> = plan
-            .inputs
-            .iter()
-            .filter(|(p, h)| {
-                let k = view::key(p);
-                h.is_some() && now.get(&k) != plan.view_seen.get(&k)
-            })
-            .map(|(p, _)| p.as_str())
-            .collect();
-        if named.is_empty() {
-            changed.push("the input view");
+    let mut seen = plan.view_seen.borrow_mut();
+    match view::changes(&plan.view, &present(&plan.inputs), &seen) {
+        Err(e) => faults.push(format!("the input view cannot be read: {e}")),
+        Ok(c) if c.inputs.is_empty() && !c.other => *seen = c.now,
+        Ok(c) => {
+            changed.extend(c.inputs);
+            if c.other {
+                changed.push("the input view".into());
+            }
         }
-        changed.extend(named);
     }
-    (!changed.is_empty()).then(|| format!("{} changed after the run began", changed.join(", ")))
+    if !changed.is_empty() {
+        faults.insert(
+            0,
+            format!("{} changed after the run began", changed.join(", ")),
+        );
+    }
+    (!faults.is_empty()).then(|| faults.join("; "))
 }
 
 /// The stored spec with defaults filled, its hash bytes, and its hash text.
@@ -728,10 +728,10 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
     Ok(RunStatus::Done)
 }
 
-/// Before each attempt: the budget has room, the payload and inputs are the bytes the run
-/// began with, the box can see a child end, and no signal arrived. Otherwise the run pauses
-/// and the attempt never starts. The signal comes last, so one that lands during the
-/// re-hash still counts.
+/// Before each attempt: the budget has room, the payload copy and the input view are as
+/// `prepare` saw them (see `stale`), the box can see a child end, and no signal arrived.
+/// Otherwise the run pauses and the attempt never starts. The signal comes last, so one
+/// that lands during the re-hash still counts.
 fn gate(plan: &RunPlan, dir: &Path, books: &mut Books) -> Result<Option<Halt>, RunError> {
     let budget = books.check(plan, dir)?;
     Ok(budget

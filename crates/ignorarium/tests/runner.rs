@@ -374,19 +374,42 @@ fn a_missing_blob_refuses_prepare() {
 }
 
 #[test]
-fn each_attempt_compares_stamps_and_prepare_hashes_in_full() {
+fn a_same_size_rewrite_pauses_the_run() {
     let lab = lab();
-    // Row 0 rewrites one byte of the blob in place and puts its old time back: the size,
-    // the time and the file stay the same, so the check before each attempt sees nothing.
+    // Row 0 rewrites one byte of the blob in place, one clock tick after the scan: the size
+    // stays, the time moves.
     let blob = blob_of(&lab, b"calibration");
     let edit = edits_in_row_0(&format!(
-        "b='{b}'; touch -r \"$b\" \"$IGNORARIUM_OUT/../t\"; chmod u+w \"$b\"; \
+        "sleep 0.03; b='{b}'; chmod u+w \"$b\"; printf C | dd of=\"$b\" bs=1 count=1 conv=notrunc 2>/dev/null",
+        b = blob.display()
+    ));
+    common::with_payload(&lab, "rewrite", &edit);
+    pauses_after_row_0(
+        &lab,
+        "rewrite",
+        "data/example.txt changed after the run began",
+    );
+    assert_eq!(std::fs::read(&blob).unwrap(), b"Calibration");
+}
+
+#[test]
+fn a_same_size_rewrite_with_its_old_time_put_back_still_pauses() {
+    let lab = lab();
+    // Row 0 rewrites one byte in place and puts the old time back: only the ctime moves,
+    // which no unprivileged writer can set back, so the file is hashed in full.
+    let blob = blob_of(&lab, b"calibration");
+    let edit = edits_in_row_0(&format!(
+        "sleep 0.03; b='{b}'; touch -r \"$b\" \"$IGNORARIUM_OUT/../t\"; chmod u+w \"$b\"; \
          printf C | dd of=\"$b\" bs=1 count=1 conv=notrunc 2>/dev/null; \
          touch -r \"$IGNORARIUM_OUT/../t\" \"$b\"",
         b = blob.display()
     ));
     common::with_payload(&lab, "stamp", &edit);
-    assert_eq!(run(&plan_of(&lab, "stamp")).unwrap(), RunStatus::Done);
+    pauses_after_row_0(
+        &lab,
+        "stamp",
+        "data/example.txt changed after the run began",
+    );
     assert_eq!(std::fs::read(&blob).unwrap(), b"Calibration");
     // A new run hashes every input once and refuses the changed one.
     let err = err_of(&lab, "stamp");
@@ -394,6 +417,43 @@ fn each_attempt_compares_stamps_and_prepare_hashes_in_full() {
         matches!(&err, RunError::InputChanged(p) if p == "data/example.txt"),
         "{err}"
     );
+}
+
+#[test]
+fn a_mode_change_on_a_blob_does_not_pause_the_run() {
+    let lab = lab();
+    // Only the ctime moves; the file is hashed once and its bytes are the same.
+    let blob = blob_of(&lab, b"calibration");
+    let edit = edits_in_row_0(&format!("chmod u+w '{}'", blob.display()));
+    common::with_payload(&lab, "chmod", &edit);
+    assert_eq!(run(&plan_of(&lab, "chmod")).unwrap(), RunStatus::Done);
+    assert_eq!(rows_of(&lab, "chmod").len(), 6);
+}
+
+#[test]
+fn a_name_that_is_not_utf8_added_to_the_view_pauses_the_run() {
+    let lab = lab();
+    let edit = edits_in_row_0(
+        "chmod u+w \"$IGNORARIUM_IN\"; printf x > \"$IGNORARIUM_IN/$(printf '\\377')\"",
+    );
+    common::with_payload(&lab, "odd-name", &edit);
+    pauses_after_row_0(
+        &lab,
+        "odd-name",
+        "the input view changed after the run began",
+    );
+}
+
+#[test]
+fn a_view_that_cannot_be_read_pauses_with_the_cause() {
+    let lab = lab();
+    let edit = edits_in_row_0("mv \"$IGNORARIUM_IN\" \"$IGNORARIUM_IN.gone\"");
+    common::with_payload(&lab, "no-view", &edit);
+    let why = format!(
+        "the input view cannot be read: {}",
+        std::io::Error::from_raw_os_error(2)
+    );
+    pauses_after_row_0(&lab, "no-view", &why);
 }
 
 #[test]
@@ -424,6 +484,14 @@ fn a_late_unpinned_input_is_read_from_the_root_and_gated() {
     assert_eq!(recs.len(), 1);
     assert_eq!(recs[0].body["source"], "run late-root");
     assert_eq!(recs[0].body["digest"], hashes.0.as_str());
+    // A resume imports the same file again and signs no second record.
+    plan_of(&lab, "late-root");
+    assert_eq!(
+        records::read_all(&imports, &key.verifying_key())
+            .unwrap()
+            .len(),
+        1
+    );
     // Gated as late data: one leaf under the study's own label.
     let log = PlanLog::open(&lab.home.root.join("planlog")).unwrap();
     let uses = log.uses(&hashes.0, &hashes.1).unwrap();

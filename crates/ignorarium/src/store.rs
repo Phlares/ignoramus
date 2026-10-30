@@ -140,6 +140,13 @@ impl Store {
 
     /// `import` with another limit for the normalized hash.
     pub fn import_within(&self, file: &Path, limit: u64) -> Result<(String, Meta), StoreError> {
+        let (digest, meta) = self.stream_in(file, limit)?;
+        self.write_meta(&digest, &meta)?;
+        Ok((digest, meta))
+    }
+
+    /// The blob of `file` in the store, and its `Meta`, not yet written.
+    fn stream_in(&self, file: &Path, limit: u64) -> Result<(String, Meta), StoreError> {
         let kind = fs::symlink_metadata(file)?.file_type();
         if kind.is_symlink() {
             return Err(StoreError::Link);
@@ -163,23 +170,45 @@ impl Store {
             size: seen.size,
             normalized_sha256: file_hashes_within(&seen.head, limit).1,
         };
-        let dir = self.root.join("meta");
-        make_private_dir(&dir, false, true)?;
-        let bytes = serde_json::to_vec(&meta).map_err(io::Error::other)?;
-        files::write_once(&dir.join(format!("{digest}.json")), &bytes, MODE)?;
         Ok((digest, meta))
     }
 
-    /// `import`, then one signed `import` record in `imports.jsonl` that names `source` and
-    /// the file's name, never its path. Every way a blob enters the store as an input
-    /// leaves this record.
+    fn write_meta(&self, digest: &str, meta: &Meta) -> Result<(), StoreError> {
+        let dir = self.root.join("meta");
+        make_private_dir(&dir, false, true)?;
+        let bytes = serde_json::to_vec(meta).map_err(io::Error::other)?;
+        files::write_once(&dir.join(format!("{digest}.json")), &bytes, MODE)?;
+        Ok(())
+    }
+
+    /// `import`, signing one `import` record (see `sign_import`) when the store did not
+    /// know the blob as an input yet, so every stored input has the record of how it came
+    /// in, and a resume that imports the same file again adds none. The record is signed
+    /// before the meta is written: a crash between the two signs it again, never not at all.
     pub fn import_signed(
         &self,
         file: &Path,
         key: &SigningKey,
         source: &str,
     ) -> Result<(String, Meta), StoreError> {
-        let (digest, meta) = self.import(file)?;
+        let (digest, meta) = self.stream_in(file, NORMALIZE_LIMIT)?;
+        if self.meta(&digest)?.is_none() {
+            self.sign_import(key, &digest, &meta, source, file)?;
+        }
+        self.write_meta(&digest, &meta)?;
+        Ok((digest, meta))
+    }
+
+    /// One signed `import` record in `imports.jsonl` that names `source` and the file's
+    /// name, never its path.
+    pub fn sign_import(
+        &self,
+        key: &SigningKey,
+        digest: &str,
+        meta: &Meta,
+        source: &str,
+        file: &Path,
+    ) -> Result<(), StoreError> {
         let body = json!({
             "digest": digest, "size": meta.size,
             "normalized_sha256": meta.normalized_sha256,
@@ -193,7 +222,7 @@ impl Store {
         };
         records::append(&self.root.join("imports.jsonl"), key, draft)
             .map_err(|e| io::Error::other(format!("imports.jsonl: {e}")))?;
-        Ok((digest, meta))
+        Ok(())
     }
 
     /// The `Meta` of an imported blob, or `None` when the store has none for `digest`.

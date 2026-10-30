@@ -5,7 +5,7 @@ use crate::backend::output::file_digest;
 use crate::files;
 use crate::rules::input_path;
 use crate::store::Store;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -45,13 +45,25 @@ impl From<io::Error> for ViewError {
     }
 }
 
-/// What a stat shows of one file: enough to see that it changed without reading it.
+/// What a stat shows of one file. A new device, inode, size or modification time is a
+/// change. A new ctime alone (a chmod, another link to the blob, or a write whose old time
+/// was put back) calls for a full hash; no unprivileged writer can set the ctime back. File
+/// times come from a clock that ticks every few milliseconds, so the size also catches a
+/// write that lands in the same tick as the scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stamp {
     dev: u64,
     ino: u64,
     size: u64,
     mtime: (i64, i64),
+    ctime: (i64, i64),
+}
+
+impl Stamp {
+    fn differs_in_ctime_only(&self, other: &Stamp) -> bool {
+        let fixed = |s: &Stamp| (s.dev, s.ino, s.size, s.mtime);
+        fixed(self) == fixed(other)
+    }
 }
 
 /// One entry below a view.
@@ -67,7 +79,7 @@ pub enum Entry {
 pub type Scan = BTreeMap<String, Entry>;
 
 /// The path of an input below the view: its segments joined by `/`, empty ones dropped.
-pub fn key(path: &str) -> String {
+fn key(path: &str) -> String {
     path.split('/')
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
@@ -176,10 +188,57 @@ fn entry(m: &fs::Metadata) -> Entry {
             ino: m.ino(),
             size: m.size(),
             mtime: (m.mtime(), m.mtime_nsec()),
+            ctime: (m.ctime(), m.ctime_nsec()),
         })
     } else {
         Entry::Other
     }
+}
+
+/// What differs in a view from an earlier scan of it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Changes {
+    /// The scan taken now.
+    pub now: Scan,
+    /// The inputs, by path, whose file changed. A file whose stamp moved only in its ctime is
+    /// hashed in full and counts only when its bytes differ from its digest.
+    pub inputs: Vec<String>,
+    /// An entry other than an input file was added, removed or changed.
+    pub other: bool,
+}
+
+/// Scan `dir` and compare it with `seen`, without reading a file unless its ctime alone
+/// moved.
+pub fn changes(dir: &Path, inputs: &[(String, String)], seen: &Scan) -> io::Result<Changes> {
+    let now = scan(dir)?;
+    let mut changed = Vec::new();
+    let mut files = BTreeSet::new();
+    for (path, digest) in inputs {
+        let k = key(path);
+        let same = match (seen.get(&k), now.get(&k)) {
+            (Some(then), Some(at)) if then == at => true,
+            (Some(Entry::File(then)), Some(Entry::File(at))) if then.differs_in_ctime_only(at) => {
+                let bytes = file_digest(&dir.join(&k)).ok().flatten();
+                bytes.as_deref() == Some(digest.as_str())
+            }
+            _ => false,
+        };
+        if !same {
+            changed.push(path.clone());
+        }
+        files.insert(k);
+    }
+    let other = others(&now, &files) != others(seen, &files);
+    Ok(Changes {
+        now,
+        inputs: changed,
+        other,
+    })
+}
+
+/// The entries of `s` that are not input files.
+fn others<'a>(s: &'a Scan, files: &BTreeSet<String>) -> Vec<(&'a String, &'a Entry)> {
+    s.iter().filter(|(k, _)| !files.contains(*k)).collect()
 }
 
 /// Hash every input file in the view in full and return the scan taken before the hashing,

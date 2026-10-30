@@ -22,6 +22,13 @@ produces = "A complete spec.toml."
 command = "edit studies/<id>/spec.toml"
 
 [[step]]
+id = "payload"
+title = "Write the payload"
+does = "Put the program the box runs for each row in payload/ under the study root: an executable payload/run and the files it uses, with no links. It gets --condition, --unit and --repeat, reads its inputs from the folder in IGNORARIUM_IN and writes its results to the folder in IGNORARIUM_OUT. register copies the folder, so later edits do not reach the run."
+produces = "An executable payload/run, and the files it uses, under the study root."
+command = "edit studies/<id>/payload/run"
+
+[[step]]
 id = "import"
 title = "Import the data"
 does = "Optional. Add a data file to the box's store, then pin the input in the spec by the digest this prints. The store keeps the bytes, so the study does not depend on the file staying where it was."
@@ -46,7 +53,7 @@ command = "ignorarium review studies/<id>/spec.toml"
 id = "register"
 title = "Register the plan"
 does = "A person types the first 8 characters of the spec hash to approve. The plan is then frozen."
-produces = "A frozen copy of the spec and a signed entry in the plan log."
+produces = "A frozen copy of the spec and of the payload folder, every input in the box's store, and a signed entry in the plan log."
 command = "ignorarium register studies/<id>/spec.toml"
 
 [[step]]

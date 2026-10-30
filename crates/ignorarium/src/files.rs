@@ -232,6 +232,23 @@ pub fn temp_beside(path: &Path) -> io::Result<PathBuf> {
     )))
 }
 
+/// Stream `r` into a new file at `path` with exactly `mode`, whatever the umask, then
+/// publish it with `hard_link`, which fails if `path` exists. The temp file is always
+/// removed.
+#[cfg(unix)]
+pub fn create_from(path: &Path, r: &mut impl Read, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = temp_beside(path)?;
+    let out = create_new(&tmp, 0o600).and_then(|mut f| {
+        io::copy(r, &mut f)?;
+        f.set_permissions(fs::Permissions::from_mode(mode))?;
+        f.sync_all()?;
+        fs::hard_link(&tmp, path)
+    });
+    let _ = fs::remove_file(&tmp);
+    out
+}
+
 /// Set `dir` and every folder below it to mode 0o555, so no entry can be added, removed or
 /// renamed in them. Files keep their modes; links are not followed.
 #[cfg(unix)]

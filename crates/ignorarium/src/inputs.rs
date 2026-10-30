@@ -1,9 +1,10 @@
 //! Where an input comes from: the content store when the spec pins a stored digest, else
-//! the file under the study root. Every reader of an input goes through `resolve`.
+//! the file under the study root. Every reader of an input goes through this module:
+//! `resolve` to hash it in place, `stored` and `regular_file` to bring it into the store.
 use crate::prior::file_hashes;
 use crate::rules::{input_path, read_regular};
 use crate::store::{Meta, Store, StoreError};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Found {
@@ -24,12 +25,8 @@ pub enum Found {
 /// (a stat, not a read: the bytes are hashed at import and when a study registers); else
 /// the file at `path`.
 pub fn resolve(store: &Store, root: &Path, path: &str, sha256: &str) -> Found {
-    if !sha256.is_empty() {
-        match store.meta(sha256) {
-            Ok(Some(meta)) => return held(store, sha256, meta),
-            Ok(None) | Err(StoreError::BadDigest) => {}
-            Err(e) => return Found::Damaged(format!("the store's record cannot be read: {e}")),
-        }
+    if let Some(found) = stored(store, sha256) {
+        return found;
     }
     let Some(file) = input_path(root, path) else {
         return Found::Unsafe;
@@ -41,6 +38,27 @@ pub fn resolve(store: &Store, root: &Path, path: &str, sha256: &str) -> Found {
         }
         None => Found::Missing,
     }
+}
+
+/// `Stored` or `Damaged` when the store has a record for `sha256`; `None` when the pin is
+/// empty, not a digest, or unknown to the store.
+pub fn stored(store: &Store, sha256: &str) -> Option<Found> {
+    if sha256.is_empty() {
+        return None;
+    }
+    match store.meta(sha256) {
+        Ok(Some(meta)) => Some(held(store, sha256, meta)),
+        Ok(None) | Err(StoreError::BadDigest) => None,
+        Err(e) => Some(Found::Damaged(format!(
+            "the store's record cannot be read: {e}"
+        ))),
+    }
+}
+
+/// The regular file `path` names under `root`, without reading it; `None` when the path is
+/// unsafe or names no regular file.
+pub fn regular_file(root: &Path, path: &str) -> Option<PathBuf> {
+    input_path(root, path).filter(|p| p.metadata().is_ok_and(|m| m.is_file()))
 }
 
 fn held(store: &Store, digest: &str, meta: Meta) -> Found {

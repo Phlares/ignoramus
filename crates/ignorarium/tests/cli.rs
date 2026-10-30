@@ -59,14 +59,22 @@ fn guide_json_lists_every_step_with_its_output() {
     assert_eq!(
         ids,
         [
-            "brief", "template", "fill", "import", "check", "review", "register", "run", "status",
-            "report"
+            "brief", "template", "fill", "payload", "import", "check", "review", "register", "run",
+            "status", "report"
         ]
     );
     for s in steps {
         for key in ["title", "does", "produces", "command"] {
             assert!(!s[key].as_str().unwrap().is_empty(), "{s}");
         }
+    }
+    let produces = |id: &str| {
+        let s = steps.iter().find(|s| s["id"] == id).unwrap();
+        s["produces"].as_str().unwrap().to_string()
+    };
+    assert!(produces("payload").contains("payload/run"));
+    for part in ["payload", "store"] {
+        assert!(produces("register").contains(part), "{part}");
     }
     let report = steps.iter().find(|s| s["id"] == "report").unwrap();
     assert!(
@@ -87,7 +95,8 @@ fn guide_prints_steps_in_order() {
             .unwrap_or_else(|| panic!("{id}"))
     };
     assert!(at("brief") < at("template") && at("template") < at("report"));
-    assert!(at("fill") < at("import") && at("import") < at("check"));
+    assert!(at("fill") < at("payload") && at("payload") < at("import"));
+    assert!(at("import") < at("check"));
     assert!(out.contains("ignorarium check"));
 }
 

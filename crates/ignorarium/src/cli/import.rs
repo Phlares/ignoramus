@@ -29,9 +29,12 @@ pub fn run(ctx: &Ctx, source: &str, files: &[PathBuf]) -> Run {
     for f in files {
         // The record keeps the name; the path as given is printed, never signed.
         let shown = f.display().to_string();
-        let (digest, _) = store
-            .import_signed(f, &key, source)
-            .map_err(|e| CliError::usage(format!("{shown}: {e}")))?;
+        // Each call is its own provenance: a repeated import adds another record.
+        let fault = |e| CliError::usage(format!("{shown}: {e}"));
+        let (digest, meta) = store.import(f).map_err(fault)?;
+        store
+            .sign_import(&key, &digest, &meta, source, f)
+            .map_err(fault)?;
         out(&format!("{digest}  {shown}\n"))?;
     }
     Ok(Done::exit(0))
