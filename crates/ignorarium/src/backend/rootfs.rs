@@ -434,12 +434,16 @@ impl<'a> Tree<'a> {
     }
 
     /// Apply the whiteout `path` names, if it is one: `.wh.<name>` removes `<name>` beside it;
-    /// `.wh..wh..opq` empties its folder; at the root, `.wh.<kept>` removes that folder.
+    /// `.wh..wh..opq` empties its folder; at the root, `.wh.<kept>` removes that folder. A
+    /// `<name>` of `.` or `..` names no entry beside the whiteout, so it is no whiteout.
     fn whiteout(&mut self, path: &Path) -> Result<(), RootfsError> {
         let Some(base) = path.file_name().map(OsStrExt::as_bytes) else {
             return Ok(());
         };
-        let Some(named) = base.strip_prefix(WHITEOUT).filter(|n| !n.is_empty()) else {
+        let Some(named) = base
+            .strip_prefix(WHITEOUT)
+            .filter(|n| !matches!(*n, b"" | b"." | b".."))
+        else {
             return Ok(());
         };
         let parent = path.parent().unwrap_or(Path::new(""));

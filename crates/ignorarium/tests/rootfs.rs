@@ -891,6 +891,26 @@ fn a_root_level_whiteout_of_dot_or_dot_dot_removes_nothing() {
 }
 
 #[test]
+fn a_whiteout_of_dot_or_dot_dot_below_the_root_removes_nothing() {
+    let (_h, store) = store();
+    for name in ["usr/.wh..", "usr/.wh..."] {
+        let digest = image_of(
+            &store,
+            &[
+                layer_bytes(&[M::File("usr/a", "A"), M::File("etc/e", "E")]),
+                layer_bytes(&[M::File(name, ""), M::File("usr/b", "B")]),
+            ],
+        );
+        let root = from_store(&store, &digest).unwrap();
+        assert_eq!(
+            files_under(&root),
+            ["etc", "etc/e", "usr", "usr/a", "usr/b"],
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn a_name_with_a_newline_extracts_under_that_name() {
     let (_h, store) = store();
     let a = TempDir::new().unwrap();
