@@ -6,13 +6,15 @@ pub const CONTROL_PORT: u32 = 7201;
 pub const HOST_CID: u32 = 2;
 pub const GUEST_CID: u32 = 3;
 pub const MAX_FRAME: usize = 1 << 20;
-/// Where the payload sees the input and output trees.
+/// Where the payload sees the input and output trees, and its own folder.
 pub const GUEST_IN: &str = "/in";
 pub const GUEST_OUT: &str = "/out";
+pub const GUEST_PAYLOAD: &str = "/payload";
 pub const SEED_ENV: &str = "IGNORARIUM_SEED";
 pub const SERIAL_ROOTFS: &str = "ign-rootfs";
 pub const SERIAL_IN: &str = "ign-in";
 pub const SERIAL_OUT: &str = "ign-out";
+pub const SERIAL_PAYLOAD: &str = "ign-payload";
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Job {
@@ -52,6 +54,9 @@ pub struct Report {
     pub payload_wall_ns: u64,
     pub cpu_seconds: f64,
     pub output_hash: String,
+    /// Why the pack refused what the payload left in `/out`: the payload's own result, so
+    /// no outputs come back and `output_hash` is empty.
+    pub pack_refused: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

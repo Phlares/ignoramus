@@ -1,24 +1,46 @@
 //! Host side of level 2: VMM arguments, the one control connection, output read-back.
+//!
+//! The VMM leads its own process group. The host sees it exit with a wait that leaves it
+//! unreaped, so a caller must keep SIGCHLD at its default action: an ignored SIGCHLD lets the
+//! kernel reap the VMM first.
+use crate::agent::payload::exited;
 use crate::agent::steps::now_nanos;
 use crate::image::{ext4, size_mib};
 use crate::pack;
 use crate::proto::{
-    CONTROL_PORT, GUEST_CID, Job, MAX_FRAME, Report, SERIAL_IN, SERIAL_OUT, SERIAL_ROOTFS, ToHost,
-    read_frame, write_frame,
+    CONTROL_PORT, GUEST_CID, Job, MAX_FRAME, Report, SERIAL_IN, SERIAL_OUT, SERIAL_PAYLOAD,
+    SERIAL_ROOTFS, ToHost, read_frame, write_frame,
 };
 use crate::tree::{tree_hash, walk};
+use rustix::process::{Pid, Signal, kill_process_group};
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, BufReader, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 pub const REPORT_SLACK: Duration = Duration::from_secs(30);
+
+/// What the caller hears while a row runs.
+pub trait Watch {
+    /// Called between the steps that build the disks and every `POLL` while the host waits
+    /// on the VMM or the guest. `false` stops the row.
+    fn tick(&self) -> bool;
+    /// The VMM now runs as the leader of its own process group, `pid`. Called once per row.
+    fn started(&self, _pid: u32) {}
+}
+
+impl<F: Fn() -> bool> Watch for F {
+    fn tick(&self) -> bool {
+        self()
+    }
+}
 
 pub struct Vm {
     pub vmm: PathBuf,
@@ -38,6 +60,8 @@ pub struct HostJob {
     pub argv: Vec<String>,
     pub env: Vec<(String, String)>,
     pub input_dir: PathBuf,
+    /// Reaches the guest read-only at `proto::GUEST_PAYLOAD`.
+    pub payload_dir: PathBuf,
     pub output_dir: PathBuf,
     pub seed: [u8; 32],
     pub wall_timeout: Duration,
@@ -72,6 +96,8 @@ pub enum VmError {
         host: String,
     },
     Io(io::Error),
+    /// The watch said stop; the VMM's process group is killed.
+    Stopped,
 }
 
 impl From<io::Error> for VmError {
@@ -93,6 +119,7 @@ impl std::fmt::Display for VmError {
                 )
             }
             VmError::Io(e) => write!(f, "host I/O error: {e}"),
+            VmError::Stopped => write!(f, "stopped by the box"),
         }
     }
 }
@@ -164,6 +191,7 @@ pub fn vmm_args(vm: &Vm, work: &Path) -> Vec<OsString> {
     args.push(disk(&vm.rootfs, true, SERIAL_ROOTFS));
     args.push(disk(&work.join("in.img"), true, SERIAL_IN));
     args.push(disk(&work.join("out.img"), false, SERIAL_OUT));
+    args.push(disk(&work.join("payload.img"), true, SERIAL_PAYLOAD));
     args.extend(["--vsock".into(), vsock, "--console".into(), "off".into()]);
     args.extend(["--serial".into(), serial]);
     args
@@ -184,29 +212,58 @@ fn with_log(msg: String, work: &Path) -> String {
     format!("{msg}\nvmm.log tail:\n{}", log_tail(work))
 }
 
-/// Owns the VMM process. Dropping it kills and reaps the process.
-struct Vmm(Child);
+/// Owns the VMM, which leads its own process group. Every way out, a drop included, kills
+/// the group before it reaps the leader: until the reap, the leader's pid names the group,
+/// so no unrelated group can take that id.
+struct Vmm {
+    child: Child,
+    pid: Pid,
+    killed: bool,
+}
 
 impl Vmm {
-    /// Waits up to `grace` for the VMM to exit by itself, then kills it.
+    fn spawn(cmd: &mut Command) -> io::Result<Vmm> {
+        let child = cmd.process_group(0).spawn()?;
+        let pid = Pid::from_child(&child);
+        Ok(Vmm {
+            child,
+            pid,
+            killed: false,
+        })
+    }
+
+    /// Waits up to `grace` for the VMM to exit by itself, then ends it.
     fn stop(&mut self, grace: Duration) -> io::Result<()> {
         let end = Instant::now() + grace;
-        while self.0.try_wait()?.is_none() {
-            if Instant::now() >= end {
-                self.0.kill()?;
-                self.0.wait()?;
-                break;
-            }
+        while Instant::now() < end && !exited(self.pid)? {
             sleep(POLL);
         }
-        Ok(())
+        self.end().map(drop)
+    }
+
+    /// Kills the group, then reaps the leader. A later call returns the same status.
+    fn end(&mut self) -> io::Result<ExitStatus> {
+        if !self.killed {
+            self.killed = true;
+            let _ = kill_process_group(self.pid, Signal::KILL);
+            // A leader that moved to another group is not in this one.
+            let _ = self.child.kill();
+        }
+        self.child.wait()
     }
 }
 
 impl Drop for Vmm {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.end();
+    }
+}
+
+fn go_on(watch: &dyn Watch) -> Result<(), VmError> {
+    if watch.tick() {
+        Ok(())
+    } else {
+        Err(VmError::Stopped)
     }
 }
 
@@ -217,6 +274,7 @@ fn accept(
     started: Instant,
     vm: &Vm,
     work: &Path,
+    watch: &dyn Watch,
 ) -> Result<UnixStream, VmError> {
     loop {
         match listener.accept() {
@@ -224,7 +282,8 @@ fn accept(
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
             Err(e) => return Err(e.into()),
         }
-        if let Some(status) = vmm.0.try_wait()? {
+        if exited(vmm.pid)? {
+            let status = vmm.end()?;
             let msg = format!("the VMM exited ({status}) before the guest connected");
             return Err(VmError::Boot(with_log(msg, work)));
         }
@@ -235,15 +294,21 @@ fn accept(
             );
             return Err(VmError::Boot(with_log(msg, work)));
         }
+        go_on(watch)?;
         sleep(POLL);
     }
 }
 
 /// Reads from and writes to a stream until an absolute deadline. A guest that trickles
 /// bytes or drains slowly cannot stretch the wait: each call gets only the time that is left.
+/// A socket wait lasts at most `POLL` and the watch ticks between waits. A wait that moves
+/// no bytes never ends a call, so a frame that arrives in pieces stays whole.
 struct Until<'a> {
     stream: &'a mut UnixStream,
     at: Instant,
+    watch: &'a dyn Watch,
+    /// Set once the watch said stop.
+    stopped: bool,
 }
 
 /// Linux applies a send timeout to each socket buffer a write waits for, not to the whole
@@ -251,26 +316,63 @@ struct Until<'a> {
 const WRITE_CHUNK: usize = 2048;
 
 impl Until<'_> {
-    fn left(&self) -> io::Result<Duration> {
-        let left = self.at.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Err(io::ErrorKind::TimedOut.into());
+    /// Runs `op` with a socket timeout until it moves bytes, the deadline passes
+    /// (`TimedOut`) or the watch says stop.
+    fn wait<T>(
+        &mut self,
+        mut op: impl FnMut(&mut UnixStream, Duration) -> io::Result<T>,
+    ) -> io::Result<T> {
+        loop {
+            let left = self.at.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            match op(self.stream, left.min(POLL)) {
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) => {}
+                done => return done,
+            }
+            if !self.watch.tick() {
+                self.stopped = true;
+                return Err(io::Error::other("stopped"));
+            }
         }
-        Ok(left)
+    }
+
+    /// `r` with its error as a `VmError`: `Stopped` after a stop, else `other`'s.
+    fn mapped<T>(
+        &self,
+        r: io::Result<T>,
+        other: impl FnOnce(io::Error) -> VmError,
+    ) -> Result<T, VmError> {
+        r.map_err(|e| {
+            if self.stopped {
+                VmError::Stopped
+            } else {
+                other(e)
+            }
+        })
     }
 }
 
 impl Read for Until<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.stream.set_read_timeout(Some(self.left()?))?;
-        self.stream.read(buf)
+        self.wait(|s, t| {
+            s.set_read_timeout(Some(t))?;
+            s.read(buf)
+        })
     }
 }
 
 impl Write for Until<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.stream.set_write_timeout(Some(self.left()?))?;
-        self.stream.write(&buf[..buf.len().min(WRITE_CHUNK)])
+        self.wait(|s, t| {
+            s.set_write_timeout(Some(t))?;
+            s.write(&buf[..buf.len().min(WRITE_CHUNK)])
+        })
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -281,13 +383,21 @@ impl Write for Until<'_> {
 /// Reads one frame before `at`. A timeout becomes `on_timeout(message)`; a closed or
 /// broken channel becomes a guest error.
 fn recv(
-    s: &mut UnixStream,
+    stream: &mut UnixStream,
     at: Instant,
+    watch: &dyn Watch,
     what: &str,
     on_timeout: fn(String) -> VmError,
     work: &Path,
 ) -> Result<ToHost, VmError> {
-    read_frame(&mut Until { stream: s, at }).map_err(|e| match e.kind() {
+    let mut until = Until {
+        stream,
+        at,
+        watch,
+        stopped: false,
+    };
+    let frame = read_frame(&mut until);
+    until.mapped(frame, |e| match e.kind() {
         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => on_timeout(with_log(
             format!("no complete {what} before the deadline"),
             work,
@@ -348,7 +458,8 @@ fn check_inputs(vm: &Vm, job: &HostJob, work: &Path) -> io::Result<()> {
             "the job is {job_len} bytes of JSON, over the {MAX_FRAME}-byte frame limit"
         )));
     }
-    readable_by_others(&job.input_dir)
+    readable_by_others("input", &job.input_dir)?;
+    readable_by_others("payload", &job.payload_dir)
 }
 
 /// The job as the guest receives it.
@@ -362,36 +473,49 @@ fn wire_job(job: &HostJob, unix_nanos: u64) -> Job {
     }
 }
 
-/// The payload runs as an unprivileged user, so every input below `dir` must be readable by
-/// others: a file needs other-read, a directory other-read and other-execute. Links are not
-/// followed.
-fn readable_by_others(dir: &Path) -> io::Result<()> {
+/// The payload runs as an unprivileged user, so `dir` and every entry below it must be
+/// readable by others: a file needs other-read, a directory other-read and other-execute.
+/// Links below `dir` are not followed. `what` names the tree in the refusal.
+fn readable_by_others(what: &str, dir: &Path) -> io::Result<()> {
+    let check = |path: &Path, mode: u32, need: u32| {
+        if mode & need == need {
+            return Ok(());
+        }
+        Err(invalid(format!(
+            "{what} {} has mode {:o}, which the unprivileged payload cannot read",
+            path.display(),
+            mode & 0o7777
+        )))
+    };
+    check(dir, fs::metadata(dir)?.mode(), 0o005)?;
     walk(dir, &mut |_, path, ty| {
         let need = match ty {
             t if t.is_dir() => 0o005,
             t if t.is_symlink() => 0,
             _ => 0o004,
         };
-        let mode = fs::symlink_metadata(path)?.mode();
-        if mode & need != need {
-            return Err(invalid(format!(
-                "input {} has mode {:o}, which the unprivileged payload cannot read",
-                path.display(),
-                mode & 0o7777
-            )));
-        }
-        Ok(())
+        check(path, fs::symlink_metadata(path)?.mode(), need)
     })
 }
 
 /// Runs one row in one VM. `work` must exist and be empty.
-pub fn run_row(vm: &Vm, job: &HostJob, work: &Path) -> Result<VmOutcome, VmError> {
+pub fn run_row(
+    vm: &Vm,
+    job: &HostJob,
+    work: &Path,
+    watch: &dyn Watch,
+) -> Result<VmOutcome, VmError> {
     let t0 = Instant::now();
     check_inputs(vm, job, work)?;
     let listen_at = listen_path(work);
 
-    let in_img = work.join("in.img");
-    ext4(Some(&job.input_dir), &in_img, size_mib(&job.input_dir)?)?;
+    for (dir, image) in [
+        (&job.input_dir, "in.img"),
+        (&job.payload_dir, "payload.img"),
+    ] {
+        ext4(Some(dir), &work.join(image), size_mib(dir)?)?;
+        go_on(watch)?;
+    }
     File::create(work.join("out.img"))?.set_len(vm.out_mib << 20)?;
     let prepare = t0.elapsed();
 
@@ -399,15 +523,16 @@ pub fn run_row(vm: &Vm, job: &HostJob, work: &Path) -> Result<VmOutcome, VmError
     listener.set_nonblocking(true)?;
     let log = File::create(work.join("vmm.log"))?;
     let started = Instant::now();
-    let mut vmm = Vmm(Command::new(&vm.vmm)
-        .args(vmm_args(vm, work))
+    let mut cmd = Command::new(&vm.vmm);
+    cmd.args(vmm_args(vm, work))
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
-        .stderr(log)
-        .spawn()
-        .map_err(|e| VmError::Boot(format!("cannot start {}: {e}", vm.vmm.display())))?);
+        .stderr(log);
+    let mut vmm = Vmm::spawn(&mut cmd)
+        .map_err(|e| VmError::Boot(format!("cannot start {}: {e}", vm.vmm.display())))?;
+    watch.started(vmm.child.id());
 
-    let mut chan = accept(&listener, &mut vmm, started, vm, work)?;
+    let mut chan = accept(&listener, &mut vmm, started, vm, work, watch)?;
     // Later connects must fail: the self-test checks that no host path is left.
     drop(listener);
     fs::remove_file(&listen_at)?;
@@ -416,6 +541,7 @@ pub fn run_row(vm: &Vm, job: &HostJob, work: &Path) -> Result<VmOutcome, VmError
     match recv(
         &mut chan,
         started + vm.boot_timeout,
+        watch,
         "hello",
         boot_timed_out,
         work,
@@ -439,8 +565,11 @@ pub fn run_row(vm: &Vm, job: &HostJob, work: &Path) -> Result<VmOutcome, VmError
     let mut until = Until {
         stream: &mut chan,
         at: report_by,
+        watch,
+        stopped: false,
     };
-    write_frame(&mut until, &wire).map_err(|e| match e.kind() {
+    let sent_job = write_frame(&mut until, &wire);
+    until.mapped(sent_job, |e| match e.kind() {
         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
             VmError::Timeout(with_log("the guest did not take the job".into(), work))
         }
@@ -449,7 +578,14 @@ pub fn run_row(vm: &Vm, job: &HostJob, work: &Path) -> Result<VmOutcome, VmError
             work,
         ),
     })?;
-    let report = match recv(&mut chan, report_by, "report", VmError::Timeout, work)? {
+    let report = match recv(
+        &mut chan,
+        report_by,
+        watch,
+        "report",
+        VmError::Timeout,
+        work,
+    )? {
         ToHost::Report(r) => r,
         ToHost::Failed { reason } => {
             return Err(guest_err(format!("guest failed: {}", shown(&reason)), work));
@@ -467,7 +603,7 @@ pub fn run_row(vm: &Vm, job: &HostJob, work: &Path) -> Result<VmOutcome, VmError
 
     let extracting = Instant::now();
     let mut output_hash = String::new();
-    if report.end.is_some() {
+    if report.end.is_some() && report.pack_refused.is_none() {
         let mut out = BufReader::new(File::open(work.join("out.img"))?);
         pack::unpack(&mut out, &job.output_dir, vm.out_mib << 20).map_err(|e| match e.kind() {
             io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof => {

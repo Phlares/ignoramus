@@ -1,6 +1,6 @@
 mod common;
 use common::{entry, file, link, pack, packed};
-use ignorarium_guest::pack::{unpack, write};
+use ignorarium_guest::pack::{ENTRY_MAX, out_caps, unpack, write};
 use ignorarium_guest::tree::tree_hash;
 use std::ffi::OsStr;
 use std::fs;
@@ -403,4 +403,27 @@ fn a_bad_link_target_field_names_the_entry() {
     cut.extend_from_slice(b"ab");
     let msg = refusal(&pack(&[cut]));
     assert!(msg.starts_with("entry \"l\": "), "{msg}");
+}
+
+#[test]
+fn a_full_out_always_fits_the_pack() {
+    // An entry's block, a link entry's kind and two lengths, a 4096-byte path and a
+    // 4095-byte target: the most one entry adds besides file data.
+    assert_eq!(ENTRY_MAX, 4096 + 1 + 4 + 4096 + 4 + 4095);
+    assert_eq!(out_caps(1 << 20), (1 << 19, (1 << 19) / ENTRY_MAX));
+    for limit in [1 << 20, (1 << 20) + 1, 16 << 20, 256 << 20] {
+        let (bytes, inodes) = out_caps(limit);
+        assert!(inodes >= 2, "{limit}: {inodes} inodes");
+        // tmpfs rounds its size up to a page, and its root takes one inode. The pack
+        // adds its magic and end byte.
+        let worst = 9 + bytes.next_multiple_of(4096) + (inodes - 1) * ENTRY_MAX;
+        assert!(
+            worst <= limit,
+            "{limit}: a full /out packs to {worst} bytes"
+        );
+    }
+    let d = tempfile::tempdir().unwrap();
+    let (bytes, _) = out_caps(1 << 20);
+    fs::write(d.path().join("full"), vec![1u8; bytes as usize]).unwrap();
+    write(d.path(), &mut Vec::new(), 1 << 20).unwrap();
 }

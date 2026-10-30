@@ -23,6 +23,7 @@ fn report() -> Report {
         payload_wall_ns: 7,
         cpu_seconds: 0.25,
         output_hash: "00".repeat(32),
+        pack_refused: Some("too big".into()),
     }
 }
 

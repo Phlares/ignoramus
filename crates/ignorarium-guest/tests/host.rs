@@ -1,19 +1,26 @@
 mod common;
 use common::{file, pack, packed, write_exec};
-use ignorarium_guest::host::{HostJob, Vm, VmError, VmOutcome, run_row, vmm_args};
+use ignorarium_guest::host::{HostJob, Vm, VmError, VmOutcome, Watch, run_row, vmm_args};
 use ignorarium_guest::proto::{
     End, Job, MAX_FRAME, Report, SelfTest, ToHost, read_frame, write_frame,
 };
 use ignorarium_guest::tree::tree_hash;
+use rustix::process::{Pid, getpgid};
+use std::cell::{Cell, RefCell};
 use std::fs::{self, Permissions};
 use std::io::{ErrorKind, Read, Seek, Write};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const SLEEPER: &str = "exec sleep 60\n";
+/// A fake VMM with a background child in its process group. It records the child's pid,
+/// then its own.
+const WITH_CHILD: &str = "sleep 60 &\necho $! > $CHILDFILE\necho $$ > $PIDFILE\nexec sleep 60\n";
 
 fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
@@ -40,8 +47,13 @@ impl Rig {
         let root = tempfile::tempdir().unwrap();
         let p = root.path();
         let (src, work, out, input) = (p.join("src"), p.join("work"), p.join("out"), p.join("in"));
-        for d in [&src, &work, &out, &input] {
+        let payload = p.join("payload");
+        for d in [&src, &work, &out, &input, &payload] {
             fs::create_dir(d).unwrap();
+        }
+        // The payload runs as another user, so both trees must be open to others.
+        for d in [&input, &payload] {
+            fs::set_permissions(d, Permissions::from_mode(0o755)).unwrap();
         }
         fs::write(src.join("a.txt"), "hello\n").unwrap();
         fs::create_dir(src.join("sub")).unwrap();
@@ -52,7 +64,8 @@ impl Rig {
             "#!/bin/sh
 {vmm_script}"
         )
-        .replace("$PIDFILE", p.join("vmm.pid").to_str().unwrap());
+        .replace("$PIDFILE", p.join("vmm.pid").to_str().unwrap())
+        .replace("$CHILDFILE", p.join("child.pid").to_str().unwrap());
         write_exec(&vmm, &script);
         let vm = Vm {
             vmm,
@@ -71,6 +84,7 @@ impl Rig {
             argv: vec!["/bin/prog".into(), "--x".into()],
             env: vec![("K".into(), "V".into())],
             input_dir: input,
+            payload_dir: payload,
             output_dir: out.clone(),
             seed: [0xab; 32],
             wall_timeout: Duration::from_secs(10),
@@ -91,7 +105,11 @@ impl Rig {
     }
 
     fn run(&self) -> Result<VmOutcome, VmError> {
-        run_row(&self.vm, &self.job, &self.work)
+        self.run_watched(&|| true)
+    }
+
+    fn run_watched(&self, watch: &dyn Watch) -> Result<VmOutcome, VmError> {
+        run_row(&self.vm, &self.job, &self.work, watch)
     }
 
     fn pid_gone(&self) {
@@ -99,6 +117,17 @@ impl Rig {
         assert!(
             !Path::new("/proc").join(&pid).exists(),
             "VMM {pid} still runs"
+        );
+    }
+
+    /// The VMM is reaped and the background child of a `WITH_CHILD` VMM is dead too.
+    fn group_gone(&self) {
+        self.pid_gone();
+        let child = fs::read_to_string(self.root.path().join("child.pid")).unwrap();
+        assert!(
+            dies(child.trim()),
+            "the VMM's child {} survived",
+            child.trim()
         );
     }
 
@@ -158,6 +187,74 @@ fn wait_pid(root: &Path) -> String {
     }
 }
 
+/// True once the process is gone or a zombie, waiting up to 2 s for a kill to land.
+fn dies(pid: &str) -> bool {
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(2) {
+        match fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Err(_) => return true,
+            Ok(s)
+                if s.rsplit(')')
+                    .next()
+                    .is_some_and(|r| r.trim_start().starts_with('Z')) =>
+            {
+                return true;
+            }
+            Ok(_) => thread::sleep(ms(10)),
+        }
+    }
+    false
+}
+
+/// A watch that records what the host tells it, and says stop on request.
+#[derive(Default)]
+struct Seen {
+    /// Each `started` pid, with its process group at that moment.
+    started: RefCell<Vec<(u32, u32)>>,
+    started_at: Cell<Option<Instant>>,
+    ticks: Cell<u32>,
+    /// Say stop this long after `started`.
+    stop_after: Option<Duration>,
+    /// Say stop once this is set.
+    stop_on: Option<Arc<AtomicBool>>,
+    /// When the watch first said stop.
+    stopped_at: Cell<Option<Instant>>,
+}
+
+impl Watch for Seen {
+    fn tick(&self) -> bool {
+        self.ticks.set(self.ticks.get() + 1);
+        let late = self
+            .stop_after
+            .zip(self.started_at.get())
+            .is_some_and(|(after, at)| at.elapsed() >= after);
+        let flagged = self
+            .stop_on
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::SeqCst));
+        if late || flagged {
+            self.stopped_at
+                .set(self.stopped_at.get().or(Some(Instant::now())));
+            return false;
+        }
+        true
+    }
+
+    fn started(&self, pid: u32) {
+        let group = getpgid(Pid::from_raw(pid as i32)).unwrap();
+        let group = group.as_raw_nonzero().get() as u32;
+        self.started.borrow_mut().push((pid, group));
+        self.started_at.set(Some(Instant::now()));
+    }
+}
+
+impl Seen {
+    /// The time from the first stop to `returned`.
+    fn since_stop(&self, returned: Instant) -> Duration {
+        returned.duration_since(self.stopped_at.get().expect("the watch never said stop"))
+    }
+}
+
 /// Sends one byte of a never-finished frame every `every`, until the host hangs up.
 fn trickle(s: &mut UnixStream, every: Duration) {
     let mut bytes = vec![0, 0, 0xff, 0xff];
@@ -191,6 +288,7 @@ fn report(hash: &str, end: Option<End>) -> ToHost {
         payload_wall_ns: 5_000_000,
         cpu_seconds: 0.5,
         output_hash: hash.into(),
+        pack_refused: None,
     })
 }
 
@@ -254,6 +352,20 @@ fn vmm_args_have_no_network_and_read_only_inputs() {
     assert_eq!(after(&a, "--initramfs"), "initramfs");
     assert_eq!(after(&a, "--cpus"), "boot=2");
     assert_eq!(after(&a, "--memory"), "size=256M");
+}
+
+#[test]
+fn vmm_args_add_a_read_only_payload_disk() {
+    let rig = Rig::sleeper();
+    let a = args_of(&rig.vm, Path::new("/w"));
+    let i = a.iter().position(|x| x == "--disk").unwrap();
+    assert_eq!(
+        &a[i + 4..i + 6],
+        [
+            "path=/w/payload.img,readonly=on,image_type=raw,serial=ign-payload",
+            "--vsock"
+        ]
+    );
 }
 
 #[test]
@@ -486,7 +598,7 @@ fn work_dir_limits_are_checked_before_boot() {
         long.push("d".repeat(60));
     }
     fs::create_dir_all(&long).unwrap();
-    let res = run_row(&rig.vm, &rig.job, &long);
+    let res = run_row(&rig.vm, &rig.job, &long, &|| true);
     assert!(matches!(res, Err(VmError::Io(_))), "{:?}", res);
     thread::sleep(ms(100));
     assert!(!rig.root.path().join("vmm.pid").exists());
@@ -576,7 +688,7 @@ fn guest_text_in_errors_is_capped_and_escaped() {
 
 /// Returns the refusal's text.
 fn refused_before_boot(rig: &Rig, work: &Path) -> String {
-    let res = run_row(&rig.vm, &rig.job, work);
+    let res = run_row(&rig.vm, &rig.job, work, &|| true);
     let Err(VmError::Io(e)) = res else {
         panic!("{res:?}")
     };
@@ -773,7 +885,7 @@ fn a_work_dir_at_the_socket_path_limit_boots_and_one_byte_more_is_refused() {
     let mut rig = rig;
     let ok = dir_of_len(rig.root.path(), 107 - 16);
     rig.vm.boot_timeout = ms(200);
-    let res = run_row(&rig.vm, &rig.job, &ok);
+    let res = run_row(&rig.vm, &rig.job, &ok, &|| true);
     assert!(matches!(res, Err(VmError::Boot(_))), "{res:?}");
     rig.pid_gone();
 }
@@ -827,4 +939,172 @@ fn the_output_disk_has_the_size_asked_for() {
         Err(VmError::Guest(m)) => assert!(m.contains(&(8u64 << 20).to_string()), "{m}"),
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn the_vmm_leads_its_own_group_and_started_names_it() {
+    let mut rig = Rig::sleeper();
+    rig.vm.boot_timeout = ms(200);
+    let watch = Seen::default();
+    let res = rig.run_watched(&watch);
+    assert!(matches!(res, Err(VmError::Boot(_))), "{res:?}");
+    let pid: u32 = wait_pid(rig.root.path()).parse().unwrap();
+    assert_eq!(*watch.started.borrow(), [(pid, pid)]);
+    rig.pid_gone();
+}
+
+#[test]
+fn a_stop_during_boot_kills_the_vmm_group() {
+    let rig = Rig::new(WITH_CHILD);
+    let watch = Seen {
+        stop_after: Some(ms(100)),
+        ..Seen::default()
+    };
+    let res = rig.run_watched(&watch);
+    let returned = Instant::now();
+    assert!(matches!(res, Err(VmError::Stopped)), "{res:?}");
+    assert_eq!(res.unwrap_err().to_string(), "stopped by the box");
+    assert!(watch.since_stop(returned) < Duration::from_secs(1));
+    rig.group_gone();
+}
+
+#[test]
+fn a_stop_while_the_guest_runs_kills_the_group() {
+    let rig = Rig::new(WITH_CHILD);
+    let job_read = Arc::new(AtomicBool::new(false));
+    let flag = job_read.clone();
+    let h = rig.guest(move |s, c| {
+        hello(s);
+        read_job(s, c);
+        flag.store(true, Ordering::SeqCst);
+        thread::sleep(ms(1500));
+    });
+    let watch = Seen {
+        stop_on: Some(job_read),
+        ..Seen::default()
+    };
+    let res = rig.run_watched(&watch);
+    let returned = Instant::now();
+    assert!(matches!(res, Err(VmError::Stopped)), "{res:?}");
+    assert!(watch.since_stop(returned) < Duration::from_secs(1));
+    rig.group_gone();
+    h.join().unwrap();
+}
+
+#[test]
+fn a_missed_report_deadline_kills_the_group() {
+    let mut rig = Rig::new(WITH_CHILD);
+    rig.job.wall_timeout = ms(100);
+    rig.vm.report_slack = ms(100);
+    let h = rig.guest(|s, c| {
+        hello(s);
+        read_job(s, c);
+        thread::sleep(ms(600));
+    });
+    let res = rig.run();
+    h.join().unwrap();
+    assert!(matches!(res, Err(VmError::Timeout(_))), "{res:?}");
+    rig.group_gone();
+}
+
+#[test]
+fn a_stop_before_boot_never_starts_the_vmm() {
+    let rig = Rig::sleeper();
+    let watch = Seen {
+        stop_on: Some(Arc::new(AtomicBool::new(true))),
+        ..Seen::default()
+    };
+    let res = rig.run_watched(&watch);
+    assert!(matches!(res, Err(VmError::Stopped)), "{res:?}");
+    assert!(watch.started.borrow().is_empty());
+}
+
+#[test]
+fn tick_runs_while_the_host_waits() {
+    let rig = Rig::sleeper();
+    let h = rig.guest(|s, c| {
+        hello(s);
+        read_job(s, c);
+        put_out(&c.work, &packed(&c.src));
+        thread::sleep(ms(300));
+        let hash = tree_hash(&c.src).unwrap();
+        write_frame(s, &report(&hash, Some(End::Code(0)))).unwrap();
+    });
+    let watch = Seen::default();
+    let res = rig.run_watched(&watch);
+    h.join().unwrap();
+    assert_eq!(res.unwrap().output_hash, rig.src_hash());
+    assert!(watch.ticks.get() >= 20, "{} ticks", watch.ticks.get());
+}
+
+#[test]
+fn a_report_that_trickles_across_many_polls_still_parses() {
+    let rig = Rig::sleeper();
+    let h = rig.guest(|s, c| {
+        hello(s);
+        read_job(s, c);
+        put_out(&c.work, &packed(&c.src));
+        let mut frame = Vec::new();
+        let hash = tree_hash(&c.src).unwrap();
+        write_frame(&mut frame, &report(&hash, Some(End::Code(0)))).unwrap();
+        // Each pause spans a few of the host's polls, so a read that gives up mid-frame shows.
+        for chunk in frame.chunks(16) {
+            s.write_all(chunk).unwrap();
+            thread::sleep(ms(15));
+        }
+    });
+    let res = rig.run();
+    h.join().unwrap();
+    assert_eq!(res.unwrap().output_hash, rig.src_hash());
+}
+
+#[test]
+fn an_unreadable_payload_or_input_root_is_refused_before_boot() {
+    let rig = Rig::new(&format!("touch $PIDFILE\n{SLEEPER}"));
+    let (input, payload) = (rig.job.input_dir.clone(), rig.job.payload_dir.clone());
+    let run = payload.join("run");
+    fs::write(&run, "#!/bin/sh\n").unwrap();
+    let mode = |p: &Path, m: u32| fs::set_permissions(p, Permissions::from_mode(m)).unwrap();
+    mode(&run, 0o755);
+    // Each top folder without other-read, then without other-execute; a payload file
+    // without other-read.
+    let cases = [
+        (&payload, 0o700, 0o755, "payload"),
+        (&payload, 0o751, 0o755, "payload"),
+        (&input, 0o700, 0o755, "input"),
+        (&input, 0o754, 0o755, "input"),
+        (&run, 0o600, 0o755, "payload"),
+    ];
+    for (path, bad, good, what) in cases {
+        mode(path, bad);
+        let msg = refused_before_boot(&rig, &rig.work);
+        let want = format!("{what} {} has mode {bad:o}", path.display());
+        assert!(msg.contains(&want), "{msg}");
+        mode(path, good);
+    }
+}
+
+#[test]
+fn a_refused_pack_is_reported_without_outputs() {
+    let rig = Rig::sleeper();
+    let h = rig.guest(|s, c| {
+        hello(s);
+        read_job(s, c);
+        put_out(&c.work, b"not a pack");
+        let mut r = report("", Some(End::Code(0)));
+        if let ToHost::Report(r) = &mut r {
+            r.pack_refused = Some("outputs exceed the output limit of 8388608 bytes".into());
+        }
+        write_frame(s, &r).unwrap();
+    });
+    let res = rig.run();
+    h.join().unwrap();
+    let o = res.unwrap();
+    assert_eq!(o.output_hash, "");
+    assert_eq!(
+        o.report.pack_refused.as_deref(),
+        Some("outputs exceed the output limit of 8388608 bytes")
+    );
+    assert_eq!(fs::read_dir(&rig.out).unwrap().count(), 0);
+    rig.pid_gone();
 }

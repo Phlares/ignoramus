@@ -5,16 +5,19 @@
 //!   nosuid, nodev; a symbolic link (as in merged-usr images) is copied as the same link; a
 //!   missing one is left out;
 //! - `/in` is the input disk: read-only, nosuid, nodev;
-//! - `/out` is a tmpfs (nosuid, nodev) owned by the payload's user, mode 0755, capped at the
-//!   output disk's size; the agent packs it onto that disk;
+//! - `/payload` is the payload disk: read-only, nosuid, nodev, programs may run;
+//! - `/out` is a tmpfs (nosuid, nodev) owned by the payload's user, mode 0755, with the bytes
+//!   and inodes of `pack::out_caps` of the output disk's size; the agent packs it onto that
+//!   disk;
 //! - `/proc` with `hidepid=2`, so the payload sees only its own user's processes (nosuid,
 //!   nodev, noexec);
 //! - `/dev` is a tmpfs (nosuid, noexec) with `null zero full random urandom tty`, mode 0666;
-//! - `/tmp` is a tmpfs (nosuid, nodev), mode 1777, capped at the output disk's size like `/out`.
+//! - `/tmp` is a tmpfs (nosuid, nodev), mode 1777, capped at the output disk's size.
 //!
 //! The root is a tmpfs, remounted read-only once it holds all of the above.
 use super::{PAYLOAD_GID, PAYLOAD_UID};
-use crate::proto::{GUEST_IN, GUEST_OUT};
+use crate::pack::out_caps;
+use crate::proto::{GUEST_IN, GUEST_OUT, GUEST_PAYLOAD};
 use rustix::fs::{CWD, FileType, Mode, makedev, mknodat};
 use rustix::io::Errno;
 use rustix::mount::{MountFlags, mount, mount_bind, mount_remount};
@@ -37,14 +40,21 @@ const DEVICES: [(&str, u32, u32); 6] = [
     ("tty", 5, 0),
 ];
 
-/// Builds the view at `sandbox` from the environment at `env_root` and the input disk
-/// `inputs`.
-pub fn build(env_root: &Path, sandbox: &Path, inputs: &Path, out_bytes: u64) -> io::Result<()> {
-    if out_bytes == 0 {
-        // A tmpfs of size 0 has no limit.
+/// Builds the view at `sandbox` from the environment at `env_root`, the input disk `inputs`
+/// and the payload disk `payload`, for an output disk of `out_bytes`.
+pub fn build(
+    env_root: &Path,
+    sandbox: &Path,
+    inputs: &Path,
+    payload: &Path,
+    out_bytes: u64,
+) -> io::Result<()> {
+    let (out_size, out_inodes) = out_caps(out_bytes);
+    // A tmpfs cap of 0 is no cap, and the inode cap is the smaller.
+    if out_inodes == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "an output size of 0 would leave /out and /tmp unlimited",
+            format!("an output size of {out_bytes} bytes would leave /out unlimited"),
         ));
     }
     let (ro, no_suid_dev) = (MountFlags::RDONLY, MountFlags::NOSUID | MountFlags::NODEV);
@@ -71,7 +81,10 @@ pub fn build(env_root: &Path, sandbox: &Path, inputs: &Path, out_bytes: u64) -> 
         Ok(p)
     };
     mount_fs(inputs, &dir(GUEST_IN)?, "ext4", ro | no_suid_dev, "")?;
-    let out = format!("uid={PAYLOAD_UID},gid={PAYLOAD_GID},mode=0755,size={out_bytes}");
+    mount_fs(payload, &dir(GUEST_PAYLOAD)?, "ext4", ro | no_suid_dev, "")?;
+    let out = format!(
+        "uid={PAYLOAD_UID},gid={PAYLOAD_GID},mode=0755,size={out_size},nr_inodes={out_inodes}"
+    );
     tmpfs(&dir(GUEST_OUT)?, no_suid_dev, &out)?;
     let proc_flags = no_suid_dev | MountFlags::NOEXEC;
     mount_fs("proc", &dir("proc")?, "proc", proc_flags, "hidepid=2")?;

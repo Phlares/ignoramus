@@ -4,7 +4,8 @@ mod common;
 use common::write_exec;
 use ignorarium_guest::host::{HostJob, Vm, VmError, run_row};
 use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
-use std::fs::{self, File};
+use std::fs::{self, File, Permissions};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::thread::{self, sleep};
 use std::time::{Duration, Instant};
@@ -14,8 +15,12 @@ fn an_accept_error_surfaces_instead_of_waiting_for_the_boot_timeout() {
     let root = tempfile::tempdir().unwrap();
     let p = root.path();
     let (work, out, input) = (p.join("work"), p.join("out"), p.join("in"));
-    for d in [&work, &out, &input] {
+    let payload = p.join("payload");
+    for d in [&work, &out, &input, &payload] {
         fs::create_dir(d).unwrap();
+    }
+    for d in [&input, &payload] {
+        fs::set_permissions(d, Permissions::from_mode(0o755)).unwrap();
     }
     let pidfile = p.join("vmm.pid");
     let vmm = p.join("fake-vmm");
@@ -43,6 +48,7 @@ fn an_accept_error_surfaces_instead_of_waiting_for_the_boot_timeout() {
         argv: vec!["/bin/prog".into()],
         env: vec![],
         input_dir: input,
+        payload_dir: payload,
         output_dir: out,
         seed: [0; 32],
         wall_timeout: Duration::from_secs(10),
@@ -86,7 +92,7 @@ fn an_accept_error_surfaces_instead_of_waiting_for_the_boot_timeout() {
         conn.unwrap()
     });
     let t = Instant::now();
-    let res = run_row(&vm, &job, &work);
+    let res = run_row(&vm, &job, &work, &|| true);
     let _conn = guest.join().unwrap();
     assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
     match res {

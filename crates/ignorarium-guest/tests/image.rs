@@ -1,4 +1,4 @@
-use ignorarium_guest::image::{Pin, check_pin, ext4, initramfs, sha256_file, size_mib};
+use ignorarium_guest::image::{Pin, check_pin, ext4, has_interp, initramfs, sha256_file, size_mib};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::ErrorKind;
@@ -214,4 +214,37 @@ fn sha256_file_matches_a_known_vector() {
         sha256_file(&f).unwrap(),
         "98ea6e4f216f2fb4b69fff9b3a44842c38686ca685f3f55dc48c5d3fb1107be4"
     );
+}
+
+/// A 64-bit little-endian ELF header with one program header of each type in `types`.
+fn elf(types: &[u32]) -> Vec<u8> {
+    let mut b = vec![0u8; 64];
+    b[..6].copy_from_slice(b"\x7fELF\x02\x01");
+    b[0x20..0x28].copy_from_slice(&64u64.to_le_bytes());
+    b[0x36..0x38].copy_from_slice(&56u16.to_le_bytes());
+    b[0x38..0x3a].copy_from_slice(&(types.len() as u16).to_le_bytes());
+    for t in types {
+        let mut ph = vec![0u8; 56];
+        ph[..4].copy_from_slice(&t.to_le_bytes());
+        b.extend(ph);
+    }
+    b
+}
+
+#[test]
+fn has_interp_tells_static_from_dynamic() {
+    const PT_LOAD: u32 = 1;
+    const PT_INTERP: u32 = 3;
+    assert!(has_interp(&fs::read("/bin/sh").unwrap()).unwrap());
+    assert!(!has_interp(&elf(&[PT_LOAD])).unwrap());
+    assert!(has_interp(&elf(&[PT_LOAD, PT_INTERP])).unwrap());
+    let cut = &elf(&[PT_LOAD, PT_INTERP])[..64 + 56 + 2];
+    let mut elf32 = elf(&[PT_INTERP]);
+    elf32[4] = 1;
+    let mut big_endian = elf(&[PT_INTERP]);
+    big_endian[5] = 2;
+    for bad in [&b"not elf"[..], &elf(&[])[..40], cut, &elf32, &big_endian] {
+        let e = has_interp(bad).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::InvalidData, "{e}");
+    }
 }

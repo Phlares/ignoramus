@@ -21,6 +21,16 @@ const MAX_PART: usize = 255;
 /// Charged to the limit for every entry: an entry costs the host an inode and a directory
 /// block however few stream bytes it takes.
 const ENTRY_COST: u64 = 4096;
+/// The most one entry costs besides file data: a link with the longest path and target.
+pub const ENTRY_MAX: u64 = ENTRY_COST + 1 + 4 + MAX_PATH as u64 + 4 + (MAX_PATH as u64 - 1);
+
+/// The `/out` caps for a pack limit of `limit` bytes: tmpfs bytes and inodes. Half the limit
+/// holds the file data, and each inode can cost at most `ENTRY_MAX` of the other half, so a
+/// full `/out` packs within the limit. A sparse file or hard links take less of `/out` than
+/// of the pack and can still go over.
+pub fn out_caps(limit: u64) -> (u64, u64) {
+    (limit / 2, limit / 2 / ENTRY_MAX)
+}
 
 /// What a pack costs against its limit: every stream byte, plus `ENTRY_COST` for each entry.
 /// `write` and `unpack` both charge through it, so a pack that one accepts, the other accepts.

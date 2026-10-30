@@ -45,6 +45,37 @@ pub fn check_pin(path: &Path, pin: &Pin) -> io::Result<()> {
     ))
 }
 
+/// True when the 64-bit little-endian ELF file `elf` names a program interpreter, so it
+/// needs a dynamic loader. `InvalidData` for anything else, a cut file included. Layout:
+/// <https://man7.org/linux/man-pages/man5/elf.5.html>
+pub fn has_interp(elf: &[u8]) -> io::Result<bool> {
+    const PT_INTERP: u64 = 3;
+    let bad = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not a 64-bit little-endian ELF file",
+        )
+    };
+    if !elf.starts_with(b"\x7fELF\x02\x01") {
+        return Err(bad());
+    }
+    let le = |at: u64, n: u64| -> io::Result<u64> {
+        let end = at.checked_add(n).ok_or_else(bad)?;
+        let range =
+            usize::try_from(at).map_err(|_| bad())?..usize::try_from(end).map_err(|_| bad())?;
+        let bytes = elf.get(range).ok_or_else(bad)?;
+        Ok(bytes.iter().rev().fold(0, |v, &b| v << 8 | u64::from(b)))
+    };
+    let (phoff, size, count) = (le(0x20, 8)?, le(0x36, 2)?, le(0x38, 2)?);
+    for i in 0..count {
+        let at = i.checked_mul(size).and_then(|o| o.checked_add(phoff));
+        if le(at.ok_or_else(bad)?, 4)? == PT_INTERP {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Appends one entry of the "newc" cpio format:
 /// <https://docs.kernel.org/driver-api/early-userspace/buffer-format.html>
 fn newc_entry(out: &mut Vec<u8>, ino: u32, name: &str, mode: u32, rdev: (u32, u32), data: &[u8]) {

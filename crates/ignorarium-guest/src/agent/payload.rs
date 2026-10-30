@@ -98,7 +98,7 @@ fn timed_out(
 }
 
 /// True once the process has exited. It stays unreaped (`WNOWAIT`).
-fn exited(pid: Pid) -> io::Result<bool> {
+pub(crate) fn exited(pid: Pid) -> io::Result<bool> {
     let opts = WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT;
     Ok(waitid(WaitId::Pid(pid), opts)?.is_some())
 }

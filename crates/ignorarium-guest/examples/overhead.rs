@@ -18,6 +18,8 @@ use ignorarium_guest::proto::End;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::fmt::Display;
+use std::fs::Permissions;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
@@ -220,18 +222,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let vm_once = |run: usize| -> Result<Timings, String> {
         let dir = tempfile::tempdir_in(tmp.path()).map_err(|e| e.to_string())?;
-        for d in ["in", "out", "work"] {
+        for d in ["in", "out", "work", "payload"] {
             std::fs::create_dir(dir.path().join(d)).map_err(|e| e.to_string())?;
+        }
+        // The payload runs as an unprivileged guest user, so its trees must be open to others.
+        for d in ["in", "payload"] {
+            std::fs::set_permissions(dir.path().join(d), Permissions::from_mode(0o755))
+                .map_err(|e| e.to_string())?;
         }
         let job = HostJob {
             argv: a.payload.clone(),
             env: env.clone(),
             input_dir: dir.path().join("in"),
+            payload_dir: dir.path().join("payload"),
             output_dir: dir.path().join("out"),
             seed: [7; 32],
             wall_timeout: Duration::from_secs(120),
         };
-        let o = run_row(&vm, &job, &dir.path().join("work")).map_err(|e| {
+        let o = run_row(&vm, &job, &dir.path().join("work"), &|| true).map_err(|e| {
             let console = std::fs::read_to_string(&serial).unwrap_or_default();
             format!("run {run}: {e}\nguest console:\n{console}")
         })?;
