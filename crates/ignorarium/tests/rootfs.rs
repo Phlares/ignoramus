@@ -1565,6 +1565,65 @@ fn the_window_after_an_entry_starts_past_its_padding() {
     fails_cleanly(&store, &past, rootfs::LIMITS, FENCED);
 }
 
+/// Append a file `name` holding `data` whose header says `header_size` and whose PAX record
+/// says `data.len()`.
+fn pax_sized(b: &mut tar::Builder<Vec<u8>>, name: &str, header_size: u64, data: &[u8]) {
+    let record = pax("size", &data.len().to_string());
+    let mut x = tar::Header::new_gnu();
+    x.set_entry_type(tar::EntryType::XHeader);
+    x.set_path("././@PaxHeader").unwrap();
+    x.set_mode(0o644);
+    x.set_size(record.len() as u64);
+    x.set_cksum();
+    b.append(&x, &record[..]).unwrap();
+    let mut h = tar::Header::new_gnu();
+    h.set_path(name).unwrap();
+    h.set_mode(0o644);
+    h.set_size(header_size);
+    h.set_cksum();
+    b.append(&h, data).unwrap();
+}
+
+#[test]
+fn a_pax_size_below_the_header_size_sets_the_fence() {
+    let (_h, store) = store();
+    // The header claims 8 GiB, the PAX record 1 byte. The window after the entry starts past
+    // that byte's block, so a long name just past it is refused, as after any 1-byte file.
+    let layer = |n: usize| {
+        let mut b = tar::Builder::new(Vec::new());
+        pax_sized(&mut b, "var/a", 8 << 30, b"a");
+        extended(
+            &mut b,
+            tar::EntryType::GNULongName,
+            "v".repeat(n).as_bytes(),
+            "var/x",
+        );
+        b.into_inner().unwrap()
+    };
+    let at = image_of(
+        &store,
+        &[layer(MIB - 1024), layer_bytes(&[M::File("usr/a", "A")])],
+    );
+    assert_eq!(
+        files_under(&from_store(&store, &at).unwrap()),
+        ["usr", "usr/a"]
+    );
+    let past = image_of(&store, &[layer(MIB - 1023)]);
+    fails_cleanly(&store, &past, rootfs::LIMITS, FENCED);
+}
+
+#[test]
+fn a_pax_size_over_a_header_size_of_0_extracts() {
+    let (_h, store) = store();
+    // 2 MiB of data, more than the 1 MiB a header size of 0 would leave the reader.
+    let data = vec![b'b'; 2 * MIB];
+    let mut b = tar::Builder::new(Vec::new());
+    pax_sized(&mut b, "usr/big", 0, &data);
+    let digest = image_of(&store, &[b.into_inner().unwrap()]);
+    let root = from_store(&store, &digest).unwrap();
+    assert_eq!(fs::read(root.join("usr/big")).unwrap(), data);
+}
+
 /// Append a GNU sparse member `name` that stores `stored` bytes and expands to `logical`
 /// bytes: one data block at the end, a hole before it.
 fn sparse(b: &mut tar::Builder<Vec<u8>>, name: &str, stored: u64, logical: u64) {
