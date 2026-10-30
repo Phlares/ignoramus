@@ -826,7 +826,7 @@ fn an_unknown_cpu_row_is_charged_the_estimate_warned_about_and_pauses_the_run() 
 #[test]
 fn an_unknown_cpu_attempt_that_is_retried_leaves_a_spend_record_and_still_pauses() {
     let lab = lab();
-    plain(&lab, "unk2");
+    let dir = plain(&lab, "unk2");
     let d = TempDir::new().unwrap();
     // The first attempt is a fault with a stuck PID 1; the retry runs clean.
     let plan = prepare_with(
@@ -854,6 +854,17 @@ fn an_unknown_cpu_attempt_that_is_retried_leaves_a_spend_record_and_still_pauses
     assert_eq!(rows.len(), 1);
     assert!(rows[0].body.get("cpu_unknown").is_none());
     assert_eq!(rows[0].body["attempts"], 2);
+    // One warning, for the first attempt.
+    let events = common::events_of(&dir);
+    let warns = common::named(&events, "row.cpu_unknown");
+    assert_eq!(warns.len(), 1);
+    assert_eq!(warns[0]["level"], "warn");
+    assert_eq!(warns[0]["attrs"]["row"], 0);
+    assert_eq!(warns[0]["attrs"]["reason"], UNKNOWN);
+    assert_eq!(
+        warns[0]["attrs"]["charged_cpu_seconds"].as_f64().unwrap(),
+        per_row_cpu(&lab, "unk2")
+    );
 }
 
 /// Breaks the event log during the row, then reports `exit` with an unknown CPU count and,
