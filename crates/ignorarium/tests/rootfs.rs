@@ -1363,10 +1363,16 @@ fn the_paths_an_extraction_records_are_capped() {
 fn over_budget(store: &Store, digest: &str, cap: u64) {
     let message = format!(
         "bad image archive: the image is over the extraction budget of {cap} bytes \
-         (decoded layer bytes, read in two passes, plus 4096 per entry written)"
+         (archive bytes read to find its members, decoded layer bytes read in two passes, \
+         and 4096 per entry written)"
     );
     fails_cleanly(store, digest, budget(cap), &message);
 }
+
+/// What the two passes over a one-layer `image` archive read, the manifest first: its
+/// header and its 61 bytes; then its header and block, the `l0/` header and the layer's
+/// header.
+const OUTER: u64 = 512 + 61 + 4 * 512;
 
 const FENCED: &str = "bad image archive: a header extension is larger than 1 MiB";
 const MIB: usize = 1 << 20;
@@ -1435,9 +1441,10 @@ fn an_oversized_long_name_or_pax_record_is_refused_before_it_is_read() {
         let mut b = tar::Builder::new(Vec::new());
         extended(&mut b, kind, &data, "usr/x");
         let digest = image_of(&store, &[b.into_inner().unwrap()]);
-        // A budget one byte past the fence: the fence error shows the stream gave the crate
-        // at most that byte past the fence, so it never held the extension.
-        fails_cleanly(&store, &digest, budget((MIB + 1) as u64), FENCED);
+        // Past the archive's two passes, a budget one byte past the fence: the fence error
+        // shows the stream gave the crate at most that byte past it, so it never held the
+        // extension.
+        fails_cleanly(&store, &digest, budget(OUTER + (MIB + 1) as u64), FENCED);
     }
 }
 
@@ -1624,11 +1631,12 @@ fn a_sparse_member_cannot_widen_the_fence() {
         "var/x",
     );
     let digest = image_of(&store, &[b.into_inner().unwrap()]);
-    // A budget one byte past the fence: the error shows the long name was never read.
+    // Past the archive's two passes, a budget one byte past the fence: the error shows the
+    // long name was never read.
     fails_cleanly(
         &store,
         &digest,
-        budget((MIB + 1) as u64),
+        budget(OUTER + (MIB + 1) as u64),
         &sparse_refused("usr/s"),
     );
 }
@@ -1654,17 +1662,20 @@ fn an_extraction_over_the_write_cap_is_refused_and_publishes_nothing() {
     let (_h, store) = store();
     // Each pass reads two headers, two data blocks and the end block: 5 * 512 = 2560.
     // Written: the folder `usr` the paths imply, `usr/a`, `usr/b`: 3 * 4096 = 12288.
-    // 2 * 2560 + 12288 = 17408.
+    // 2 * 2560 + 12288 = 17408, and the two passes over the archive.
     let layers = [layer_bytes(&[
         M::File("usr/a", "12345"),
         M::File("usr/b", "678"),
     ])];
     let digest = image_of(&store, &layers);
-    over_budget(&store, &digest, 17407);
+    over_budget(&store, &digest, OUTER + 17407);
     assert_eq!(fs::read_dir(store.root.join("rootfs")).unwrap().count(), 0);
-    assert!(from_store_capped(&store, &digest, budget(17408)).is_ok());
+    assert!(from_store_capped(&store, &digest, budget(OUTER + 17408)).is_ok());
     // The budget counts the whole image, across layers: layer 1 costs 2 * 1536 + 2 * 4096 =
-    // 11264, layer 2 costs 2 * 1536 + 4096 = 7168 (the folder exists), 18432 in all.
+    // 11264, layer 2 costs 2 * 1536 + 4096 = 7168 (the folder exists), 18432 in all. The
+    // passes over the archive read its 76-byte manifest and, on the way to `l1/layer.tar`, the
+    // 2048 bytes of layer 1.
+    let outer = 512 + 76 + 6 * 512 + 2048;
     let two = image_of(
         &store,
         &[
@@ -1672,8 +1683,40 @@ fn an_extraction_over_the_write_cap_is_refused_and_publishes_nothing() {
             layer_bytes(&[M::File("usr/b", "5678")]),
         ],
     );
-    over_budget(&store, &two, 18431);
-    assert!(from_store_capped(&store, &two, budget(18432)).is_ok());
+    over_budget(&store, &two, outer + 18431);
+    assert!(from_store_capped(&store, &two, budget(outer + 18432)).is_ok());
+}
+
+#[test]
+fn many_tiny_members_of_the_archive_count_against_the_budget() {
+    let (_h, store) = store();
+    let n = 20_000;
+    let manifest = br#"[{"Layers":["l0/layer.tar"]}]"#;
+    let layer = layer_bytes(&[M::File("usr/a", "A")]);
+    let mut b = tar::Builder::new(Vec::new());
+    let mut add = |name: &str, data: &[u8]| {
+        let mut h = tar::Header::new_gnu();
+        h.set_path(name).unwrap();
+        h.set_mode(0o644);
+        h.set_size(data.len() as u64);
+        h.set_cksum();
+        b.append(&h, data).unwrap();
+    };
+    for i in 0..n {
+        add(&format!("f{i}"), b"");
+    }
+    add("manifest.json", manifest);
+    add("l0/layer.tar", &layer);
+    let digest = store.put(&b.into_inner().unwrap()).unwrap();
+    // The first pass reads every filler's header, the manifest's header and its bytes; the
+    // second reads the same headers, the manifest's block and the layer's header. The layer
+    // costs 2 * 1536 to read and 2 * 4096 to write (`usr` and `usr/a`).
+    let first = 512 * (n + 1) + manifest.len() as u64;
+    let second = 512 * (n + 3);
+    let cost = first + second + 2 * 1536 + 2 * 4096;
+    over_budget(&store, &digest, cost - 1);
+    let root = from_store_capped(&store, &digest, budget(cost)).unwrap();
+    assert_eq!(files_under(&root), ["usr", "usr/a"]);
 }
 
 #[test]
@@ -1699,7 +1742,7 @@ fn many_empty_entries_are_stopped_by_the_entry_charge() {
     // The decoded bytes, 2 * (1000 * 512 + 512) = 1025024, fit in 2 MiB; the 1001 entries
     // written (1000 files and `usr`) at 4096 each do not.
     over_budget(&store, &digest, 2 << 20);
-    assert!(from_store_capped(&store, &digest, budget(1_025_024 + 1001 * 4096)).is_ok());
+    assert!(from_store_capped(&store, &digest, budget(OUTER + 1_025_024 + 1001 * 4096)).is_ok());
 }
 
 #[test]
@@ -1744,7 +1787,7 @@ fn folders_a_deep_path_implies_are_charged_as_entries() {
     let digest = image_of(&store, &[b.into_inner().unwrap()]);
     // Each pass reads the long-name header and its name block, the file header and the end
     // block: 4 * 512. Written: the file and 201 folders (`usr` and 200 `d`).
-    let cost = 2 * 4 * 512 + 202 * 4096;
+    let cost = OUTER + 2 * 4 * 512 + 202 * 4096;
     over_budget(&store, &digest, cost - 1);
     let root = from_store_capped(&store, &digest, budget(cost)).unwrap();
     assert!(root.join(&deep).is_file());

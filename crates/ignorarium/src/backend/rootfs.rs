@@ -4,8 +4,14 @@
 //! One parser reads each archive (the `tar` crate, headers only) and the same code writes the
 //! tree. The box never calls the `tar` program and never uses the crate's unpack functions.
 //!
-//! One budget bounds an extraction (`WRITE_CAP` bytes). Every decoded byte read from a layer
-//! stream counts, in both passes, and so does `ENTRY` for every entry written (folder, file,
+//! The outer archive is read in two passes: the first stops at `manifest.json`, the second
+//! records where the data of each layer the manifest names lies, and stops once it has them
+//! all. It records nothing else. Each layer is then read from where it lies. A manifest may
+//! name at most `MAX_LAYERS` layers.
+//!
+//! One budget bounds an extraction (`WRITE_CAP` bytes). Every byte the two passes over the
+//! outer archive read counts. Every decoded byte read from a layer stream counts, in both
+//! passes over the layer, and so does `ENTRY` for every entry written (folder, file,
 //! symbolic link, hard link, and each parent folder a path implies) as an estimate of its inode
 //! and metadata. The one count bounds the data written, the decoding work and the number of
 //! entries. Each layer is decoded twice, so `WRITE_CAP` admits about 16 GiB of decoded layer
@@ -199,39 +205,62 @@ fn tar_err(e: io::Error) -> RootfsError {
     limit(&e).map_or_else(|| RootfsError::Tar(e.to_string()), RootfsError::Format)
 }
 
-/// Where the data of each file in an archive lies: offset and size, by path.
+/// Where the data of a file in an archive lies: offset and size, by path.
 type Members = BTreeMap<PathBuf, (u64, u64)>;
 
-/// One pass over the tar `blob`, behind a fence: where each file's data lies. The first
-/// file of a name wins.
-fn members(blob: &mut impl Read) -> Result<Members, RootfsError> {
+fn is_file<R: Read>(entry: &tar::Entry<'_, R>) -> bool {
+    matches!(
+        entry.header().entry_type(),
+        EntryType::Regular | EntryType::Continuous
+    )
+}
+
+/// `blob` from its start, with every byte read from it charged to `budget`.
+fn from_start<'a, S: Seek>(
+    blob: &'a mut S,
+    budget: &'a Meter,
+) -> io::Result<Metered<'a, &'a mut S>> {
+    blob.seek(SeekFrom::Start(0))?;
+    Ok(Metered {
+        inner: blob,
+        meter: budget,
+    })
+}
+
+/// The bytes of the first `manifest.json` in the archive, from a pass that stops there.
+fn read_manifest(blob: &mut (impl Read + Seek), budget: &Meter) -> Result<Vec<u8>, RootfsError> {
+    let name = Path::new("manifest.json");
+    each_entry(from_start(blob, budget)?, |entry| {
+        if !is_file(entry) || normalize(&entry.path_bytes())?.as_deref() != Some(name) {
+            return Ok(None);
+        }
+        let mut text = Vec::new();
+        entry.take(MANIFEST_MAX).read_to_end(&mut text)?;
+        Ok(Some(text))
+    })?
+    .ok_or_else(|| RootfsError::Format("manifest.json is missing".into()))
+}
+
+/// Where the data of each file in `names` lies, from a pass that stops once it has found
+/// them all. The first file of a name wins; no other file is recorded.
+fn find_layers(
+    blob: &mut (impl Read + Seek),
+    names: &[PathBuf],
+    budget: &Meter,
+) -> Result<Members, RootfsError> {
+    let wanted: BTreeSet<&Path> = names.iter().map(PathBuf::as_path).collect();
     let mut found = Members::new();
-    each_entry(blob, |entry| {
-        let is_file = matches!(
-            entry.header().entry_type(),
-            EntryType::Regular | EntryType::Continuous
-        );
-        if is_file && let Some(path) = normalize(&entry.path_bytes())? {
+    each_entry(from_start(blob, budget)?, |entry| {
+        if is_file(entry)
+            && let Some(path) = normalize(&entry.path_bytes())?
+            && wanted.contains(path.as_path())
+        {
             let at = (entry.raw_file_position(), entry.size());
             found.entry(path).or_insert(at);
         }
-        Ok(None::<()>)
+        Ok((found.len() == wanted.len()).then_some(()))
     })?;
     Ok(found)
-}
-
-/// The data of the file `name` in `blob`, read from where `found` says it lies.
-fn member<'a, S: Read + Seek>(
-    blob: &'a mut S,
-    found: &Members,
-    name: &Path,
-    what: &str,
-) -> Result<io::Take<&'a mut S>, RootfsError> {
-    let &(at, size) = found
-        .get(name)
-        .ok_or_else(|| RootfsError::Format(format!("{what} is missing")))?;
-    blob.seek(SeekFrom::Start(at))?;
-    Ok(blob.take(size))
 }
 
 /// Call `each` on the entries of the tar in `reader`, behind a fence, until it returns
@@ -255,15 +284,12 @@ fn each_entry<R: Read, T>(
     Ok(None)
 }
 
-/// Extract the image archive `blob` into `root`. The archive is read once to find its
-/// files; the manifest and each layer are then read from where they lie.
+/// Extract the image archive `blob` into `root`. One pass over the archive finds the
+/// manifest, a second finds the layers it names, and each layer is then read from where it
+/// lies. The budget counts every byte the two passes read.
 fn extract(blob: &mut (impl Read + Seek), root: &Path, limits: Limits) -> Result<(), RootfsError> {
-    let found = members(blob)?;
-    let mut manifest = Vec::new();
-    let manifest_json = Path::new("manifest.json");
-    member(blob, &found, manifest_json, "manifest.json")?
-        .take(MANIFEST_MAX)
-        .read_to_end(&mut manifest)?;
+    let budget = Meter::budget(limits.budget);
+    let manifest = read_manifest(blob, &budget)?;
     let manifest: Vec<ManifestEntry> = serde_json::from_slice(&manifest)
         .map_err(|e| RootfsError::Format(format!("manifest.json: {e}")))?;
     let layers = manifest
@@ -285,14 +311,17 @@ fn extract(blob: &mut (impl Read + Seek), root: &Path, limits: Limits) -> Result
             _ => return Err(RootfsError::Unsafe(format!("layer path {l:?}"))),
         }
     }
+    let found = find_layers(blob, &names, &budget)?;
     fs::create_dir(root)?;
-    let budget = Meter::budget(limits.budget);
     let records = Meter::records(limits.records);
     let mut tree = Tree::new(root, &budget, &records);
     for name in &names {
-        let what = format!("layer {}", name.display());
+        let &(at, size) = found
+            .get(name)
+            .ok_or_else(|| RootfsError::Format(format!("layer {} is missing", name.display())))?;
         for pass in [Pass::Whiteouts, Pass::Content] {
-            tree.layer(&mut member(blob, &found, name, &what)?, pass)?;
+            blob.seek(SeekFrom::Start(at))?;
+            tree.layer(&mut Read::take(&mut *blob, size), pass)?;
         }
     }
     Ok(())
@@ -319,8 +348,9 @@ impl Meter {
         Meter::new(
             cap,
             format!(
-                "the image is over the extraction budget of {cap} bytes (decoded layer bytes, \
-                 read in two passes, plus {ENTRY} per entry written)"
+                "the image is over the extraction budget of {cap} bytes (archive bytes read \
+                 to find its members, decoded layer bytes read in two passes, and {ENTRY} per \
+                 entry written)"
             ),
         )
     }
@@ -760,14 +790,15 @@ mod tests {
     }
 
     #[test]
-    fn a_manifest_after_a_large_member_costs_one_pass_over_the_archive() {
-        let layer = tar_of(&[("usr/a", b"A")]);
+    fn a_manifest_after_a_large_member_costs_two_passes_however_many_layers_it_names() {
+        let layers = [tar_of(&[("usr/a", b"A")]), tar_of(&[("usr/b", b"B")])];
         let filler = vec![0u8; 8 << 20];
-        let manifest = br#"[{"Layers":["l0/layer.tar"]}]"#;
+        let manifest = br#"[{"Layers":["l0/layer.tar","l1/layer.tar","l0/layer.tar"]}]"#;
         // `docker save` writes the manifest last.
         let image = tar_of(&[
             ("filler", &filler),
-            ("l0/layer.tar", &layer),
+            ("l0/layer.tar", &layers[0]),
+            ("l1/layer.tar", &layers[1]),
             ("manifest.json", manifest),
         ]);
         let dir = tempfile::TempDir::new().unwrap();
@@ -777,15 +808,39 @@ mod tests {
             read: 0,
         };
         extract(&mut blob, &root, LIMITS).unwrap();
-        assert_eq!(fs::read_to_string(root.join("usr/a")).unwrap(), "A");
-        // One pass over the archive, then the manifest and the layer's two passes, each read
-        // from where it lies.
-        let once = (image.len() + manifest.len() + 2 * layer.len()) as u64;
+        assert_eq!(fs::read_to_string(root.join("usr/b")).unwrap(), "B");
+        // Two passes over the archive, then two passes over each named layer from where it
+        // lies.
+        let named = 2 * layers[0].len() + layers[1].len();
+        let most = (2 * image.len() + 2 * named) as u64;
         assert!(
-            (filler.len() as u64..=once).contains(&blob.read),
-            "{} bytes read; one pass is at most {once}",
+            (filler.len() as u64..=most).contains(&blob.read),
+            "{} bytes read; two passes are at most {most}",
             blob.read
         );
+    }
+
+    #[test]
+    fn the_layer_pass_records_only_the_named_files_and_stops_at_the_last() {
+        let fillers: Vec<String> = (0..1000).map(|i| format!("f{i}")).collect();
+        let mut members: Vec<(&str, &[u8])> =
+            fillers.iter().map(|f| (f.as_str(), &b""[..])).collect();
+        members.extend([("l0/layer.tar", &b"x"[..]), ("after", &b"y"[..])]);
+        let image = tar_of(&members);
+        let budget = Meter::budget(WRITE_CAP);
+        let names = [PathBuf::from("l0/layer.tar"), PathBuf::from("l0/layer.tar")];
+        let found = find_layers(&mut io::Cursor::new(&image), &names, &budget).unwrap();
+        // 1000 empty fillers of one header each, then the layer's header.
+        let at = 512 * 1001;
+        assert_eq!(found, Members::from([(names[0].clone(), (at, 1))]));
+        assert_eq!(budget.used.get(), at);
+        // A name the archive lacks: the pass reads on, past the layer's data block, the last
+        // file's header and block, to the end block, and finds nothing.
+        let missing = [PathBuf::from("l9/layer.tar")];
+        let budget = Meter::budget(WRITE_CAP);
+        let found = find_layers(&mut io::Cursor::new(&image), &missing, &budget).unwrap();
+        assert!(found.is_empty());
+        assert_eq!(budget.used.get(), at + 4 * 512);
     }
 
     #[test]
