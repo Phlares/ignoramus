@@ -270,6 +270,46 @@ fn from_store_refuses_a_bad_archive_and_publishes_nothing() {
 }
 
 #[test]
+fn a_manifest_may_name_at_most_256_layers() {
+    let (_h, store) = store();
+    let a = TempDir::new().unwrap();
+    put(a.path(), "usr/a", "A", None);
+    // One small layer, named again and again.
+    let naming = |n: usize| {
+        let names = vec!["\"l0/layer.tar\""; n].join(",");
+        archive(
+            &store,
+            &[a.path()],
+            Some(&format!("[{{\"Layers\":[{names}]}}]")),
+        )
+    };
+    let root = from_store(&store, &naming(256)).unwrap();
+    assert_eq!(files_under(&root), ["usr", "usr/a"]);
+    let over = naming(257);
+    let err = from_store(&store, &over).unwrap_err();
+    assert!(matches!(err, RootfsError::Format(_)), "{err}");
+    assert_eq!(
+        err.to_string(),
+        "bad image archive: manifest.json lists 257 layers, over the limit of 256"
+    );
+    assert!(!store.root.join("rootfs").join(&over).exists());
+}
+
+#[test]
+fn a_layer_the_archive_lacks_is_a_format_error() {
+    let (_h, store) = store();
+    let a = TempDir::new().unwrap();
+    put(a.path(), "usr/a", "A", None);
+    let m = r#"[{"Layers":["l0/layer.tar","l9/layer.tar"]}]"#;
+    let digest = archive(&store, &[a.path()], Some(m));
+    let err = from_store(&store, &digest).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "bad image archive: layer l9/layer.tar is missing"
+    );
+}
+
+#[test]
 fn from_store_refuses_a_layer_path_that_leaves_the_archive() {
     let (_h, store) = store();
     let a = TempDir::new().unwrap();

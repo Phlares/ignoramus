@@ -23,11 +23,11 @@ use crate::home::make_private_dir;
 use crate::store::{Store, StoreError};
 use serde::Deserialize;
 use std::cell::Cell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::ops::Bound;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -40,6 +40,8 @@ const WHITEOUT: &[u8] = b".wh.";
 const OPAQUE: &[u8] = b".wh..wh..opq";
 /// Largest `manifest.json` read.
 const MANIFEST_MAX: u64 = 16 << 20;
+/// Most layers a manifest may name. Each costs two passes over its data.
+const MAX_LAYERS: usize = 256;
 /// Layer compressions by their leading bytes. Only gzip is decoded; the others are refused.
 const COMPRESSIONS: [(&str, &[u8]); 4] = [
     ("gzip", &[0x1f, 0x8b]),
@@ -155,12 +157,15 @@ pub fn from_store_capped(
     fs::create_dir(&tmp)?;
     fs::set_permissions(&tmp, fs::Permissions::from_mode(0o700))?;
     let root = tmp.join("root");
-    let built = extract(&blob, &root, cap).and_then(|()| match fs::rename(&root, &done) {
-        Ok(()) => Ok(()),
-        // Another box published the same tree first.
-        Err(_) if is_real_dir(&done) => Ok(()),
-        Err(e) => Err(e.into()),
-    });
+    let built = fs::File::open(&blob)
+        .map_err(RootfsError::from)
+        .and_then(|mut f| extract(&mut f, &root, cap))
+        .and_then(|()| match fs::rename(&root, &done) {
+            Ok(()) => Ok(()),
+            // Another box published the same tree first.
+            Err(_) if is_real_dir(&done) => Ok(()),
+            Err(e) => Err(e.into()),
+        });
     // The temp folder is this call's own scratch; every folder in it is owner-writable.
     let _ = fs::remove_dir_all(&tmp);
     built.map(|()| done)
@@ -174,22 +179,39 @@ fn tar_err(e: io::Error) -> RootfsError {
     limit(&e).map_or_else(|| RootfsError::Tar(e.to_string()), RootfsError::Format)
 }
 
-/// Call `f` with the bytes of the file `name` in the tar at `blob`. `None` when absent.
-fn with_member<T>(
-    blob: &Path,
-    name: &Path,
-    mut f: impl FnMut(&mut dyn Read) -> Result<T, RootfsError>,
-) -> Result<Option<T>, RootfsError> {
-    each_entry(fs::File::open(blob)?, |entry| {
+/// Where the data of each file in an archive lies: offset and size, by path.
+type Members = BTreeMap<PathBuf, (u64, u64)>;
+
+/// One pass over the tar `blob`, behind a fence: where each file's data lies. The first
+/// file of a name wins.
+fn members(blob: &mut impl Read) -> Result<Members, RootfsError> {
+    let mut found = Members::new();
+    each_entry(blob, |entry| {
         let is_file = matches!(
             entry.header().entry_type(),
             EntryType::Regular | EntryType::Continuous
         );
-        if is_file && normalize(&entry.path_bytes())?.as_deref() == Some(name) {
-            return f(entry).map(Some);
+        if is_file && let Some(path) = normalize(&entry.path_bytes())? {
+            let at = (entry.raw_file_position(), entry.size());
+            found.entry(path).or_insert(at);
         }
-        Ok(None)
-    })
+        Ok(None::<()>)
+    })?;
+    Ok(found)
+}
+
+/// The data of the file `name` in `blob`, read from where `found` says it lies.
+fn member<'a, S: Read + Seek>(
+    blob: &'a mut S,
+    found: &Members,
+    name: &Path,
+    what: &str,
+) -> Result<io::Take<&'a mut S>, RootfsError> {
+    let &(at, size) = found
+        .get(name)
+        .ok_or_else(|| RootfsError::Format(format!("{what} is missing")))?;
+    blob.seek(SeekFrom::Start(at))?;
+    Ok(blob.take(size))
 }
 
 /// Call `each` on the entries of the tar in `reader`, behind a fence, until it returns
@@ -213,14 +235,15 @@ fn each_entry<R: Read, T>(
     Ok(None)
 }
 
-/// Extract the image at `blob` into `root`.
-fn extract(blob: &Path, root: &Path, cap: u64) -> Result<(), RootfsError> {
-    let manifest = with_member(blob, Path::new("manifest.json"), |r| {
-        let mut text = Vec::new();
-        r.take(MANIFEST_MAX).read_to_end(&mut text)?;
-        Ok(text)
-    })?
-    .ok_or_else(|| RootfsError::Format("manifest.json is missing".into()))?;
+/// Extract the image archive `blob` into `root`. The archive is read once to find its
+/// files; the manifest and each layer are then read from where they lie.
+fn extract(blob: &mut (impl Read + Seek), root: &Path, cap: u64) -> Result<(), RootfsError> {
+    let found = members(blob)?;
+    let mut manifest = Vec::new();
+    let manifest_json = Path::new("manifest.json");
+    member(blob, &found, manifest_json, "manifest.json")?
+        .take(MANIFEST_MAX)
+        .read_to_end(&mut manifest)?;
     let manifest: Vec<ManifestEntry> = serde_json::from_slice(&manifest)
         .map_err(|e| RootfsError::Format(format!("manifest.json: {e}")))?;
     let layers = manifest
@@ -229,6 +252,12 @@ fn extract(blob: &Path, root: &Path, cap: u64) -> Result<(), RootfsError> {
         .map(|m| m.layers)
         .filter(|l| !l.is_empty())
         .ok_or_else(|| RootfsError::Format("manifest.json lists no layers".into()))?;
+    if layers.len() > MAX_LAYERS {
+        return Err(RootfsError::Format(format!(
+            "manifest.json lists {} layers, over the limit of {MAX_LAYERS}",
+            layers.len()
+        )));
+    }
     let mut names = Vec::new();
     for l in &layers {
         match normalize(l.as_bytes()) {
@@ -240,11 +269,9 @@ fn extract(blob: &Path, root: &Path, cap: u64) -> Result<(), RootfsError> {
     let budget = Meter::budget(cap);
     let mut tree = Tree::new(root, &budget);
     for name in &names {
+        let what = format!("layer {}", name.display());
         for pass in [Pass::Whiteouts, Pass::Content] {
-            let seen = with_member(blob, name, |r| tree.layer(r, pass))?;
-            seen.ok_or_else(|| {
-                RootfsError::Format(format!("layer {} is missing", name.display()))
-            })?;
+            tree.layer(&mut member(blob, &found, name, &what)?, pass)?;
         }
     }
     Ok(())
@@ -659,6 +686,69 @@ impl<'a> Tree<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tar of regular files.
+    fn tar_of(members: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut b = tar::Builder::new(Vec::new());
+        for (name, data) in members {
+            let mut h = tar::Header::new_gnu();
+            h.set_path(name).unwrap();
+            h.set_mode(0o644);
+            h.set_size(data.len() as u64);
+            h.set_cksum();
+            b.append(&h, *data).unwrap();
+        }
+        b.into_inner().unwrap()
+    }
+
+    /// A source that counts the bytes read through it.
+    struct Counted<R> {
+        inner: R,
+        read: u64,
+    }
+
+    impl<R: Read> Read for Counted<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.read += n as u64;
+            Ok(n)
+        }
+    }
+
+    impl<R: Seek> Seek for Counted<R> {
+        fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+            self.inner.seek(to)
+        }
+    }
+
+    #[test]
+    fn a_manifest_after_a_large_member_costs_one_pass_over_the_archive() {
+        let layer = tar_of(&[("usr/a", b"A")]);
+        let filler = vec![0u8; 8 << 20];
+        let manifest = br#"[{"Layers":["l0/layer.tar"]}]"#;
+        // `docker save` writes the manifest last.
+        let image = tar_of(&[
+            ("filler", &filler),
+            ("l0/layer.tar", &layer),
+            ("manifest.json", manifest),
+        ]);
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("root");
+        let mut blob = Counted {
+            inner: io::Cursor::new(&image),
+            read: 0,
+        };
+        extract(&mut blob, &root, WRITE_CAP).unwrap();
+        assert_eq!(fs::read_to_string(root.join("usr/a")).unwrap(), "A");
+        // One pass over the archive, then the manifest and the layer's two passes, each read
+        // from where it lies.
+        let once = (image.len() + manifest.len() + 2 * layer.len()) as u64;
+        assert!(
+            (filler.len() as u64..=once).contains(&blob.read),
+            "{} bytes read; one pass is at most {once}",
+            blob.read
+        );
+    }
 
     #[test]
     fn forget_drops_a_path_and_its_descendants_and_keeps_its_neighbours() {
