@@ -236,18 +236,7 @@ pub fn prepare_with(
                 "pinned": b.pinned,
             });
             let level = if b.pinned { "info" } else { "warn" };
-            events::emit(
-                &dir.join("events.jsonl"),
-                Event {
-                    ts: crate::time::now_rfc3339(),
-                    trace_id: events::trace_id(&spec_hash),
-                    span_id: None,
-                    name: "env.build".into(),
-                    level: level.into(),
-                    attrs,
-                },
-            )
-            .map_err(io)?;
+            emit_event(&dir, &spec_hash, None, "env.build", level, attrs)?;
         }
         (found.rootfs, found.name)
     } else {
@@ -789,11 +778,23 @@ fn log_event(
     level: &str,
     attrs: Value,
 ) -> Result<(), RunError> {
+    emit_event(dir, &plan.spec_hash, span, name, level, attrs)
+}
+
+/// One event line in `dir`'s log, in the trace of the study with `spec_hash`.
+fn emit_event(
+    dir: &Path,
+    spec_hash: &[u8; 32],
+    span: Option<&str>,
+    name: &str,
+    level: &str,
+    attrs: Value,
+) -> Result<(), RunError> {
     events::emit(
         &dir.join("events.jsonl"),
         Event {
             ts: crate::time::now_rfc3339(),
-            trace_id: events::trace_id(&plan.spec_hash),
+            trace_id: events::trace_id(spec_hash),
             span_id: span.map(String::from),
             name: name.into(),
             level: level.into(),
@@ -974,8 +975,8 @@ fn attempt_row(
                 selftest: None,
                 cpu_unknown: None,
             });
+        let span = watch.row.borrow().1.clone();
         if let Some(t) = &o.selftest {
-            let span = watch.row.borrow().1.clone();
             let attrs = json!({
                 "row": row.index,
                 "connect_blocked": t.connect_blocked,
@@ -991,7 +992,6 @@ fn attempt_row(
         if let Some(reason) = &o.cpu_unknown {
             o.cpu_seconds = o.cpu_seconds.max(books.per_row.cpu_seconds);
             unknown = true;
-            let span = watch.row.borrow().1.clone();
             let attrs = json!({
                 "row": row.index,
                 "reason": reason,

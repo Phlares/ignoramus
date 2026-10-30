@@ -2,6 +2,7 @@
 //! IPC, UTS and cgroup namespaces, an empty read-only root with read-only binds of the
 //! environment, the input folder and the payload, one writable output folder, and a
 //! seccomp filter. See the bubblewrap manual: <https://github.com/containers/bubblewrap>.
+use super::rootfs::KEPT;
 use super::selftest::SelfTest;
 use super::{Backend, Exit, Probe, RowJob, RowOutcome, TIMEOUT_CODE, Watch, outcome, supervise};
 use crate::sys;
@@ -14,13 +15,14 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
+/// A bubblewrap version as text and as (major, minor).
+type Version = (String, (u32, u32));
 /// The first bubblewrap with `--disable-userns`.
 const FLOOR: (u32, u32) = (0, 8);
-/// The environment root's entries bound into the sandbox, each when present.
-const ROOT_ENTRIES: [&str; 5] = ["usr", "bin", "lib", "lib64", "etc"];
 /// Bytes kept from the end of bubblewrap's stderr and status pipe.
 const TAIL: usize = 4096;
 /// Time the probe's test sandbox may take.
@@ -48,6 +50,8 @@ pub struct Level1 {
     /// Marks descriptors close-on-exec from the box before it starts bubblewrap. A field
     /// so a test can stand in a kernel that lacks the call.
     close_range: fn() -> io::Result<()>,
+    /// `bwrap --version`, read on first use: every row record names the launcher.
+    version: OnceLock<Result<Version, String>>,
 }
 
 impl Default for Level1 {
@@ -75,11 +79,16 @@ impl Level1 {
             bwrap,
             exe,
             close_range: || sys::close_range_cloexec(libc::c_uint::MAX, libc::c_uint::MAX),
+            version: OnceLock::new(),
         }
     }
 
     /// The version `bwrap --version` prints, as text and as (major, minor).
-    fn version(&self) -> Result<(String, (u32, u32)), String> {
+    fn version(&self) -> &Result<Version, String> {
+        self.version.get_or_init(|| self.read_version())
+    }
+
+    fn read_version(&self) -> Result<Version, String> {
         let out = Command::new(&self.bwrap)
             .arg("--version")
             .stdin(Stdio::null())
@@ -115,8 +124,8 @@ impl Level1 {
             ));
         }
         let (text, number) = match self.version() {
-            Ok(v) => v,
-            Err(why) => return Some(why),
+            Ok((text, number)) => (text, *number),
+            Err(why) => return Some(why.clone()),
         };
         if number < FLOOR {
             return Some(format!(
@@ -196,29 +205,29 @@ impl Level1 {
                 Some("the sandbox's PID 1 did not exit in time; its CPU time is unknown".into()),
             ),
         };
-        let done = |exit| Launched {
-            exit,
-            cpu,
-            cpu_unknown: cpu_unknown.clone(),
-            stdout: stdout.clone(),
-        };
         // `Payload(TIMEOUT_CODE)` without an exit document is the wall timeout; with one,
         // bubblewrap passed on the payload's own 124, which the document holds too.
-        if matches!(
+        let exit = if matches!(
             exit,
             Exit::Stopped | Exit::Infra(_) | Exit::Payload(TIMEOUT_CODE)
         ) {
-            return done(exit);
-        }
-        let exit = match field(&status, "exit-code") {
-            Some(0) => Exit::Ok,
-            Some(c) => Exit::Payload(c),
-            None => Exit::Infra(format!(
-                "bubblewrap reported no payload exit: {}",
-                stderr.trim()
-            )),
+            exit
+        } else {
+            match field(&status, "exit-code") {
+                Some(0) => Exit::Ok,
+                Some(c) => Exit::Payload(c),
+                None => Exit::Infra(format!(
+                    "bubblewrap reported no payload exit: {}",
+                    stderr.trim()
+                )),
+            }
         };
-        done(exit)
+        Launched {
+            exit,
+            cpu,
+            cpu_unknown,
+            stdout,
+        }
     }
 
     /// The self-test sandbox: the host root, the box binary and the isolation of a row.
@@ -415,11 +424,11 @@ pub fn row_args(job: &RowJob) -> Result<Sandbox, String> {
     Ok(Sandbox { mounts, run })
 }
 
-/// A read-only bind for each directory of `ROOT_ENTRIES` in `root`, and the same link for
+/// A read-only bind for each directory of `KEPT` in `root`, and the same link for
 /// each symbolic link; an absent entry adds nothing.
 fn root_mounts(root: &Path) -> Vec<OsString> {
     let mut mounts = Vec::new();
-    for entry in ROOT_ENTRIES {
+    for entry in KEPT {
         let (path, at) = (root.join(entry), Path::new("/").join(entry));
         match std::fs::read_link(&path) {
             Ok(target) => mounts.extend(op("--symlink", target, at)),
