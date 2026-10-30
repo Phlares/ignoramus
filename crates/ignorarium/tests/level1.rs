@@ -9,7 +9,7 @@ use ignorarium::backend::level0::Level0;
 use ignorarium::backend::level1::{Level1, isolation_args, row_args};
 use ignorarium::backend::selftest::SelfTest;
 use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome, Watch, output_hash, seccomp};
-use ignorarium::control::ControlFile;
+use ignorarium::control::{self, ControlFile};
 use ignorarium::machine;
 use ignorarium::runner::{self, RunError, RunStatus, prepare, prepare_with};
 use std::cell::Cell;
@@ -573,6 +573,57 @@ fn killing_bwrap_ends_the_sandbox() {
         "{:?}",
         o.exit
     );
+}
+
+/// Runs only as the child of the level 1 dead-box test: the box that gets killed mid-row.
+#[test]
+fn level1_dead_box_child() {
+    let Some((home, id)) = common::boxed_study() else {
+        return;
+    };
+    let plan = prepare_with(&home, &id, vec![Box::new(backend())]).unwrap();
+    let _ = runner::run(&plan);
+}
+
+#[test]
+fn a_killed_box_takes_its_sandbox_with_it() {
+    if ready().is_none() {
+        return;
+    }
+    let lab = lab();
+    let m = marker("dead-box");
+    // Row 0 starts the marked process, waits until it runs, then marks itself started.
+    let payload = format!(
+        "#!/bin/sh\n\
+         if [ \"$IGNORARIUM_ROW\" = 0 ]; then\n\
+         \x20 sh -c 'sleep 60; : {m}' &\n\
+         \x20 until grep -q {m} /proc/$!/cmdline 2>/dev/null; do sleep 0.01; done\n\
+         \x20 echo started > \"$IGNORARIUM_OUT/started\"\n\
+         \x20 wait\n\
+         fi\n"
+    );
+    common::with_payload(&lab, "dead1", &payload);
+    let file = common::kill_box_at(&lab, "level1_dead_box_child", "dead1", 0);
+    // bubblewrap dies with the box (`--die-with-parent`), and the sandbox with bubblewrap.
+    assert!(gone_within(&m, Duration::from_secs(1)), "{:?}", alive(&m));
+    // This process is a subreaper (the probe made it one), so it may adopt the dead
+    // bubblewrap as a zombie: reap it, as the box would have.
+    let pid = file["pid"].as_u64().unwrap();
+    let t = Instant::now();
+    while let Some(state) = common::proc_state(pid) {
+        assert!(
+            t.elapsed() < Duration::from_secs(1),
+            "bubblewrap is {state}"
+        );
+        if state == 'Z' {
+            let p = rustix::process::Pid::from_raw(pid as i32).unwrap();
+            let _ = rustix::process::waitpid(Some(p), rustix::process::WaitOptions::NOHANG);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let o = control::end_orphan(&lab.home, "dead1").unwrap().unwrap();
+    assert_eq!(o.row, 0);
+    assert_eq!(o.note, "row leader gone; group not killed");
 }
 
 #[test]

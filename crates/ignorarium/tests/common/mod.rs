@@ -145,6 +145,62 @@ pub fn in_child(name: &str, cwd: &Path, envs: &[(&str, &std::ffi::OsStr)]) -> bo
     out.status.success() && String::from_utf8_lossy(&out.stdout).contains(" 1 passed")
 }
 
+/// `/proc/<pid>/stat` state letter, or `None` once the process is reaped.
+pub fn proc_state(pid: u64) -> Option<char> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?.1.trim_start().chars().next()
+}
+
+/// Wait until the box's row file names row `row` and that row has written `started` to its
+/// output, then return the file.
+pub fn wait_for_row_file(dir: &Path, row: u64) -> serde_json::Value {
+    let t = std::time::Instant::now();
+    loop {
+        let file = std::fs::read(dir.join("run/row.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+        if let Some(f) = file.filter(|f| f["row"] == row)
+            && dir.join(format!("run/rows/{row}/out/started")).exists()
+        {
+            return f;
+        }
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(20),
+            "row {row} never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+const BOX_HOME: &str = "IGNORARIUM_TEST_BOX_HOME";
+const BOX_STUDY: &str = "IGNORARIUM_TEST_BOX_STUDY";
+
+/// Inside the child box that `kill_box_at` starts: its home and the study it runs.
+pub fn boxed_study() -> Option<(Home, String)> {
+    let root = std::env::var_os(BOX_HOME)?;
+    let id = std::env::var(BOX_STUDY).ok()?;
+    Some((Home::open_at(Path::new(&root)).unwrap(), id))
+}
+
+/// Run study `id` in a child box, this binary's test `child`, kill the box with SIGKILL once
+/// row `row` runs, and return the row file it left.
+pub fn kill_box_at(lab: &Lab, child: &str, id: &str, row: u64) -> serde_json::Value {
+    use std::process::Stdio;
+    let mut boxed = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", child, "--nocapture"])
+        .env(BOX_HOME, &lab.home.root)
+        .env(BOX_STUDY, id)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let file = wait_for_row_file(&lab.home.study_dir(id), row);
+    boxed.kill().unwrap();
+    boxed.wait().unwrap();
+    file
+}
+
 /// Write an executable file without this process holding a write descriptor to it.
 /// A thread that forks while such a descriptor is open hands it to its child, and an
 /// `exec` of the file then fails with ETXTBSY. A child process writes the file instead.
