@@ -201,6 +201,30 @@ fn from_store_runs_once_per_digest() {
 }
 
 #[test]
+fn a_link_or_file_planted_at_the_tree_path_is_never_returned() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_h, store) = store();
+    let a = TempDir::new().unwrap();
+    put(a.path(), "usr/a", "A", None);
+    let digest = archive(&store, &[a.path()], None);
+    let parent = store.root.join("rootfs");
+    fs::create_dir(&parent).unwrap();
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+    let host = host_dir();
+    let at = parent.join(&digest);
+    std::os::unix::fs::symlink(host.path(), &at).unwrap();
+    let err = from_store(&store, &digest).unwrap_err();
+    assert!(matches!(err, RootfsError::Io(_)), "{err}");
+    assert_eq!(fs::read_link(&at).unwrap(), host.path());
+    assert_eq!(fs::read_dir(host.path()).unwrap().count(), 1);
+    fs::remove_file(&at).unwrap();
+    fs::write(&at, "planted").unwrap();
+    let err = from_store(&store, &digest).unwrap_err();
+    assert!(matches!(err, RootfsError::Io(_)), "{err}");
+    assert_eq!(fs::read_to_string(&at).unwrap(), "planted");
+}
+
+#[test]
 fn from_store_leaves_no_temp_folder_beside_the_result() {
     let (_h, store) = store();
     let a = TempDir::new().unwrap();
@@ -249,7 +273,13 @@ fn from_store_refuses_a_layer_path_that_leaves_the_archive() {
     let (_h, store) = store();
     let a = TempDir::new().unwrap();
     put(a.path(), "usr/a", "A", None);
-    for path in ["../l0/layer.tar", "/l0/layer.tar", "l0/../l0/layer.tar", ""] {
+    for path in [
+        "../l0/layer.tar",
+        "/l0/layer.tar",
+        "l0/../l0/layer.tar",
+        "./l0/layer.tar",
+        "",
+    ] {
         let m = format!("[{{\"Layers\":[\"{path}\"]}}]");
         let digest = archive(&store, &[a.path()], Some(&m));
         let err = from_store(&store, &digest).unwrap_err();
@@ -708,6 +738,22 @@ fn a_busybox_style_hard_link_inside_a_kept_folder_extracts() {
 }
 
 #[test]
+fn a_hard_link_reaches_a_file_written_before_other_members() {
+    let (_h, store) = store();
+    let digest = image_of(
+        &store,
+        &[layer_bytes(&[
+            M::File("usr/a", "A"),
+            M::Sym("usr/s", "a"),
+            M::File("usr/b", "B"),
+            M::Hard("usr/c", "usr/a", "box"),
+        ])],
+    );
+    let root = from_store(&store, &digest).unwrap();
+    assert_eq!(fs::read_to_string(root.join("usr/c")).unwrap(), "A");
+}
+
+#[test]
 fn setuid_and_setgid_bits_do_not_survive_extraction() {
     use std::os::unix::fs::PermissionsExt;
     let (_h, store) = store();
@@ -744,6 +790,103 @@ fn a_root_level_whiteout_removes_a_whole_kept_folder() {
     let digest = archive(&store, &[a.path(), b.path()], None);
     let root = from_store(&store, &digest).unwrap();
     assert_eq!(files_under(&root), ["usr", "usr/y"]);
+}
+
+#[test]
+fn a_whiteout_under_a_missing_folder_makes_no_folder() {
+    let (_h, store) = store();
+    let digest = image_of(
+        &store,
+        &[
+            layer_bytes(&[M::File("usr/a", "A")]),
+            layer_bytes(&[
+                M::File("usr/missing/.wh.y", ""),
+                M::File("etc/none/.wh..wh..opq", ""),
+            ]),
+        ],
+    );
+    let root = from_store(&store, &digest).unwrap();
+    assert_eq!(files_under(&root), ["usr", "usr/a"]);
+}
+
+#[test]
+fn an_opaque_whiteout_on_a_file_leaves_the_file() {
+    let (_h, store) = store();
+    let digest = image_of(
+        &store,
+        &[
+            layer_bytes(&[M::File("etc/f", "F")]),
+            layer_bytes(&[M::File("etc/f/.wh..wh..opq", "")]),
+        ],
+    );
+    let root = from_store(&store, &digest).unwrap();
+    assert_eq!(fs::read_to_string(root.join("etc/f")).unwrap(), "F");
+}
+
+#[test]
+fn a_whiteout_through_a_name_too_long_for_the_disk_fails_the_extraction() {
+    let (_h, store) = store();
+    // A name over 255 bytes cannot be looked up, so the whiteout cannot be judged: as a
+    // folder on the way, or as the name the whiteout removes.
+    let long = "n".repeat(300);
+    for path in [
+        format!("usr/{long}/z/.wh..wh..opq"),
+        format!("usr/.wh.{long}"),
+    ] {
+        let mut b = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_mode(0o644);
+        h.set_size(0);
+        b.append_data(&mut h, &path, &b""[..]).unwrap();
+        let digest = image_of(
+            &store,
+            &[
+                layer_bytes(&[M::File("usr/a", "A")]),
+                b.into_inner().unwrap(),
+            ],
+        );
+        let err = from_store(&store, &digest).unwrap_err();
+        assert!(
+            matches!(&err, RootfsError::Io(e) if e.raw_os_error() == Some(libc::ENAMETOOLONG)),
+            "{err}"
+        );
+    }
+}
+
+#[test]
+fn a_member_under_a_file_is_a_format_error() {
+    let (_h, store) = store();
+    let digest = image_of(
+        &store,
+        &[layer_bytes(&[
+            M::File("usr/x", "x"),
+            M::File("usr/x/y", "y"),
+        ])],
+    );
+    let err = from_store(&store, &digest).unwrap_err();
+    assert!(matches!(err, RootfsError::Format(_)), "{err}");
+    assert_eq!(
+        err.to_string(),
+        "bad image archive: usr/x is a file, not a folder"
+    );
+}
+
+#[test]
+fn a_root_level_whiteout_of_dot_or_dot_dot_removes_nothing() {
+    let (_h, store) = store();
+    let digest = image_of(
+        &store,
+        &[
+            layer_bytes(&[M::File("usr/a", "A")]),
+            layer_bytes(&[
+                M::File(".wh...", ""),
+                M::File(".wh..", ""),
+                M::File("usr/b", "B"),
+            ]),
+        ],
+    );
+    let root = from_store(&store, &digest).unwrap();
+    assert_eq!(files_under(&root), ["usr", "usr/a", "usr/b"]);
 }
 
 #[test]
@@ -866,6 +1009,21 @@ fn a_hard_link_with_a_crafted_owner_name_is_judged_by_its_real_target() {
         &[
             layer_bytes(&[M::File("usr/ok", "fine"), M::Sym("etc/x", h)]),
             layer_bytes(&[M::Hard("usr/pull", "etc/x/secret", owner)]),
+        ],
+        &host,
+    );
+}
+
+#[test]
+fn an_opaque_whiteout_in_a_link_to_a_host_folder_is_refused() {
+    let (_h, store) = store();
+    let host = host_dir();
+    let h = host.path().to_str().unwrap();
+    refused(
+        &store,
+        &[
+            layer_bytes(&[M::Sym("etc/x", h)]),
+            layer_bytes(&[M::File("etc/x/.wh..wh..opq", "")]),
         ],
         &host,
     );

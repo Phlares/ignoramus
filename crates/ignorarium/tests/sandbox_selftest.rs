@@ -106,23 +106,29 @@ fn a_failed_self_test_never_runs_the_payload() {
     if skip_level1() {
         return;
     }
-    let d = TempDir::new().unwrap();
-    let fake = d.path().join("fake-box");
-    write_exec(
-        &fake,
-        "#!/bin/sh\necho '{\"connect_blocked\":false,\"vsock_blocked\":true,\"io_uring_blocked\":true}'\nexit 102\n",
-    );
-    let b = Level1::with(Level1::new().bwrap, fake);
-    let work = TempDir::new().unwrap();
-    let job = job(work.path());
-    let o = b.run_row(&job, &|| true).unwrap();
-    assert_eq!(
-        o.exit,
-        Exit::Infra("sandbox self-test failed: connect was not blocked".into())
-    );
-    assert!(!work.path().join("out/ran").exists());
-    let t = o.selftest.unwrap();
-    assert!(!t.connect_blocked && t.vsock_blocked && t.io_uring_blocked);
+    // The result decides, whatever the exit code: a failed result with exit 0 fails too.
+    for code in [102, 0] {
+        let d = TempDir::new().unwrap();
+        let fake = d.path().join("fake-box");
+        write_exec(
+            &fake,
+            &format!(
+                "#!/bin/sh\necho '{{\"connect_blocked\":false,\"vsock_blocked\":true,\"io_uring_blocked\":true}}'\nexit {code}\n"
+            ),
+        );
+        let b = Level1::with(Level1::new().bwrap, fake);
+        let work = TempDir::new().unwrap();
+        let job = job(work.path());
+        let o = b.run_row(&job, &|| true).unwrap();
+        assert_eq!(
+            o.exit,
+            Exit::Infra("sandbox self-test failed: connect was not blocked".into()),
+            "exit {code}"
+        );
+        assert!(!work.path().join("out/ran").exists());
+        let t = o.selftest.unwrap();
+        assert!(!t.connect_blocked && t.vsock_blocked && t.io_uring_blocked);
+    }
 }
 
 #[test]
@@ -165,6 +171,21 @@ fn io_uring_setup_fails_inside_and_succeeds_or_is_absent_outside() {
 }
 
 #[test]
+fn the_vsock_check_outside_the_sandbox_is_the_kernels_answer() {
+    use rustix::net::{AddressFamily, SocketType, socket};
+    let family = AddressFamily::from_raw(libc::AF_VSOCK as u16);
+    let errno = socket(family, SocketType::STREAM, None)
+        .err()
+        .map(|e| e.raw_os_error());
+    let kernel = match selftest::Call::of(errno) {
+        selftest::Call::Denied => "denied",
+        selftest::Call::Absent => "absent",
+        selftest::Call::Open => "open",
+    };
+    assert_eq!(selftest::run().vsock_state(), kernel);
+}
+
+#[test]
 fn a_row_timeout_during_the_self_test_is_the_rows_timeout() {
     if skip_level1() {
         return;
@@ -187,6 +208,27 @@ sleep 30
     let o = b.run_row(&job, &|| true).unwrap();
     assert_eq!(o.exit, Exit::Payload(124));
     assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+    assert!(!work.path().join("out/ran").exists());
+}
+
+#[test]
+fn a_self_test_that_ends_with_124_while_the_row_has_time_is_a_fault() {
+    if skip_level1() {
+        return;
+    }
+    let d = TempDir::new().unwrap();
+    let fake = d.path().join("fake-box");
+    let passed = r#"{"connect_blocked":true,"vsock_blocked":true,"io_uring_blocked":true}"#;
+    write_exec(&fake, &format!("#!/bin/sh\necho '{passed}'\nexit 124\n"));
+    let b = Level1::with(Level1::new().bwrap, fake);
+    let work = TempDir::new().unwrap();
+    let o = b.run_row(&job(work.path()), &|| true).unwrap();
+    assert_eq!(
+        o.exit,
+        Exit::Infra(format!(
+            "sandbox self-test failed: it ended with Payload(124): {passed}"
+        ))
+    );
     assert!(!work.path().join("out/ran").exists());
 }
 

@@ -732,6 +732,52 @@ fn a_stuck_sandbox_pid_1_marks_the_cpu_unknown_and_the_row_goes_on() {
 
 const UNKNOWN: &str = "the sandbox's PID 1 did not exit in time; its CPU time is unknown";
 
+/// A stand-in bubblewrap whose self-test sandbox prints `result`, reports `code` and leaves
+/// a process behind as its PID 1, as `stuck_bwrap` does for a row. Other sandboxes succeed.
+fn stuck_selftest_bwrap(dir: &Path, result: &str, code: i32) -> Level1 {
+    let path = dir.join("bwrap-stuck-selftest");
+    let script = format!(
+        r#"#!/bin/bash
+if [ "$1" = --version ]; then echo 'bubblewrap 0.9.0'; exit 0; fi
+prev=; for a in "$@"; do [ "$prev" = --json-status-fd ] && fd=$a; prev=$a; done
+case "$*" in *' /box/ignorarium '*) ;; *) echo '{{"exit-code": 0}}' >&$fd; exit 0;; esac
+pid=$( eval "exec $fd>&-"; setsid sleep 20 >/dev/null 2>&1 & echo $! )
+sleep 0.3
+echo '{result}'
+echo "{{\"child-pid\": $pid}}" >&$fd
+echo '{{"exit-code": {code}}}' >&$fd
+exit 0
+"#
+    );
+    write_exec(&path, &script);
+    Level1::with(path, BOX.into())
+}
+
+#[test]
+fn a_failed_self_test_with_a_stuck_pid_1_marks_the_rows_cpu_unknown() {
+    let d = TempDir::new().unwrap();
+    let failed = r#"{"connect_blocked":false,"vsock_blocked":true,"io_uring_blocked":true}"#;
+    let b = stuck_selftest_bwrap(d.path(), failed, 102);
+    let (_w, job) = row("true", LONG);
+    let o = b.run_row(&job, &|| true).unwrap();
+    assert_eq!(
+        o.exit,
+        Exit::Infra("sandbox self-test failed: connect was not blocked".into())
+    );
+    assert_eq!(o.cpu_unknown.as_deref(), Some(UNKNOWN));
+}
+
+#[test]
+fn a_passed_self_test_with_a_stuck_pid_1_marks_the_rows_cpu_unknown() {
+    let d = TempDir::new().unwrap();
+    let passed = r#"{"connect_blocked":true,"vsock_blocked":true,"io_uring_blocked":true}"#;
+    let b = stuck_selftest_bwrap(d.path(), passed, 0);
+    let (_w, job) = row("true", LONG);
+    let o = b.run_row(&job, &|| true).unwrap();
+    assert_eq!(o.exit, Exit::Ok);
+    assert_eq!(o.cpu_unknown.as_deref(), Some(UNKNOWN));
+}
+
 #[test]
 fn an_unknown_cpu_row_is_charged_the_estimate_warned_about_and_pauses_the_run() {
     let lab = lab();

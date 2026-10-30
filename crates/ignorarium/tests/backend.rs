@@ -224,6 +224,21 @@ fn a_fifo_in_the_output_is_kind_other_and_does_not_block() {
 }
 
 #[test]
+fn an_unreadable_output_file_is_an_error_not_kind_other() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("locked");
+    std::fs::write(&f, b"x").unwrap();
+    std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::File::open(&f).is_ok() {
+        println!("skip unreadable output: this user reads a mode-000 file (root)");
+        return;
+    }
+    let err = output_hash(d.path()).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
+}
+
+#[test]
 fn a_non_utf8_name_is_recorded_as_hex_bytes() {
     use std::os::unix::ffi::OsStrExt;
     let d = tempfile::tempdir().unwrap();
