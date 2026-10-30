@@ -55,6 +55,13 @@ source = "stated"               # stated | record:<sha256>
 id = "exact"
 [[design.conditions]]
 id = "arm-a"
+# params = { bits = 4 }        # optional; the payload gets them as JSON in IGNORARIUM_PARAMS
+# [design.selection]           # optional: a stage that picks one candidate on the selection inputs first
+# metric = "ppl-ratio"         # the outcome whose mean paired value ranks the candidates
+# conditions = ["arm-a", "arm-b"]  # two or more candidates, not the reference; a tie goes to the first
+# rule = "best-mean"
+[design.confirmation]
+conditions = ["arm-a"]          # run after the reference on the confirmation inputs; "selected" runs the pick
 
 [[inputs]]
 path = "data/example.txt"       # from the study root (the folder with ignorarium.toml; without one, the spec's folder)

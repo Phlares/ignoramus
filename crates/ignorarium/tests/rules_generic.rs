@@ -363,6 +363,9 @@ fn fat_templates() -> Vec<Value> {
                 { "id": "t2", "metric": "ppl-ratio", "threshold_e": 1.0 },
             ]);
             s["outcomes"].as_array_mut().unwrap().push(second);
+            s["design"]["conditions"][1]["params"] = json!({ "bits": 4, "mode": "fast" });
+            s["design"]["selection"] =
+                json!({ "metric": "ppl-ratio", "conditions": ["a", "b"], "rule": "best-mean" });
             s["scope"]["end_of_run"]["follow_on"] = json!([
                 { "when": "H1.pass", "spec": "follow/a.toml" },
                 { "when": "H1.pass", "spec": "follow/b.toml" },
@@ -372,8 +375,16 @@ fn fat_templates() -> Vec<Value> {
         .collect()
 }
 
-/// Concrete paths a pattern selects in `v`, counting only nodes that exist.
+/// Concrete paths a pattern selects in `v`, counting only nodes that exist. A `*` segment
+/// selects every key of a table.
 fn expand(v: &Value, pattern: &str) -> Vec<String> {
+    let join = |p: &str, name: &str| {
+        if p.is_empty() {
+            name.to_string()
+        } else {
+            format!("{p}.{name}")
+        }
+    };
     let mut cur = vec![(String::new(), v)];
     for seg in pattern.split('.') {
         let (name, each) = match seg.strip_suffix("[*]") {
@@ -382,14 +393,15 @@ fn expand(v: &Value, pattern: &str) -> Vec<String> {
         };
         let mut next = vec![];
         for (p, node) in cur {
+            if seg == "*" {
+                let keys = node.as_object().into_iter().flatten();
+                next.extend(keys.map(|(k, c)| (join(&p, k), c)));
+                continue;
+            }
             let Some(child) = node.get(name) else {
                 continue;
             };
-            let base = if p.is_empty() {
-                name.to_string()
-            } else {
-                format!("{p}.{name}")
-            };
+            let base = join(&p, name);
             match (each, child) {
                 (false, c) => next.push((base, c)),
                 (true, Value::Array(a)) => {
@@ -747,6 +759,30 @@ fn unknown_keys_report_once_at_the_top_and_inside_array_elements() {
         .map(|x| x.path.as_str())
         .collect();
     assert_eq!(got, ["extra", "outcomes[0].colour"]);
+}
+
+#[test]
+fn a_star_segment_selects_every_key_and_known_key_accepts_them() {
+    let r = local_rules(&format!(
+        "[[rule]]\n{HEAD}target = [\n\
+         {{ path = \"a\", check = \"type\", kind = \"table\" }},\n\
+         {{ path = \"a.*\", check = \"type\", kind = \"int\" }},\n\
+         {{ path = \"b\", check = \"type\", kind = \"table\" }},\n\
+         {{ path = \"b.*\", check = \"type\", kind = \"any\" }},\n\
+         {{ path = \"**\", check = \"known-key\" }},\n]\n"
+    ));
+    let s = json!({
+        "a": { "x": 1, "y": "two", "Pasted Secret": "three", "p.q": 4 },
+        "b": { "t": { "deep": 1 }, "u": [1, "x"], "v": true },
+        "c": 1,
+    });
+    let got: Vec<_> = rules::check_generic(&s, &r)
+        .into_iter()
+        .map(|d| d.path)
+        .collect();
+    // `a.*` types every key of `a`, naming an unsafe key `<key>`; `b.*` (any) checks no
+    // type and keeps known-key out of its values. A key with a dot is never a `*` key.
+    assert_eq!(got, ["a.<key>", "a.y", "a.<key>", "c"]);
 }
 
 #[test]

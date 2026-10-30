@@ -119,10 +119,23 @@ fn inputs(n: usize, units: u64) -> Value {
 }
 
 /// A confirmatory plan that passes every named check: 11 confirmation inputs of 5 units,
-/// 55 confirmation units against 54 needed.
+/// 55 confirmation units against 54 needed. A selection stage picks `arm-a` or `arm-b` on
+/// the selection input, and the confirmation stage runs the pick.
 fn ok() -> Value {
     let mut s = spec_at("../../templates/numeric-ablation.toml");
     let edits = [
+        (
+            "/design/conditions",
+            json!([{ "id": "exact" }, { "id": "arm-a" }, { "id": "arm-b", "params": { "bits": 4 } }]),
+        ),
+        (
+            "/design/selection",
+            json!({ "metric": "ppl-ratio", "conditions": ["arm-a", "arm-b"], "rule": "best-mean" }),
+        ),
+        (
+            "/design/confirmation",
+            json!({ "conditions": ["selected"] }),
+        ),
         ("/study/mode", json!("confirmatory")),
         ("/design/sesoi", json!(1.0)),
         ("/design/variance/value", json!(4.0)),
@@ -177,6 +190,16 @@ fn power_edits(upc: u32, clusters: usize) -> Vec<Edit> {
         ("/design/units_per_cluster", j(json!(upc))),
         ("/inputs", j(inputs(clusters, upc.into()))),
     ]
+}
+
+/// No selection stage: the confirmation stage runs `arm-a`, and `extra` follows.
+fn unstaged(extra: Vec<Edit>) -> Vec<Edit> {
+    let mut e = vec![
+        ("/design/selection", None),
+        ("/design/confirmation/conditions", j(json!(["arm-a"]))),
+    ];
+    e.extend(extra);
+    e
 }
 
 /// Two clusters of 5 units, and one edit: small enough that the gate fires if it computes.
@@ -251,7 +274,7 @@ fn faults() -> Vec<Fault> {
         ),
         // No selection or confirmation input: the schedule would be empty, in every mode.
         f(
-            vec![("/inputs", j(json!([inputs(0, 5)[0]])))],
+            unstaged(vec![("/inputs", j(json!([inputs(0, 5)[0]])))]),
             vec![
                 ("E-CNF-002", "inputs"),
                 ("E-CNF-004", "inputs"),
@@ -259,10 +282,10 @@ fn faults() -> Vec<Fault> {
             ],
         ),
         f(
-            vec![
+            unstaged(vec![
                 ("/study/mode", j(json!("exploratory"))),
                 ("/inputs", j(json!([inputs(0, 5)[0]]))),
-            ],
+            ]),
             vec![("E-UNT-001", "inputs")],
         ),
         // A selection or confirmation input declares its units; 12 inputs keep the power gate quiet.
@@ -305,11 +328,116 @@ fn faults() -> Vec<Fault> {
             vec![("E-REF-001", "design.reference")],
         ),
         // The reference may be any condition; an empty condition list is reported by non-empty alone.
-        f(vec![("/design/reference", j(json!("arm-a")))], vec![]),
+        f(
+            vec![
+                ("/design/reference", j(json!("arm-a"))),
+                ("/design/selection/conditions", j(json!(["exact", "arm-b"]))),
+            ],
+            vec![],
+        ),
         f(vec![("/design/conditions", j(json!([])))], vec![]),
         f(
-            vec![("/design/conditions", j(json!([{ "id": "exakt" }, 5])))],
+            vec![(
+                "/design/conditions",
+                j(json!([{ "id": "exakt" }, 5, { "id": "arm-a" }, { "id": "arm-b" }])),
+            )],
             vec![("E-REF-001", "design.reference")],
+        ),
+        // The stages: a stage needs a selection input, and a selection input a stage.
+        f(
+            vec![("/inputs/1/role", j(json!("confirmation")))],
+            vec![("E-SEL-001", "design.selection")],
+        ),
+        f(unstaged(vec![]), vec![("E-SEL-001", "inputs[1].role")]),
+        // Two or more candidates, each a declared condition other than the reference.
+        f(
+            vec![("/design/selection/conditions", j(json!(["arm-a"])))],
+            vec![("E-SEL-001", "design.selection.conditions")],
+        ),
+        f(
+            vec![("/design/selection/conditions", j(json!(["exact", "arm-a"])))],
+            vec![("E-SEL-001", "design.selection.conditions[0]")],
+        ),
+        f(
+            vec![("/design/selection/conditions", j(json!(["arm-a", "arm-z"])))],
+            vec![("E-SEL-001", "design.selection.conditions[1]")],
+        ),
+        f(
+            vec![(
+                "/design/selection/conditions",
+                j(json!(["arm-a", "selected"])),
+            )],
+            vec![("E-SEL-001", "design.selection.conditions[1]")],
+        ),
+        f(
+            vec![("/design/selection/metric", j(json!("nope")))],
+            vec![("E-SEL-001", "design.selection.metric")],
+        ),
+        // `selected` needs a stage; no condition may take its name.
+        f(
+            vec![
+                ("/design/selection", None),
+                ("/inputs/1/role", j(json!("confirmation"))),
+            ],
+            vec![("E-SEL-001", "design.confirmation.conditions[0]")],
+        ),
+        f(
+            vec![(
+                "/design/conditions",
+                j(
+                    json!([{ "id": "exact" }, { "id": "arm-a" }, { "id": "arm-b" }, { "id": "selected" }]),
+                ),
+            )],
+            vec![("E-SEL-001", "design.conditions[3].id")],
+        ),
+        // The confirmation stage runs declared conditions and the pick, never the reference.
+        f(
+            vec![(
+                "/design/confirmation/conditions",
+                j(json!(["selected", "arm-z"])),
+            )],
+            vec![("E-SEL-001", "design.confirmation.conditions[1]")],
+        ),
+        f(
+            vec![(
+                "/design/confirmation/conditions",
+                j(json!(["exact", "selected"])),
+            )],
+            vec![("E-SEL-001", "design.confirmation.conditions[0]")],
+        ),
+        f(
+            vec![(
+                "/design/confirmation/conditions",
+                j(json!(["arm-a", "selected"])),
+            )],
+            vec![],
+        ),
+        // A param is a string or a number.
+        f(
+            vec![("/design/conditions/2/params/bits", j(json!([4])))],
+            vec![("E-TYP-001", "design.conditions[2].params.bits")],
+        ),
+        f(
+            vec![(
+                "/design/conditions/2/params/bits",
+                j(json!({ "from": "x" })),
+            )],
+            vec![("E-TYP-001", "design.conditions[2].params.bits")],
+        ),
+        f(
+            vec![("/design/conditions/2/params/bits", j(json!(true)))],
+            vec![("E-TYP-001", "design.conditions[2].params.bits")],
+        ),
+        f(
+            vec![("/design/conditions/2/params/Pasted Key", j(json!([])))],
+            vec![("E-TYP-001", "design.conditions[2].params.<key>")],
+        ),
+        f(
+            vec![
+                ("/design/conditions/2/params/bits", j(json!("four"))),
+                ("/design/conditions/1/params", j(json!({ "rate": 0.5 }))),
+            ],
+            vec![],
         ),
         f(
             vec![("/design/test", j(json!("descriptive")))],
@@ -593,6 +721,8 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
         "E-SEC-001",
         "E-UNT-001",
         "E-UNT-002",
+        "E-SEL-001",
+        "E-TYP-001",
     ]
     .into_iter()
     .map(String::from)
@@ -1192,7 +1322,7 @@ fn power_gate_numbers_at_the_guard_edges() {
     assert!(named(&edited(&e), dir.path()).is_empty());
 }
 
-/// `inputs[0].path` matches `inputs[*].path`.
+/// `inputs[0].path` matches `inputs[*].path`, and `params.bits` matches `params.*`.
 fn matches_pattern(path: &str, pattern: &str) -> bool {
     let (p, q): (Vec<_>, Vec<_>) = (path.split('.').collect(), pattern.split('.').collect());
     p.len() == q.len()
@@ -1200,7 +1330,7 @@ fn matches_pattern(path: &str, pattern: &str) -> bool {
             Some(name) => a
                 .strip_prefix(name)
                 .is_some_and(|r| r.starts_with('[') && r.ends_with(']')),
-            None => a == b,
+            None => *b == "*" || a == b,
         })
 }
 
@@ -1221,6 +1351,7 @@ fn every_named_diagnostic_is_reported_at_a_path_its_target_matches() {
     }
     assert!(seen.len() > 15, "{}", seen.len());
     assert!(matches_pattern("a[12].b", "a[*].b") && !matches_pattern("a.b", "a[*].b"));
+    assert!(matches_pattern("a.k.b", "a.*.b") && !matches_pattern("a.k", "a.*.b"));
 }
 
 // ---- inputs from the store ----
@@ -1477,7 +1608,7 @@ fn a_stratum_is_required_when_the_design_names_strata() {
 }
 
 #[test]
-fn the_row_cap_counts_units_conditions_and_repeats() {
+fn the_row_cap_counts_units_conditions_and_repeats_per_stage() {
     let dir = study_dir();
     let at = |upc: u64, units: u64, repeats: u64| {
         edited(&[
@@ -1487,25 +1618,47 @@ fn the_row_cap_counts_units_conditions_and_repeats() {
         ])
     };
     let cap = [("E-UNT-002", "design.units_per_cluster")];
-    // (25,000 selection + 25,000 confirmation units) x 2 conditions x 1 repeat = 100,000 rows.
-    assert!(named(&at(25_000, 25_000, 1), dir.path()).is_empty());
-    let d = named(&at(25_001, 25_001, 1), dir.path());
+    // 20,000 selection units x (the reference + 2 candidates), then 20,000 confirmation
+    // units x (the reference + the pick), 1 repeat: 100,000 rows.
+    assert!(named(&at(20_000, 20_000, 1), dir.path()).is_empty());
+    let over = at(20_001, 20_001, 1);
+    let d = named(&over, dir.path());
     assert_eq!(codes_paths(&d), cap);
     assert_eq!(
         d[0].problem,
-        "The schedule has more rows than the box allows. It would hold 100004 rows; the cap is 100000."
+        "The schedule has more rows than the box allows. It would hold 100005 rows; the cap is 100000."
     );
+    // The count is the count of the schedule `run` would write.
+    let spec = ignorarium::spec::model::Spec::from_value(&over).unwrap();
+    let rows = ignorarium::schedule::rows(&spec, &[0; 32]).unwrap();
+    assert_eq!(rows.len(), 100_005);
     // A cluster gives at most units_per_cluster, and at most its own units.
-    assert!(named(&at(25_000, 4_000_000_000, 1), dir.path()).is_empty());
-    assert!(named(&at(4_000_000_000, 25_000, 1), dir.path()).is_empty());
-    // Repeats and conditions multiply.
-    assert_eq!(codes_paths(&named(&at(25_000, 25_000, 2), dir.path())), cap);
-    let mut s = at(25_000, 25_000, 1);
-    s["design"]["conditions"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!({ "id": "arm-b" }));
-    assert_eq!(codes_paths(&named(&s, dir.path())), cap);
+    assert!(named(&at(20_000, 4_000_000_000, 1), dir.path()).is_empty());
+    assert!(named(&at(4_000_000_000, 20_000, 1), dir.path()).is_empty());
+    // Repeats and each stage's conditions multiply; a condition no stage runs adds no row.
+    assert_eq!(codes_paths(&named(&at(20_000, 20_000, 2), dir.path())), cap);
+    let grow = |stage: Option<&str>| {
+        let mut s = at(20_000, 20_000, 1);
+        let ids = s["design"]["conditions"].as_array_mut().unwrap();
+        ids.push(json!({ "id": "arm-c" }));
+        if let Some(stage) = stage {
+            let list = s["design"][stage]["conditions"].as_array_mut().unwrap();
+            list.push(json!("arm-c"));
+        }
+        named(&s, dir.path())
+    };
+    assert_eq!(codes_paths(&grow(Some("selection"))), cap);
+    assert_eq!(codes_paths(&grow(Some("confirmation"))), cap);
+    assert!(grow(None).is_empty());
+    // Without a selection stage, the selection input runs nothing.
+    let mut s = at(20_001, 50_000, 1);
+    set(&mut s, "/design/selection", None);
+    set(
+        &mut s,
+        "/design/confirmation/conditions",
+        j(json!(["arm-a"])),
+    );
+    assert!(!codes_paths(&named(&s, dir.path())).contains(&cap[0]));
     // The largest counts do not overflow.
     let max = u64::from(u32::MAX);
     assert_eq!(codes_paths(&named(&at(max, max, max), dir.path())), cap);

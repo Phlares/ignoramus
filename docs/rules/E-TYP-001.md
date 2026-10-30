@@ -8,7 +8,7 @@ A field has the wrong type.
 
 ## Fix
 
-Use the type the template shows for this field.
+Use the type the template shows for this field. Each value in a condition's params is a string or a number.
 
 ## Why
 
@@ -77,6 +77,17 @@ A wrong type changes what the value means, and later checks cannot read it.
 - `design.conditions` (type)
 - `design.conditions[*]` (type)
 - `design.conditions[*].id` (type)
+- `design.conditions[*].params` (type)
+- `design.conditions[*].params.*` (type)
+- `design.conditions[*].params.*` (named:param-shape)
+- `design.selection` (type)
+- `design.selection.metric` (type)
+- `design.selection.conditions` (type)
+- `design.selection.conditions[*]` (type)
+- `design.selection.rule` (type)
+- `design.confirmation` (type)
+- `design.confirmation.conditions` (type)
+- `design.confirmation.conditions[*]` (type)
 - `inputs` (type)
 - `inputs[*]` (type)
 - `inputs[*].path` (type)

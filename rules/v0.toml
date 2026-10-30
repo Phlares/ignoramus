@@ -57,6 +57,11 @@ target = [
   { path = "design.variance.source", check = "required" },
   { path = "design.conditions", check = "required" },
   { path = "design.conditions[*].id", check = "required" },
+  { path = "design.selection.metric", check = "required" },
+  { path = "design.selection.conditions", check = "required" },
+  { path = "design.selection.rule", check = "required" },
+  { path = "design.confirmation", check = "required" },
+  { path = "design.confirmation.conditions", check = "required" },
   { path = "inputs", check = "required" },
   { path = "inputs[*].path", check = "required" },
   { path = "inputs[*].sha256", check = "required" },
@@ -93,7 +98,7 @@ target = [
 code = "E-TYP-001"
 severity = "error"
 problem = "A field has the wrong type."
-instruction = "Use the type the template shows for this field."
+instruction = "Use the type the template shows for this field. Each value in a condition's params is a string or a number."
 why = "A wrong type changes what the value means, and later checks cannot read it."
 sources = ["https://toml.io/en/v1.0.0"]
 target = [
@@ -154,6 +159,17 @@ target = [
   { path = "design.conditions", check = "type", kind = "array" },
   { path = "design.conditions[*]", check = "type", kind = "table" },
   { path = "design.conditions[*].id", check = "type", kind = "string" },
+  { path = "design.conditions[*].params", check = "type", kind = "table" },
+  { path = "design.conditions[*].params.*", check = "type", kind = "any" },
+  { path = "design.conditions[*].params.*", check = "named:param-shape" },
+  { path = "design.selection", check = "type", kind = "table" },
+  { path = "design.selection.metric", check = "type", kind = "string" },
+  { path = "design.selection.conditions", check = "type", kind = "array" },
+  { path = "design.selection.conditions[*]", check = "type", kind = "string" },
+  { path = "design.selection.rule", check = "type", kind = "string" },
+  { path = "design.confirmation", check = "type", kind = "table" },
+  { path = "design.confirmation.conditions", check = "type", kind = "array" },
+  { path = "design.confirmation.conditions[*]", check = "type", kind = "string" },
   { path = "inputs", check = "type", kind = "array" },
   { path = "inputs[*]", check = "type", kind = "table" },
   { path = "inputs[*].path", check = "type", kind = "string" },
@@ -210,6 +226,7 @@ target = [
   { path = "scope.end_of_run.route", check = "enum", values = ["report", "follow-on", "share"] },
   { path = "design.test", check = "enum", values = ["paired-mean", "descriptive"] },
   { path = "design.pick", check = "enum", values = ["seeded", "first"] },
+  { path = "design.selection.rule", check = "enum", values = ["best-mean"] },
   { path = "outcomes[*].paired", check = "enum", values = ["difference", "percent"] },
   { path = "inputs[*].role", check = "enum", values = ["calibration", "selection", "confirmation", "model"] },
   { path = "inputs[*].licence.type", check = "enum", values = ["common", "custom", "request-form", "unspecified"] },
@@ -306,10 +323,12 @@ code = "E-UNQ-001"
 severity = "error"
 problem = "A list repeats an id, path or name."
 instruction = "Give every entry its own value. Remove the repeat, or rename it."
-why = "A repeated input would run its units twice and count them twice in the power gate. A repeated condition, outcome, measure, hypothesis, operator or trigger id makes later steps pick one entry and ignore the other."
+why = "A repeated input would run its units twice and count them twice in the power gate. A stage that lists a condition twice runs it twice. A repeated condition, outcome, measure, hypothesis, operator or trigger id makes later steps pick one entry and ignore the other."
 sources = []
 target = [
   { path = "design.conditions", check = "unique", key = "id" },
+  { path = "design.selection.conditions", check = "unique" },
+  { path = "design.confirmation.conditions", check = "unique" },
   { path = "outcomes", check = "unique", key = "id" },
   { path = "outcomes", check = "unique", key = "measure" },
   { path = "question.hypotheses", check = "unique", key = "id" },
@@ -477,11 +496,28 @@ target = [
 code = "E-UNT-002"
 severity = "error"
 problem = "The schedule has more rows than the box allows."
-instruction = "Lower design.units_per_cluster, design.repeats, the number of conditions, or the units of the selection and confirmation inputs."
+instruction = "Lower design.units_per_cluster, design.repeats, the number of conditions a stage runs, or the units of the selection and confirmation inputs."
 why = "check builds the whole schedule to count its rows and cost. A typo in a unit count must stop here, not exhaust the memory."
 sources = []
 target = [
   { path = "design.units_per_cluster", check = "named:row-cap" },
+]
+
+[[rule]]
+code = "E-SEL-001"
+severity = "error"
+problem = "A stage is not well formed: a selection stage with no selection input, or a selection input with no stage; fewer than two candidates; a stage condition that is the reference or not in design.conditions; a metric that is not an outcome; selected with no selection stage; or a condition named selected."
+instruction = "Give design.selection two or more candidates from design.conditions other than the reference, a metric that is an outcome id, and at least one selection input; or remove the stage and the selection inputs. List conditions from design.conditions in design.confirmation.conditions, and selected only with a selection stage. Name no condition selected."
+why = "The selection stage picks one candidate on the selection inputs by a rule fixed before the data come in; the confirmation stage then tests the pick on other data. Only a declared rule over declared candidates shows that the confirmation data did not shape the choice. The reference runs in every stage."
+sources = ["https://www.fda.gov/media/78495/download"]
+target = [
+  { path = "design.selection", check = "named:selection-stage" },
+  { path = "inputs[*].role", check = "named:selection-stage" },
+  { path = "design.selection.conditions", check = "named:selection-stage" },
+  { path = "design.selection.conditions[*]", check = "named:selection-stage" },
+  { path = "design.selection.metric", check = "named:selection-stage" },
+  { path = "design.confirmation.conditions[*]", check = "named:selection-stage" },
+  { path = "design.conditions[*].id", check = "named:selection-stage" },
 ]
 
 [[rule]]

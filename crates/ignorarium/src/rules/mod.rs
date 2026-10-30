@@ -28,7 +28,7 @@ impl BoxRecords for NoRecords {
 pub struct Rule {
     pub code: String,
     pub severity: Severity,
-    /// Dots and `[*]` for array elements; `**` means any depth.
+    /// Dots, `[*]` for array elements and `*` for every key of a table; `**` means any depth.
     pub path: String,
     pub check: Check,
     pub problem: String,
@@ -89,6 +89,9 @@ pub enum Kind {
     Bool,
     Array,
     Table,
+    /// Any value. The path and everything below it are known keys; a named check owns the
+    /// value's shape.
+    Any,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

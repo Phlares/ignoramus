@@ -4,7 +4,7 @@ use crate::canon::{canonical_of, to_canonical};
 use crate::files::{locked_append, open_log};
 use crate::home::{HomeError, make_private_dir};
 use crate::keys::{sign_hex, verify_hex};
-use crate::prior::{PriorError, PriorUse};
+use crate::prior::{PriorError, PriorUse, same_data};
 use crate::time::now_rfc3339;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -239,14 +239,11 @@ impl PlanLog {
     /// Every leaf that holds this data, oldest first, with its index.
     pub fn uses(&self, exact: &str, normalized: &str) -> Result<Vec<(usize, Leaf)>, LogError> {
         let _lock = self.read_lock()?;
+        let data = (exact.to_string(), normalized.to_string());
         let mut hits = Vec::new();
         for (index, l) in read_lines(&self.leaves_path())?.iter().enumerate() {
             let leaf: Leaf = serde_json::from_slice(l).map_err(|_| LogError::Leaf { index })?;
-            let hit = leaf
-                .data_hashes
-                .iter()
-                .any(|(e, n)| e == exact || (!normalized.is_empty() && n == normalized));
-            if hit {
+            if leaf.data_hashes.iter().any(|h| same_data(&data, h)) {
                 hits.push((index, leaf));
             }
         }

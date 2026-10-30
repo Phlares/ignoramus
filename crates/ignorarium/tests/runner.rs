@@ -22,6 +22,161 @@ fn conf_input(t: String) -> String {
     t.replace("data/confirm.txt", "data/conf.txt")
 }
 
+/// The template with a selection stage: `arm-a` and `arm-b` (each with params) on the 2 units
+/// of the selection input `data/select.txt`, then `selected` on the confirmation input. The
+/// schedule: rows 0 to 5 select, rows 6 to 11 confirm, the first `selected` row is row 7.
+fn staged(t: String) -> String {
+    let stage = r#"id = "arm-a"
+params = { bits = 4, mode = "fast" }
+[[design.conditions]]
+id = "arm-b"
+params = { bits = 8 }
+[design.selection]
+metric = "ppl-ratio"
+conditions = ["arm-a", "arm-b"]
+rule = "best-mean"
+"#;
+    let input = r#"[[inputs]]
+path = "data/select.txt"
+sha256 = ""
+role = "selection"
+stratum = "fiction"
+units = 2
+[inputs.licence]
+spdx = ""
+type = "unspecified"
+source = ""
+creators = []
+
+[pins]"#;
+    t.replacen("id = \"arm-a\"\n", stage, 1)
+        .replacen(
+            "conditions = [\"arm-a\"]   ",
+            "conditions = [\"selected\"]",
+            1,
+        )
+        .replacen("[pins]", input, 1)
+}
+
+/// Writes its params and its argv, and a value per condition: against the reference's 8,
+/// `arm-a` pairs to +25 % and `arm-b` to -25 %, so the lower-is-better pick is `arm-b`.
+const STAGED: &str = "#!/bin/sh
+printf '%s' \"$IGNORARIUM_PARAMS\" > \"$IGNORARIUM_OUT/params\"
+printf '%s %s %s' \"$2\" \"$4\" \"$6\" > \"$IGNORARIUM_OUT/result\"
+case \"$2\" in exact) v=8;; arm-a) v=10;; arm-b) v=6;; *) v=0;; esac
+printf '{\"ppl\": %s}' \"$v\" > \"$IGNORARIUM_OUT/values.json\"
+";
+
+fn selections_of(lab: &Lab, id: &str) -> Vec<records::Record> {
+    kind_of(lab, id, "selection")
+}
+
+#[test]
+fn selected_rows_run_the_pick_and_name_the_record() {
+    let lab = lab();
+    let dir = register_study(&lab, "pick", staged, &[], STAGED);
+    let plan = plan_of(&lab, "pick");
+    let stages: Vec<_> = plan.schedule.rows.iter().map(|r| &r.stage[..]).collect();
+    assert_eq!(stages, [["selection"; 6], ["confirmation"; 6]].concat());
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let sel = selections_of(&lab, "pick");
+    assert_eq!(sel.len(), 1);
+    assert_eq!(
+        sel[0].body,
+        serde_json::json!({
+            "metric": "ppl-ratio",
+            "candidates": [{ "id": "arm-a", "mean": 25.0 }, { "id": "arm-b", "mean": -25.0 }],
+            "selected": "arm-b",
+            "complete_units": 2,
+            "incomplete_units": 0,
+        })
+    );
+    // Written after the last selection row and the first confirmation row, before row 7.
+    let all = common::records_of(&lab, "pick");
+    let at = all.iter().position(|r| r.kind == "selection").unwrap();
+    assert_eq!((all[at - 1].row, all[at + 1].row), (Some(6), Some(7)));
+    let hash = records::hash(&sel[0]);
+    for r in rows_of(&lab, "pick") {
+        let i = r.row.unwrap();
+        let row = &plan.schedule.rows[i as usize];
+        assert_eq!(r.body["stage"], row.stage.as_str());
+        assert_eq!(r.body["condition"], row.condition.as_str());
+        let ran = std::fs::read_to_string(dir.join(format!("run/rows/{i}/out/result"))).unwrap();
+        if row.condition == "selected" {
+            assert_eq!(r.body["picked"], "arm-b");
+            assert_eq!(r.body["selection"], hash.as_str());
+            assert_eq!(ran, format!("arm-b {} 0", row.unit));
+        } else {
+            assert!(r.body.get("picked").is_none() && r.body.get("selection").is_none());
+            assert_eq!(ran, format!("{} {} 0", row.condition, row.unit));
+        }
+    }
+}
+
+#[test]
+fn params_reach_the_payload_as_json() {
+    let lab = lab();
+    let dir = register_study(&lab, "params", staged, &[], STAGED);
+    let plan = plan_of(&lab, "params");
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    for row in &plan.schedule.rows {
+        let got = std::fs::read_to_string(dir.join(format!("run/rows/{}/out/params", row.index)))
+            .unwrap();
+        // Canonical JSON: sorted keys, no spaces; `{}` for a condition without params.
+        let want = match row.condition.as_str() {
+            "exact" => "{}",
+            "arm-a" => r#"{"bits":4,"mode":"fast"}"#,
+            _ => r#"{"bits":8}"#,
+        };
+        assert_eq!(got, want, "row {}", row.index);
+    }
+}
+
+#[test]
+fn a_resumed_run_reuses_the_selection_record() {
+    let lab = lab();
+    register_study(&lab, "reuse", staged, &[], STAGED);
+    let mut plan = plan_of(&lab, "reuse");
+    // The box dies in row 7, the first `selected` row, after the selection record.
+    let (mut b, _) = fake(vec![]);
+    b.panic_at = Some(7);
+    plan.backend = Box::new(b);
+    assert!(catch_unwind(AssertUnwindSafe(|| run(&plan))).is_err());
+    assert_eq!(indices(&lab, "reuse"), (0..7).collect::<Vec<_>>());
+    let first = selections_of(&lab, "reuse");
+    assert_eq!(first.len(), 1);
+    plan.backend = Box::new(Level0);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(selections_of(&lab, "reuse"), first);
+    let hash = records::hash(&first[0]);
+    let named: Vec<_> = rows_of(&lab, "reuse")
+        .into_iter()
+        .filter(|r| r.body["condition"] == "selected")
+        .map(|r| r.body["selection"].clone())
+        .collect();
+    assert_eq!(named, vec![serde_json::json!(hash); 3]);
+}
+
+#[test]
+fn no_complete_unit_pauses_the_run() {
+    let lab = lab();
+    // The candidates write no values: their rows are void, and no selection unit is complete.
+    let payload = STAGED.replace("case", "case \"$2\" in arm-*) exit 0;; esac\ncase");
+    register_study(&lab, "nopick", staged, &[], &payload);
+    let plan = plan_of(&lab, "nopick");
+    let why = "no selection unit has a ppl-ratio value for every candidate; incomplete units: 2";
+    assert_eq!(run(&plan).unwrap(), RunStatus::Paused(why.into()));
+    // The first confirmation row ran; the first `selected` row did not.
+    assert_eq!(indices(&lab, "nopick"), (0..7).collect::<Vec<_>>());
+    assert!(selections_of(&lab, "nopick").is_empty());
+    let dir = lab.home.study_dir("nopick");
+    let pauses = events_of(&dir);
+    assert_eq!(named(&pauses, "run.pause")[0]["attrs"]["reason"], why);
+    // A resume pauses again, at the same row.
+    assert_eq!(run(&plan).unwrap(), RunStatus::Paused(why.into()));
+    assert_eq!(indices(&lab, "nopick").len(), 7);
+}
+
 /// Runs level 0, then replaces the exit with the next scripted one.
 struct Fake {
     script: RefCell<VecDeque<Exit>>,
@@ -839,6 +994,82 @@ fn late_confirmation_data_used_before_is_refused() {
         e => panic!("{e}"),
     }
     assert!(!a.join("schedule.json").exists());
+}
+
+/// `staged` as a confirmatory plan: the confirmation input gives 55 units, against 54 needed.
+fn confirmatory_staged(source: String) -> impl Fn(String) -> String {
+    move |t| {
+        staged(t)
+            .replace("mode = \"exploratory\"", "mode = \"confirmatory\"")
+            .replace("label = \"signal\"", "label = \"confirmed\"")
+            .replace("sesoi = 0.0", "sesoi = 1.0")
+            .replace("value = 0.0", "value = 4.0")
+            .replace(
+                "source = \"stated\"",
+                &format!("source = \"record:{source}\""),
+            )
+            .replace("units_per_cluster = 3", "units_per_cluster = 55")
+            .replace("units = 3 ", "units = 55 ")
+            .replace(
+                "triggers = []",
+                "triggers = [{ id = \"T1\", metric = \"ppl-ratio\", threshold_e = 1.0 }]",
+            )
+    }
+}
+
+#[test]
+fn a_late_input_with_the_data_of_the_other_role_is_refused() {
+    let lab = lab();
+    let source = common::plant_estimate(&lab.home, "ppl-ratio", 4.0);
+    let (sel, conf) = ("data/select.txt", "data/confirm.txt");
+    // (study, files at registration, files written after it). A late exact copy of a
+    // registered file has a registered hash, so lateness by hash alone would miss it.
+    let cases = [
+        (
+            "late-sel",
+            vec![(conf, "Shared  Text")],
+            vec![(sel, "shared text")],
+        ),
+        (
+            "late-conf",
+            vec![(sel, "same bytes")],
+            vec![(conf, "same bytes")],
+        ),
+        ("both-late", vec![], vec![(sel, "both"), (conf, "both")]),
+    ];
+    for (id, before, after) in cases {
+        let dir = register_study(
+            &lab,
+            id,
+            confirmatory_staged(source.clone()),
+            &before,
+            PAYLOAD,
+        );
+        for (p, text) in after {
+            std::fs::write(common::work(&lab, id).join(p), text).unwrap();
+        }
+        let err = prepare_with(&lab.home, id, vec![Box::new(Level0)])
+            .err()
+            .unwrap_or_else(|| panic!("{id}: prepare should refuse"));
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "E-CNF-004: input {conf} holds the same data as input {sel}, of the other role. See docs/rules/E-CNF-004.md"
+            ),
+            "{id}"
+        );
+        assert!(!dir.join("schedule.json").exists(), "{id}");
+    }
+    // Other data passes, and so does an exploratory plan, which E-CNF-004 does not cover.
+    let work = |id: &str| common::work(&lab, id);
+    register_study(&lab, "apart", confirmatory_staged(source), &[], PAYLOAD);
+    std::fs::write(work("apart").join(sel), "one text").unwrap();
+    std::fs::write(work("apart").join(conf), "another text").unwrap();
+    plan_of(&lab, "apart");
+    register_study(&lab, "loose", staged, &[], PAYLOAD);
+    std::fs::write(work("loose").join(sel), "both").unwrap();
+    std::fs::write(work("loose").join(conf), "both").unwrap();
+    plan_of(&lab, "loose");
 }
 
 #[test]

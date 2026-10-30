@@ -2,7 +2,7 @@
 use crate::canon;
 use crate::files::{self, WriteOnceError};
 use crate::seed::seed;
-use crate::spec::model::Spec;
+use crate::spec::model::{Role, Spec};
 use crate::units::{self, Cluster};
 use serde::Serialize;
 use std::fmt;
@@ -11,6 +11,8 @@ use std::path::Path;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Row {
     pub index: u64,
+    /// `"selection"` or `"confirmation"`: the role of the row's cluster.
+    pub stage: String,
     pub unit: String,
     pub cluster: String,
     pub stratum: String,
@@ -69,9 +71,23 @@ impl std::error::Error for ExpandError {}
 /// so a rule refuses a larger one first (E-UNT-002).
 pub const ROW_CAP: u64 = 100_000;
 
-/// Rows in the order stratum, cluster path, then each picked unit, then reference condition
-/// first, then the other conditions in spec order, then repeat 0..repeats. The order of
-/// `clusters` does not matter.
+/// The stage a cluster of `role` runs in, and the conditions that stage runs besides the
+/// reference. A selection cluster has a stage only when the spec declares one.
+fn stage(spec: &Spec, role: Role) -> Option<(&'static str, &[String])> {
+    match role {
+        Role::Selection => spec
+            .design
+            .selection
+            .as_ref()
+            .map(|s| ("selection", &s.conditions[..])),
+        Role::Confirmation => Some(("confirmation", &spec.design.confirmation.conditions[..])),
+        Role::Calibration | Role::Model => None,
+    }
+}
+
+/// Rows in the order stage (selection first), stratum, cluster path, then each picked unit,
+/// then the reference condition, then the stage's conditions in the order it lists them, then
+/// repeat 0..repeats. The order of `clusters` does not matter.
 pub fn expand(
     spec: &Spec,
     spec_hash: &[u8; 32],
@@ -81,27 +97,25 @@ pub fn expand(
     if !d.conditions.iter().any(|c| c.id == d.reference) {
         return Err(ExpandError::UnknownReference(d.reference.clone()));
     }
-    let conditions: Vec<&str> = d
-        .conditions
+    let mut staged: Vec<(&str, &[String], &Cluster)> = clusters
         .iter()
-        .filter(|c| c.id == d.reference)
-        .chain(d.conditions.iter().filter(|c| c.id != d.reference))
-        .map(|c| c.id.as_str())
+        .filter_map(|c| stage(spec, c.role).map(|(name, conds)| (name, conds, c)))
         .collect();
-    let mut sorted: Vec<&Cluster> = clusters.iter().collect();
-    sorted.sort_by(|a, b| (&a.stratum, &a.path).cmp(&(&b.stratum, &b.path)));
+    staged.sort_by_key(|(_, _, c)| (c.role == Role::Confirmation, &c.stratum, &c.path));
     let mut rows = Vec::new();
     let mut index: u64 = 0;
-    for c in sorted {
+    for (name, conditions, c) in staged {
+        let conditions = std::iter::once(&d.reference).chain(conditions);
         for &i in &c.picked {
-            for cond in &conditions {
+            for cond in conditions.clone() {
                 for repeat in 0..d.repeats {
                     rows.push(Row {
                         index,
+                        stage: name.to_string(),
                         unit: units::key(&c.path, i),
                         cluster: c.path.clone(),
                         stratum: c.stratum.clone(),
-                        condition: (*cond).to_string(),
+                        condition: cond.clone(),
                         repeat,
                         shard: 0,
                         seed_hex: hex::encode(seed(spec_hash, &format!("row/{index}"))),

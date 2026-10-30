@@ -8,8 +8,9 @@ use crate::derived::Estimate;
 use crate::diag::Diagnostic;
 use crate::inputs::{self, Found};
 use crate::power::required_units;
-use crate::prior::PriorUse;
+use crate::prior::{PriorUse, same_data};
 use crate::schedule::ROW_CAP;
+use crate::spec::model::SELECTED;
 use crate::store::Store;
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
@@ -71,6 +72,8 @@ const NAMED: &[(&str, NamedFn)] = &[
     ("data-fresh", data_fresh),
     ("units-declared", units_declared),
     ("row-cap", row_cap),
+    ("selection-stage", selection_stage),
+    ("param-shape", param_shape),
     ("confirmatory-test-allowed", test_allowed),
     ("reference-is-condition", reference_is_condition),
     ("budget-present", budget_present),
@@ -458,11 +461,7 @@ fn selection_confirmation_disjoint(spec: &Value, ctx: &CheckCtx, pat: &str) -> V
         .filter(|(_, i)| role(i) == Some("selection"))
         .filter_map(|(_, i)| input_hashes(ctx, i))
         .collect();
-    let shared = |(exact, normalized): &(String, String)| {
-        selection
-            .iter()
-            .any(|(e, n)| e == exact || (!n.is_empty() && n == normalized))
-    };
+    let shared = |h: &(String, String)| selection.iter().any(|s| same_data(s, h));
     with_parent(spec, pat)
         .into_iter()
         .filter(|(_, input, _)| role(input) == Some("confirmation"))
@@ -495,28 +494,37 @@ fn units_declared(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
         .collect()
 }
 
+/// The conditions each unit of a cluster with this role runs: the reference and its stage's
+/// list. `None` when the role has no stage: a calibration or model input, or a selection input
+/// with no selection stage.
+fn stage_size(spec: &Value, role: &str) -> Option<u64> {
+    let list = match role {
+        "selection" => list(spec, "design.selection.conditions")?,
+        "confirmation" => list(spec, "design.confirmation.conditions")?,
+        _ => return None,
+    };
+    Some(1 + list.len() as u64)
+}
+
 /// The schedule would hold more than `ROW_CAP` rows: each cluster's units, up to the units per
-/// cluster at the target, times the conditions and the repeats. Counted before anything is
-/// built, so a typo cannot exhaust the memory of `check`.
+/// cluster at the target, times the conditions its stage runs, times the repeats. Counted
+/// before anything is built, so a typo cannot exhaust the memory of `check`.
 fn row_cap(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
-    let (Some(conditions), Some(repeats)) = (
-        list(spec, "design.conditions"),
-        val(spec, "design.repeats").and_then(Value::as_u64),
-    ) else {
+    let Some(repeats) = val(spec, "design.repeats").and_then(Value::as_u64) else {
         return vec![];
     };
-    let units: Vec<u64> = nodes(spec, "inputs[*]")
+    let clusters: Vec<(u64, u64)> = nodes(spec, "inputs[*]")
         .into_iter()
-        .filter(|(_, i)| is_cluster(i))
-        .filter_map(|(_, i)| i.get("units")?.as_u64())
+        .filter_map(|(_, i)| Some((i.get("units")?.as_u64()?, stage_size(spec, role(i)?)?)))
         .collect();
     let mut out = vec![];
     for (path, per) in nodes(spec, pat) {
         let Some(per) = per.as_u64() else { continue };
-        let rows = units
+        let rows = clusters
             .iter()
-            .fold(0u128, |n, u| n.saturating_add(u128::from((*u).min(per))))
-            .saturating_mul(conditions.len() as u128)
+            .fold(0u128, |n, (units, size)| {
+                n.saturating_add(u128::from((*units).min(per)) * u128::from(*size))
+            })
             .saturating_mul(u128::from(repeats));
         if rows > u128::from(ROW_CAP) {
             out.push(Hit {
@@ -526,6 +534,58 @@ fn row_cap(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
         }
     }
     out
+}
+
+/// The stages, at each target:
+/// - `design.selection`: a stage, and no selection input.
+/// - `inputs[*].role`: a selection input, and no stage.
+/// - `design.selection.conditions`: fewer than two candidates.
+/// - `<stage>.conditions[*]`: the reference, or no declared condition. `selected` names the
+///   pick, in the confirmation stage of a plan with a selection stage only.
+/// - `design.selection.metric`: no outcome id.
+/// - `design.conditions[*].id`: a condition named `selected`.
+///
+/// A mistyped stage counts as present; with no condition ids, `non-empty` reports that.
+fn selection_stage(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let staged = val(spec, "design.selection").is_some();
+    let has_input = |inputs: &Vec<Value>| inputs.iter().any(|i| role(i) == Some("selection"));
+    match pat {
+        "design.selection" => match list(spec, "inputs") {
+            Some(inputs) if !has_input(inputs) => flag(spec, pat, Value::is_object),
+            _ => vec![],
+        },
+        "inputs[*].role" => flag(spec, pat, |v| !staged && v.as_str() == Some("selection")),
+        "design.selection.conditions" => {
+            flag(spec, pat, |v| v.as_array().is_some_and(|a| a.len() < 2))
+        }
+        "design.selection.metric" => {
+            let outcomes = texts(spec, "outcomes[*].id");
+            flag(spec, pat, |v| {
+                v.as_str().is_some_and(|m| !outcomes.contains(&m))
+            })
+        }
+        "design.conditions[*].id" => flag(spec, pat, |v| v.as_str() == Some(SELECTED)),
+        "design.selection.conditions[*]" | "design.confirmation.conditions[*]" => {
+            let pick = staged && pat.starts_with("design.confirmation");
+            let declared = texts(spec, "design.conditions[*].id");
+            let reference = text(spec, "design.reference");
+            flag(spec, pat, |v| {
+                v.as_str().is_some_and(|c| {
+                    Some(c) == reference
+                        || match c {
+                            SELECTED => !pick,
+                            _ => !declared.is_empty() && !declared.contains(&c),
+                        }
+                })
+            })
+        }
+        _ => vec![],
+    }
+}
+
+/// A param value is a string or a number.
+fn param_shape(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    flag(spec, pat, |v| !(v.is_string() || v.is_number()))
 }
 
 /// The reference names no listed condition. With no condition ids, `non-empty` reports that.

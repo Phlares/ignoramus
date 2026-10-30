@@ -1,3 +1,4 @@
+use ignorarium::machine::Machine;
 use ignorarium::schedule::{self, Row, Schedule, ScheduleError, expand};
 use ignorarium::seed::seed;
 use ignorarium::spec::model::{Pick, Role, Spec};
@@ -11,23 +12,159 @@ fn hash() -> [u8; 32] {
     hex::decode(H).unwrap().try_into().unwrap()
 }
 
-fn spec(conds: &[&str], reference: &str, repeats: u64) -> Spec {
-    let mut v: Value = ignorarium::spec::load(Path::new("../../templates/numeric-ablation.toml"))
+fn template() -> Value {
+    ignorarium::spec::load(Path::new("../../templates/numeric-ablation.toml"))
         .unwrap()
-        .value;
+        .value
+}
+
+/// The template with `conds`, the confirmation stage running every one but the reference.
+fn spec(conds: &[&str], reference: &str, repeats: u64) -> Spec {
+    let mut v = template();
     v["design"]["conditions"] = Value::Array(conds.iter().map(|c| json!({"id": c})).collect());
     v["design"]["reference"] = json!(reference);
     v["design"]["repeats"] = json!(repeats);
+    let others: Vec<_> = conds.iter().filter(|c| **c != reference).collect();
+    v["design"]["confirmation"] = json!({ "conditions": others });
     Spec::from_value(&v).unwrap()
 }
 
 fn cluster(path: &str, stratum: &str, picked: &[u32]) -> Cluster {
+    cluster_of(Role::Confirmation, path, stratum, picked)
+}
+
+fn cluster_of(role: Role, path: &str, stratum: &str, picked: &[u32]) -> Cluster {
     Cluster {
         path: path.into(),
         stratum: stratum.into(),
-        role: Role::Confirmation,
+        role,
         picked: picked.to_vec(),
     }
+}
+
+/// Candidates `a` and `b` against the reference `exact` in a selection stage; the
+/// confirmation stage runs the pick.
+fn staged(repeats: u64) -> Spec {
+    let mut v = template();
+    v["design"]["conditions"] = json!([{ "id": "exact" }, { "id": "a" }, { "id": "b" }]);
+    v["design"]["repeats"] = json!(repeats);
+    v["design"]["selection"] =
+        json!({ "metric": "ppl-ratio", "conditions": ["b", "a"], "rule": "best-mean" });
+    v["design"]["confirmation"] = json!({ "conditions": ["selected"] });
+    Spec::from_value(&v).unwrap()
+}
+
+/// A selection cluster in stratum `z` and confirmation clusters in strata that sort before it.
+fn stage_clusters() -> Vec<Cluster> {
+    vec![
+        cluster("c2", "a", &[1]),
+        cluster_of(Role::Selection, "s", "z", &[0, 4]),
+        cluster("c1", "a", &[0]),
+    ]
+}
+
+/// (stage, unit, condition, repeat) of each row.
+fn stage_rows(rows: &[Row]) -> Vec<(&str, &str, &str, u32)> {
+    rows.iter()
+        .map(|r| (&r.stage[..], &r.unit[..], &r.condition[..], r.repeat))
+        .collect()
+}
+
+#[test]
+fn the_selection_stage_runs_its_candidates_on_selection_inputs_only() {
+    let rows = expand(&staged(1), &hash(), &stage_clusters()).unwrap();
+    // The selection stage comes first, whatever the strata; the reference, then the
+    // candidates in the order the stage lists them.
+    assert_eq!(
+        stage_rows(&rows[..6]),
+        [
+            ("selection", "s#0", "exact", 0),
+            ("selection", "s#0", "b", 0),
+            ("selection", "s#0", "a", 0),
+            ("selection", "s#4", "exact", 0),
+            ("selection", "s#4", "b", 0),
+            ("selection", "s#4", "a", 0),
+        ]
+    );
+    assert!(rows[..6].iter().all(|r| r.cluster == "s"));
+    assert!(rows[6..].iter().all(|r| r.stage == "confirmation"));
+    for (i, r) in rows.iter().enumerate() {
+        assert_eq!(r.index, i as u64);
+        assert_eq!(r.seed_hex, hex::encode(seed(&hash(), &format!("row/{i}"))));
+    }
+}
+
+#[test]
+fn the_confirmation_stage_runs_selected_on_confirmation_inputs_only() {
+    let rows = expand(&staged(2), &hash(), &stage_clusters()).unwrap();
+    assert_eq!(rows.len(), 2 * 3 * 2 + 2 * 2 * 2);
+    assert_eq!(
+        stage_rows(&rows[12..]),
+        [
+            ("confirmation", "c1#0", "exact", 0),
+            ("confirmation", "c1#0", "exact", 1),
+            ("confirmation", "c1#0", "selected", 0),
+            ("confirmation", "c1#0", "selected", 1),
+            ("confirmation", "c2#1", "exact", 0),
+            ("confirmation", "c2#1", "exact", 1),
+            ("confirmation", "c2#1", "selected", 0),
+            ("confirmation", "c2#1", "selected", 1),
+        ]
+    );
+    // Without a selection stage, a selection input runs nothing.
+    let rows = expand(
+        &spec(&["exact", "a"], "exact", 1),
+        &hash(),
+        &stage_clusters(),
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 4);
+    assert!(
+        rows.iter()
+            .all(|r| r.stage == "confirmation" && r.cluster != "s")
+    );
+}
+
+#[test]
+fn the_estimate_counts_each_stage() {
+    // Two stages: 4 candidates on 8 texts, then the pick on 52 texts, 4 units per text.
+    let mut v = template();
+    let ids = ["exact", "c1", "c2", "c3", "c4"];
+    v["design"]["conditions"] = json!(ids.map(|id| json!({ "id": id })));
+    v["design"]["units_per_cluster"] = json!(4);
+    v["design"]["selection"] =
+        json!({ "metric": "ppl-ratio", "conditions": &ids[1..], "rule": "best-mean" });
+    v["design"]["confirmation"] = json!({ "conditions": ["selected"] });
+    let texts = |role: &str, n: usize| -> Vec<Value> {
+        (0..n)
+            .map(|i| input(&format!("data/{role}-{i:02}.txt"), role, 10))
+            .collect()
+    };
+    let mut inputs = texts("selection", 8);
+    inputs.extend(texts("confirmation", 52));
+    v["inputs"] = json!(inputs);
+    let s = Spec::from_value(&v).unwrap();
+    let rows = schedule::rows(&s, &hash()).unwrap();
+    let e = ignorarium::estimate::estimate(&s, &Machine::default(), &rows);
+    // 5 conditions x 8 texts x 4 units, then 2 x 52 x 4.
+    assert_eq!(e.rows, 5 * 8 * 4 + 2 * 52 * 4);
+    assert_eq!(e.rows, 576);
+    let per: Vec<(&str, u64)> = e
+        .rows_per_condition
+        .iter()
+        .map(|(id, n)| (id.as_str(), *n))
+        .collect();
+    assert_eq!(
+        per,
+        [
+            ("exact", 32 + 208),
+            ("c1", 32),
+            ("c2", 32),
+            ("c3", 32),
+            ("c4", 32),
+            ("selected", 208)
+        ]
+    );
 }
 
 /// One cluster `c` whose units are 0..n.
@@ -145,6 +282,9 @@ fn the_schedule_of_a_spec_holds_each_clusters_picked_units() {
     v["design"]["units_per_cluster"] = json!(5);
     v["design"]["repeats"] = json!(2);
     v["design"]["conditions"] = json!([{ "id": "exact" }, { "id": "a" }, { "id": "b" }]);
+    v["design"]["selection"] =
+        json!({ "metric": "ppl-ratio", "conditions": ["a", "b"], "rule": "best-mean" });
+    v["design"]["confirmation"] = json!({ "conditions": ["a", "b"] });
     v["inputs"] = json!([
         input("data/cal.txt", "calibration", 40),
         input("data/s.txt", "selection", 2),
@@ -159,12 +299,10 @@ fn the_schedule_of_a_spec_holds_each_clusters_picked_units() {
     // (2 + 5 units) × 3 conditions × 2 repeats: the count the row cap rule computes.
     assert_eq!(rows.len(), 42);
     let picked = units::pick(5, 7, Pick::Seeded, seed(&hash(), "units/data/c.txt"));
-    let mut want: Vec<String> = picked
-        .iter()
-        .map(|i| format!("data/c.txt#{i}"))
-        .chain(["data/s.txt#0".into(), "data/s.txt#1".into()])
+    let want: Vec<String> = ["data/s.txt#0".to_string(), "data/s.txt#1".into()]
+        .into_iter()
+        .chain(picked.iter().map(|i| format!("data/c.txt#{i}")))
         .collect();
-    want.sort();
     let mut got: Vec<String> = rows.iter().map(|r| r.unit.clone()).collect();
     got.dedup();
     assert_eq!(got, want);

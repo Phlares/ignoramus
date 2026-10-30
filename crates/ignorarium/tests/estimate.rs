@@ -41,11 +41,14 @@ fn spec_of(v: &Value) -> Spec {
     Spec::from_value(v).unwrap()
 }
 
-/// 3 conditions, 4 clusters, 5 units per cluster, repeats 2, 36 s per row.
+/// 3 conditions in each of 2 stages, 4 clusters, 5 units per cluster, repeats 2, 36 s per row.
 fn sized() -> Value {
     let mut v = template();
     v["design"]["conditions"] = json!([{"id": "a"}, {"id": "b"}, {"id": "c"}]);
     v["design"]["reference"] = json!("a");
+    v["design"]["selection"] =
+        json!({ "metric": "ppl-ratio", "conditions": ["b", "c"], "rule": "best-mean" });
+    v["design"]["confirmation"] = json!({ "conditions": ["b", "c"] });
     let mut inputs = clusters("selection", 1, 9);
     inputs.extend(clusters("confirmation", 3, 5));
     v["inputs"] = json!(inputs);
@@ -126,6 +129,7 @@ fn long_job_needs_more_than_the_limit() {
     let mut v = template();
     v["design"]["conditions"] = json!([{"id": "a"}]);
     v["design"]["reference"] = json!("a");
+    v["design"]["confirmation"] = json!({ "conditions": [] });
     v["design"]["repeats"] = json!(1);
     let m = Machine::default();
     let long = |v: &Value, m: &Machine| {

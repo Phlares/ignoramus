@@ -47,6 +47,7 @@ fn unknown_key_is_rejected_at_every_depth() {
         "/access",
         "/report",
         "/design/variance",
+        "/design/confirmation",
         "/inputs/0",
         "/inputs/1",
         "/inputs/0/licence",

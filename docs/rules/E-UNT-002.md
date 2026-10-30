@@ -8,7 +8,7 @@ The schedule has more rows than the box allows.
 
 ## Fix
 
-Lower design.units_per_cluster, design.repeats, the number of conditions, or the units of the selection and confirmation inputs.
+Lower design.units_per_cluster, design.repeats, the number of conditions a stage runs, or the units of the selection and confirmation inputs.
 
 ## Why
 

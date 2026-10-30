@@ -54,6 +54,8 @@ source = "stated"               # stated | record:<sha256>
 id = "exact"
 [[design.conditions]]
 id = "arm-a"
+[design.confirmation]
+conditions = ["arm-a"]
 
 [[inputs]]
 path = "bal-confirm.txt"       # relative to the study folder

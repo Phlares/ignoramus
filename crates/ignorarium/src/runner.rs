@@ -4,7 +4,7 @@ use crate::backend::rootfs;
 use crate::backend::{self, Backend, Exit, Probe, RowJob, RowOutcome, Watch};
 use crate::budget::{Alerts, Cost, CostMeter, Decision, HostMeter, decide, dimension_name};
 use crate::control::{self, ControlError, ControlFile, RunLock, Signal, State};
-use crate::derived::{REGISTER, Register};
+use crate::derived::{REGISTER, Register, SELECTION, Selection};
 use crate::environ::{Builder, Built, Recipe};
 use crate::estimate::{apply_defaults, estimate};
 use crate::events::{self, Event};
@@ -13,12 +13,13 @@ use crate::inputs::{self, Found};
 use crate::machine::{self, Machine};
 use crate::payload::{self, PayloadError};
 use crate::planlog::store::{Leaf, LogError, PlanLog};
+use crate::prior::same_data;
 use crate::records::{self, RecordDraft, RecordError, VerifyError};
 use crate::schedule::{self, Row, Schedule, ScheduleError};
-use crate::spec::model::{Role, Spec};
+use crate::spec::model::{Mode, Role, SELECTED, Spec};
 use crate::store::Store;
 use crate::view::{self, ViewError};
-use crate::{keys, spec, sys, values};
+use crate::{analysis, canon, keys, spec, sys, values};
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
 use std::cell::{Cell, RefCell};
@@ -116,6 +117,12 @@ pub enum RunError {
         path: String,
         label: String,
     },
+    /// In a confirmatory plan, a selection input and a confirmation input hold the same data;
+    /// one of them was absent when `check` compared them.
+    DataShared {
+        path: String,
+        other: String,
+    },
     Spec(String),
     Schedule(ScheduleError),
     Log(LogError),
@@ -163,6 +170,10 @@ impl fmt::Display for RunError {
             RunError::DataReused { path, label } => write!(
                 f,
                 "E-CNF-005: input {path} was used by an earlier study ({label}). See docs/rules/E-CNF-005.md"
+            ),
+            RunError::DataShared { path, other } => write!(
+                f,
+                "E-CNF-004: input {path} holds the same data as input {other}, of the other role. See docs/rules/E-CNF-004.md"
             ),
             RunError::Spec(e) => write!(f, "cannot load the spec: {e}"),
             RunError::Schedule(e) => e.fmt(f),
@@ -544,9 +555,12 @@ pub fn progress(
     })
 }
 
-/// A selection or confirmation input that the registered plan leaf did not hold is late:
-/// refuse if another study used it, else record it under this study's id once. `all` are the
-/// inputs' hashes in spec order. Every lookup finishes before the append takes its lock.
+/// In a confirmatory plan, refuse a selection input and a confirmation input that hold the
+/// same data (E-CNF-004): `check` cannot compare a file that was absent at registration, and a
+/// late copy of a registered file has a registered hash. Then a selection or confirmation
+/// input that the registered plan leaf did not hold is late: refuse it if another study used
+/// it, else record it under this study's id once. `all` are the inputs' hashes in spec order.
+/// Every lookup finishes before the append takes its lock.
 fn gate_late_data(
     home: &Home,
     spec: &Spec,
@@ -561,18 +575,26 @@ fn gate_late_data(
         .leaf(leaf_index)?
         .ok_or_else(|| RunError::NotRegistered(id.into()))?
         .data_hashes;
-    let mut late = Vec::new();
-    for (input, (_, hashes)) in spec.inputs.iter().zip(all) {
-        if let Some(hashes) = hashes
-            && matches!(input.role, Role::Selection | Role::Confirmation)
-            && !registered.contains(hashes)
-        {
-            late.push((input.path.clone(), hashes.clone()));
+    // (path, role, hashes) of each selection or confirmation input present now.
+    let clusters: Vec<(&str, Role, &(String, String))> = (spec.inputs.iter().zip(all))
+        .filter(|(i, _)| matches!(i.role, Role::Selection | Role::Confirmation))
+        .filter_map(|(i, (_, h))| Some((i.path.as_str(), i.role, h.as_ref()?)))
+        .collect();
+    if spec.study.mode == Mode::Confirmatory {
+        for (path, role, hashes) in &clusters {
+            let other = (clusters.iter()).find(|(_, r, h)| r != role && same_data(h, hashes));
+            if let Some((other, _, _)) = other {
+                return Err(RunError::DataShared {
+                    path: (*path).into(),
+                    other: (*other).into(),
+                });
+            }
         }
     }
+    let late = (clusters.iter()).filter(|(_, _, h)| !registered.contains(h));
     let own = own_label(id);
     let mut new = Vec::new();
-    for (path, hashes) in late {
+    for (path, _, hashes) in late {
         let uses = log.uses(&hashes.0, &hashes.1)?;
         if let Some((i, leaf)) = uses.iter().find(|(_, l)| !is_own(l, &own)) {
             let label = match (leaf.kind.as_str(), leaf.label.strip_prefix(OWN_PREFIX)) {
@@ -580,10 +602,13 @@ fn gate_late_data(
                 ("legacy", None) => format!("phase {}", leaf.label),
                 _ => format!("registered plan, leaf {i}"),
             };
-            return Err(RunError::DataReused { path, label });
+            return Err(RunError::DataReused {
+                path: (*path).into(),
+                label,
+            });
         }
         if uses.is_empty() {
-            new.push(hashes);
+            new.push((*hashes).clone());
         }
     }
     if !new.is_empty() {
@@ -704,6 +729,7 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
         .filter_map(|r| r.row)
         .collect();
     let mut books = Books::open(plan, &all, &machine);
+    let mut pick = None;
     for row in plan
         .schedule
         .rows
@@ -716,7 +742,14 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
         if let Some(h) = gate(plan, &dir, &mut books)? {
             return halt(plan, &dir, lock, h, None);
         }
-        let h = run_row(plan, row, &dir, &log, &mut books, &watch)?;
+        if row.condition == SELECTED && pick.is_none() {
+            match selection(plan, &log)? {
+                Ok(p) => pick = Some(p),
+                Err(why) => return halt(plan, &dir, lock, Halt::Pause(why), None),
+            }
+        }
+        let picked = pick.as_ref().filter(|_| row.condition == SELECTED);
+        let h = run_row(plan, row, picked, &dir, &log, &mut books, &watch)?;
         // A failed event write is a failed internal check: the run pauses after the row.
         let failed = watch.failed.take();
         if let Some(h) = h.or_else(|| failed.is_some().then(|| Halt::Pause(EVENT_LOG.into()))) {
@@ -1051,10 +1084,47 @@ impl Tally {
     }
 }
 
+/// The condition a `selected` row runs, and the hash of the `selection` record that picked it.
+struct Pick {
+    id: String,
+    record: String,
+}
+
+/// The pick from the study's `selection` record, or from a new one made from the selection
+/// rows recorded so far: every selection row has its record by the first `selected` row, as
+/// rows run in schedule order. `Ok(Err(why))` when no pick can be made; the run pauses.
+fn selection(plan: &RunPlan, log: &Path) -> Result<Result<Pick, String>, RunError> {
+    let all = records::read_all(log, &plan.key.verifying_key())?;
+    let record = match all.iter().find(|r| r.kind == SELECTION) {
+        Some(r) => r.clone(),
+        None => {
+            let s = match analysis::select(&plan.spec, &all) {
+                Ok(s) => s,
+                Err(why) => return Ok(Err(why)),
+            };
+            let draft = RecordDraft {
+                study: plan.study_id.clone(),
+                row: None,
+                kind: SELECTION.into(),
+                body: serde_json::to_value(&s).map_err(io)?,
+            };
+            records::append(log, &plan.key, draft)?
+        }
+    };
+    let s = Selection::of(&record)
+        .ok_or_else(|| RunError::Records("the selection record does not parse".into()))?;
+    Ok(Ok(Pick {
+        id: s.selected,
+        record: records::hash(&record),
+    }))
+}
+
 /// One row in its own span: `row.start`, the attempts, `row.end`. `Some` ends the run.
+/// `pick` is the selection for a `selected` row.
 fn run_row(
     plan: &RunPlan,
     row: &Row,
+    pick: Option<&Pick>,
     dir: &Path,
     log: &Path,
     books: &mut Books,
@@ -1064,7 +1134,7 @@ fn run_row(
     watch.begin(row.index, &span);
     let start = json!({ "row": row.index });
     log_event(plan, dir, Some(&span), "row.start", "info", start)?;
-    let (exit, halt) = attempt_row(plan, row, dir, log, books, watch)?;
+    let (exit, halt) = attempt_row(plan, row, pick, dir, log, books, watch)?;
     let end = json!({ "row": row.index, "exit": exit });
     watch.keep(log_event(plan, dir, Some(&span), "row.end", "info", end));
     Ok(halt)
@@ -1076,11 +1146,13 @@ fn run_row(
 fn attempt_row(
     plan: &RunPlan,
     row: &Row,
+    pick: Option<&Pick>,
     dir: &Path,
     log: &Path,
     books: &mut Books,
     watch: &RunWatch,
 ) -> Result<(String, Option<Halt>), RunError> {
+    let condition = pick.map_or(&row.condition, |p| &p.id);
     let mut attempts = 0u32;
     let mut unknown = false;
     let mut bound;
@@ -1091,7 +1163,7 @@ fn attempt_row(
     let noted = |o: &RowOutcome| attempt_events(plan, dir, &span, row.index, o);
     let mut outcome = loop {
         attempts += 1;
-        let job = job_for(plan, row, dir)?;
+        let job = job_for(plan, row, condition, dir)?;
         out_dir.clone_from(&job.output_dir);
         let mut o = plan
             .backend
@@ -1187,6 +1259,7 @@ fn attempt_row(
         Exit::Infra(_) | Exit::Stopped => ("void:infra".to_string(), None),
     };
     let mut body = json!({
+        "stage": row.stage,
         "condition": row.condition,
         "unit": row.unit,
         "repeat": row.repeat,
@@ -1204,6 +1277,10 @@ fn attempt_row(
     });
     if let Some(why) = reason {
         body["reason"] = json!(why);
+    }
+    if let Some(p) = pick {
+        body["picked"] = json!(p.id);
+        body["selection"] = json!(p.record);
     }
     if let Some(v) = values {
         body["values"] = json!(v);
@@ -1322,8 +1399,18 @@ fn unrecorded(
     Ok(())
 }
 
-/// The job for one attempt, with a fresh output dir. An old one is renamed, never deleted.
-fn job_for(plan: &RunPlan, row: &Row, dir: &Path) -> Result<RowJob, RunError> {
+/// The canonical JSON of the params of `condition`; `{}` when it has none.
+fn params_json(spec: &Spec, condition: &str) -> Result<String, RunError> {
+    let params = (spec.design.conditions.iter())
+        .find(|c| c.id == condition)
+        .map(|c| c.params.clone())
+        .unwrap_or_default();
+    String::from_utf8(canon::canonical_of(&params).map_err(io)?).map_err(io)
+}
+
+/// The job for one attempt of `row`, running `condition`, with a fresh output dir. An old one
+/// is renamed, never deleted.
+fn job_for(plan: &RunPlan, row: &Row, condition: &str, dir: &Path) -> Result<RowJob, RunError> {
     let index = row.index.to_string();
     no_links(dir, &["run", "rows", &index])?;
     let row_dir = std::path::absolute(dir.join("run").join("rows").join(&index)).map_err(io)?;
@@ -1344,7 +1431,7 @@ fn job_for(plan: &RunPlan, row: &Row, dir: &Path) -> Result<RowJob, RunError> {
         argv: vec![
             text(&plan.payload),
             "--condition".into(),
-            row.condition.clone(),
+            condition.into(),
             "--unit".into(),
             row.unit.clone(),
             "--repeat".into(),
@@ -1354,6 +1441,10 @@ fn job_for(plan: &RunPlan, row: &Row, dir: &Path) -> Result<RowJob, RunError> {
             ("PATH".into(), PATH_ENV.into()),
             ("IGNORARIUM_SEED".into(), row.seed_hex.clone()),
             ("IGNORARIUM_ROW".into(), row.index.to_string()),
+            (
+                "IGNORARIUM_PARAMS".into(),
+                params_json(&plan.spec, condition)?,
+            ),
         ],
         input_dir: plan.view.clone(),
         output_dir: out,

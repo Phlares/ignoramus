@@ -2,17 +2,19 @@
 use super::{Bound, Check, Kind, Rule};
 use crate::diag::Diagnostic;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 const NONFINITE: &str = "!nonfinite:";
 
 /// Every violation of the generic rules, in rule-file order, then in key-sorted order within a rule
 /// (array elements by index).
 pub fn check_generic(spec: &Value, rules: &[Rule]) -> Vec<Diagnostic> {
-    let known: HashSet<&str> = rules
+    let known: HashMap<&str, Kind> = rules
         .iter()
-        .filter(|r| matches!(r.check, Check::Type(_)))
-        .map(|r| r.path.as_str())
+        .filter_map(|r| match r.check {
+            Check::Type(k) => Some((r.path.as_str(), k)),
+            _ => None,
+        })
         .collect();
     let mut out = Vec::new();
     for rule in rules.iter().filter(|r| applies(r, spec)) {
@@ -45,7 +47,7 @@ pub(super) fn applies(rule: &Rule, spec: &Value) -> bool {
         .is_none_or(|w| is("mode", &w.mode) && is("label", &w.label))
 }
 
-fn violations(rule: &Rule, spec: &Value, known: &HashSet<&str>) -> Vec<String> {
+fn violations(rule: &Rule, spec: &Value, known: &HashMap<&str, Kind>) -> Vec<String> {
     match &rule.check {
         Check::Named(_) | Check::Documented => vec![],
         Check::KnownKey => {
@@ -125,7 +127,8 @@ fn below(max: Bound, x: f64) -> bool {
 /// A float field takes integers and the non-finite markers; `Finite` reports the markers.
 fn is_kind(k: Kind, v: &Value) -> bool {
     match (k, v) {
-        (Kind::String, Value::String(_))
+        (Kind::Any, _)
+        | (Kind::String, Value::String(_))
         | (Kind::Bool, Value::Bool(_))
         | (Kind::Array, Value::Array(_))
         | (Kind::Table, Value::Object(_))
@@ -161,7 +164,8 @@ pub fn safe_key(key: &str) -> bool {
 
 /// Nodes a path selects, as (concrete path, value). `None` marks a missing key.
 /// A missing or non-table parent selects nothing: its own rule reports it.
-/// `**` selects every value at any depth.
+/// `**` selects every value at any depth; a `*` segment selects every key of a table, by
+/// `join_key`, since those keys come from the spec.
 pub(super) fn select<'a>(root: &'a Value, pattern: &str) -> Vec<(String, Option<&'a Value>)> {
     if pattern == "**" {
         let mut out = Vec::new();
@@ -177,6 +181,10 @@ pub(super) fn select<'a>(root: &'a Value, pattern: &str) -> Vec<(String, Option<
         let mut next = Vec::new();
         for (p, v) in cur {
             let Some(Value::Object(m)) = v else { continue };
+            if seg == "*" {
+                next.extend(m.iter().map(|(k, c)| (join_key(&p, k), Some(c))));
+                continue;
+            }
             let child_path = join(&p, name);
             let child = m.get(name);
             match (each, child) {
@@ -214,15 +222,27 @@ fn all_nodes<'a>(v: &'a Value, path: &str, out: &mut Vec<(String, Option<&'a Val
     }
 }
 
-/// Keys whose wildcard path has no `type` target. An unknown table is reported
-/// once, without its children.
-fn unknown_keys(v: &Value, path: &str, wild: &str, known: &HashSet<&str>, out: &mut Vec<String>) {
+/// Keys whose wildcard path has no `type` target, by name or by a `*` segment. An unknown
+/// table is reported once, without its children, and an `any` node is not entered.
+fn unknown_keys(
+    v: &Value,
+    path: &str,
+    wild: &str,
+    known: &HashMap<&str, Kind>,
+    out: &mut Vec<String>,
+) {
     let Value::Object(m) = v else { return };
     for (k, c) in m {
-        let (p, w) = (join_key(path, k), join(wild, k));
+        let p = join_key(path, k);
+        let found = [join(wild, k), join(wild, "*")]
+            .into_iter()
+            .find_map(|w| known.get(w.as_str()).copied().map(|kind| (w, kind)));
         // A key with `.` or `[` would read as a deeper path.
-        if k.contains(['.', '[']) || !known.contains(w.as_str()) {
+        let Some((w, kind)) = found.filter(|_| !k.contains(['.', '['])) else {
             out.push(p);
+            continue;
+        };
+        if kind == Kind::Any {
             continue;
         }
         match c {

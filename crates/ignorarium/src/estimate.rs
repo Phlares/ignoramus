@@ -1,7 +1,7 @@
 //! Defaults for absent spec keys, and the cost estimate.
 use crate::machine::Machine;
 use crate::schedule::Row;
-use crate::spec::model::{Mode, Spec};
+use crate::spec::model::{Mode, SELECTED, Spec};
 use serde_json::{Map, Value, json};
 
 /// The only place that holds default values: path, and the value given the spec.
@@ -70,15 +70,19 @@ pub struct Estimate {
     pub is_long_job: bool,
 }
 
-/// The cost of `rows`, the schedule `run` writes, counted row by row.
+/// The cost of `rows`, the schedule `run` writes, counted row by row. Rows count per
+/// declared condition, and per `selected` when the confirmation stage runs the pick.
 pub fn estimate(spec: &Spec, machine: &Machine, rows: &[Row]) -> Estimate {
     let d = &spec.design;
+    let picks = d.confirmation.conditions.iter().any(|c| c == SELECTED);
     let rows_per_condition: Vec<(String, u64)> = d
         .conditions
         .iter()
-        .map(|c| {
-            let n = rows.iter().filter(|r| r.condition == c.id).count();
-            (c.id.clone(), n as u64)
+        .map(|c| c.id.as_str())
+        .chain(picks.then_some(SELECTED))
+        .map(|id| {
+            let n = rows.iter().filter(|r| r.condition == id).count();
+            (id.to_string(), n as u64)
         })
         .collect();
     let n = rows.len() as u64;

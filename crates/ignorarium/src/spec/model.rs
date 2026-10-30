@@ -1,6 +1,10 @@
 //! Typed spec schema. Shape only: value checks live in the rules.
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
+
+/// The condition id that stands for the selection stage's pick.
+pub const SELECTED: &str = "selected";
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -171,6 +175,33 @@ pub struct Design {
     pub pick: Pick,
     pub variance: Variance,
     pub conditions: Vec<Condition>,
+    /// The stage that picks one candidate on the selection inputs; `None` when there is none.
+    pub selection: Option<Selection>,
+    pub confirmation: Stage,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Selection {
+    /// The outcome whose mean paired value ranks the candidates.
+    pub metric: String,
+    /// The candidates; a tie goes to the first listed.
+    pub conditions: Vec<String>,
+    pub rule: SelectionRule,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SelectionRule {
+    /// The best mean, in the metric outcome's direction.
+    BestMean,
+}
+
+/// The conditions a stage runs besides the reference, which runs in every stage.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Stage {
+    pub conditions: Vec<String>,
 }
 
 /// Which of a cluster's units the study takes.
@@ -202,6 +233,15 @@ pub struct Variance {
 #[serde(deny_unknown_fields)]
 pub struct Condition {
     pub id: String,
+    /// What the payload gets, as JSON, in `IGNORARIUM_PARAMS`.
+    #[serde(default)]
+    pub params: BTreeMap<String, Param>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Param {
+    Value(Scalar),
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -282,7 +322,7 @@ pub enum OperatorType {
 }
 
 /// Integers come first so whole numbers stay integers.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Scalar {
     Int(i64),

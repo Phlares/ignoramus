@@ -1,4 +1,4 @@
-use ignorarium::derived::{Estimate, Register};
+use ignorarium::derived::{Estimate, Register, Selection};
 use ignorarium::records::Record;
 use serde_json::{Value, json};
 
@@ -91,4 +91,25 @@ fn a_register_record_with_a_missing_or_extra_field_does_not_parse() {
     let mut b = register_body();
     b["extra"] = json!(1);
     assert_eq!(Register::of(&rec("register", b)), None);
+}
+
+fn selection_body() -> Value {
+    json!({
+        "metric": "ppl-ratio",
+        "candidates": [{ "id": "a", "mean": 1.5 }, { "id": "b", "mean": -2.0 }],
+        "selected": "b", "complete_units": 7, "incomplete_units": 1
+    })
+}
+
+#[test]
+fn a_selection_record_parses_and_only_as_its_kind() {
+    let s = Selection::of(&rec("selection", selection_body())).unwrap();
+    assert_eq!(s.selected, "b");
+    assert_eq!((s.complete_units, s.incomplete_units), (7, 1));
+    assert_eq!(s.candidates[1].mean, -2.0);
+    assert_eq!(serde_json::to_value(&s).unwrap(), selection_body());
+    assert_eq!(Selection::of(&rec("estimate", selection_body())), None);
+    let mut b = selection_body();
+    b["candidates"][0]["extra"] = json!(1);
+    assert_eq!(Selection::of(&rec("selection", b)), None);
 }

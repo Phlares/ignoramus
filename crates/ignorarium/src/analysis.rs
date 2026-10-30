@@ -1,8 +1,9 @@
 //! Reading the rows back: each condition's value for a unit, paired with the reference
 //! condition's value for the same unit and repeat.
+use crate::derived::{Candidate, Selection};
 use crate::records::Record;
-use crate::spec::model::{Paired as Rule, Spec};
-use std::collections::BTreeMap;
+use crate::spec::model::{Direction, Paired as Rule, Spec};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Paired values by (unit, condition, outcome id).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -81,4 +82,65 @@ pub fn paired(spec: &Spec, rows: &[Record]) -> Paired {
             .filter(|(_, v)| v.is_finite())
             .collect(),
     }
+}
+
+/// The selection stage's pick. A selection unit (a unit of a `selection` row record) is
+/// complete when it has a paired metric value for every candidate. Each candidate's mean is
+/// over the complete units; the best mean in the metric outcome's direction wins, and a tie
+/// goes to the first listed. `Err` when the plan has no stage or candidate, its metric is not
+/// an outcome, no unit is complete, or a mean is not finite.
+pub fn select(spec: &Spec, rows: &[Record]) -> Result<Selection, String> {
+    let stage = (spec.design.selection.as_ref()).ok_or("the plan has no selection stage")?;
+    let outcome = (spec.outcomes.iter().find(|o| o.id == stage.metric))
+        .ok_or("the selection metric is not an outcome of the plan")?;
+    let units: BTreeSet<&str> = rows
+        .iter()
+        .filter(|r| r.kind == "row" && r.body["stage"] == "selection")
+        .filter_map(|r| r.body["unit"].as_str())
+        .collect();
+    let pairs = paired(spec, rows);
+    let complete: Vec<Vec<f64>> = units
+        .iter()
+        .filter_map(|u| {
+            (stage.conditions.iter())
+                .map(|c| pairs.get(u, c, &outcome.id))
+                .collect()
+        })
+        .collect();
+    if complete.is_empty() {
+        return Err(format!(
+            "no selection unit has a {} value for every candidate; incomplete units: {}",
+            outcome.id,
+            units.len()
+        ));
+    }
+    let n = complete.len() as f64;
+    let mut candidates = Vec::new();
+    for (i, id) in stage.conditions.iter().enumerate() {
+        let mean = complete.iter().map(|v| v[i]).sum::<f64>() / n;
+        if !mean.is_finite() {
+            return Err(format!(
+                "the mean {} of candidate {id} is not finite",
+                outcome.id
+            ));
+        }
+        candidates.push(Candidate {
+            id: id.clone(),
+            mean,
+        });
+    }
+    let better = |a: f64, b: f64| match outcome.direction {
+        Direction::Lower => a < b,
+        Direction::Higher => a > b,
+    };
+    let best = (candidates.iter())
+        .reduce(|best, c| if better(c.mean, best.mean) { c } else { best })
+        .ok_or("the selection stage lists no candidate")?;
+    Ok(Selection {
+        metric: outcome.id.clone(),
+        selected: best.id.clone(),
+        complete_units: complete.len() as u64,
+        incomplete_units: (units.len() - complete.len()) as u64,
+        candidates,
+    })
 }

@@ -46,6 +46,13 @@ pub fn normalized_sha256(text: &str) -> String {
     sha256_hex(folded.as_bytes())
 }
 
+/// Two files, by their `(exact, normalized)` hashes, hold the same data: the same exact hash,
+/// or the same normalized hash (text that differs only in case and spacing). An empty
+/// normalized hash (no text) matches nothing.
+pub fn same_data(a: &(String, String), b: &(String, String)) -> bool {
+    a.0 == b.0 || (!a.1.is_empty() && a.1 == b.1)
+}
+
 /// `(exact, normalized)` SHA-256 of a file. The normalized hash is empty
 /// when the bytes are not UTF-8 text or exceed `NORMALIZE_LIMIT`.
 pub fn file_hashes(bytes: &[u8]) -> (String, String) {
