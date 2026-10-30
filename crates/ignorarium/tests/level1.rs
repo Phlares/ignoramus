@@ -961,14 +961,15 @@ fn an_unknown_cpu_attempt_that_is_retried_leaves_a_spend_record_and_still_pauses
     );
 }
 
-/// Breaks the event log during the row, then reports `exit` with an unknown CPU count and,
-/// with `selftest`, a passed self-test. With `stop`, it first sends a stop and ticks, so the
-/// watch ends the row.
+/// Breaks the event log during the row, then reports `exit`, with an unknown CPU count when
+/// `unknown`, and with `selftest`, a passed self-test. With `stop`, it first sends a stop and
+/// ticks, so the watch ends the row.
 struct BreakEvents {
     dir: PathBuf,
     exit: Exit,
     selftest: bool,
     stop: Option<ControlFile>,
+    unknown: bool,
 }
 
 impl Backend for BreakEvents {
@@ -1001,7 +1002,7 @@ impl Backend for BreakEvents {
             wall_seconds: 0.1,
             output_hash: output_hash(&job.output_dir)?,
             selftest: self.selftest.then_some(passed),
-            cpu_unknown: Some(UNKNOWN.into()),
+            cpu_unknown: self.unknown.then(|| UNKNOWN.into()),
         })
     }
 }
@@ -1025,6 +1026,7 @@ fn an_attempts_record_is_written_before_its_events_can_fail() {
             exit,
             selftest,
             stop: stop.then(|| ControlFile::of(&lab.home, &id)),
+            unknown: true,
         });
         let err = runner::run(&plan).expect_err("an event write fails");
         assert!(matches!(err, RunError::Io(_)), "{i}: {err}");
@@ -1044,6 +1046,55 @@ fn an_attempts_record_is_written_before_its_events_can_fail() {
         );
         let p = progress_of(&lab, &id);
         assert_eq!((p.unknown_cpu, p.cost.cpu_seconds), (1, est), "{i}");
+    }
+}
+
+#[test]
+fn a_pause_sticks_when_the_event_log_cannot_be_written() {
+    let cases = [
+        (
+            true,
+            "row 0 has an unknown CPU count; it is charged the row estimate",
+        ),
+        (false, "the event log cannot be written"),
+    ];
+    for (i, (unknown, why)) in cases.into_iter().enumerate() {
+        let lab = lab();
+        let id = format!("stick{i}");
+        let dir = plain(&lab, &id);
+        let mut plan = prepare(&lab.home, &id, 0).unwrap();
+        plan.backend = Box::new(BreakEvents {
+            dir: dir.clone(),
+            exit: Exit::Ok,
+            selftest: false,
+            stop: None,
+            unknown,
+        });
+        let err = runner::run(&plan).expect_err("an event write fails");
+        assert!(matches!(err, RunError::Io(_)), "{i}: {err}");
+        // The pause is written before any event, and no later row starts.
+        let state = ignorarium::control::State::read(&lab.home, &id).unwrap();
+        assert_eq!(
+            state,
+            Some(ignorarium::control::State::Paused(why.into())),
+            "{i}"
+        );
+        assert_eq!(common::indices(&lab, &id), [0], "{i}");
+        assert!(!dir.join("run/rows/1").exists(), "{i}");
+        // With the event log back, the next run does not go past the pause.
+        std::fs::remove_dir(dir.join("events.jsonl")).unwrap();
+        std::fs::rename(dir.join("events.old"), dir.join("events.jsonl")).unwrap();
+        let again = prepare(&lab.home, &id, 0).unwrap();
+        assert_eq!(
+            runner::run(&again).unwrap(),
+            RunStatus::Paused("a pause was requested".into()),
+            "{i}"
+        );
+        assert_eq!(common::indices(&lab, &id), [0], "{i}");
+        // A resume goes on.
+        ControlFile::of(&lab.home, &id).request_resume().unwrap();
+        assert_eq!(runner::run(&again).unwrap(), RunStatus::Done, "{i}");
+        assert_eq!(common::indices(&lab, &id), [0, 1, 2, 3, 4, 5], "{i}");
     }
 }
 

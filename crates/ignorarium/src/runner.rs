@@ -34,6 +34,7 @@ const MIN_TIMEOUT: Duration = Duration::from_secs(60);
 const TIMEOUT_FACTOR: f64 = 10.0;
 const PATH_ENV: &str = "/usr/bin:/bin";
 const PAUSE_REQUESTED: &str = "a pause was requested";
+const EVENT_LOG: &str = "the event log cannot be written";
 const INTERRUPTED: &str = "interrupted by a signal";
 const REAPED: &str = "SIGCHLD is ignored; the box cannot see a row end";
 /// The payload, relative to the study folder.
@@ -566,6 +567,7 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
                 why,
                 in_flight: None,
             },
+            None,
         );
     }
     match control::end_orphan(&plan.home, &plan.study_id) {
@@ -576,7 +578,7 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
         Ok(None) => {}
         Err(e) => {
             let why = format!("cannot end the row a dead box left: {e}");
-            return halt(plan, &dir, lock, Halt::Pause(why));
+            return halt(plan, &dir, lock, Halt::Pause(why), None);
         }
     }
     State::Running
@@ -598,6 +600,7 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
         row: RefCell::new((0, String::new())),
         last_beat: Cell::new(Instant::now()),
         ended: RefCell::new(None),
+        failed: RefCell::new(None),
     };
     let done: BTreeSet<u64> = all
         .iter()
@@ -612,13 +615,16 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
         .filter(|r| !done.contains(&r.index))
     {
         if let Some(h) = at_boundary(&control) {
-            return halt(plan, &dir, lock, h);
+            return halt(plan, &dir, lock, h, None);
         }
         if let Some(h) = gate(plan, &dir, &mut books)? {
-            return halt(plan, &dir, lock, h);
+            return halt(plan, &dir, lock, h, None);
         }
-        if let Some(h) = run_row(plan, row, &dir, &log, &mut books, &watch)? {
-            return halt(plan, &dir, lock, h);
+        let h = run_row(plan, row, &dir, &log, &mut books, &watch)?;
+        // A failed event write is a failed internal check: the run pauses after the row.
+        let failed = watch.failed.take();
+        if let Some(h) = h.or_else(|| failed.is_some().then(|| Halt::Pause(EVENT_LOG.into()))) {
+            return halt(plan, &dir, lock, h, failed);
         }
     }
     State::Done.write(&plan.home, &plan.study_id).map_err(io)?;
@@ -741,26 +747,37 @@ impl Halt {
     }
 }
 
-/// End the run. A pause writes `run.pause` and the paused state; a stop writes the stop trace.
-fn halt(plan: &RunPlan, dir: &Path, lock: &RunLock, h: Halt) -> Result<RunStatus, RunError> {
+/// End the run. A pause writes the paused state, then `run.pause`; a stop writes the stop
+/// trace, its record first. `failed` is an event write that failed during the row this halt
+/// ends. When it is set, or `run.pause` cannot be written, the pause also stays a pending
+/// request, so no run goes past it without a resume, and the failure is the result.
+fn halt(
+    plan: &RunPlan,
+    dir: &Path,
+    lock: &RunLock,
+    h: Halt,
+    failed: Option<RunError>,
+) -> Result<RunStatus, RunError> {
     match h {
         Halt::Pause(why) => {
-            log_event(
-                plan,
-                dir,
-                None,
-                "run.pause",
-                "warn",
-                json!({ "reason": why }),
-            )?;
             State::Paused(why.clone())
                 .write(&plan.home, &plan.study_id)
                 .map_err(io)?;
-            Ok(RunStatus::Paused(why))
+            let attrs = json!({ "reason": why });
+            let logged = log_event(plan, dir, None, "run.pause", "warn", attrs);
+            match failed.or(logged.err()) {
+                None => Ok(RunStatus::Paused(why)),
+                Some(e) => {
+                    ControlFile::of(&plan.home, &plan.study_id)
+                        .request_pause()
+                        .map_err(io)?;
+                    Err(e)
+                }
+            }
         }
         Halt::Stop { why, in_flight } => {
             lock.stop(&plan.key, &why, in_flight)?;
-            Ok(RunStatus::Stopped(why))
+            failed.map_or(Ok(RunStatus::Stopped(why)), Err)
         }
     }
 }
@@ -816,6 +833,8 @@ struct RunWatch<'a> {
     last_beat: Cell<Instant>,
     /// Why this watch ended the row early, once it has: a stop seen, or a fault.
     ended: RefCell<Option<Halt>>,
+    /// The first event write that failed during the row in flight.
+    failed: RefCell<Option<RunError>>,
 }
 
 impl RunWatch<'_> {
@@ -828,6 +847,13 @@ impl RunWatch<'_> {
     fn end(&self, h: Halt) {
         self.ended.borrow_mut().get_or_insert(h);
     }
+
+    /// Keep the first event write of the row that fails; the row's records still land.
+    fn keep(&self, written: Result<(), RunError>) {
+        if let Err(e) = written {
+            self.failed.borrow_mut().get_or_insert(e);
+        }
+    }
 }
 
 impl Watch for RunWatch<'_> {
@@ -836,7 +862,7 @@ impl Watch for RunWatch<'_> {
             self.last_beat.set(Instant::now());
             let (index, span) = self.row.borrow().clone();
             let attrs = json!({ "row": index });
-            // A failed write shows at the row's end event, which ends the run.
+            // A failed write shows at the row's end event, which pauses the run.
             let _ = log_event(self.plan, self.dir, Some(&span), "heartbeat", "info", attrs);
         }
         // A failed or busy read is retried on the next tick; a boundary pauses on a failure.
@@ -944,7 +970,7 @@ fn run_row(
     log_event(plan, dir, Some(&span), "row.start", "info", start)?;
     let (exit, halt) = attempt_row(plan, row, dir, log, books, watch)?;
     let end = json!({ "row": row.index, "exit": exit });
-    log_event(plan, dir, Some(&span), "row.end", "info", end)?;
+    watch.keep(log_event(plan, dir, Some(&span), "row.end", "info", end));
     Ok(halt)
 }
 
@@ -989,7 +1015,7 @@ fn attempt_row(
         // A row ended early is not data: its spend is recorded, and the run ends.
         if let Some(h) = watch.ended.borrow_mut().take() {
             unrecorded(plan, log, row, books, &o, &h.reason())?;
-            noted(&o)?;
+            watch.keep(noted(&o));
             return Ok((h.exit().into(), Some(h)));
         }
         // A stop nobody asked for is a backend fault: void the row and pause, no retry.
@@ -1011,7 +1037,12 @@ fn attempt_row(
             &o,
             &format!("infrastructure fault: {why}"),
         )?;
-        noted(&o)?;
+        watch.keep(noted(&o));
+        // No new attempt once the event log fails; the run pauses after the row.
+        if watch.failed.borrow().is_some() {
+            let h = Halt::Pause(EVENT_LOG.into());
+            return Ok((h.exit().into(), Some(h)));
+        }
         let halt = match plan.backend.probe() {
             Probe::Unavailable(why) => Some(Halt::Pause(format!("backend unavailable: {why}"))),
             Probe::Available => gate(plan, dir, books)?,
@@ -1059,7 +1090,7 @@ fn attempt_row(
         },
     )?;
     books.add(plan, &outcome, true);
-    noted(&outcome)?;
+    watch.keep(noted(&outcome));
     let halt = match outcome.exit {
         Exit::Infra(why) => Some(Halt::Pause(format!(
             "row {} voided by infrastructure faults: {why}",
