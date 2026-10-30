@@ -8,6 +8,8 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 
 pub const API: &str = "https://sandbox.zenodo.org/api";
+/// The DOI prefix of published records on this instance. Drafts reserve 10.5281 here too.
+pub const DOI_PREFIX: &str = "10.5072";
 const SANDBOX: &str = "https://sandbox.zenodo.org/";
 const BODY_CHARS: usize = 2000;
 
@@ -35,6 +37,7 @@ pub struct Step {
 
 pub struct Zenodo<T: Transport> {
     transport: T,
+    doi_prefix: &'static str,
 }
 
 /// Server text with control characters written as escapes.
@@ -71,7 +74,10 @@ fn number(step: &'static str, v: &Value, path: &str) -> Result<u64, Error> {
 impl<T: Transport> Zenodo<T> {
     /// The only constructor.
     pub fn sandbox(transport: T) -> Self {
-        Zenodo { transport }
+        Zenodo {
+            transport,
+            doi_prefix: DOI_PREFIX,
+        }
     }
 
     fn send(&self, step: &'static str, accept: &[u16], req: Request) -> Result<Response, Error> {
@@ -335,17 +341,20 @@ impl<T: Transport> Zenodo<T> {
             Body::None,
         )?;
         let doi = text("publish", &v, "/doi")?;
-        if doi != d.doi {
+        let record = number("publish", &v, "/record_id")?;
+        let suffix = format!("zenodo.{record}");
+        let reserved = d.doi.split_once('/').map(|(_, s)| s);
+        if doi != format!("{}/{suffix}", self.doi_prefix) || reserved != Some(suffix.as_str()) {
             return Err(mismatch(
                 "publish",
                 format!(
-                    "the record has DOI {}, the draft reserved {}",
+                    "the record has DOI {}, expected {}/{suffix} for the draft that reserved {}",
                     esc(doi),
+                    self.doi_prefix,
                     esc(&d.doi)
                 ),
             ));
         }
-        let record = number("publish", &v, "/record_id")?;
         let detail = json!({
             "doi": doi,
             "record_id": record,

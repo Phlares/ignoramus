@@ -651,6 +651,49 @@ fn publish_checks_the_doi() {
 }
 
 #[test]
+fn publish_accepts_the_sandbox_test_prefix() {
+    let reserved = Draft {
+        doi: "10.5281/zenodo.123456".to_string(),
+        ..draft()
+    };
+    let fake = Fake::new(vec![reply(202, PUBLISH)]);
+    let step = Zenodo::sandbox(&fake)
+        .publish(&publish_token(), &reserved)
+        .unwrap();
+    assert_eq!(step.detail["doi"], "10.5072/zenodo.123456");
+}
+
+#[test]
+fn publish_refuses_a_wrong_suffix_or_prefix() {
+    let reserved = Draft {
+        doi: "10.5281/zenodo.123456".to_string(),
+        ..draft()
+    };
+    for doi in [
+        "10.5072/zenodo.5",
+        "10.5281/zenodo.123456",
+        "10.9999/zenodo.123456",
+        "10.5072/other.123456",
+    ] {
+        let body = PUBLISH.replace("10.5072/zenodo.123456", doi);
+        let fake = Fake::new(vec![reply(202, body)]);
+        let err = Zenodo::sandbox(&fake)
+            .publish(&publish_token(), &reserved)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::Mismatch {
+                    step: "publish",
+                    ..
+                }
+            ),
+            "{doi}: {err:?}"
+        );
+    }
+}
+
+#[test]
 fn publish_wants_202() {
     let fake = Fake::new(vec![reply(200, PUBLISH)]);
     let err = Zenodo::sandbox(&fake)
