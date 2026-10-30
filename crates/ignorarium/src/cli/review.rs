@@ -3,7 +3,7 @@
 use super::check::{self, Assessed};
 use super::{Ctx, Done, Run, out};
 use crate::diag::{Diagnostic, Severity};
-use crate::rules::safe_key;
+use crate::rules::{self, safe_key};
 use serde_json::Value;
 use std::path::Path;
 
@@ -184,6 +184,10 @@ fn page(a: &Assessed) -> String {
     s.push_str(&format!("\n## Conditions\n\n{}", bullets(conditions)));
     s.push_str("\n## Estimate\n\n");
     s.push_str(&est.map_or(NO_ESTIMATE.into(), |e| bullets(check::figure_lines(e))));
+    let power = rules::power(&a.value, &a.ctx)
+        .into_iter()
+        .map(|p| format!("{}: {}", p.hypothesis, p.sentence()));
+    s.push_str(&format!("\n## Power\n\n{}", bullets(power)));
     s.push_str(&format!(
         "\n## Claim label\n\n{}",
         bullets([

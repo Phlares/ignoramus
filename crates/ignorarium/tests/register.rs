@@ -647,24 +647,7 @@ fn register_refuses_pending_values() {
 
 #[test]
 fn register_freezes_the_estimate_records_it_used() {
-    // A confirmation input in each of two more strata.
-    let input = |stratum: &str| {
-        format!(
-            "[[inputs]]
-path = \"data/{stratum}.txt\"
-sha256 = \"\"
-role = \"confirmation\"
-stratum = \"{stratum}\"
-units = 3
-[inputs.licence]
-spdx = \"\"
-type = \"unspecified\"
-source = \"\"
-creators = []
-
-"
-        )
-    };
+    // Two more strata, each with the 15 clusters the power gate needs.
     let (f, spec) = setup("numeric-ablation", |t| {
         common::confirmatory(t)
             .replace(
@@ -673,7 +656,11 @@ creators = []
             )
             .replacen(
                 "[pins]",
-                &format!("{}{}[pins]", input("code"), input("article")),
+                &format!(
+                    "{}{}[pins]",
+                    common::clusters("code", 15),
+                    common::clusters("article", 15)
+                ),
                 1,
             )
     });

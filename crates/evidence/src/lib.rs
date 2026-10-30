@@ -1,4 +1,4 @@
-//! Sequential evidence statistics: e-processes, online false-discovery control, tree splits and scan p-values.
+//! Sequential evidence statistics: e-processes, online false-discovery control, tree splits, scan p-values, and the claim test with its power.
 //!
 //! The crate does no I/O and has no dependencies. Every random draw comes from an [`rng::Rng`] that the caller seeds.
 #![forbid(unsafe_code)]
@@ -7,6 +7,7 @@ use std::fmt;
 pub mod claim;
 pub mod elond;
 pub mod eprocess;
+pub mod power;
 pub mod rng;
 pub mod scan;
 pub mod sim;

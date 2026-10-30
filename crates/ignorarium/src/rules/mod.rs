@@ -9,8 +9,8 @@ mod generic;
 mod named;
 pub use generic::{check_generic, safe_key};
 pub use named::{
-    CheckCtx, Lookup, StratumInput, Taken, check_named, estimate_inputs, input_path, read_regular,
-    selected_by,
+    CheckCtx, Lookup, Power, StratumInput, Taken, check_named, estimate_inputs, input_path, power,
+    read_regular, selected_by,
 };
 
 /// The records of a box, by study. An `Err` is a log that cannot be read or trusted.
@@ -31,10 +31,15 @@ impl BoxRecords for NoRecords {
 
 /// True when `id` has the form E-FMT-001 gives `study.id` in the built-in rules.
 pub fn is_study_id(id: &str) -> bool {
+    has_format("study.id", id)
+}
+
+/// True when `value` has the form E-FMT-001 gives the field at `path` in the built-in rules.
+fn has_format(path: &str, value: &str) -> bool {
     builtin().iter().any(|r| {
         r.code == "E-FMT-001"
-            && r.path == "study.id"
-            && matches!(&r.check, Check::Format(re) if re.is_match(id))
+            && r.path == path
+            && matches!(&r.check, Check::Format(re) if re.is_match(value))
     })
 }
 

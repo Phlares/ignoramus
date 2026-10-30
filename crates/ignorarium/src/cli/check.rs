@@ -206,6 +206,7 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
             key,
         }),
         store,
+        spec_hash: spec::hash_bytes(&raw.hash).unwrap_or_default(),
     };
     let (value, filled, diags) = rules::check_all(&raw.value, rules::builtin(), &cc);
     let mut a = Assessed {
@@ -290,9 +291,24 @@ fn render_json(a: &Assessed) -> Result<String, CliError> {
             "long_job": e.is_long_job,
         })
     });
+    let power: Vec<Value> = rules::power(&a.value, &a.ctx)
+        .into_iter()
+        .map(|p| {
+            let clusters: serde_json::Map<String, Value> = (p.clusters.into_iter())
+                .map(|(stratum, n)| (stratum, json!(n)))
+                .collect();
+            json!({
+                "hypothesis": p.hypothesis,
+                "power": p.power,
+                "clusters": clusters,
+                "needed": p.needed,
+            })
+        })
+        .collect();
     let v = json!({
         "diagnostics": a.diags,
         "pending": a.pending(),
+        "power": power,
         "estimate": estimate,
         "defaults": defaults_json(&a.filled),
         "hash": a.hash,

@@ -3,18 +3,21 @@
 //! selects its nodes with it, and reports only at those nodes. A check skips what
 //! is missing or mistyped: the generic rules report that.
 use super::generic::{applies, diagnostic, join, join_key, plain_key, safe_key, select};
-use super::{BoxRecords, Check, NoRecords, Rule, is_study_id};
+use super::{BoxRecords, Check, NoRecords, Rule, has_format, is_study_id};
 use crate::derived::{Estimate, Selection, StudyState, contrast_key};
 use crate::diag::Diagnostic;
 use crate::inputs::{self, Found};
-use crate::power::required_clusters;
+use crate::power::{required_clusters, z};
 use crate::prior::{PriorUse, same_data};
 use crate::records;
 use crate::schedule::ROW_CAP;
-use crate::spec::model::{Claim, Outcome, SELECTED};
+use crate::seed::seed;
+use crate::spec::model::{Claim, Outcome, SELECTED, StatisticSpec};
 use crate::store::Store;
 use evidence::Tail;
-use evidence::claim::Bound;
+use evidence::claim::{Bound, Statistic};
+use evidence::power::{Plan, Stratum, clusters_needed, simulate};
+use evidence::rng::Rng;
 use serde_json::{Value, json};
 use std::path::{Component, Path, PathBuf};
 
@@ -29,6 +32,9 @@ pub struct CheckCtx {
     pub records: Box<dyn BoxRecords>,
     /// The content store inputs resolve from first.
     pub store: Store,
+    /// The hash the register record and the schedule hold for this spec. It seeds the power
+    /// gate, so every check of one spec gives the same power.
+    pub spec_hash: [u8; 32],
 }
 
 impl CheckCtx {
@@ -43,6 +49,7 @@ impl CheckCtx {
             store: Store {
                 root: root.join("store"),
             },
+            spec_hash: [0; 32],
         }
     }
 }
@@ -362,101 +369,295 @@ fn open_unit(x: f64) -> bool {
     x > 0.0 && x < 1.0
 }
 
-/// E-CNF-002, at each hypothesis with a mean claim that E-CNF-001 and E-HYP-004 accept and
-/// whose estimates are found: in each group it is tested in, the clusters must reach the
-/// one-sided z count for every bound, at level `design.alpha` x `alpha_share` and power
-/// `design.power`. The box estimates the statistic as the unweighted mean of the cluster
-/// means, so a cluster mean has sd `sd x sqrt(icc + (1 - icc) / m)` on average, m the
-/// harmonic mean of the units the group's clusters give. An absent alpha or power cannot be
-/// computed, so it fails closed; a mistyped or out-of-range one, or a units per cluster below
-/// 1, is the generic rules'. Quantile claims are not sized here.
+/// Replicates of each power simulation.
+const REPS: u32 = 4000;
+/// The most clusters per stratum the search for the count that would pass tries.
+const CAP: u32 = 1024;
+
+/// E-CNF-002, at each hypothesis with a claim that E-CNF-001, E-HYP-003 and E-HYP-004 accept
+/// and whose estimates are found: `gate` must find the power the claim needs. An absent alpha
+/// or power cannot be computed, so it fails closed; a mistyped or out-of-range one, or a units
+/// per cluster below 1, is the generic rules'.
 fn power_met(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let claimed: Vec<(String, &Value)> = nodes(spec, pat)
+        .into_iter()
+        .filter(|(_, h)| has_claim(h))
+        .collect();
+    let design = match gate_design(spec) {
+        Err(absent) => {
+            return claimed
+                .iter()
+                .flat_map(|(path, _)| {
+                    absent.iter().map(move |f| Hit {
+                        path: path.clone(),
+                        detail: Some(format!("Cannot compute power: design.{f} is absent.")),
+                    })
+                })
+                .collect();
+        }
+        Ok(None) => return vec![],
+        Ok(Some(d)) => d,
+    };
+    let mut out = vec![];
+    for (path, h) in claimed {
+        let at = |detail: String| Hit {
+            path: path.clone(),
+            detail: Some(detail),
+        };
+        match gate(spec, ctx, h, design) {
+            None => {}
+            Some(Gate::Floor(short)) => out.extend(short.into_iter().map(|(group, have, need)| {
+                let group = group_name(&group);
+                at(format!(
+                    "{}{} has {have} of the {need} clusters the power gate needs.",
+                    group[..1].to_ascii_uppercase(),
+                    &group[1..]
+                ))
+            })),
+            Some(Gate::Simulated(p)) if p.power >= p.target => {}
+            Some(Gate::Simulated(p)) => out.push(at(p.sentence())),
+            Some(Gate::Fault(why)) => out.push(at(format!("Cannot simulate power: {why}."))),
+        }
+    }
+    out
+}
+
+/// The simulated power of one confirmatory hypothesis, as `check --json` and `review` show it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Power {
+    /// The hypothesis id; `<name>` when it is not safe to print.
+    pub hypothesis: String,
+    pub power: f64,
+    /// `design.power`.
+    pub target: f64,
+    /// The clusters of each group the claim is tested in, in the hypothesis's order: the
+    /// stratum as `shown` prints it, `""` for the pooled group.
+    pub clusters: Vec<(String, usize)>,
+    /// When the power falls short: the smallest common count of clusters per group that
+    /// reaches the target, at most 1,024.
+    pub needed: Option<u32>,
+}
+
+impl Power {
+    /// `Simulated power 0.62 with 26 clusters in code and 26 in article`, then what would pass.
+    pub fn sentence(&self) -> String {
+        let groups: Vec<String> = (self.clusters.iter().enumerate())
+            .map(|(i, (stratum, n))| {
+                let unit = match (i, n) {
+                    (0, 1) => " cluster",
+                    (0, _) => " clusters",
+                    _ => "",
+                };
+                format!("{n}{unit} in {}", in_group(stratum))
+            })
+            .collect();
+        let groups = match groups.split_last() {
+            Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+            _ => groups.concat(),
+        };
+        let target = decimals(self.target);
+        let then = match (self.power >= self.target, self.needed) {
+            (true, _) => format!("the target is {target}"),
+            (false, Some(n)) => format!("about {n} per stratum reach {target}"),
+            (false, None) => format!("{CAP} per stratum do not reach {target}"),
+        };
+        // Truncated, so a power just short of the target never prints as the target; the
+        // 1e-9 absorbs the rounding of k / REPS.
+        let power = (self.power * 100.0 + 1e-9).floor() / 100.0;
+        format!("Simulated power {power:.2} with {groups}; {then}.")
+    }
+}
+
+/// A hypothesis id as output may print it: one E-FMT-001 accepts and the secret scan passes,
+/// else `<name>`.
+fn shown_id(id: &str) -> &str {
+    let clean = crate::scan::scan_str(id, crate::scan::builtin()).is_empty();
+    if clean && has_format("question.hypotheses[*].id", id) {
+        id
+    } else {
+        "<name>"
+    }
+}
+
+/// A group as a sentence names it after "in": the stratum, or `the pooled group`.
+fn in_group(stratum: &str) -> &str {
+    if stratum.is_empty() {
+        "the pooled group"
+    } else {
+        stratum
+    }
+}
+
+/// `x` with two decimals when they show it exactly, else in full: 0.8 is `0.80`, 0.999 `0.999`.
+fn decimals(x: f64) -> String {
+    let two = format!("{x:.2}");
+    if two.parse::<f64>() == Ok(x) {
+        two
+    } else {
+        x.to_string()
+    }
+}
+
+/// The simulated power of each confirmatory hypothesis the gate simulates, in order.
+pub fn power(spec: &Value, ctx: &CheckCtx) -> Vec<Power> {
+    let Ok(Some(design)) = gate_design(spec) else {
+        return vec![];
+    };
+    if !confirmatory(spec) {
+        return vec![];
+    }
+    nodes(spec, "question.hypotheses[*]")
+        .into_iter()
+        .filter(|(_, h)| has_claim(h))
+        .filter_map(|(_, h)| match gate(spec, ctx, h, design)? {
+            Gate::Simulated(p) => Some(p),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `design.alpha`, `design.power` and `design.units_per_cluster`, when the gate can compute
+/// with them. `Err` lists the absent ones of alpha and power; `Ok(None)`: one is mistyped or
+/// out of range, which the generic rules report.
+fn gate_design(spec: &Value) -> Result<Option<(f64, f64, u64)>, Vec<&'static str>> {
     let fields = ["alpha", "power"].map(|f| (f, val(spec, &format!("design.{f}"))));
     if fields
         .iter()
         .any(|(_, v)| v.is_some_and(|v| !v.is_number()))
     {
-        return vec![];
+        return Ok(None);
     }
-    let claimed: Vec<(String, &Value)> = nodes(spec, pat)
-        .into_iter()
-        .filter(|(_, h)| has_claim(h))
-        .collect();
     let absent: Vec<&str> = fields
         .iter()
         .filter(|(_, v)| v.is_none())
         .map(|(f, _)| *f)
         .collect();
     if !absent.is_empty() {
-        return claimed
-            .iter()
-            .flat_map(|(path, _)| {
-                absent.iter().map(move |f| Hit {
-                    path: path.clone(),
-                    detail: Some(format!("Cannot compute power: design.{f} is absent.")),
-                })
-            })
-            .collect();
+        return Err(absent);
     }
     let [alpha, power] = fields.map(|(_, v)| v.and_then(Value::as_f64).unwrap_or_default());
     let per = val(spec, "design.units_per_cluster").and_then(Value::as_u64);
-    let Some(per) = per.filter(|n| *n >= 1) else {
-        return vec![];
+    Ok(per
+        .filter(|n| *n >= 1 && open_unit(alpha) && open_unit(power))
+        .map(|per| (alpha, power, per)))
+}
+
+/// What the power gate finds for one hypothesis.
+enum Gate {
+    /// The z floor fails in these groups: (stratum, clusters, clusters a z-test needs).
+    Floor(Vec<(String, u64, u64)>),
+    Simulated(Power),
+    /// The simulation refused its plan; the text says why.
+    Fault(String),
+}
+
+/// The power gate of hypothesis `h`. It simulates the test the box runs (`evidence::claim`) at
+/// level `design.alpha` x `alpha_share`. In each group the claim is tested in, units have the
+/// sd and icc of the group's estimate around a mean at `power_at` (a mean claim), or at
+/// `power_at` - sd z(q), which puts the units' q-quantile at `power_at` (a quantile claim), over
+/// the group's own clusters. The seed is `power/<id>` under the spec hash. A mean claim first
+/// meets the one-sided z count for every bound: the box estimates the statistic as the
+/// unweighted mean of the cluster means, so a cluster mean has sd `sd x sqrt(icc + (1 - icc) /
+/// m)` on average, m the harmonic mean of the units the group's clusters give. A shortfall
+/// there fails without simulating. `None` when a rule before it reports the hypothesis, or a
+/// group has no cluster (E-HYP-002).
+fn gate(spec: &Value, ctx: &CheckCtx, h: &Value, design: (f64, f64, u64)) -> Option<Gate> {
+    let (alpha, target, per) = design;
+    let sized = sizing(h)?;
+    let Some(Lookup::Found(groups)) = estimates_of(spec, h, ctx) else {
+        return None;
     };
-    if !open_unit(alpha) || !open_unit(power) {
-        return vec![];
-    }
-    let mut out = vec![];
-    for (path, h) in claimed {
-        let Some(sized) = sizing(h) else { continue };
-        let Some(Lookup::Found(groups)) = estimates_of(spec, h, ctx) else {
-            continue;
-        };
-        for g in groups {
+    let level = alpha * sized.share;
+    let groups: Vec<(StratumInput, Vec<u64>)> = (groups.into_iter())
+        .map(|g| {
             let sizes = cluster_sizes(spec, ctx, &g.stratum, per);
-            if sizes.is_empty() {
-                continue;
-            }
-            let have = sizes.len() as u64;
-            let m = have as f64 / sizes.iter().map(|&u| 1.0 / u as f64).sum::<f64>();
-            let sd = g.sd * (g.icc + (1.0 - g.icc) / m).sqrt();
-            let need = sized
-                .bounds
-                .iter()
-                .map(|b| {
-                    let distance = (b.margin - sized.at).abs();
-                    required_clusters(alpha * sized.share, power, sd, distance)
-                })
-                .max()
-                .unwrap_or(0);
-            if have < need {
-                let group = group_name(&g.stratum);
-                out.push(Hit {
-                    path: path.clone(),
-                    detail: Some(format!(
-                        "{}{} has {have} of the {need} clusters the power gate needs.",
-                        group[..1].to_ascii_uppercase(),
-                        &group[1..]
-                    )),
-                });
-            }
+            (g, sizes)
+        })
+        .collect();
+    if let Statistic::Mean { .. } = sized.stat {
+        let short: Vec<(String, u64, u64)> = (groups.iter())
+            .filter(|(_, sizes)| !sizes.is_empty())
+            .filter_map(|(g, sizes)| {
+                let have = sizes.len() as u64;
+                let m = have as f64 / sizes.iter().map(|&u| 1.0 / u as f64).sum::<f64>();
+                let sd = g.sd * (g.icc + (1.0 - g.icc) / m).sqrt();
+                let need = (sized.bounds.iter())
+                    .map(|b| required_clusters(level, target, sd, (b.margin - sized.at).abs()))
+                    .max()
+                    .unwrap_or(0);
+                (have < need).then(|| (g.stratum.clone(), have, need))
+            })
+            .collect();
+        if !short.is_empty() {
+            return Some(Gate::Floor(short));
         }
     }
-    out
+    if groups.iter().any(|(_, sizes)| sizes.is_empty()) {
+        return None;
+    }
+    let strata = (groups.iter())
+        .map(|(g, sizes)| Stratum {
+            sizes: (sizes.iter())
+                .map(|&u| u32::try_from(u).unwrap_or(u32::MAX))
+                .collect(),
+            sd: g.sd,
+            icc: g.icc,
+            unit_mean: match sized.stat {
+                Statistic::Mean { .. } => sized.at,
+                Statistic::Quantile(q) => sized.at - g.sd * z(q),
+            },
+        })
+        .collect();
+    let plan = Plan {
+        stat: sized.stat,
+        bounds: sized.bounds,
+        strata,
+        level,
+    };
+    let id = h.get("id").and_then(Value::as_str).unwrap_or_default();
+    let seed = seed(&ctx.spec_hash, &format!("power/{id}"));
+    let found = simulate(&plan, REPS, &mut Rng::from_seed(seed)).and_then(|power| {
+        let needed = if power < target {
+            clusters_needed(&plan, target, REPS, seed, CAP)?
+        } else {
+            None
+        };
+        Ok((power, needed))
+    });
+    Some(match found {
+        Err(e) => Gate::Fault(e.to_string()),
+        Ok((power, needed)) => Gate::Simulated(Power {
+            hypothesis: shown_id(id).to_string(),
+            power,
+            target,
+            clusters: (groups.iter())
+                .map(|(g, sizes)| {
+                    let pooled = g.stratum.is_empty();
+                    let name = if pooled { "" } else { shown(&g.stratum) };
+                    (name.to_string(), sizes.len())
+                })
+                .collect(),
+            needed,
+        }),
+    })
 }
 
 /// What the power gate sizes a hypothesis at.
 struct Sizing {
+    stat: Statistic,
     bounds: Vec<Bound>,
     at: f64,
     share: f64,
 }
 
-/// `None` unless the claim is well formed, the statistic is a valid mean, `power_at` passes
-/// E-CNF-001 and `alpha_share` passes E-HYP-004.
+/// `None` unless the claim and statistic are well formed with every margin inside the mean
+/// range (E-HYP-003), `power_at` passes E-CNF-001 and `alpha_share` passes E-HYP-004.
 fn sizing(h: &Value) -> Option<Sizing> {
     let claim = claim_of(h)?;
-    if !matches!(h.get("statistic").and_then(mean_range), Some(Ok(Some(_)))) {
+    let stat = statistic_of(h)?;
+    let bounds = claim.bounds();
+    let margins: Vec<f64> = bounds.iter().map(|b| b.margin).collect();
+    if !inside_range(h, &margins) {
         return None;
     }
     let at = h
@@ -468,10 +669,27 @@ fn sizing(h: &Value) -> Option<Sizing> {
         .as_f64()
         .filter(|x| share_in_range(*x))?;
     Some(Sizing {
-        bounds: claim.bounds(),
+        stat,
+        bounds,
         at,
         share,
     })
+}
+
+/// The statistic of a hypothesis, when it is well formed.
+fn statistic_of(h: &Value) -> Option<Statistic> {
+    let statistic = h.get("statistic")?;
+    mean_range(statistic)?.ok()?;
+    let parsed: StatisticSpec = serde_json::from_value(statistic.clone()).ok()?;
+    Some(parsed.to_evidence())
+}
+
+/// Every margin lies strictly inside the statistic's mean range, when it has one.
+fn inside_range(h: &Value, margins: &[f64]) -> bool {
+    match h.get("statistic").and_then(mean_range) {
+        Some(Ok(Some((lo, hi)))) => margins.iter().all(|&m| lo < m && m < hi),
+        _ => true,
+    }
 }
 
 /// The units each confirmation cluster of `stratum` gives (every confirmation input for the
@@ -1248,10 +1466,7 @@ fn hypothesis_shape(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
         "*" => flag(spec, pat, |v| v.as_f64() == Some(0.0)),
         "claim" => at(&|h, claim| match claim.and_then(margins) {
             Some(Err(())) => true,
-            Some(Ok(ms)) => match h.get("statistic").and_then(mean_range) {
-                Some(Ok(Some((lo, hi)))) => ms.iter().any(|&m| m <= lo || m >= hi),
-                _ => false,
-            },
+            Some(Ok(ms)) => !inside_range(h, &ms),
             None => false,
         }),
         "statistic" => at(&|h, statistic| match statistic {

@@ -1348,6 +1348,70 @@ fn an_unfinished_study_is_pending_and_check_exits_3() {
 }
 
 #[test]
+fn the_gate_gives_the_same_verdict_on_every_check() {
+    // The median claim sized 3 below the margin: about 93% of units lie at or below it, so
+    // some replicates of 15 clusters pass and some do not.
+    let near = |t: String| common::confirmatory(t).replace("power_at = -20.0", "power_at = -3.0");
+    let (_d, home, spec) = setup(near);
+    common::pilot(&Home::open_at(&home).unwrap(), vec![common::arm_a()]);
+    let power = |code: i32| {
+        let a = bin(&home)
+            .arg("check")
+            .arg(&spec)
+            .arg("--json")
+            .assert()
+            .code(code);
+        json_out(&a)["power"].clone()
+    };
+    let first = power(1);
+    assert_eq!(
+        first,
+        json!([{ "hypothesis": "H1", "power": 0.3565, "clusters": { "": 15 }, "needed": 21 }])
+    );
+    assert_eq!(power(1), first);
+    let sentence = "Simulated power 0.35 with 15 clusters in the pooled group; about 21 per stratum reach 0.80.";
+    assert!(check_out(&home, &spec, 1).contains(sentence));
+    let page = stdout(&bin(&home).arg("review").arg(&spec).assert().code(1));
+    assert!(
+        page.contains(&format!(
+            "## Power
+
+- H1: {sentence}
+"
+        )),
+        "{page}"
+    );
+    // Another spec hash draws other replicates for the same plan.
+    let text = std::fs::read_to_string(&spec).unwrap();
+    std::fs::write(
+        &spec,
+        text.replace("population = \"\"", "population = \"texts\""),
+    )
+    .unwrap();
+    let other = power(1);
+    assert_ne!(other[0]["power"], first[0]["power"]);
+    assert_eq!(other[0]["clusters"], first[0]["clusters"]);
+    // Sized 20 below the margin, every replicate passes, and nothing more is needed.
+    std::fs::write(
+        &spec,
+        common::confirmatory(std::fs::read_to_string(TEMPLATE).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(
+        power(0),
+        json!([{ "hypothesis": "H1", "power": 1.0, "clusters": { "": 15 }, "needed": null }])
+    );
+    let page = stdout(&bin(&home).arg("review").arg(&spec).assert().code(0));
+    assert!(
+        page.contains(
+            "- H1: Simulated power 1.00 with 15 clusters in the pooled group; the target is 0.80.
+"
+        ),
+        "{page}"
+    );
+}
+
+#[test]
 fn a_broken_key_fails_only_the_checks_that_need_a_record() {
     let (_d, home, spec) = setup(|t| t);
     let box_home = Home::open_at(&home).unwrap();

@@ -1103,9 +1103,10 @@ fn a_pilot_then_a_follow_on_resolve_end_to_end() {
     let follow = |from: &str| {
         let t = std::fs::read_to_string("../../templates/numeric-ablation.toml").unwrap();
         let path = lab.root.join(format!("follow-{from}.toml"));
-        // The power gate sizes a claim on a mean statistic, over the clusters it is given.
+        // A claim on a mean statistic in [-22, 22], sized 20 below the margin: with a small
+        // variance each of the 16 clusters scores about 0.91, enough to reach 1/0.005.
         let text = common::confirmatory(two_clusters(t))
-            .replace("{ quantile = 0.5 }", "{ mean = [-50.0, 50.0] }");
+            .replace("{ quantile = 0.5 }", "{ mean = [-22.0, 22.0] }");
         std::fs::write(&path, text.replace("my-pilot", from)).unwrap();
         path
     };

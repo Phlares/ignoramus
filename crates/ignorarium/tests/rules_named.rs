@@ -4,7 +4,7 @@ use ignorarium::canon::sha256_hex;
 use ignorarium::diag::{Diagnostic, Severity};
 use ignorarium::prior::{NoPriorUse, PriorError, PriorUse, normalized_sha256};
 use ignorarium::records;
-use ignorarium::rules::{self, CheckCtx, Lookup, Rule, StratumInput, estimate_inputs};
+use ignorarium::rules::{self, CheckCtx, Lookup, Power, Rule, StratumInput, estimate_inputs};
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -101,15 +101,25 @@ fn inputs(n: usize, units: u64) -> Value {
 }
 
 /// The base plan's one hypothesis: the pick's paired value is below 0 in stratum `fiction`, by
-/// the mean of each cluster, which lies in [-50, 50]. Power must hold at -1, with the sd and
+/// the mean of each cluster, which lies in [-50, 50]. Power must hold at -30, with the sd and
 /// icc of study `pilot`. It takes the whole level.
 fn h1() -> Value {
     json!({
         "id": "H1", "statement": "", "rival": "", "outcome": "ppl-ratio",
         "contrast": { "selected": 1.0 }, "strata": ["fiction"],
-        "claim": { "below": 0.0 }, "statistic": { "mean": [-50.0, 50.0] }, "power_at": -1.0,
+        "claim": { "below": 0.0 }, "statistic": { "mean": [-50.0, 50.0] }, "power_at": -30.0,
         "estimates": { "from": "pilot" }, "alpha_share": 1.0
     })
+}
+
+/// Sizes `h1()` 1 below the margin, where the z floor decides: at sd 2, icc 0 and 5 units per
+/// cluster a z-test needs 10 clusters. The narrower mean range keeps short the simulation that
+/// follows a floor that passes.
+fn near() -> Vec<Edit> {
+    vec![
+        hyp("power_at", j(json!(-1.0))),
+        hyp("statistic", j(json!({ "mean": [-5.0, 5.0] }))),
+    ]
 }
 
 /// `h1()` as `id`, with no claim: a descriptive hypothesis.
@@ -122,8 +132,8 @@ fn descriptive(id: &str) -> Value {
     h
 }
 
-/// `h1()` as `H<i>` for each share, in order, sized 2 below the margin: far enough that 11
-/// clusters pass at each of these shares.
+/// `h1()` as `H<i>` for each share, in order. The base plan's 35 clusters pass at each of these
+/// shares: a share of 0.1 needs 31.
 fn shared(shares: &[f64]) -> Vec<Edit> {
     let list: Vec<Value> = shares
         .iter()
@@ -132,7 +142,6 @@ fn shared(shares: &[f64]) -> Vec<Edit> {
             let mut h = h1();
             h["id"] = json!(format!("H{}", i + 1));
             h["alpha_share"] = json!(s);
-            h["power_at"] = json!(-2.0);
             h
         })
         .collect();
@@ -145,10 +154,11 @@ fn hyp(field: &str, v: Option<Value>) -> Edit {
     (ptr, v)
 }
 
-/// A confirmatory plan that passes every named check: 11 confirmation inputs of 5 units, 11
-/// clusters against the 10 the power gate needs at sd 2, icc 0, alpha 0.005 and power 0.8, 1
-/// below the margin. A selection stage picks `arm-a` or `arm-b` on the selection input, and
-/// the confirmation stage runs the pick, which `h1()` tests.
+/// A confirmatory plan that passes every named check: 35 confirmation inputs of 5 units. At sd
+/// 2 and icc 0 a cluster mean has sd 0.89; 30 below the margin, in a range of half-width 50,
+/// each scores about -0.6, and the simulated test at alpha 0.005 and power 0.8 needs 22
+/// clusters (31 at a share of 0.1). A selection stage picks `arm-a` or `arm-b` on the selection
+/// input, and the confirmation stage runs the pick, which `h1()` tests.
 fn ok() -> Value {
     let mut s = spec_at("../../templates/numeric-ablation.toml");
     let edits = [
@@ -167,7 +177,7 @@ fn ok() -> Value {
         ),
         ("/study/mode", json!("confirmatory")),
         ("/design/units_per_cluster", json!(5)),
-        ("/inputs", inputs(11, 5)),
+        ("/inputs", inputs(35, 5)),
         (
             "/mutations/triggers",
             json!([{ "id": "T1", "metric": "ppl-ratio", "threshold_e": 1.0 }]),
@@ -253,6 +263,8 @@ fn guard(ptr: &'static str, v: Value) -> Vec<Edit> {
 }
 
 const POWER: (&str, &str) = ("E-CNF-002", "question.hypotheses[0]");
+/// The start of the problem the simulation states.
+const SIM: &str = "The confirmation sample is too small. Simulated power ";
 
 fn faults() -> Vec<Fault> {
     // Built at run time: the leak gate rejects a drive prefix written in a source file.
@@ -285,15 +297,17 @@ fn faults() -> Vec<Fault> {
             vec![hyp("power_at", j(json!(-50.1)))],
             vec![("E-CNF-001", "question.hypotheses[0].power_at")],
         ),
-        f(vec![hyp("power_at", j(json!(-50.0)))], vec![]),
+        // At the end of the range E-CNF-001 accepts it; then half the cluster means fall
+        // outside the range, which gives e-value 0, and the gate refuses.
+        f(vec![hyp("power_at", j(json!(-50.0)))], vec![POWER]),
         f(vec![hyp("power_at", j(json!("low")))], vec![]),
-        // 9 clusters against the 10 needed.
+        // 9 clusters against the 22 the simulated test needs; 1 below the margin, 9 against
+        // the z floor's 10.
         f(power_edits(5, 9), vec![POWER]),
-        // Each input gives at most units_per_cluster: 9 units count as 5. One unit per cluster
-        // needs 47 clusters. Selection inputs do not count: 10 confirmation inputs pass.
-        f(vec![("/inputs", j(inputs(9, 9)))], vec![POWER]),
-        f(vec![("/inputs", j(inputs(11, 1)))], vec![POWER]),
-        f(vec![("/inputs", j(inputs(10, 5)))], vec![]),
+        f(and(near(), power_edits(5, 9)), vec![POWER]),
+        // Selection inputs do not count: 22 confirmation inputs pass, 21 do not.
+        f(vec![("/inputs", j(inputs(21, 5)))], vec![POWER]),
+        f(vec![("/inputs", j(inputs(22, 5)))], vec![]),
         // The sd and icc come from a finished study's estimates.
         f(
             vec![hyp("estimates", None)],
@@ -344,7 +358,7 @@ fn faults() -> Vec<Fault> {
         ),
         // A selection or confirmation input declares its units; one without them is not counted.
         f(
-            vec![("/inputs", j(inputs(12, 5))), ("/inputs/2/units", None)],
+            vec![("/inputs", j(inputs(36, 5))), ("/inputs/2/units", None)],
             vec![("E-UNT-001", "inputs[2].units")],
         ),
         f(
@@ -369,11 +383,11 @@ fn faults() -> Vec<Fault> {
             ],
             vec![],
         ),
-        // (50,001 + 50,001 units) x 2 conditions: above the row cap.
+        // 36 inputs of 50,001 units, each run twice or more: above the row cap.
         f(
             vec![
                 ("/design/units_per_cluster", j(json!(50_001))),
-                ("/inputs", j(inputs(1, 50_001))),
+                ("/inputs", j(inputs(35, 50_001))),
             ],
             vec![("E-UNT-002", "design.units_per_cluster")],
         ),
@@ -636,11 +650,15 @@ fn faults() -> Vec<Fault> {
             vec![hyp("claim", j(json!({ "within": [1.0] })))],
             vec![("E-HYP-003", "question.hypotheses[0].claim")],
         ),
+        // Exploratory, so no power_at must lie inside these claims.
         f(
-            vec![hyp("claim", j(json!({ "within": [-2.0, 1.0] })))],
+            exploring(vec![hyp("claim", j(json!({ "within": [-2.0, 1.0] })))]),
             vec![],
         ),
-        f(vec![hyp("claim", j(json!({ "above": -2.0 })))], vec![]),
+        f(
+            exploring(vec![hyp("claim", j(json!({ "above": -2.0 })))]),
+            vec![],
+        ),
         // A mean range is [lo, hi] with lo < hi, and every margin lies strictly inside it.
         f(
             vec![hyp("statistic", j(json!({ "mean": [5.0, 4.0] })))],
@@ -675,7 +693,8 @@ fn faults() -> Vec<Fault> {
             ],
             vec![("E-HYP-003", "question.hypotheses[0].statistic")],
         ),
-        // A quantile lies strictly between 0 and 1, and takes any margin.
+        // A quantile lies strictly between 0 and 1, and takes any margin (exploratory: the
+        // gate would ask for about 100 clusters, since a share of 1 scores only 1/9 at q 0.9).
         f(
             vec![hyp("statistic", j(json!({ "quantile": 1.0 })))],
             vec![("E-HYP-003", "question.hypotheses[0].statistic")],
@@ -685,10 +704,10 @@ fn faults() -> Vec<Fault> {
             vec![("E-HYP-003", "question.hypotheses[0].statistic")],
         ),
         f(
-            vec![
+            exploring(vec![
                 hyp("statistic", j(json!({ "quantile": 0.9 }))),
                 hyp("claim", j(json!({ "below": 500.0 }))),
-            ],
+            ]),
             vec![],
         ),
         f(
@@ -880,8 +899,8 @@ fn faults() -> Vec<Fault> {
             guard("/question/hypotheses/0/alpha_share", json!(1.0)),
             vec![POWER],
         ),
-        // A share out of range, a claim that is not well formed, and a quantile statistic
-        // skip the gate; their own rules report the first two.
+        // A share out of range and a claim that is not well formed skip the gate; their own
+        // rules report them.
         f(
             guard("/question/hypotheses/0/alpha_share", json!(0.0)),
             vec![("E-HYP-004", "question.hypotheses[0].alpha_share")],
@@ -889,13 +908,6 @@ fn faults() -> Vec<Fault> {
         f(
             guard("/question/hypotheses/0/claim", json!({})),
             vec![("E-HYP-003", "question.hypotheses[0].claim")],
-        ),
-        f(
-            guard(
-                "/question/hypotheses/0/statistic",
-                json!({ "quantile": 0.5 }),
-            ),
-            vec![],
         ),
         // Fail closed: an absent alpha or power cannot be computed.
         f(vec![("/design/alpha", None)], vec![POWER]),
@@ -905,7 +917,7 @@ fn faults() -> Vec<Fault> {
             vec![(
                 "/inputs",
                 j(json!(
-                    inputs(11, 5)
+                    inputs(35, 5)
                         .as_array()
                         .unwrap()
                         .iter()
@@ -1126,7 +1138,8 @@ fn selected_takes_the_worst_candidate_estimate() {
     );
     // At sd 3 and icc 0.3 with 5 units per cluster, 1 below the margin, the gate needs 47.
     let dir = study_dir();
-    let d = rules::check_named(&ok(), v0(), &with_box(dir.path(), holding(held)));
+    let spec = edited(&and(near(), power_edits(5, 11)));
+    let d = rules::check_named(&spec, v0(), &with_box(dir.path(), holding(held)));
     assert_eq!(
         d.iter().map(|x| x.problem.as_str()).collect::<Vec<_>>(),
         [
@@ -1392,7 +1405,7 @@ fn each_stratum_needs_its_own_clusters() {
     ];
     let dir = study_dir();
     let run = |strata: Value| {
-        let mut e = base.to_vec();
+        let mut e = and(near(), base.to_vec());
         e.push(hyp("strata", j(strata)));
         named(&edited(&e), dir.path())
             .into_iter()
@@ -1412,34 +1425,36 @@ fn each_stratum_needs_its_own_clusters() {
         [short("code"), short("article")]
     );
     assert_eq!(run(json!(["article"])), [short("article")]);
-    // Pooled, the same 52 clusters pass.
-    assert!(run(json!([])).is_empty());
+    // Pooled, the same 52 clusters pass the z floor, and the gate simulates.
+    let pooled = run(json!([]));
+    assert_eq!(pooled.len(), 1);
+    assert!(pooled[0].1.starts_with(SIM), "{pooled:?}");
 }
 
 #[test]
 fn two_confirmation_inputs_with_the_same_data_count_once() {
-    // 10 clusters pass where 10 are needed; a copy of one, in other case and spacing, is the
+    // 22 clusters pass where 22 are needed; a copy of one, in other case and spacing, is the
     // same cluster.
     let dir = study_dir();
     write(dir.path(), "texts/s00.txt", b"selection text");
-    for i in 0..10 {
+    for i in 0..22 {
         write(
             dir.path(),
             &format!("texts/c{i:02}.txt"),
             format!("text {i}").as_bytes(),
         );
     }
-    let spec = edited(&power_edits(5, 10));
+    let spec = edited(&power_edits(5, 22));
     assert!(named(&spec, dir.path()).is_empty());
-    write(dir.path(), "texts/c09.txt", b"TEXT   8");
+    write(dir.path(), "texts/c21.txt", b"TEXT   20");
     assert_eq!(
         named(&spec, dir.path())
             .iter()
             .map(|d| d.problem.as_str())
             .collect::<Vec<_>>(),
-        [
-            "The confirmation sample is too small. Stratum fiction has 9 of the 10 clusters the power gate needs."
-        ]
+        [format!(
+            "{SIM}0.00 with 21 clusters in fiction; about 22 per stratum reach 0.80."
+        )]
     );
 }
 
@@ -1450,17 +1465,23 @@ fn the_power_gate_uses_the_harmonic_mean_of_the_picked_units_per_cluster() {
     // over 1 / m: the harmonic mean size. 1 small cluster: 11 / (10 / 5 + 1) = 3.67 units, 13
     // clusters needed; 2: 2.89 units, 17. The arithmetic mean, 4.6 and 4.3, would pass at 11.
     let dir = study_dir();
+    let problems = |list: Value| {
+        let e = and(near(), vec![("/inputs", j(list))]);
+        named(&edited(&e), dir.path())
+            .into_iter()
+            .map(|d| d.problem)
+            .collect::<Vec<_>>()
+    };
     let with_small = |k: usize| {
         let mut list = inputs(11, 5);
         for i in 0..k {
             list[2 + i]["units"] = json!(1);
         }
-        named(&edited(&[("/inputs", j(list))]), dir.path())
-            .into_iter()
-            .map(|d| d.problem)
-            .collect::<Vec<_>>()
+        problems(list)
     };
-    assert!(with_small(0).is_empty());
+    // 11 clusters of 5 pass the floor; the simulation follows.
+    let none = with_small(0);
+    assert!(none.len() == 1 && none[0].starts_with(SIM), "{none:?}");
     let short = |need: u64| {
         format!(
             "The confirmation sample is too small. Stratum fiction has 11 of the {need} clusters the power gate needs."
@@ -1472,8 +1493,17 @@ fn the_power_gate_uses_the_harmonic_mean_of_the_picked_units_per_cluster() {
     let mut list = inputs(10, 5);
     list[2]["units"] = json!(0);
     assert_eq!(
-        named(&edited(&[("/inputs", j(list))]), dir.path())[0].problem,
-        "The confirmation sample is too small. Stratum fiction has 9 of the 10 clusters the power gate needs."
+        problems(list),
+        [
+            "The confirmation sample is too small. Stratum fiction has 9 of the 10 clusters the power gate needs."
+        ]
+    );
+    // An input gives at most units_per_cluster: 9 units count as 5, so 9 clusters fall short.
+    assert_eq!(
+        problems(inputs(9, 9)),
+        [
+            "The confirmation sample is too small. Stratum fiction has 9 of the 10 clusters the power gate needs."
+        ]
     );
 }
 
@@ -1581,17 +1611,18 @@ fn a_negative_icc_counts_as_zero() {
 fn the_gate_takes_the_largest_need_over_the_bounds() {
     let dir = study_dir();
     let within = |power_at: f64| {
-        let s = edited(&[
-            hyp("claim", j(json!({ "within": [-2.0, 2.0] }))),
-            hyp("power_at", j(json!(power_at))),
-        ]);
-        named(&s, dir.path())
+        let mut e = and(near(), power_edits(5, 11));
+        e.push(hyp("claim", j(json!({ "within": [-2.0, 2.0] }))));
+        e.push(hyp("power_at", j(json!(power_at))));
+        named(&edited(&e), dir.path())
             .into_iter()
             .map(|d| d.problem)
             .collect::<Vec<_>>()
     };
-    // 2 from each margin needs 3 clusters; 0.5 from the upper margin needs 38.
-    assert!(within(0.0).is_empty());
+    // 2 from each margin needs 3 clusters, so the simulation follows; 0.5 from the upper
+    // margin needs 38.
+    let far = within(0.0);
+    assert!(far.len() == 1 && far[0].starts_with(SIM), "{far:?}");
     assert_eq!(
         within(1.5),
         [
@@ -1669,9 +1700,9 @@ fn boundaries_hold_on_both_sides() {
         let d = named(&edited(&edits), dir.path());
         assert!(d.is_empty(), "{edits:?}: {d:?}");
     };
-    // 54 units pass where 53 fail (table).
-    passes(power_edits(1, 54));
-    passes(power_edits(3, 18));
+    // 22 clusters pass where 21 fail (table), with 1 unit each as with 5.
+    passes(power_edits(5, 22));
+    passes(power_edits(1, 22));
     passes(vec![("/mutations/depth_cap", j(json!(2)))]);
     passes(vec![("/mutations/depth_cap", j(json!(0)))]);
     passes(vec![("/scope/min_isolation", j(json!(2)))]);
@@ -1704,14 +1735,17 @@ fn boundaries_hold_on_both_sides() {
 #[test]
 fn power_gate_problem_states_both_numbers() {
     let dir = study_dir();
-    let d = named(&edited(&power_edits(5, 9)), dir.path());
+    let d = named(&edited(&and(near(), power_edits(5, 9))), dir.path());
     assert_eq!(codes_paths(&d), [POWER]);
     assert_eq!(
         d[0].problem,
         "The confirmation sample is too small. Stratum fiction has 9 of the 10 clusters the power gate needs."
     );
     let pooled = named(
-        &edited(&[hyp("strata", j(json!([]))), ("/inputs", j(inputs(9, 5)))]),
+        &edited(&and(
+            near(),
+            vec![hyp("strata", j(json!([]))), ("/inputs", j(inputs(9, 5)))],
+        )),
         dir.path(),
     );
     assert_eq!(
@@ -1723,33 +1757,44 @@ fn power_gate_problem_states_both_numbers() {
 #[test]
 fn power_gate_uses_alpha_power_share_and_defaults() {
     let dir = study_dir();
+    // The z floor's details only: a floor that passes gives way to the simulation.
     let detail = |edits: Vec<Edit>| -> Vec<String> {
         named(&edited(&edits), dir.path())
             .into_iter()
             .map(|d| d.problem.rsplit_once(". ").unwrap().1.to_string())
+            .filter(|d| d.ends_with(" clusters the power gate needs."))
             .collect()
     };
     // alpha 0.05 needs 5 clusters.
-    let mut e = power_edits(5, 5);
+    let mut e = and(near(), power_edits(5, 5));
     e.push(("/design/alpha", j(json!(0.05))));
     assert!(detail(e.clone()).is_empty());
-    e[1] = ("/inputs", j(inputs(4, 5)));
+    e[3] = ("/inputs", j(inputs(4, 5)));
     assert_eq!(
         detail(e),
         ["Stratum fiction has 4 of the 5 clusters the power gate needs."]
     );
     // Higher power needs more clusters.
+    let mut e = and(near(), power_edits(5, 11));
+    assert!(detail(e.clone()).is_empty());
+    e.push(("/design/power", j(json!(0.9))));
     assert_eq!(
-        detail(vec![("/design/power", j(json!(0.9)))]),
+        detail(e),
         ["Stratum fiction has 11 of the 12 clusters the power gate needs."]
     );
     // A share of 0.5 halves the level: 11 clusters, each hypothesis.
     let mut halves = shared(&[0.5, 0.5]);
     for i in 0..2 {
-        let ptr: &'static str =
-            Box::leak(format!("/question/hypotheses/{i}/power_at").into_boxed_str());
-        halves.push((ptr, j(json!(-1.0))));
+        for (field, v) in [
+            ("power_at", json!(-1.0)),
+            ("statistic", json!({ "mean": [-5.0, 5.0] })),
+        ] {
+            let ptr: &'static str =
+                Box::leak(format!("/question/hypotheses/{i}/{field}").into_boxed_str());
+            halves.push((ptr, j(v)));
+        }
     }
+    halves.extend(power_edits(5, 11));
     assert!(detail(halves.clone()).is_empty());
     halves.extend(power_edits(5, 10));
     assert_eq!(
@@ -1764,7 +1809,8 @@ fn power_gate_uses_alpha_power_share_and_defaults() {
         common::estimate(&[("arm-a", 1.0, json!({}))], "", 4.0, Some(0.1)),
         common::estimate(&[("arm-b", 1.0, json!({ "bits": 4 }))], "", 4.0, Some(0.1)),
     ]);
-    let d = rules::check_named(&ok(), v0(), &with_box(dir.path(), icc));
+    let spec = edited(&and(near(), power_edits(5, 11)));
+    let d = rules::check_named(&spec, v0(), &with_box(dir.path(), icc));
     assert!(
         d[0].problem
             .ends_with("Stratum fiction has 11 of the 14 clusters the power gate needs."),
@@ -1921,8 +1967,12 @@ fn named_checks_never_panic_on_missing_or_mistyped_fields() {
         .map(|k| (k.clone(), json!("x")))
         .collect();
     named(&Value::Object(strings), dir.path());
-    // A rich confirmatory plan with every node replaced by each junk value, and removed.
-    let mut base = edited(&route(one("H1.pass", "f.toml")));
+    // A rich confirmatory plan with every node replaced by each junk value, and removed. Its 9
+    // clusters fail the z floor, so few variants reach the slower simulation.
+    let mut base = edited(&and(
+        route(one("H1.pass", "f.toml")),
+        and(near(), power_edits(5, 9)),
+    ));
     set(&mut base, "/inputs/0/role", j(json!("confirmation")));
     set(&mut base, "/inputs/0/path", j(json!("f.toml")));
     let mut ptrs = vec![];
@@ -2358,10 +2408,11 @@ fn power_gate_numbers_at_the_guard_edges() {
         assert_eq!(d.len(), 1, "{edits:?}");
         d[0].problem.rsplit_once(". ").unwrap().1.to_string()
     };
+    let floor = |extra: Vec<Edit>| and(and(near(), power_edits(5, 11)), extra);
     // power 0.999 needs 26 clusters at sd 2 and 5 units per cluster.
     assert_eq!(
         detail(
-            vec![("/design/power", j(json!(0.999)))],
+            floor(vec![("/design/power", j(json!(0.999)))]),
             holding(pilot_estimates())
         ),
         "Stratum fiction has 11 of the 26 clusters the power gate needs."
@@ -2374,13 +2425,229 @@ fn power_gate_numbers_at_the_guard_edges() {
         ])
     };
     assert_eq!(
-        detail(vec![], one(1.0)),
+        detail(floor(vec![]), one(1.0)),
         "Stratum fiction has 11 of the 47 clusters the power gate needs."
     );
     // The largest integer saturates instead of overflowing.
     let e = vec![("/design/units_per_cluster", j(json!(i64::MAX)))];
     let d = rules::check_named(&edited(&e), v0(), &with_box(dir.path(), one(0.0)));
     assert!(d.is_empty(), "{d:?}");
+}
+
+/// `n` clusters of 5 units in each of strata `code` and `article`, 0.64 below the margin, with
+/// cluster means in [-4, 4]: a z-test needs 23 clusters per stratum.
+fn two_strata(n: usize) -> Vec<Edit> {
+    let mut list = inputs(0, 5).as_array().unwrap().clone();
+    list[1]["stratum"] = json!("code");
+    for (i, stratum) in ["code", "article"].iter().enumerate() {
+        for k in 0..n {
+            let mut c = input(&format!("texts/c{i}{k:02}.txt"), "confirmation", 5);
+            c["stratum"] = json!(stratum);
+            list.push(c);
+        }
+    }
+    vec![
+        ("/inputs", j(Value::Array(list))),
+        hyp("strata", j(json!(["code", "article"]))),
+        hyp("power_at", j(json!(-0.64))),
+        hyp("statistic", j(json!({ "mean": [-4.0, 4.0] }))),
+    ]
+}
+
+fn problems(spec: &Value, dir: &Path) -> Vec<String> {
+    named(spec, dir).into_iter().map(|d| d.problem).collect()
+}
+
+#[test]
+fn the_gate_refuses_what_the_z_formula_passes() {
+    let dir = study_dir();
+    // 22 per stratum fall short of the z floor's 23, and the gate states the floor's numbers.
+    let short = |s: &str| {
+        format!(
+            "The confirmation sample is too small. Stratum {s} has 22 of the 23 clusters the power gate needs."
+        )
+    };
+    assert_eq!(
+        problems(&edited(&two_strata(22)), dir.path()),
+        [short("code"), short("article")]
+    );
+    // 26 pass the floor. The e-value test the box runs needs far more: every bound in both
+    // strata must reach 1/0.005.
+    let spec = edited(&two_strata(26));
+    assert_eq!(
+        problems(&spec, dir.path()),
+        [format!(
+            "{SIM}0.00 with 26 clusters in code and 26 in article; about 97 per stratum reach 0.80."
+        )]
+    );
+    assert_eq!(
+        rules::power(&spec, &ctx(dir.path())),
+        [Power {
+            hypothesis: "H1".into(),
+            power: 0.0,
+            target: 0.8,
+            clusters: vec![("code".into(), 26), ("article".into(), 26)],
+            needed: Some(97),
+        }]
+    );
+}
+
+#[test]
+fn the_z_floor_fails_without_simulating() {
+    // 1 below the margin with 1 unit per cluster a z-test needs 47 clusters. With 46 the gate
+    // states the floor's numbers alone. With 47 it passes the floor and simulates the test,
+    // where at sd 2 a cluster mean falls outside [-5, 5] about 1 time in 44, and a cluster mean
+    // outside the range gives e-value 0: more clusters only lose power.
+    let dir = study_dir();
+    let at = |n| problems(&edited(&and(near(), power_edits(1, n))), dir.path());
+    assert_eq!(
+        at(46),
+        [
+            "The confirmation sample is too small. Stratum fiction has 46 of the 47 clusters the power gate needs."
+        ]
+    );
+    assert_eq!(
+        at(47),
+        [format!(
+            "{SIM}0.00 with 47 clusters in fiction; 1024 per stratum do not reach 0.80."
+        )]
+    );
+}
+
+#[test]
+fn a_quantile_claim_is_simulated_without_a_floor() {
+    let dir = study_dir();
+    let median = |extra: Vec<Edit>| {
+        let mut e = extra;
+        e.push(hyp("statistic", j(json!({ "quantile": 0.5 }))));
+        problems(&edited(&e), dir.path())
+    };
+    // 30 below the margin every unit lies below it, so each cluster scores 1 and the e-value
+    // after n clusters is 1.5^(n - 1): 15 clusters reach 1/0.005, 14 do not.
+    assert!(median(power_edits(5, 15)).is_empty());
+    assert_eq!(
+        median(power_edits(5, 14)),
+        [format!(
+            "{SIM}0.00 with 14 clusters in fiction; about 15 per stratum reach 0.80."
+        )]
+    );
+    // One cluster, and a target given to three decimals.
+    let mut e = power_edits(5, 1);
+    e.push(("/design/power", j(json!(0.999))));
+    assert_eq!(
+        median(e),
+        [format!(
+            "{SIM}0.00 with 1 cluster in fiction; about 15 per stratum reach 0.999."
+        )]
+    );
+    // Each stratum the claim lists, named in order.
+    let mut list = inputs(0, 5).as_array().unwrap().clone();
+    for (i, stratum) in ["fiction", "code", "article"].iter().enumerate() {
+        for k in 0..2 {
+            let mut c = input(&format!("texts/c{i}{k}.txt"), "confirmation", 5);
+            c["stratum"] = json!(stratum);
+            list.push(c);
+        }
+    }
+    assert_eq!(
+        median(vec![
+            ("/inputs", j(Value::Array(list))),
+            hyp("strata", j(json!(["fiction", "code", "article"]))),
+        ]),
+        [format!(
+            "{SIM}0.00 with 2 clusters in fiction, 2 in code and 2 in article; about 15 per stratum reach 0.80."
+        )]
+    );
+    // The 0.9-quantile of the units at -3: their mean lies 2 sd z(0.9) = 2.56 lower, where
+    // 99.7% of units fall below the margin, against the 90% the null allows.
+    let tail = vec![
+        hyp("statistic", j(json!({ "quantile": 0.9 }))),
+        hyp("power_at", j(json!(-3.0))),
+    ];
+    assert_eq!(
+        problems(&edited(&and(power_edits(1, 2), tail)), dir.path()),
+        [format!(
+            "{SIM}0.00 with 2 clusters in fiction; about 115 per stratum reach 0.80."
+        )]
+    );
+    // 1 below the margin a mean would fail the z floor with 2 clusters; a quantile has no
+    // floor, and the simulation states its own numbers.
+    assert_eq!(
+        median(and(near(), power_edits(5, 2))),
+        [format!(
+            "{SIM}0.00 with 2 clusters in fiction; about 42 per stratum reach 0.80."
+        )]
+    );
+}
+
+#[test]
+fn a_plan_the_simulation_refuses_fails_closed() {
+    // An analysis of variance gives no icc above 1; a record that holds one stops the gate.
+    let held = |icc| {
+        holding(vec![
+            common::estimate(&[("arm-a", 1.0, json!({}))], "", 4.0, Some(icc)),
+            common::estimate(&[("arm-b", 1.0, json!({ "bits": 4 }))], "", 4.0, Some(icc)),
+        ])
+    };
+    let dir = study_dir();
+    let d = rules::check_named(&ok(), v0(), &with_box(dir.path(), held(1.5)));
+    assert_eq!(
+        d.iter()
+            .map(|x| (x.code.as_str(), x.problem.as_str()))
+            .collect::<Vec<_>>(),
+        [(
+            "E-CNF-002",
+            "The confirmation sample is too small. Cannot simulate power: invalid parameter: icc."
+        )]
+    );
+    assert!(rules::power(&ok(), &with_box(dir.path(), held(1.5))).is_empty());
+    assert!(rules::check_named(&ok(), v0(), &with_box(dir.path(), held(1.0))).is_empty());
+}
+
+#[test]
+fn the_power_is_seeded_by_the_spec_hash_and_the_hypothesis_id() {
+    // Two hypotheses alike but for their ids, each at half the level with 24 clusters, where
+    // the simulated power lies between 0 and 1.
+    let dir = study_dir();
+    let mut e = shared(&[0.5, 0.5]);
+    e.extend(power_edits(5, 24));
+    let spec = edited(&e);
+    let of = |hash: [u8; 32]| {
+        rules::power(
+            &spec,
+            &CheckCtx {
+                spec_hash: hash,
+                ..ctx(dir.path())
+            },
+        )
+        .iter()
+        .map(|p| p.power)
+        .collect::<Vec<_>>()
+    };
+    let base = of([0; 32]);
+    assert_eq!(base.len(), 2);
+    assert!(base.iter().all(|p| 0.1 < *p && *p < 0.9), "{base:?}");
+    assert_ne!(base[0], base[1]);
+    assert_eq!(of([0; 32]), base);
+    let other = of([1; 32]);
+    assert!(
+        other[0] != base[0] && other[1] != base[1],
+        "{base:?} {other:?}"
+    );
+    // An id that fails its format, or that the secret scan flags, shows as <name>.
+    for id in [
+        "Pasted Key".to_string(),
+        format!("{}{}", "AKIA", "Q".repeat(16)),
+    ] {
+        let mut s = spec.clone();
+        s["question"]["hypotheses"][0]["id"] = json!(id);
+        assert_eq!(rules::power(&s, &ctx(dir.path()))[0].hypothesis, "<name>");
+    }
+    assert_eq!(rules::power(&spec, &ctx(dir.path()))[1].hypothesis, "H2");
+    // No power is simulated in an exploratory study, or where the z floor fails.
+    assert!(rules::power(&edited(&exploring(vec![])), &ctx(dir.path())).is_empty());
+    let floor = edited(&and(near(), power_edits(5, 9)));
+    assert!(rules::power(&floor, &ctx(dir.path())).is_empty());
 }
 
 /// `inputs[0].path` matches `inputs[*].path`, and `params.bits` matches `params.*`.
@@ -2629,7 +2896,7 @@ fn a_stored_selection_input_is_compared_by_its_stored_hashes() {
 #[test]
 fn a_confirmation_input_without_units_is_refused() {
     let dir = study_dir();
-    let mut s = edited(&[("/inputs", j(inputs(12, 5)))]);
+    let mut s = edited(&[("/inputs", j(inputs(36, 5)))]);
     set(&mut s, "/inputs/5/units", None);
     let d = named(&s, dir.path());
     assert_eq!(codes_paths(&d), [("E-UNT-001", "inputs[5].units")]);
@@ -2649,8 +2916,8 @@ fn a_confirmation_input_without_units_is_refused() {
 #[test]
 fn a_stratum_is_required_when_the_design_names_strata() {
     let dir = study_dir();
-    // 13 clusters, so the 11 left in stratum fiction pass the power gate.
-    let mut s = edited(&[("/inputs", j(inputs(13, 5)))]);
+    // 37 clusters, so the 35 left in stratum fiction pass the power gate.
+    let mut s = edited(&[("/inputs", j(inputs(37, 5)))]);
     set(&mut s, "/inputs/4/stratum", j(json!("")));
     set(&mut s, "/inputs/6/stratum", None);
     let want = [
@@ -2672,8 +2939,10 @@ fn a_stratum_is_required_when_the_design_names_strata() {
 #[test]
 fn the_row_cap_counts_units_conditions_and_repeats_per_stage() {
     let dir = study_dir();
+    // Exploratory: the power gate would refuse one confirmation cluster.
     let at = |upc: u64, units: u64, repeats: u64| {
         edited(&[
+            ("/study/mode", j(json!("exploratory"))),
             ("/design/units_per_cluster", j(json!(upc))),
             ("/inputs", j(inputs(1, units))),
             ("/design/repeats", j(json!(repeats))),
@@ -2698,7 +2967,6 @@ fn the_row_cap_counts_units_conditions_and_repeats_per_stage() {
     assert!(named(&at(20_000, 4_000_000_000, 1), dir.path()).is_empty());
     assert!(named(&at(4_000_000_000, 20_000, 1), dir.path()).is_empty());
     // Repeats and each stage's conditions multiply; a condition no stage runs adds no row.
-    // (The pilot's estimates were measured with 1 repeat, so a plan with more has no match.)
     let cap_only = |s: &Value| -> bool {
         let found = named(s, dir.path());
         codes_paths(&found)

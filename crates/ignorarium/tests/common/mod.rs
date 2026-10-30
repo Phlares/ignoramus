@@ -503,14 +503,41 @@ pub fn pilot(home: &Home, estimates: Vec<serde_json::Value>) -> Vec<String> {
 }
 
 /// The template text as a confirmatory plan with its example claim, power_at, estimates and
-/// alpha share uncommented: below 0 by the median, sized at -1, with the sd and icc of
-/// `my-pilot`, at the whole level.
+/// alpha share uncommented: below 0 by the median, with the sd and icc of `my-pilot`, at the
+/// whole level. It is sized at -20, where every unit lies below the margin, and 14 more
+/// confirmation inputs give the 15 clusters the median test needs: each scores 1, and
+/// 1.5^14 = 292 reaches 1/0.005.
 pub fn confirmatory(t: String) -> String {
     ["power_at", "estimates"]
         .iter()
         .fold(with_claim(t), |t, k| {
             t.replace(&format!("# {k} = "), &format!("{k} = "))
         })
+        .replace("power_at = -1.0", "power_at = -20.0")
+        .replacen("[pins]", &format!("{}[pins]", clusters("fiction", 14)), 1)
         .replace("mode = \"exploratory\"", "mode = \"confirmatory\"")
         .replace("label = \"signal\"", "label = \"confirmed\"")
+}
+
+/// `n` confirmation inputs `data/<stratum>-<i>.txt` of 3 units in `stratum`, as spec text.
+pub fn clusters(stratum: &str, n: usize) -> String {
+    (0..n)
+        .map(|i| {
+            format!(
+                "[[inputs]]
+path = \"data/{stratum}-{i:02}.txt\"
+sha256 = \"\"
+role = \"confirmation\"
+stratum = \"{stratum}\"
+units = 3
+[inputs.licence]
+spdx = \"\"
+type = \"unspecified\"
+source = \"\"
+creators = []
+
+"
+            )
+        })
+        .collect()
 }
