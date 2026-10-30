@@ -130,7 +130,10 @@ fn every_allowed_enum_value_deserializes() {
             &["signal", "confirmed", "replicated", "generalized"],
         ),
         ("/outcomes/0/direction", &["lower", "higher"]),
-        ("/outcomes/0/paired", &["difference", "percent"]),
+        (
+            "/outcomes/0/paired",
+            &["difference", "percent", "log-ratio"],
+        ),
         ("/scope/stop_rule", &["budget-only", "e-process"]),
         ("/scope/end_of_run/route", &["report", "follow-on", "share"]),
         ("/design/pick", &["seeded", "first"]),

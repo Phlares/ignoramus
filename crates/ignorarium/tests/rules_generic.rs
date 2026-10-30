@@ -736,6 +736,21 @@ fn type_rules_accept_and_reject_the_right_values() {
 }
 
 #[test]
+fn every_paired_rule_passes_the_enum_check() {
+    let enum_hit = |rule: &str| -> bool {
+        let mut s = template();
+        s["outcomes"][0]["paired"] = json!(rule);
+        rules::check_generic(&s, &v0())
+            .iter()
+            .any(|d| d.code == "E-ENM-001" && d.path == "outcomes[0].paired")
+    };
+    for rule in ["difference", "percent", "log-ratio"] {
+        assert!(!enum_hit(rule), "{rule}");
+    }
+    assert!(enum_hit("ratio"));
+}
+
+#[test]
 fn child_checks_skip_when_the_parent_is_missing_or_wrong() {
     let mut s = template();
     s.as_object_mut().unwrap().remove("scope");

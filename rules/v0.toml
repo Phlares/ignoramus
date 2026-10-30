@@ -234,7 +234,7 @@ target = [
   { path = "scope.end_of_run.route", check = "enum", values = ["report", "follow-on", "share"] },
   { path = "design.pick", check = "enum", values = ["seeded", "first"] },
   { path = "design.selection.rule", check = "enum", values = ["best-mean"] },
-  { path = "outcomes[*].paired", check = "enum", values = ["difference", "percent"] },
+  { path = "outcomes[*].paired", check = "enum", values = ["difference", "percent", "log-ratio"] },
   { path = "inputs[*].role", check = "enum", values = ["calibration", "selection", "confirmation", "model"] },
   { path = "inputs[*].licence.type", check = "enum", values = ["common", "custom", "request-form", "unspecified"] },
   { path = "mutations.operators[*].type", check = "enum", values = ["int", "float", "enum"] },

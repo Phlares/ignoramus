@@ -28,7 +28,7 @@ id = "ppl-ratio"
 unit = "ratio"                  # required
 direction = "lower"             # lower | higher (which is better)
 measure = "ppl"                 # the key the payload writes in values.json
-paired = "percent"              # difference | percent (against the reference condition)
+paired = "percent"              # difference | percent | log-ratio (against the reference condition)
 registered = true
 
 [scope]

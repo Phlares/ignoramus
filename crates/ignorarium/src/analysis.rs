@@ -58,7 +58,8 @@ impl Paired {
 
 /// Pair every `ok` row record's values with the reference condition's row for the same
 /// unit and repeat. `Difference` is condition minus reference; `Percent` is
-/// 100 x (condition / reference - 1), and no pair when the reference is not above zero.
+/// 100 x (condition / reference - 1), and no pair when the reference is not above zero;
+/// `LogRatio` is ln(condition / reference), and no pair when either side is not above zero.
 pub fn paired(spec: &Spec, rows: &[Record]) -> Paired {
     // (unit, repeat, condition) -> the row's values
     let mut cells: BTreeMap<(&str, u64, &str), &serde_json::Value> = BTreeMap::new();
@@ -91,6 +92,8 @@ pub fn paired(spec: &Spec, rows: &[Record]) -> Paired {
                 Rule::Difference => a - b,
                 Rule::Percent if b > 0.0 => 100.0 * (a / b - 1.0),
                 Rule::Percent => continue,
+                // ln of a side at or below zero is not finite, which drops the pair below.
+                Rule::LogRatio => a.ln() - b.ln(),
             };
             if !v.is_finite() {
                 continue;

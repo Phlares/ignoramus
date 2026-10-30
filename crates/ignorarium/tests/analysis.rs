@@ -128,6 +128,51 @@ fn a_zero_reference_has_no_percent_value() {
 }
 
 #[test]
+fn log_ratio_is_the_log_of_condition_over_reference() {
+    let rows = [
+        ok("a#0", "base", 0, 100.0),
+        ok("a#0", "new", 0, 104.0),
+        ok("a#1", "base", 0, 50.0),
+        ok("a#1", "new", 0, 25.0),
+        // Repeats average on the log scale: ln 2 and ln 0.5 give 0.
+        ok("a#2", "base", 0, 10.0),
+        ok("a#2", "new", 0, 20.0),
+        ok("a#2", "base", 1, 10.0),
+        ok("a#2", "new", 1, 5.0),
+    ];
+    let p = paired(&spec("log-ratio"), &rows);
+    let got = p.get("a#0", "new", "ppl-ratio").unwrap();
+    assert!((got - 1.04_f64.ln()).abs() < 1e-12, "{got}");
+    let got = p.get("a#1", "new", "ppl-ratio").unwrap();
+    assert!((got + 2.0_f64.ln()).abs() < 1e-12, "{got}");
+    let got = p.get("a#2", "new", "ppl-ratio").unwrap();
+    assert!(got.abs() < 1e-12, "{got}");
+    assert_eq!(p.get("a#0", "base", "ppl-ratio"), Some(0.0));
+}
+
+#[test]
+fn a_non_positive_side_has_no_log_ratio() {
+    let rows = [
+        ok("a#0", "base", 0, 0.0),
+        ok("a#0", "new", 0, 5.0),
+        ok("a#1", "base", 0, -1.0),
+        ok("a#1", "new", 0, -5.0),
+        ok("a#2", "base", 0, 5.0),
+        ok("a#2", "new", 0, 0.0),
+        ok("a#3", "base", 0, 5.0),
+        ok("a#3", "new", 0, -1.0),
+        // Both sides just above zero still pair.
+        ok("a#4", "base", 0, 1e-300),
+        ok("a#4", "new", 0, 1e-300),
+    ];
+    let p = paired(&spec("log-ratio"), &rows);
+    for u in ["a#0", "a#1", "a#2", "a#3"] {
+        assert_eq!(p.get(u, "new", "ppl-ratio"), None, "{u}");
+    }
+    assert_eq!(p.get("a#4", "new", "ppl-ratio"), Some(0.0));
+}
+
+#[test]
 fn a_pair_that_overflows_is_absent() {
     let rows = [
         ok("a#0", "base", 0, 1e-308),

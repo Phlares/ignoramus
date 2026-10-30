@@ -165,6 +165,8 @@ pub enum Paired {
     Difference,
     /// 100 x (condition / reference - 1).
     Percent,
+    /// ln(condition / reference).
+    LogRatio,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
