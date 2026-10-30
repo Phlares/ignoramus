@@ -243,7 +243,11 @@ fn resolve(a: &Assessed) -> Result<Vec<Resolved>, CliError> {
                     records.push(r);
                 }
             }
-            value.insert(g.stratum, json!({ "sd": g.sd, "icc": g.icc }));
+            let mut taken = json!({ "sd": g.sd, "icc": g.icc });
+            if g.pooled {
+                taken["pooled"] = json!(true);
+            }
+            value.insert(g.stratum, taken);
         }
         out.push(Resolved {
             path,
@@ -270,7 +274,12 @@ fn taken(r: &Resolved) -> String {
                 format!("stratum {stratum}")
             };
             let num = |k: &str| v[k].as_f64().map_or("?".into(), |x| x.to_string());
-            format!("{group} sd {}, icc {}", num("sd"), num("icc"))
+            let from = if v["pooled"] == true && !stratum.is_empty() {
+                " (the pooled estimate)"
+            } else {
+                ""
+            };
+            format!("{group} sd {}, icc {}{from}", num("sd"), num("icc"))
         })
         .collect();
     format!("takes {} from {}: {}", r.path, r.study, groups.join("; "))

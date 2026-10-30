@@ -250,7 +250,7 @@ pub fn prepare_with(
         .find(|r| r.kind == REGISTER)
         .ok_or_else(|| RunError::NotRegistered(study_id.into()))?;
     let register = Register::of(register).ok_or_else(|| RunError::BadRegister(study_id.into()))?;
-    let (spec, spec_hash, hash_text) = stored_spec(&dir)?;
+    let (spec, _, spec_hash, hash_text) = stored_spec(&dir)?;
     if register.spec_hash != hash_text {
         return Err(RunError::SpecChanged);
     }
@@ -488,7 +488,8 @@ fn stale(plan: &RunPlan, dir: &Path) -> Option<String> {
 }
 
 /// The stored spec with defaults filled, its hash bytes, and its hash text.
-fn stored_spec(dir: &Path) -> Result<(Spec, [u8; 32], String), RunError> {
+/// The stored spec, typed and as the defaulted JSON value, with its hash as bytes and text.
+pub(crate) fn stored_spec(dir: &Path) -> Result<(Spec, Value, [u8; 32], String), RunError> {
     let fault = |e: &dyn fmt::Display| RunError::Spec(e.to_string());
     let raw = spec::load(&dir.join("spec.toml")).map_err(|e| fault(&e))?;
     let mut value = raw.value;
@@ -496,7 +497,7 @@ fn stored_spec(dir: &Path) -> Result<(Spec, [u8; 32], String), RunError> {
     let spec = Spec::from_value(&value).map_err(|e| fault(&e))?;
     let hash = spec::hash_bytes(&raw.hash)
         .ok_or_else(|| RunError::Spec(format!("bad spec hash {}", raw.hash)))?;
-    Ok((spec, hash, raw.hash))
+    Ok((spec, value, hash, raw.hash))
 }
 
 fn expand_rows(spec: &Spec, hash: &[u8; 32]) -> Result<Vec<Row>, RunError> {
@@ -526,7 +527,7 @@ pub fn progress(
     study_id: &str,
     all: &[records::Record],
 ) -> Result<Progress, RunError> {
-    let (spec, spec_hash, _) = stored_spec(&home.study_dir(study_id))?;
+    let (spec, _, spec_hash, _) = stored_spec(&home.study_dir(study_id))?;
     let machine = machine::load(&home.root).map_err(io)?;
     let rows = expand_rows(&spec, &spec_hash)?;
     let tally = Tally::of(all);

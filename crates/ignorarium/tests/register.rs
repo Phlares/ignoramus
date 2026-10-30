@@ -688,8 +688,9 @@ creators = []
     let (r, out) = go(&f, &spec, &answer(&spec), true);
     assert_eq!(r.unwrap().code, 0, "{out}");
     // The person approves the values with the plan: they are shown before the prompt.
-    let shown = "takes question.hypotheses[0].estimates from my-pilot: stratum article sd 2, icc 0.1; \
-                 stratum code sd 2, icc 0.1; stratum fiction sd 3, icc 0.2\n";
+    let shown = "takes question.hypotheses[0].estimates from my-pilot: \
+                 stratum article sd 2, icc 0.1 (the pooled estimate); \
+                 stratum code sd 2, icc 0.1 (the pooled estimate); stratum fiction sd 3, icc 0.2\n";
     let at = out.find(shown).unwrap_or_else(|| panic!("{out}"));
     assert!(at < out.find(PROMPT).unwrap(), "{out}");
     // A stratum's own estimate, else the pooled one, never another contrast's; each record
@@ -702,8 +703,8 @@ creators = []
             "records": [hashes[2], hashes[0]],
             "value": {
                 "fiction": { "sd": 3.0, "icc": 0.2 },
-                "code": { "sd": 2.0, "icc": 0.1 },
-                "article": { "sd": 2.0, "icc": 0.1 }
+                "code": { "sd": 2.0, "icc": 0.1, "pooled": true },
+                "article": { "sd": 2.0, "icc": 0.1, "pooled": true }
             }
         }])
     );

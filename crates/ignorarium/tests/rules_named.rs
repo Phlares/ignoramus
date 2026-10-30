@@ -976,6 +976,7 @@ fn stratum(name: &str, sd: f64, icc: f64, records: &[&String]) -> StratumInput {
         stratum: name.into(),
         sd,
         icc,
+        pooled: false,
         records: records.iter().map(|h| h.to_string()).collect(),
     }
 }
@@ -999,7 +1000,10 @@ fn the_base_plan_reads_each_candidates_estimate() {
     let h = hashes(pilot_estimates());
     assert_eq!(
         inputs_of(&[], pilot_estimates()),
-        Lookup::Found(vec![stratum("fiction", 2.0, 0.0, &[&h[2], &h[3]])])
+        Lookup::Found(vec![StratumInput {
+            pooled: true,
+            ..stratum("fiction", 2.0, 0.0, &[&h[2], &h[3]])
+        }])
     );
 }
 
@@ -1082,7 +1086,10 @@ fn selected_takes_the_worst_candidate_estimate() {
     let h = hashes(held.clone());
     assert_eq!(
         inputs_of(&[], held.clone()),
-        Lookup::Found(vec![stratum("fiction", 3.0, 0.3, &[&h[2], &h[3]])])
+        Lookup::Found(vec![StratumInput {
+            pooled: true,
+            ..stratum("fiction", 3.0, 0.3, &[&h[2], &h[3]])
+        }])
     );
     // The other way round: arm-a has the larger sd, arm-b the larger icc.
     let swapped = vec![
@@ -1092,7 +1099,10 @@ fn selected_takes_the_worst_candidate_estimate() {
     let s = hashes(swapped.clone());
     assert_eq!(
         inputs_of(&[], swapped),
-        Lookup::Found(vec![stratum("fiction", 3.0, 0.3, &[&s[2], &s[3]])])
+        Lookup::Found(vec![StratumInput {
+            pooled: true,
+            ..stratum("fiction", 3.0, 0.3, &[&s[2], &s[3]])
+        }])
     );
     // At sd 3 and icc 0.3 with 5 units per cluster, 1 below the margin, the gate needs 47.
     let dir = study_dir();
@@ -1117,7 +1127,10 @@ fn a_stratum_falls_back_to_the_pooled_estimate() {
         inputs_of(&edits, held.clone()),
         Lookup::Found(vec![
             stratum("fiction", 3.0, 0.1, &[&h[3]]),
-            stratum("article", 2.0, 0.1, &[&h[2]]),
+            StratumInput {
+                pooled: true,
+                ..stratum("article", 2.0, 0.1, &[&h[2]])
+            },
         ])
     );
     // No strata: the pooled group, and only its estimate.
@@ -1150,10 +1163,10 @@ fn an_estimate_without_icc_is_refused() {
     }
     assert!(missing(&pooled, a(4.0, Some(0.0))).is_empty());
     assert!(missing(&pooled, a(1e-9, Some(1.0))).is_empty());
-    // The stratum's own estimate is used even when it lacks an icc that the pooled one has.
+    // Only an unusable estimate in the stratum and in the pool: the stratum is named.
     let held = vec![
         common::estimate(&[("arm-a", 1.0, json!({}))], "fiction", 4.0, None),
-        common::estimate(&[("arm-a", 1.0, json!({}))], "", 4.0, Some(0.1)),
+        common::estimate(&[("arm-a", 1.0, json!({}))], "", 4.0, None),
     ];
     assert_eq!(
         missing(&unstaged(vec![]), holding(held)),
@@ -1164,6 +1177,66 @@ fn an_estimate_without_icc_is_refused() {
             )
         )]
     );
+}
+
+#[test]
+fn a_stratum_estimate_without_icc_falls_back_to_the_pooled_one() {
+    // One cluster in the stratum: no icc there. The pool has one.
+    let held = vec![
+        common::estimate(&[("arm-a", 1.0, json!({}))], "fiction", 9.0, None),
+        common::estimate(&[("arm-a", 1.0, json!({}))], "", 4.0, Some(0.1)),
+    ];
+    let h = hashes(held.clone());
+    let want = StratumInput {
+        pooled: true,
+        ..stratum("fiction", 2.0, 0.1, &[&h[3]])
+    };
+    assert_eq!(
+        inputs_of(&unstaged(vec![]), held.clone()),
+        Lookup::Found(vec![want])
+    );
+    assert!(missing(&unstaged(vec![]), holding(held)).is_empty());
+    // A zero variance in the stratum is skipped the same way.
+    let held = vec![
+        common::estimate(&[("arm-a", 1.0, json!({}))], "fiction", 0.0, Some(0.2)),
+        common::estimate(&[("arm-a", 1.0, json!({}))], "", 4.0, Some(0.1)),
+    ];
+    let h = hashes(held.clone());
+    let got = inputs_of(&unstaged(vec![]), held);
+    let want = StratumInput {
+        pooled: true,
+        ..stratum("fiction", 2.0, 0.1, &[&h[3]])
+    };
+    assert_eq!(got, Lookup::Found(vec![want]));
+    // A usable stratum estimate is used as is.
+    let held = vec![
+        common::estimate(&[("arm-a", 1.0, json!({}))], "fiction", 9.0, Some(0.3)),
+        common::estimate(&[("arm-a", 1.0, json!({}))], "", 4.0, Some(0.1)),
+    ];
+    let h = hashes(held.clone());
+    assert_eq!(
+        inputs_of(&unstaged(vec![]), held),
+        Lookup::Found(vec![stratum("fiction", 3.0, 0.3, &[&h[2]])])
+    );
+}
+
+#[test]
+fn the_repeats_are_part_of_the_estimate_key() {
+    let held = |repeats: u64| {
+        let terms = [("arm-a".to_string(), 1.0, json!({}))];
+        let reference = ("exact".to_string(), json!({}));
+        let (key, key_hash) =
+            ignorarium::derived::contrast_key(&common::ppl_ratio(), repeats, &reference, &terms);
+        let mut e = common::arm_a();
+        e["key"] = key;
+        e["key_hash"] = json!(key_hash);
+        holding(vec![e])
+    };
+    let pooled = unstaged(vec![hyp("strata", j(json!([])))]);
+    let with = |repeats: u64| and(pooled.clone(), vec![("/design/repeats", j(json!(repeats)))]);
+    assert!(missing(&with(3), held(3)).is_empty());
+    assert_eq!(missing(&with(3), held(1)).len(), 1);
+    assert_eq!(missing(&with(1), held(3)).len(), 1);
 }
 
 #[test]
@@ -2602,7 +2675,15 @@ fn the_row_cap_counts_units_conditions_and_repeats_per_stage() {
     assert!(named(&at(20_000, 4_000_000_000, 1), dir.path()).is_empty());
     assert!(named(&at(4_000_000_000, 20_000, 1), dir.path()).is_empty());
     // Repeats and each stage's conditions multiply; a condition no stage runs adds no row.
-    assert_eq!(codes_paths(&named(&at(20_000, 20_000, 2), dir.path())), cap);
+    // (The pilot's estimates were measured with 1 repeat, so a plan with more has no match.)
+    let cap_only = |s: &Value| -> bool {
+        let found = named(s, dir.path());
+        codes_paths(&found)
+            .into_iter()
+            .filter(|c| c.0 != "E-CNF-003")
+            .eq(cap.iter().copied())
+    };
+    assert!(cap_only(&at(20_000, 20_000, 2)));
     // The pilot also measured arm-c as the pick.
     let mut measured = pilot_estimates();
     measured.push(common::estimate(
@@ -2636,7 +2717,7 @@ fn the_row_cap_counts_units_conditions_and_repeats_per_stage() {
     assert!(!codes_paths(&named(&s, dir.path())).contains(&cap[0]));
     // The largest counts do not overflow.
     let max = u64::from(u32::MAX);
-    assert_eq!(codes_paths(&named(&at(max, max, max), dir.path())), cap);
+    assert!(cap_only(&at(max, max, max)));
 }
 
 #[test]

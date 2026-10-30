@@ -185,13 +185,14 @@ impl StudyState {
     }
 }
 
-/// The key of a contrast's estimate: canonical `{"outcome", "measure", "paired",
+/// The key of a contrast's estimate: canonical `{"outcome", "measure", "paired", "repeats",
 /// "reference", "contrast"}`, the reference as `[condition id, params]` (a paired value is
 /// taken against it) and each term as `[condition id, weight, params]`, sorted by id (then
 /// weight); and the SHA-256 hex of its canonical JSON. A follow-on study finds a finished
 /// study's estimate by this hash.
 pub fn contrast_key(
     outcome: &Outcome,
+    repeats: u64,
     reference: &(String, Value),
     terms: &[(String, f64, Value)],
 ) -> (Value, String) {
@@ -201,6 +202,7 @@ pub fn contrast_key(
         "outcome": outcome.id,
         "measure": outcome.measure,
         "paired": outcome.paired,
+        "repeats": repeats,
         "reference": [reference.0, reference.1],
         "contrast": terms
             .into_iter()

@@ -1,4 +1,4 @@
-use ignorarium::analysis::{declared_params, estimates, paired, select};
+use ignorarium::analysis::{declared_params, distinct_clusters, estimates, paired, select};
 use ignorarium::derived::{Candidate, Estimate, Selection, contrast_key};
 use ignorarium::records::Record;
 use ignorarium::spec::model::{Direction, Role, SelectionRule, Spec};
@@ -489,7 +489,7 @@ fn estimates_cover_each_stratum_and_the_pool() {
     close(all[2].mean, 20.0 / 3.0);
     // Every estimate of one contrast shares the key and its hash.
     let terms = [("arm-a".to_string(), 1.0, json!({}))];
-    let (key, hash) = contrast_key(&spec.outcomes[0], &("base".into(), json!({})), &terms);
+    let (key, hash) = contrast_key(&spec.outcomes[0], 1, &("base".into(), json!({})), &terms);
     assert!(all.iter().all(|e| e.key == key && e.key_hash == hash));
 }
 
@@ -538,6 +538,7 @@ fn the_key_carries_the_params_and_the_pick() {
     ];
     let want = contrast_key(
         &spec.outcomes[0],
+        1,
         &("base".into(), json!({ "bits": 16 })),
         &terms,
     );
@@ -559,4 +560,65 @@ fn declared_params_are_the_specs_scalars_by_condition() {
         json!({ "bits": 4, "mode": "fast", "lr": 0.5 })
     );
     assert_eq!(got.len(), 2);
+}
+
+#[test]
+fn a_repeated_stratum_gives_one_estimate() {
+    let spec = one_hypothesis(&["fiction", "fiction"]);
+    let mut rows = arm_a_rows("f1", &[1.0, 2.0]);
+    rows.extend(arm_a_rows("f2", &[3.0, 4.0]));
+    let clusters = [cluster("f1", "fiction", 2), cluster("f2", "fiction", 2)];
+    let p = paired(&spec, &rows);
+    let all = estimates(&spec, &no_params(), &p, &clusters, None);
+    let strata: Vec<&str> = all.iter().map(|e| e.stratum.as_str()).collect();
+    assert_eq!(strata, ["fiction", ""]);
+}
+
+#[test]
+fn the_key_carries_the_repeats() {
+    let mut v = ignorarium::spec::load("../../templates/numeric-ablation.toml".as_ref())
+        .unwrap()
+        .value;
+    v["outcomes"][0]["paired"] = json!("difference");
+    v["design"]["reference"] = json!("base");
+    v["design"]["repeats"] = json!(3);
+    let spec = Spec::from_value(&v).unwrap();
+    let rows = arm_a_rows("c", &[1.0, 2.0]);
+    let p = paired(&spec, &rows);
+    let e = estimates(&spec, &no_params(), &p, &[cluster("c", "", 2)], None);
+    let terms = [("arm-a".to_string(), 1.0, json!({}))];
+    let want = contrast_key(&spec.outcomes[0], 3, &("base".into(), json!({})), &terms);
+    assert_eq!((e[0].key.clone(), e[0].key_hash.clone()), want);
+}
+
+#[test]
+fn clusters_that_hold_the_same_data_count_once() {
+    let h = |a: &str, b: &str| Some((a.to_string(), b.to_string()));
+    let hashes = vec![
+        ("a".to_string(), h("x1", "n1")),
+        // Same exact hash as `a`.
+        ("b".to_string(), h("x1", "n9")),
+        // Same normalized hash as `a`.
+        ("c".to_string(), h("x2", "n1")),
+        ("d".to_string(), h("x3", "n3")),
+        // An unread input stands alone, twice.
+        ("e".to_string(), None),
+        ("f".to_string(), None),
+        // An empty normalized hash matches nothing.
+        ("g".to_string(), h("x4", "")),
+        ("i".to_string(), h("x5", "")),
+    ];
+    let all: Vec<Cluster> = ["a", "b", "c", "d", "e", "f", "g", "i"]
+        .iter()
+        .map(|p| cluster(p, "", 1))
+        .collect();
+    let kept: Vec<String> = distinct_clusters(all.clone(), &hashes)
+        .into_iter()
+        .map(|c| c.path)
+        .collect();
+    assert_eq!(kept, ["a", "d", "e", "f", "g", "i"]);
+    // Only a cluster of the same role is the same cluster.
+    let mut mixed = all[..2].to_vec();
+    mixed[1].role = Role::Selection;
+    assert_eq!(distinct_clusters(mixed, &hashes).len(), 2);
 }

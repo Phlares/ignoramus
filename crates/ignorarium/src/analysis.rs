@@ -2,9 +2,9 @@
 //! condition's value for the same unit and repeat.
 use crate::canon::{sha256_hex, to_canonical};
 use crate::derived::{ANALYSIS, Analysis, Candidate, ESTIMATE, Estimate, Selection, contrast_key};
-use crate::estimate::apply_defaults;
+use crate::prior::same_data;
 use crate::records::{self, Record, RecordDraft};
-use crate::runner::{RunError, RunPlan};
+use crate::runner::{RunError, RunPlan, stored_spec};
 use crate::schedule::SELECTION_STAGE;
 use crate::spec::model::{Direction, Outcome, Paired as Rule, Role, SELECTED, Spec};
 use crate::units::{self, Cluster};
@@ -169,8 +169,9 @@ pub fn declared_params(spec: &Spec) -> BTreeMap<String, Value> {
 /// group `""` (alone when it lists none). A group holds the confirmation clusters of its
 /// stratum. A unit's value is the contrast over its paired values, and counts only when
 /// every term has one. A `selected` row is recorded under `selected`, so its value is read
-/// there, while the key names the pick. `params` holds each condition's params, by id. A hypothesis whose outcome is unknown, or whose contrast needs a pick that
-/// `selection` does not give, has none, and neither has a group with fewer than 2 values.
+/// there, while the key names the pick. `params` holds each condition's params, by id. A
+/// hypothesis whose outcome is unknown, or whose contrast needs a pick that `selection` does
+/// not give, has none, and neither has a group with fewer than 2 values.
 pub fn estimates(
     spec: &Spec,
     params: &BTreeMap<String, Value>,
@@ -199,9 +200,14 @@ pub fn estimates(
             })
             .collect();
         let Some(terms) = terms else { continue };
-        let (key, key_hash) = contrast_key(outcome, &reference, &terms);
-        let mut groups: Vec<&str> = h.strata.iter().map(String::as_str).collect();
-        groups.push("");
+        let (key, key_hash) =
+            contrast_key(outcome, u64::from(spec.design.repeats), &reference, &terms);
+        let mut groups: Vec<&str> = Vec::new();
+        for g in h.strata.iter().map(String::as_str).chain([""]) {
+            if !groups.contains(&g) {
+                groups.push(g);
+            }
+        }
         for stratum in groups {
             let samples: Vec<Vec<f64>> = (clusters.iter())
                 .filter(|c| c.role == Role::Confirmation)
@@ -255,8 +261,8 @@ struct Fit {
 }
 
 /// A one-way analysis of variance over the clusters, `None` when the mean or the variance is
-/// not finite, which is so for fewer than 2 values (a divisor of 0). With k clusters and n values, MSB = SSB / (k - 1) and
-/// MSW = SSW / (n - k); `m0 = (n - sum m_c^2 / n) / (k - 1)`; the between-cluster variance
+/// not finite, which is so for fewer than 2 values (a divisor of 0). With k clusters and n
+/// values, MSB = SSB / (k - 1) and MSW = SSW / (n - k); `m0 = (n - sum m_c^2 / n) / (k - 1)`; the between-cluster variance
 /// is `max(0, (MSB - MSW) / m0)`, `var` is it plus MSW and `icc` is it over `var`. With
 /// k < 2 or n <= k a degree of freedom is missing: `var` is the sample variance of all
 /// values and there is no icc.
@@ -313,32 +319,38 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
         return Ok(());
     }
     let selection = all.iter().find_map(Selection::of);
-    let clusters = units::clusters(&plan.spec, &plan.spec_hash);
-    let mut wanted = estimates(
+    let clusters = distinct_clusters(units::clusters(&plan.spec, &plan.spec_hash), &plan.inputs);
+    let wanted = estimates(
         &plan.spec,
         &declared_params(&plan.spec),
         &paired(&plan.spec, &all),
         &clusters,
         selection.as_ref(),
     );
-    let mut seen = BTreeSet::new();
-    wanted.retain(|e| seen.insert(identity(e)));
+    let (_, value, hash, _) = stored_spec(&dir)?;
+    if hash != plan.spec_hash {
+        return Err(RunError::SpecChanged);
+    }
+    let version = env!("CARGO_PKG_VERSION");
     let mut have = BTreeSet::new();
     match all.iter().position(|r| r.kind == ANALYSIS) {
         Some(at) => {
-            Analysis::of(&all[at])
+            let promised = Analysis::of(&all[at])
                 .ok_or_else(|| RunError::Records("the analysis record does not parse".into()))?;
             let after = all[at + 1..].iter().filter_map(Estimate::of);
             have.extend(after.map(|e| identity(&e)));
+            if promised.box_version != version
+                && wanted.iter().any(|e| !have.contains(&identity(e)))
+            {
+                return Err(RunError::Records(format!(
+                    "the analysis record was written by box {}; box {version} does not add to it",
+                    promised.box_version
+                )));
+            }
         }
         None => {
-            let mut spec = crate::spec::load(&dir.join("spec.toml"))
-                .map_err(|e| RunError::Spec(e.to_string()))?
-                .value;
-            apply_defaults(&mut spec);
-            let version = env!("CARGO_PKG_VERSION");
             let body = Analysis {
-                commit: commit(&spec, version)?,
+                commit: commit(&value, version)?,
                 box_version: version.into(),
                 estimates: wanted.len() as u64,
                 verdicts: 0,
@@ -367,4 +379,30 @@ fn append(plan: &RunPlan, log: &Path, kind: &str, body: &impl Serialize) -> Resu
     };
     records::append(log, &plan.key, draft)?;
     Ok(())
+}
+
+/// The clusters, without any whose input holds the same data (`prior::same_data`) as an
+/// earlier cluster of the same role: the power gate counts such inputs as one cluster. An
+/// input whose data was not read stands alone.
+pub fn distinct_clusters(
+    clusters: Vec<Cluster>,
+    hashes: &[(String, Option<(String, String)>)],
+) -> Vec<Cluster> {
+    let data = |c: &Cluster| {
+        (hashes.iter())
+            .find(|(path, _)| *path == c.path)
+            .and_then(|(_, h)| h.as_ref())
+    };
+    let mut kept: Vec<Cluster> = Vec::new();
+    for c in clusters {
+        let twin = data(&c).is_some_and(|h| {
+            (kept.iter())
+                .filter(|k| k.role == c.role)
+                .any(|k| data(k).is_some_and(|kh| same_data(kh, h)))
+        });
+        if !twin {
+            kept.push(c);
+        }
+    }
+    kept
 }

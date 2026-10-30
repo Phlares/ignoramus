@@ -564,6 +564,9 @@ pub struct StratumInput {
     pub stratum: String,
     pub sd: f64,
     pub icc: f64,
+    /// The sd and icc come from the pooled estimate, because the stratum's own has no usable icc
+    /// or the study has none for the stratum.
+    pub pooled: bool,
     pub records: Vec<String>,
 }
 
@@ -571,8 +574,8 @@ pub struct StratumInput {
 /// `estimates` names. That study must have finished. For each stratum the hypothesis lists
 /// (the pooled group `""` when none) and each contrast it stands for (with `selected`, each
 /// candidate of this plan's selection stage, with its params), the estimate with that
-/// contrast's key and the stratum, else the pooled one; its icc must be known. Several such
-/// estimates must agree. The largest sd and icc over the candidates.
+/// contrast's key and the stratum, else the pooled one. An estimate without an icc, or with
+/// no variance above 0, is skipped. Several such estimates must agree. The largest sd and icc over the candidates.
 pub fn estimate_inputs(spec: &Value, h: usize, ctx: &CheckCtx) -> Lookup {
     estimates_of(spec, &spec["question"]["hypotheses"][h], ctx)
         .unwrap_or_else(|| Lookup::Missing("The hypothesis is not well formed.".into()))
@@ -613,6 +616,7 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
             stratum: stratum.into(),
             sd: 0.0,
             icc: 0.0,
+            pooled: false,
             records: vec![],
         };
         for c in &contrasts {
@@ -620,14 +624,25 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
                 .pick
                 .map(|p| format!(" with {} as the pick", shown(p)))
                 .unwrap_or_default();
-            let found = [stratum, ""].into_iter().find_map(|group| {
-                let all: Vec<&(String, Estimate)> = estimates
-                    .iter()
+            let matching = |group: &str| -> Vec<&(String, Estimate)> {
+                (estimates.iter())
                     .filter(|(_, e)| e.key_hash == c.key && e.stratum == group)
+                    .collect()
+            };
+            // The first group with an estimate that has an icc and a variance above 0.
+            let found = [stratum, ""].into_iter().find_map(|group| {
+                let usable: Vec<_> = (matching(group).into_iter())
+                    .filter(|(_, e)| e.icc.is_some() && e.var > 0.0)
                     .collect();
-                (!all.is_empty()).then_some((group, all))
+                (!usable.is_empty()).then_some((group, usable))
             });
             let Some((group, all)) = found else {
+                if let Some(group) = [stratum, ""].into_iter().find(|g| !matching(g).is_empty()) {
+                    return Some(Lookup::Missing(format!(
+                        "Study {from}'s estimate of this contrast{pick} in {} has no icc, or no variance above 0.",
+                        group_name(group)
+                    )));
+                }
                 let wanted = if stratum.is_empty() {
                     group_name("")
                 } else {
@@ -637,6 +652,7 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
                     "Study {from} has no estimate of this contrast{pick} in {wanted}."
                 )));
             };
+            input.pooled |= group != stratum;
             let e = &all[0].1;
             if all.iter().any(|(_, x)| x.var != e.var || x.icc != e.icc) {
                 return Some(Lookup::Missing(format!(
@@ -645,12 +661,7 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
                     group_name(group)
                 )));
             }
-            let Some(icc) = e.icc.filter(|_| e.var > 0.0) else {
-                return Some(Lookup::Missing(format!(
-                    "Study {from}'s estimate of this contrast{pick} in {} has no icc, or no variance above 0.",
-                    group_name(group)
-                )));
-            };
+            let icc = e.icc.unwrap_or_default();
             input.sd = input.sd.max(e.var.sqrt());
             input.icc = input.icc.max(icc);
             input
@@ -712,6 +723,10 @@ fn contrasts<'a>(spec: &'a Value, hyp: &'a Value) -> Option<Vec<Concrete<'a>>> {
         .and_then(|(_, o)| serde_json::from_value::<Outcome>(o.clone()).ok())?;
     let reference = text(spec, "design.reference")?;
     let reference = (reference.to_string(), params_of(spec, reference)?);
+    let repeats = match val(spec, "design.repeats") {
+        None => 1,
+        Some(r) => r.as_u64()?,
+    };
     let terms_ok = names_for(spec, CONTRAST_KEYS)?;
     let terms: Vec<(&str, f64)> = hyp
         .get("contrast")?
@@ -749,7 +764,7 @@ fn contrasts<'a>(spec: &'a Value, hyp: &'a Value) -> Option<Vec<Concrete<'a>>> {
                     Some((c.to_string(), w, params_of(spec, c)?))
                 })
                 .collect::<Option<Vec<_>>>()?;
-            let key = contrast_key(&outcome, &reference, &concrete).1;
+            let key = contrast_key(&outcome, repeats, &reference, &concrete).1;
             Some(Concrete { pick, key })
         })
         .collect()

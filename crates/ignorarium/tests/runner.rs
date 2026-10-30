@@ -2190,8 +2190,98 @@ fn a_staged_run_keys_its_estimate_by_the_pick_and_its_params() {
     let e = Estimate::of(&es[0]).unwrap();
     let terms = [("arm-b".to_string(), 1.0, serde_json::json!({ "bits": 8 }))];
     let reference = ("exact".to_string(), serde_json::json!({}));
-    let (key, hash) = contrast_key(&common::ppl_ratio(), &reference, &terms);
+    let (key, hash) = contrast_key(&common::ppl_ratio(), 1, &reference, &terms);
     assert_eq!((e.key, e.key_hash), (key, hash));
     // The pick pairs to -25 % on every confirmation unit.
     assert_eq!((e.clusters, e.units, e.mean, e.var), (1, 3, -25.0, 0.0));
+}
+
+/// Sign a record of `kind` with `body` onto the study's log.
+fn append_record(lab: &Lab, id: &str, kind: &str, body: serde_json::Value) {
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let draft = records::RecordDraft {
+        study: id.into(),
+        row: None,
+        kind: kind.into(),
+        body,
+    };
+    let log = lab.home.study_dir(id).join("records.jsonl");
+    records::append(&log, &key, draft).unwrap();
+}
+
+/// A study with two hypotheses, run to the end: its dir, its plan and its records.
+fn finished_study(lab: &Lab, id: &str) -> (std::path::PathBuf, RunPlan, Vec<records::Record>) {
+    let dir = register_study(
+        lab,
+        id,
+        two_hypotheses,
+        &[("data/example.txt", "calibration")],
+        PAYLOAD,
+    );
+    let plan = plan_of(lab, id);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    (dir, plan, common::records_of(lab, id))
+}
+
+#[test]
+fn an_analysis_record_that_does_not_parse_is_an_error() {
+    let lab = lab();
+    let (dir, plan, _) = finished_study(&lab, "badan");
+    keep_records(&dir, 7);
+    append_record(
+        &lab,
+        "badan",
+        "analysis",
+        serde_json::json!({ "commit": 1 }),
+    );
+    match run(&plan) {
+        Err(RunError::Records(why)) => assert!(why.contains("analysis"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    // Nothing was written after it.
+    assert_eq!(common::records_of(&lab, "badan").len(), 8);
+}
+
+#[test]
+fn finish_refuses_when_the_spec_changed_since_registration() {
+    let lab = lab();
+    let (dir, plan, _) = finished_study(&lab, "moved");
+    keep_records(&dir, 7);
+    let path = dir.join("spec.toml");
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, text.replace("alpha = 0.005", "alpha = 0.006")).unwrap();
+    assert!(matches!(
+        analysis::finish(&plan),
+        Err(RunError::SpecChanged)
+    ));
+    assert_eq!(common::records_of(&lab, "moved").len(), 7);
+}
+
+#[test]
+fn a_heal_by_another_box_version_is_refused_only_when_it_adds_something() {
+    let lab = lab();
+    let (dir, plan, all) = finished_study(&lab, "vers");
+    let old = |a: &records::Record| {
+        let mut b = a.body.clone();
+        b["box_version"] = serde_json::json!("0.0.0");
+        b
+    };
+    // The old box wrote the analysis record and one of the two estimates.
+    keep_records(&dir, 7);
+    append_record(&lab, "vers", "analysis", old(&all[7]));
+    append_record(&lab, "vers", "estimate", all[8].body.clone());
+    match run(&plan) {
+        Err(RunError::Records(why)) => {
+            assert!(
+                why.contains("0.0.0") && why.contains(env!("CARGO_PKG_VERSION")),
+                "{why}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(common::records_of(&lab, "vers").len(), 9);
+    // With every estimate there, nothing is added and nothing is refused.
+    append_record(&lab, "vers", "estimate", all[9].body.clone());
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(common::records_of(&lab, "vers").len(), 10);
 }

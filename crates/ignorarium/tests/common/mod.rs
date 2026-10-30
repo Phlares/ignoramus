@@ -387,7 +387,7 @@ pub fn estimate_against(
         .map(|(c, w, p)| (c.to_string(), *w, p.clone()))
         .collect();
     let reference = (reference.0.to_string(), reference.1);
-    let (key, key_hash) = derived::contrast_key(&ppl_ratio(), &reference, &terms);
+    let (key, key_hash) = derived::contrast_key(&ppl_ratio(), 1, &reference, &terms);
     serde_json::json!({
         "hypothesis": "H1", "outcome": "ppl-ratio", "key": key, "key_hash": key_hash,
         "stratum": stratum, "clusters": 4, "units": 20, "mean": 1.0, "var": var, "icc": icc
