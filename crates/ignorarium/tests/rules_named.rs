@@ -3352,3 +3352,58 @@ fn estimate_keys_match_across_studies_with_the_same_resolved_params() {
     )]);
     assert!(missing(&edits, waiting).is_empty());
 }
+
+#[test]
+fn an_estimates_study_that_has_not_finished_waits_while_a_param_waits_too() {
+    // arm-b, the contrast's one term, takes its bits from `chooser`, which has not run: the
+    // contrast's key is unknown, but a study that has not finished is pending whatever the key.
+    let edits = unstaged(vec![
+        (BITS, j(json!({ "from": "chooser" }))),
+        ("/design/confirmation/conditions", j(json!(["arm-b"]))),
+        hyp("contrast", j(json!({ "arm-b": 1.0 }))),
+    ]);
+    let waits = |b: common::Studies| -> Vec<(String, String)> {
+        let dir = study_dir();
+        rules::check_named(&edited(&edits), v0(), &with_box(dir.path(), b))
+            .into_iter()
+            .filter(|d| d.code == "W-REF-001")
+            .map(|d| (d.path, d.problem))
+            .collect()
+    };
+    let wait = |path: &str, study: &str, which: &str| {
+        (
+            path.to_string(),
+            format!(
+                "A value waits on a study that has not finished. Waits on study {study}, which is {which}."
+            ),
+        )
+    };
+    let bits = wait(
+        "design.conditions[2].params.bits",
+        "chooser",
+        "not registered",
+    );
+    let pilot = common::finished(pilot_estimates());
+    for (b, which) in [
+        (common::Studies(vec![]), "not registered"),
+        (
+            common::Studies(vec![(
+                "pilot",
+                Ok(common::records_for("pilot", &pilot[..1])),
+            )]),
+            "not finished",
+        ),
+    ] {
+        assert_eq!(
+            waits(b),
+            [
+                wait("question.hypotheses[0].estimates", "pilot", which),
+                bits.clone()
+            ],
+            "{which}"
+        );
+    }
+    // A finished study waits on nothing; only the param does.
+    let done = common::Studies(vec![("pilot", Ok(common::records_for("pilot", &pilot)))]);
+    assert_eq!(waits(done), [bits]);
+}

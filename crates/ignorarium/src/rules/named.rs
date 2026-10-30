@@ -899,14 +899,13 @@ struct Concrete<'a> {
 }
 
 /// `estimate_inputs`, with `None` when a generic, shape or stage rule reports the hypothesis or
-/// its reference, so the rules that read estimates skip it.
+/// its reference, or a param reference leaves the contrast's key unknown, so the rules that read
+/// estimates skip it. A study that has not finished is pending whatever the key.
 fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
     let Some(reference) = hyp.get("estimates") else {
         return Some(Lookup::Missing("The hypothesis names no study.".into()));
     };
     let from = study_ref(spec, reference)?;
-    let contrasts = contrasts(spec, hyp, ctx)?;
-    let groups = groups_of(hyp)?;
     let state = ctx.records.study(from).and_then(|all| {
         StudyState::of(all, |log, slot| ctx.records.stream_closed(log, from, slot))
     });
@@ -922,6 +921,8 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
         Ok(StudyState::NotFinished) => return Some(Lookup::Pending(waits(from, "not finished"))),
         Ok(StudyState::Finished(records)) => records,
     };
+    let contrasts = contrasts(spec, hyp, ctx)?;
+    let groups = groups_of(hyp)?;
     let estimates: Vec<(String, Estimate)> = records
         .iter()
         .filter_map(|r| Some((records::hash(r), Estimate::of(r)?)))
