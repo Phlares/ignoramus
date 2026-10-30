@@ -551,6 +551,14 @@ true
         (writes_values("{"), "JSON"),
         (
             "#!/bin/sh
+head -c 70000 /dev/zero | tr '\0' ' ' > \"$IGNORARIUM_OUT/values.json\"
+"
+            .to_string(),
+            "larger",
+        ),
+        (writes_values(r#"{"ppl": 1, "ppl": 2}"#), "twice"),
+        (
+            "#!/bin/sh
 mkdir \"$IGNORARIUM_OUT/values.json\"
 "
             .to_string(),

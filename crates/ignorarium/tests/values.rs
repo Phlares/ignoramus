@@ -1,3 +1,4 @@
+use ignorarium::backend::output_hash;
 use ignorarium::values::{self, FILE, LIMIT};
 use std::fs;
 use std::path::Path;
@@ -10,7 +11,7 @@ fn dir_with(text: &str) -> TempDir {
 }
 
 fn read(d: &Path, measures: &[&str]) -> Result<Vec<(String, f64)>, String> {
-    values::read(d, measures).map(|m| m.into_iter().collect())
+    values::read(d, measures).map(|(m, _)| m.into_iter().collect())
 }
 
 #[test]
@@ -54,6 +55,41 @@ fn non_finite_extra_or_missing_values_are_refused() {
             .unwrap_err()
             .contains("values.json")
     );
+}
+
+#[test]
+fn values_must_be_covered_by_the_output_hash() {
+    let d = dir_with(r#"{"ppl": 1}"#);
+    let hash = output_hash(d.path()).unwrap();
+    let got = values::read_covered(d.path(), &["ppl"], &hash).unwrap();
+    assert_eq!(got.get("ppl"), Some(&1.0));
+    // A process that rewrites the file after the hash was taken breaks the match.
+    fs::write(d.path().join(FILE), r#"{"ppl": 2}"#).unwrap();
+    let e = values::read_covered(d.path(), &["ppl"], &hash).unwrap_err();
+    assert!(e.contains("changed"), "{e}");
+    // So does a file added after the hash, even with the same values.
+    let d = dir_with(r#"{"ppl": 1}"#);
+    let hash = output_hash(d.path()).unwrap();
+    fs::write(d.path().join("extra"), "x").unwrap();
+    assert!(values::read_covered(d.path(), &["ppl"], &hash).is_err());
+}
+
+#[test]
+fn reasons_quote_at_most_80_characters_of_payload_text() {
+    let long = "k".repeat(5000);
+    for text in [
+        format!(r#"{{"{long}": 1}}"#),
+        format!(r#"{{"ppl": "{long}"}}"#),
+        format!(r#"{{"{long}": 1, "{long}": 1}}"#),
+    ] {
+        let d = dir_with(&text);
+        let e = read(d.path(), &["ppl"]).unwrap_err();
+        assert!(e.chars().count() < 200, "{}", e.chars().count());
+    }
+    // Multi-byte text is cut on a character boundary.
+    let wide = "é".repeat(500);
+    let d = dir_with(&format!(r#"{{"{wide}": 1}}"#));
+    assert!(read(d.path(), &["ppl"]).unwrap_err().contains('…'));
 }
 
 #[test]

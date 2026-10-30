@@ -64,6 +64,9 @@ pub fn paired(spec: &Spec, rows: &[Record]) -> Paired {
                 Rule::Percent if b > 0.0 => 100.0 * (a / b - 1.0),
                 Rule::Percent => continue,
             };
+            if !v.is_finite() {
+                continue;
+            }
             let e = sums
                 .entry((unit.to_string(), cond.to_string(), o.id.clone()))
                 .or_default();
@@ -75,6 +78,7 @@ pub fn paired(spec: &Spec, rows: &[Record]) -> Paired {
         by_key: sums
             .into_iter()
             .map(|(k, (sum, n))| (k, sum / f64::from(n)))
+            .filter(|(_, v)| v.is_finite())
             .collect(),
     }
 }

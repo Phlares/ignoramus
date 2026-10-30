@@ -116,6 +116,31 @@ fn a_zero_reference_has_no_percent_value() {
 }
 
 #[test]
+fn a_pair_that_overflows_is_absent() {
+    let rows = [
+        ok("a#0", "base", 0, 1e-308),
+        ok("a#0", "new", 0, 1e308),
+        ok("a#1", "base", 0, -1e308),
+        ok("a#1", "new", 0, 1e308),
+    ];
+    assert_eq!(
+        paired(&spec("percent"), &rows).get("a#0", "new", "ppl-ratio"),
+        None
+    );
+    let d = paired(&spec("difference"), &rows);
+    assert_eq!(d.get("a#1", "new", "ppl-ratio"), None);
+    // The mean of finite pairs that sum past the range is absent too.
+    let rows = [
+        ok("a#2", "base", 0, -0.5e308),
+        ok("a#2", "new", 0, 1e308),
+        ok("a#2", "base", 1, -0.5e308),
+        ok("a#2", "new", 1, 1e308),
+    ];
+    let d = paired(&spec("difference"), &rows);
+    assert_eq!(d.get("a#2", "new", "ppl-ratio"), None);
+}
+
+#[test]
 fn a_repeat_with_a_zero_reference_drops_out_of_the_percent_mean() {
     let rows = [
         ok("a#0", "base", 0, 0.0),

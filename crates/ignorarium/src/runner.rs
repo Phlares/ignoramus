@@ -1175,7 +1175,7 @@ fn attempt_row(
             .iter()
             .map(|o| o.measure.as_str())
             .collect();
-        match values::read(&out_dir, &measures) {
+        match values::read_covered(&out_dir, &measures, &outcome.output_hash) {
             Ok(v) => values = Some(v),
             Err(why) => outcome.exit = Exit::Void(format!("values: {why}")),
         }
