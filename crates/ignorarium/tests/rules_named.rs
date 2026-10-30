@@ -4,7 +4,9 @@ use ignorarium::canon::sha256_hex;
 use ignorarium::diag::{Diagnostic, Severity};
 use ignorarium::prior::{NoPriorUse, PriorError, PriorUse, normalized_sha256};
 use ignorarium::records;
-use ignorarium::rules::{self, CheckCtx, Lookup, Power, Rule, StratumInput, estimate_inputs};
+use ignorarium::rules::{
+    self, BoxRecords, CheckCtx, Lookup, Power, Rule, StratumInput, estimate_inputs,
+};
 use ignorarium::stream::Next;
 use serde_json::{Value, json};
 use std::cell::RefCell;
@@ -1896,6 +1898,70 @@ fn a_confirmatory_plan_needs_a_level_from_the_stream_of_its_log() {
     assert!(run(&exploratory, "planlog", Err("unread".into())).is_empty());
     let mistyped = edited(&[("/study/test_log", j(json!("yes")))]);
     assert!(run(&mistyped, "planlog", Err("unread".into())).is_empty());
+}
+
+/// `ok()`'s box, whose first stream read fails, as a read torn by a concurrent write would,
+/// and whose later reads give the first slot. It counts its stream reads.
+struct Torn {
+    studies: common::Studies,
+    reads: Rc<std::cell::Cell<u32>>,
+}
+
+impl BoxRecords for Torn {
+    fn study(&self, id: &str) -> Result<Option<Vec<records::Record>>, String> {
+        self.studies.study(id)
+    }
+
+    fn stream_next(&self, _: &str) -> Result<Next, String> {
+        self.reads.set(self.reads.get() + 1);
+        if self.reads.get() == 1 {
+            Err("line 2 is not a whole record".into())
+        } else {
+            Ok(Next {
+                slot: 1,
+                level: 0.005,
+            })
+        }
+    }
+
+    fn stream_closed(&self, _: &str, _: &str, _: u64) -> Result<bool, String> {
+        Ok(false)
+    }
+}
+
+#[test]
+fn every_rule_of_one_check_sees_one_stream_read() {
+    let dir = study_dir();
+    let reads = Rc::new(std::cell::Cell::new(0));
+    let torn = Torn {
+        studies: holding(pilot_estimates()),
+        reads: reads.clone(),
+    };
+    let ctx = CheckCtx {
+        records: Box::new(rules::ReadOnce::new(torn)),
+        ..ctx(dir.path())
+    };
+    // The gate reads first. Had a later rule read again, it would see a level and pass a plan
+    // the gate never sized.
+    let d = rules::check_named(&ok(), v0(), &ctx);
+    assert_eq!(codes_paths(&d), [("E-STR-001", "study.mode")]);
+    assert!(
+        d[0].problem
+            .ends_with("The planlog stream cannot be read: line 2 is not a whole record."),
+        "{}",
+        d[0].problem
+    );
+    // What check shows and register spends is that read too: an error, never no level.
+    assert_eq!(
+        rules::granted(&ok(), &ctx),
+        Err("line 2 is not a whole record".to_string())
+    );
+    assert!(rules::power(&ok(), &ctx).is_empty());
+    assert_eq!(reads.get(), 1);
+    // An exploratory plan takes no level and reads nothing.
+    let exploratory = edited(&exploring(vec![]));
+    assert_eq!(rules::granted(&exploratory, &ctx), Ok(None));
+    assert_eq!(reads.get(), 1);
 }
 
 #[test]

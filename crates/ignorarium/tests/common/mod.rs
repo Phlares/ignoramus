@@ -476,7 +476,8 @@ impl BoxRecords for Studies {
 
     /// Each stream is empty.
     fn stream_next(&self, log: &str) -> Result<stream::Next, String> {
-        stream::next_of(log, &[]).map_err(|e| e.to_string())
+        let log = stream::LogName::parse(log).map_err(|e| e.to_string())?;
+        stream::next_of(log, &[], &[]).map_err(|e| e.to_string())
     }
 
     fn stream_closed(&self, _: &str, _: &str, _: u64) -> Result<bool, String> {

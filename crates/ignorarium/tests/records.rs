@@ -269,6 +269,45 @@ fn append_with_sees_every_record_and_chains_what_make_returns() {
 }
 
 #[test]
+fn first_checks_the_first_line_alone() {
+    let d = tempfile::tempdir().unwrap();
+    let k = key(1);
+    let vk = k.verifying_key();
+    assert_eq!(
+        records::first(&d.path().join("none.jsonl"), &vk).unwrap(),
+        None
+    );
+    std::fs::write(d.path().join("empty.jsonl"), "").unwrap();
+    assert_eq!(
+        records::first(&d.path().join("empty.jsonl"), &vk).unwrap(),
+        None
+    );
+    let p = three(d.path(), &k);
+    let all = records::read_all(&p, &vk).unwrap();
+    assert_eq!(records::first(&p, &vk).unwrap(), Some(all[0].clone()));
+    // A damaged later line is not its concern; a damaged first line, or another key, is.
+    let mut v = lines(&p);
+    v[1] = v[1].replace("\"n\":1}", "\"n\":9}");
+    write_lines(&p, &v);
+    assert_eq!(records::first(&p, &vk).unwrap(), Some(all[0].clone()));
+    assert!(matches!(
+        records::first(&p, &key(2).verifying_key()),
+        Err(VerifyError::BadSig { seq: 0 })
+    ));
+    v[0] = v[0].replace("\"n\":0}", "\"n\":9}");
+    write_lines(&p, &v);
+    assert!(matches!(
+        records::first(&p, &vk),
+        Err(VerifyError::BadHash { seq: 0 })
+    ));
+    std::fs::write(&p, &v[0]).unwrap();
+    assert!(matches!(
+        records::first(&p, &vk),
+        Err(VerifyError::Parse { line: 1 })
+    ));
+}
+
+#[test]
 fn append_with_refuses_a_log_that_fails_verification() {
     let d = tempfile::tempdir().unwrap();
     let k = key(1);

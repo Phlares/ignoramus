@@ -18,7 +18,7 @@ use crate::rules::{self, Lookup, Taken};
 use crate::spec::model::{Condition, Param, Spec, param_path};
 use crate::spec::{self};
 use crate::store::Store;
-use crate::stream::{self, Log, StreamError};
+use crate::stream::{self, Log, LogName, StreamError};
 use crate::{keys, time};
 use ed25519_dalek::SigningKey;
 use serde_json::{Map, Value, json};
@@ -125,10 +125,11 @@ pub fn run_stdio(ctx: &Ctx, spec_path: &Path) -> Result<Done, CliError> {
 }
 
 /// Nothing named `studies/<id>` exists until every local write has succeeded. Every check
-/// that can refuse comes first: the rules, the values taken from other studies, the payload
-/// hash and its pin, the approval, the input imports, the spec re-read and the log tails. Then the study is staged under a
-/// temporary name and published by one rename, and only the plan leaf and the `register`
-/// record are appended after it.
+/// that can refuse comes first: the rules, the values taken from other studies, the stream
+/// level, the payload hash and its pin, the approval, the input imports, the spec re-read and
+/// the log tails. Then the study is staged under a temporary name and published by one
+/// rename. A confirmatory plan's stream slot opens next; a refusal there moves the folder
+/// back to staging. Only the plan leaf and the `register` record are appended after it.
 pub fn run(
     spec_path: &Path,
     home: &Home,
@@ -158,6 +159,7 @@ pub fn run(
     }
     let spec = Spec::from_value(&a.value).map_err(|e| io("spec does not fit the schema", e))?;
     let resolved = resolve(&a, &spec.design.conditions)?;
+    let checked = level_to_spend(&a)?;
     let id = spec.study.id.as_str();
     if home.study_dir(id).symlink_metadata().is_ok() {
         return Err(refusal("E-REG-002", ""));
@@ -174,7 +176,7 @@ pub fn run(
     for r in &resolved {
         writeln!(output, "{}", taken(r)).map_err(say)?;
     }
-    if let Some(granted) = &a.stream {
+    if let Some(granted) = checked {
         writeln!(output, "{}", check::stream_line(granted)).map_err(say)?;
     }
     write!(output, "{PROMPT} ").map_err(say)?;
@@ -192,7 +194,13 @@ pub fn run(
         inputs,
         resolved,
     };
-    let (leaf, alpha) = store(spec_path, home, &spec, &a, &key, &frozen)?;
+    let (leaf, alpha) = store(spec_path, home, &spec, &a, checked, &key, &frozen)?;
+    if let (Some(approved), Some(spent)) = (checked, &alpha)
+        && spent.level > approved.level
+    {
+        let (from, to) = (stream::shown(approved.level), stream::shown(spent.level));
+        writeln!(output, "level rose from {from} to {to} since the check").map_err(say)?;
+    }
     let slot = alpha.as_ref().map_or(String::new(), |a| {
         format!(", stream slot {}, level {}", a.slot, stream::shown(a.level))
     });
@@ -321,6 +329,22 @@ fn mode_of(a: &Assessed) -> &str {
     a.value["study"]["mode"].as_str().unwrap_or_default()
 }
 
+/// The slot and level the check showed, which a confirmatory plan spends; `None` for an
+/// exploratory plan. A confirmatory plan with no level above 0 is refused before anything is
+/// written.
+fn level_to_spend(a: &Assessed) -> Result<Option<&Alpha>, CliError> {
+    if mode_of(a) != "confirmatory" {
+        return Ok(None);
+    }
+    match &a.stream {
+        Some(s) if s.level > 0.0 => Ok(Some(s)),
+        _ => Err(refusal(
+            "E-STR-001",
+            "the check found no level above 0; nothing was written",
+        )),
+    }
+}
+
 fn label_of(a: &Assessed) -> &str {
     a.estimate
         .as_ref()
@@ -404,18 +428,20 @@ fn hold_inputs(
 }
 
 /// Re-read the spec and check both log tails, stage and publish the study folder, then open
-/// the stream slot of a confirmatory plan and append the plan leaf and the `register` record.
-/// Another process can register the same id between the check and the publish; the rename
-/// refuses it, before any slot opens or leaf is appended. The slot opens under the stream's
-/// lock at a level no lower than the check showed, or nothing is written to the stream; a
-/// refusal or fault after the rename leaves a folder without a record. The log appends are
-/// not atomic with the earlier-use lookup in `check`; v0 accepts that. `check_tails` runs
-/// before `append` takes its lock. Returns the leaf and the slot.
+/// the stream slot of a confirmatory plan at no lower level than `checked`, and append the
+/// plan leaf and the `register` record. Another process can register the same id between the
+/// check and the publish; the rename refuses it, before any slot opens or leaf is appended.
+/// The slot opens under the stream's lock, or nothing is written to the stream and the folder
+/// goes back to staging, so the id stays free. A fault in a later append leaves a folder
+/// without a record. The log appends are not atomic with the earlier-use lookup in `check`;
+/// v0 accepts that. `check_tails` runs before `append` takes its lock. Returns the leaf and
+/// the slot.
 fn store(
     spec_path: &Path,
     home: &Home,
     spec: &Spec,
     a: &Assessed,
+    checked: Option<&Alpha>,
     key: &SigningKey,
     frozen: &Frozen,
 ) -> Result<(u64, Option<Alpha>), CliError> {
@@ -427,7 +453,8 @@ fn store(
     let canon = to_canonical(&raw.value).map_err(|e| io("canonical form", e))?;
     let id = spec.study.id.as_str();
     let mode = mode_of(a);
-    let log = stream::log_for(spec.study.test_log);
+    let name = LogName::of(spec.study.test_log);
+    let log = name.as_str();
     let plan_log = PlanLog::open(&home.root.join(log))
         .and_then(|l| l.check_tails().map(|()| l))
         .map_err(|e| io(log, e))?;
@@ -441,18 +468,18 @@ fn store(
         }
     })?;
     // Only appends from here: a lost rename above opened no slot and appended no leaf.
-    let alpha = match &a.stream {
+    let alpha = match checked {
         None => None,
         Some(checked) => {
-            let next = Log::of(home, log)
+            let next = Log::of(home, name)
                 .open(key, id, checked.level)
-                .map_err(|e| match e {
-                    StreamError::Lower { .. } => {
-                        let mut r = refusal("E-STR-001", &e.to_string());
-                        r.msg = format!("{}; {}", r.msg, kept(&dir));
-                        r
-                    }
-                    e => io("stream", e),
+                .map_err(|e| {
+                    let mut r = match e {
+                        StreamError::Lower { .. } => refusal("E-STR-001", &e.to_string()),
+                        e => io("stream", e),
+                    };
+                    r.msg = format!("{}; {}", r.msg, take_back(&dir, &staged));
+                    r
                 })?;
             Some(Alpha {
                 log: log.into(),
@@ -500,6 +527,17 @@ fn store(
     )
     .map_err(|e| io("records.jsonl", e))?;
     Ok((leaf, alpha))
+}
+
+/// Move the published study folder `dir` back to `staged`, which frees the id, and say so.
+fn take_back(dir: &Path, staged: &Path) -> String {
+    match std::fs::rename(dir, staged) {
+        Ok(()) => kept(staged),
+        Err(e) => format!(
+            "the study was not registered, and {} could not go back to staging: {e}",
+            dir.display()
+        ),
+    }
 }
 
 /// What a refusal after staging says: no study, and where the staged files are.
@@ -640,5 +678,43 @@ mod tests {
             e.msg,
             "question.hypotheses[0].estimates no longer reads as the check read it: Waits on study pilot, which is not registered. The study was not registered."
         );
+    }
+
+    #[test]
+    fn a_confirmatory_plan_with_no_level_is_refused_before_staging() {
+        let root = Path::new("/work/study");
+        let assessed = |mode: &str, stream: Option<Alpha>| Assessed {
+            root: root.into(),
+            hash: "sha256:ab".into(),
+            value: json!({ "study": { "id": "s", "mode": mode } }),
+            filled: vec![],
+            diags: vec![],
+            estimate: None,
+            input_hashes: vec![],
+            ctx: rules::CheckCtx::empty(root),
+            stream,
+        };
+        let at = |level: f64| Alpha {
+            log: "planlog".into(),
+            slot: 3,
+            level,
+        };
+        let refused = "E-STR-001: The stream gives this confirmatory study no level.";
+        for stream in [None, Some(at(0.0))] {
+            let a = assessed("confirmatory", stream);
+            let e = level_to_spend(&a).unwrap_err();
+            assert_eq!(e.code, 1);
+            assert!(e.msg.starts_with(refused), "{}", e.msg);
+            assert!(
+                e.msg
+                    .contains(" Found: the check found no level above 0; nothing was written."),
+                "{}",
+                e.msg
+            );
+        }
+        let a = assessed("confirmatory", Some(at(0.005)));
+        assert_eq!(level_to_spend(&a).unwrap(), Some(&at(0.005)));
+        let a = assessed("exploratory", None);
+        assert_eq!(level_to_spend(&a).unwrap(), None);
     }
 }

@@ -2,7 +2,11 @@
 //! (`planlog`, `testlog`) has its own stream in `stream/<log>.jsonl`: a signed record log
 //! whose first record fixes alpha and gamma, then one `stream.open` per slot, in the order
 //! studies register, and one `stream.close` per slot that a study's e-value has closed. The
-//! state is rebuilt by replaying those records into an `evidence::elond::Stream`.
+//! state is rebuilt by replaying those records into an `evidence::elond::Stream`. The plan
+//! stream gives levels to M slots and then only level 0. The test stream never runs out:
+//! after each M slots a `stream.epoch` record starts a fresh stream, with slot numbers that
+//! go on counting.
+use crate::derived::Alpha;
 use crate::home::Home;
 use crate::records::{self, Record, RecordDraft, RecordError, VerifyError};
 use ed25519_dalek::{SigningKey, VerifyingKey};
@@ -20,12 +24,42 @@ pub const M: u64 = 10;
 pub const GAMMA: Gamma = Gamma::Bounded { m: M };
 
 pub const CONFIG: &str = "stream.config";
+pub const EPOCH: &str = "stream.epoch";
 pub const OPEN: &str = "stream.open";
 pub const CLOSE: &str = "stream.close";
 
-/// The log a study's plan leaf and stream slot go to.
-pub fn log_for(test_log: bool) -> &'static str {
-    if test_log { "testlog" } else { "planlog" }
+/// The log a study's plan leaf and stream slot go to: the plan log, or the test log, which
+/// never counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogName {
+    Plan,
+    Test,
+}
+
+impl LogName {
+    /// The log `study.test_log` names.
+    pub fn of(test_log: bool) -> LogName {
+        if test_log {
+            LogName::Test
+        } else {
+            LogName::Plan
+        }
+    }
+
+    /// `planlog` or `testlog`; any other name is an error, so no stream path is built from it.
+    pub fn parse(name: &str) -> Result<LogName, StreamError> {
+        [LogName::Plan, LogName::Test]
+            .into_iter()
+            .find(|l| l.as_str() == name)
+            .ok_or(StreamError::Name)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LogName::Plan => "planlog",
+            LogName::Test => "testlog",
+        }
+    }
 }
 
 /// The body of the first record: the stream's constants.
@@ -42,6 +76,8 @@ pub struct Next {
 
 #[derive(Debug)]
 pub enum StreamError {
+    /// A log name other than `planlog` and `testlog`.
+    Name,
     /// The log cannot be read, trusted or appended to.
     Records(RecordError),
     /// The first record is not a `stream.config` with this box's alpha and gamma.
@@ -58,11 +94,19 @@ pub enum StreamError {
     NotOpen { slot: u64 },
     /// An e-value that is NaN, negative or infinite.
     EValue,
+    /// A signed `register` record names slot `slot` of `study` at `level`, and the stream
+    /// holds no such slot: the log was cut, replaced or restored from an older copy.
+    Lacks {
+        study: String,
+        slot: u64,
+        level: f64,
+    },
 }
 
 impl std::fmt::Display for StreamError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            StreamError::Name => write!(f, "a stream log is planlog or testlog"),
             StreamError::Records(e) => write!(f, "{e}"),
             StreamError::Config => write!(
                 f,
@@ -81,6 +125,11 @@ impl std::fmt::Display for StreamError {
             ),
             StreamError::NotOpen { slot } => write!(f, "slot {slot} is not open for this study"),
             StreamError::EValue => write!(f, "the e-value is not a finite number of 0 or more"),
+            StreamError::Lacks { study, slot, level } => write!(
+                f,
+                "the stream lacks slot {slot} of study {study} at level {}",
+                shown(*level)
+            ),
         }
     }
 }
@@ -124,24 +173,71 @@ struct Close {
     discovery: bool,
 }
 
-/// The stream the records of `log` rebuild.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Epoch {
+    epoch: u64,
+}
+
+/// The stream the records of `log` rebuild. Slots are numbered over the whole log; each epoch
+/// is a fresh e-LOND stream, and only the test log has more than one.
 struct Replay {
-    stream: Stream,
-    /// Each open slot, with the study that holds it.
-    open: BTreeMap<u64, (Slot, String)>,
-    /// Each closed slot, with the study that held it.
-    closed: BTreeMap<u64, String>,
+    log: LogName,
+    /// One stream per epoch, the current one last.
+    epochs: Vec<Stream>,
+    /// Slots opened so far, over every epoch.
+    opened: u64,
+    /// Each open slot: its epoch's slot, the epoch, and the study that holds it.
+    open: BTreeMap<u64, (Slot, usize, String)>,
+    /// Every slot opened, with its study and level.
+    given: BTreeMap<u64, (String, f64)>,
+}
+
+impl Replay {
+    fn new(log: LogName) -> Replay {
+        Replay {
+            log,
+            epochs: vec![fresh()],
+            opened: 0,
+            open: BTreeMap::new(),
+            given: BTreeMap::new(),
+        }
+    }
+
+    /// True when the next slot starts a new epoch: the test stream's current epoch has given
+    /// its M slots. The plan stream never starts one, so its slots after M get level 0.
+    fn epoch_due(&self) -> bool {
+        self.log == LogName::Test && self.epochs.last().is_some_and(|s| s.opened() >= M)
+    }
+
+    fn start_epoch(&mut self) {
+        self.epochs.push(fresh());
+    }
+
+    /// Open the next slot in the current epoch: its number over the log, and the slot.
+    fn open(&mut self) -> (u64, Slot) {
+        let current = self.epochs.len() - 1;
+        let slot = self.epochs[current].open();
+        self.opened += 1;
+        (self.opened, slot)
+    }
+
+    /// True when `study` holds or held slot `slot` at `level`.
+    fn gave(&self, study: &str, slot: u64, level: f64) -> bool {
+        (self.given.get(&slot)).is_some_and(|(s, l)| s == study && l.to_bits() == level.to_bits())
+    }
+}
+
+fn fresh() -> Stream {
+    Stream::new(ALPHA, GAMMA).expect("the stream constants are valid")
 }
 
 /// Replay `all`, the records of the stream of `log`. Every record must be the one the
-/// stream gives at that point: the config first, each slot in order at the stream's level,
-/// each close of an open slot by its study with the decision the e-value gives.
-fn replay(log: &str, all: &[Record]) -> Result<Replay, StreamError> {
-    let mut r = Replay {
-        stream: Stream::new(ALPHA, GAMMA).expect("the stream constants are valid"),
-        open: BTreeMap::new(),
-        closed: BTreeMap::new(),
-    };
+/// stream gives at that point: the config first, each slot in order at its epoch's level, an
+/// epoch only when one is due, each close of an open slot by its study with the decision the
+/// e-value gives in that slot's epoch.
+fn replay(log: LogName, all: &[Record]) -> Result<Replay, StreamError> {
+    let mut r = Replay::new(log);
     let Some((first, rest)) = all.split_first() else {
         return Ok(r);
     };
@@ -151,34 +247,41 @@ fn replay(log: &str, all: &[Record]) -> Result<Replay, StreamError> {
     for rec in rest {
         let bad = |why| StreamError::Replay { seq: rec.seq, why };
         match rec.kind.as_str() {
+            EPOCH => {
+                let e: Epoch = serde_json::from_value(rec.body.clone())
+                    .map_err(|_| bad("is not a stream.epoch body"))?;
+                if !r.epoch_due() || e.epoch != r.epochs.len() as u64 + 1 || !rec.study.is_empty() {
+                    return Err(bad("starts an epoch the stream does not start"));
+                }
+                r.start_epoch();
+            }
             OPEN => {
                 let o: Open = serde_json::from_value(rec.body.clone())
                     .map_err(|_| bad("is not a stream.open body"))?;
-                let slot = r.stream.open();
-                if (o.log.as_str(), o.study.as_str()) != (log, rec.study.as_str())
-                    || o.slot != slot.index()
+                let (n, slot) = r.open();
+                if (o.log.as_str(), o.study.as_str()) != (log.as_str(), rec.study.as_str())
+                    || o.slot != n
                     || o.level.to_bits() != slot.level().to_bits()
                 {
                     return Err(bad("is not the slot the stream opens next"));
                 }
-                r.open.insert(o.slot, (slot, o.study));
+                r.given.insert(n, (o.study.clone(), o.level));
+                r.open.insert(n, (slot, r.epochs.len() - 1, o.study));
             }
             CLOSE => {
                 let c: Close = serde_json::from_value(rec.body.clone())
                     .map_err(|_| bad("is not a stream.close body"))?;
-                let (slot, study) = r
+                let (slot, epoch, _) = r
                     .open
                     .remove(&c.slot)
-                    .filter(|(_, s)| *s == c.study && c.study == rec.study)
+                    .filter(|(_, _, s)| *s == c.study && c.study == rec.study)
                     .ok_or(bad("closes a slot the study does not hold open"))?;
-                let discovery = r
-                    .stream
+                let discovery = r.epochs[epoch]
                     .close(slot, c.e_value)
                     .map_err(|_| bad("holds an invalid e-value"))?;
                 if discovery != c.discovery {
                     return Err(bad("records a decision its e-value does not give"));
                 }
-                r.closed.insert(c.slot, study);
             }
             _ => return Err(bad("is not a stream record")),
         }
@@ -186,12 +289,33 @@ fn replay(log: &str, all: &[Record]) -> Result<Replay, StreamError> {
     Ok(r)
 }
 
-/// What the stream of `log`, after the records `all`, would give the next slot.
-pub fn next_of(log: &str, all: &[Record]) -> Result<Next, StreamError> {
-    let slot = replay(log, all)?.stream.open();
+/// What the stream of `log`, after the records `all`, would give the next slot. `held` is
+/// the alpha of each signed `register` record, by study: a slot one of them names for this
+/// log must be in the stream, given to that study at that level, or the log was cut,
+/// replaced or restored from an older copy.
+pub fn next_of(
+    log: LogName,
+    all: &[Record],
+    held: &[(String, Alpha)],
+) -> Result<Next, StreamError> {
+    let mut r = replay(log, all)?;
+    let lacking = (held.iter())
+        .filter(|(_, a)| a.log == log.as_str())
+        .find(|(study, a)| !r.gave(study, a.slot, a.level));
+    if let Some((study, a)) = lacking {
+        return Err(StreamError::Lacks {
+            study: study.clone(),
+            slot: a.slot,
+            level: a.level,
+        });
+    }
+    if r.epoch_due() {
+        r.start_epoch();
+    }
+    let (slot, s) = r.open();
     Ok(Next {
-        slot: slot.index(),
-        level: slot.level(),
+        slot,
+        level: s.level(),
     })
 }
 
@@ -207,14 +331,17 @@ fn draft(study: &str, kind: &str, body: Value) -> RecordDraft {
 /// The stream of one log.
 pub struct Log {
     path: PathBuf,
-    log: String,
+    log: LogName,
 }
 
 impl Log {
-    pub fn of(home: &Home, log: &str) -> Log {
+    pub fn of(home: &Home, log: LogName) -> Log {
         Log {
-            path: home.root.join("stream").join(format!("{log}.jsonl")),
-            log: log.into(),
+            path: home
+                .root
+                .join("stream")
+                .join(format!("{}.jsonl", log.as_str())),
+            log,
         }
     }
 
@@ -224,13 +351,13 @@ impl Log {
     }
 
     fn replayed(&self, key: &VerifyingKey) -> Result<Replay, StreamError> {
-        replay(&self.log, &records::read_all(&self.path, key)?)
+        replay(self.log, &records::read_all(&self.path, key)?)
     }
 
     /// The slot and level the stream would give a study that opened a slot now. Writes
     /// nothing.
     pub fn next(&self, key: &VerifyingKey) -> Result<Next, StreamError> {
-        next_of(&self.log, &records::read_all(&self.path, key)?)
+        next_of(self.log, &records::read_all(&self.path, key)?, &[])
     }
 
     /// Open the next slot for `study`, under the log's lock: the config first when the log
@@ -239,8 +366,13 @@ impl Log {
     pub fn open(&self, key: &SigningKey, study: &str, at_least: f64) -> Result<Next, StreamError> {
         let mut opened = None;
         records::append_with(&self.path, key, |all| -> Result<_, StreamError> {
-            let slot = replay(&self.log, all)?.stream.open();
-            let (index, level) = (slot.index(), slot.level());
+            let mut r = replay(self.log, all)?;
+            let epoch = r.epoch_due();
+            if epoch {
+                r.start_epoch();
+            }
+            let (index, slot) = r.open();
+            let level = slot.level();
             if !(level > 0.0 && level >= at_least) {
                 return Err(StreamError::Lower {
                     slot: index,
@@ -252,7 +384,11 @@ impl Log {
             if all.is_empty() {
                 drafts.push(draft("", CONFIG, config()));
             }
-            let body = json!({ "log": self.log, "study": study, "slot": index, "level": level });
+            if epoch {
+                drafts.push(draft("", EPOCH, json!({ "epoch": r.epochs.len() })));
+            }
+            let log = self.log.as_str();
+            let body = json!({ "log": log, "study": study, "slot": index, "level": level });
             drafts.push(draft(study, OPEN, body));
             opened = Some(Next { slot: index, level });
             Ok(drafts)
@@ -275,11 +411,13 @@ impl Log {
         }
         let mut decided = None;
         records::append_with(&self.path, key, |all| -> Result<_, StreamError> {
-            let mut r = replay(&self.log, all)?;
-            let (held, _) = (r.open.remove(&slot))
-                .filter(|(_, holder)| holder.as_str() == study)
+            let mut r = replay(self.log, all)?;
+            let (held, epoch, _) = (r.open.remove(&slot))
+                .filter(|(_, _, holder)| holder.as_str() == study)
                 .ok_or(StreamError::NotOpen { slot })?;
-            let discovery = r.stream.close(held, e).map_err(|_| StreamError::EValue)?;
+            let discovery = r.epochs[epoch]
+                .close(held, e)
+                .map_err(|_| StreamError::EValue)?;
             let body =
                 json!({ "slot": slot, "study": study, "e_value": e, "discovery": discovery });
             decided = Some(discovery);
@@ -291,6 +429,7 @@ impl Log {
     /// True when `study` held slot `slot` and the slot is closed.
     pub fn closed(&self, key: &VerifyingKey, study: &str, slot: u64) -> Result<bool, StreamError> {
         let r = self.replayed(key)?;
-        Ok(r.closed.get(&slot).is_some_and(|s| s == study))
+        let held = r.given.get(&slot).is_some_and(|(s, _)| s == study);
+        Ok(held && !r.open.contains_key(&slot))
     }
 }

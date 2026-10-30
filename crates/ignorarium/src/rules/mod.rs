@@ -1,6 +1,6 @@
 //! Typed rules, loaded from data. `generic` runs the data-driven checks; `named` the cross-field ones.
 use crate::diag::Severity;
-use crate::stream::Next;
+use crate::stream::{LogName, Next};
 use regex::Regex;
 use serde::Deserialize;
 use std::path::Path;
@@ -35,11 +35,46 @@ impl BoxRecords for NoRecords {
 
     /// Each stream is empty.
     fn stream_next(&self, log: &str) -> Result<Next, String> {
-        crate::stream::next_of(log, &[]).map_err(|e| e.to_string())
+        let log = LogName::parse(log).map_err(|e| e.to_string())?;
+        crate::stream::next_of(log, &[], &[]).map_err(|e| e.to_string())
     }
 
     fn stream_closed(&self, _: &str, _: &str, _: u64) -> Result<bool, String> {
         Ok(false)
+    }
+}
+
+/// `B`, with each stream read once and the answer kept, so every rule of one check sees one
+/// slot and level, or one error.
+pub struct ReadOnce<B> {
+    inner: B,
+    streams: std::cell::RefCell<std::collections::BTreeMap<String, Result<Next, String>>>,
+}
+
+impl<B> ReadOnce<B> {
+    pub fn new(inner: B) -> ReadOnce<B> {
+        ReadOnce {
+            inner,
+            streams: Default::default(),
+        }
+    }
+}
+
+impl<B: BoxRecords> BoxRecords for ReadOnce<B> {
+    fn study(&self, id: &str) -> Result<Option<Vec<crate::records::Record>>, String> {
+        self.inner.study(id)
+    }
+
+    fn stream_next(&self, log: &str) -> Result<Next, String> {
+        let mut streams = self.streams.borrow_mut();
+        let read = streams
+            .entry(log.to_string())
+            .or_insert_with(|| self.inner.stream_next(log));
+        read.clone()
+    }
+
+    fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String> {
+        self.inner.stream_closed(log, study, slot)
     }
 }
 

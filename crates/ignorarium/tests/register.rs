@@ -8,6 +8,7 @@ use ignorarium::keys;
 use ignorarium::planlog::commitment;
 use ignorarium::planlog::store::{Leaf, PlanLog};
 use ignorarium::prior::normalized_sha256;
+use ignorarium::stream::{Log, LogName};
 use serde_json::{Value, json};
 use std::io::{BufRead, Cursor, Read};
 use std::path::{Path, PathBuf};
@@ -599,6 +600,7 @@ fn check_shows_the_level_and_register_spends_it() {
         out.ends_with("registered my-study: leaf 0, stream slot 1, level 0.005\n"),
         "{out}"
     );
+    assert!(!out.contains("level rose"), "{out}");
     let stream = stream_of(&f, "planlog");
     let kinds: Vec<&Value> = stream.iter().map(|r| &r["kind"]).collect();
     assert_eq!(kinds, [&json!("stream.config"), &json!("stream.open")]);
@@ -613,7 +615,7 @@ fn check_shows_the_level_and_register_spends_it() {
     );
     // The next plan would get slot 2.
     let key = keys::load(&f.home).unwrap().unwrap();
-    let next = ignorarium::stream::Log::of(&f.home, "planlog")
+    let next = Log::of(&f.home, LogName::Plan)
         .next(&key.verifying_key())
         .unwrap();
     assert_eq!((next.slot, next.level), (2, FIRST));
@@ -650,7 +652,7 @@ fn a_slot_lost_at_the_prompt_is_refused_before_the_plan_leaf() {
     let (f, spec) = setup("numeric-ablation", common::confirmatory);
     common::pilot(&f.home, vec![common::arm_a()]);
     let key = keys::load_or_create(&f.home).unwrap();
-    let log = ignorarium::stream::Log::of(&f.home, "planlog");
+    let log = Log::of(&f.home, LogName::Plan);
     for i in 1..=9 {
         log.open(&key, &format!("s{i}"), 0.0).unwrap();
     }
@@ -668,13 +670,69 @@ fn a_slot_lost_at_the_prompt_is_refused_before_the_plan_leaf() {
         "{}",
         e.msg
     );
-    assert!(e.msg.contains("the study was not registered"), "{}", e.msg);
-    // No slot for it, no plan leaf and no register record.
+    // No slot for it and no plan leaf; the study folder went back to staging, so the id is
+    // free again.
+    taken_back(&f, &e);
     let stream = stream_of(&f, "planlog");
     assert_eq!(stream.len(), 11);
     assert!(stream.iter().all(|r| r["study"] != "my-study"));
+}
+
+/// The published study folder went back to its one staging folder, which the error names;
+/// there is no `my-study` and no plan leaf.
+fn taken_back(f: &Fixture, e: &CliError) {
+    let staged: Vec<String> = (studies(f).into_iter())
+        .filter(|n| n.starts_with(".my-study.") && n.ends_with(".tmp"))
+        .collect();
+    assert_eq!(staged.len(), 1, "{:?}", studies(f));
+    assert!(e.msg.contains(&staged[0]), "{}", e.msg);
+    assert!(e.msg.contains("the study was not registered"), "{}", e.msg);
+    assert!(!f.home.study_dir("my-study").exists());
     assert!(leaves(&f.home.root.join("planlog")).is_empty());
-    assert!(!f.home.study_dir("my-study").join("records.jsonl").exists());
+}
+
+#[test]
+fn a_stream_fault_after_the_publish_takes_the_folder_back() {
+    let (f, spec) = setup("numeric-ablation", common::confirmatory);
+    common::pilot(&f.home, vec![common::arm_a()]);
+    // The stream log cannot be opened for append: a folder stands at its path.
+    let stream = f.home.root.join("stream/planlog.jsonl");
+    let (r, _) = at_prompt(&f, &spec, || std::fs::create_dir(&stream).unwrap());
+    let e = r.unwrap_err();
+    assert_eq!(e.code, 2, "{}", e.msg);
+    assert!(e.msg.starts_with("stream: "), "{}", e.msg);
+    taken_back(&f, &e);
+    // With the folder moved aside, the same plan registers.
+    std::fs::rename(&stream, f.tmp.path().join("moved")).unwrap();
+    let (r, out) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap().code, 0, "{out}");
+    assert_eq!(leaves(&f.home.root.join("planlog")).len(), 1);
+}
+
+#[test]
+fn a_level_that_rose_since_the_check_is_spent_and_said() {
+    let (f, spec) = setup("numeric-ablation", common::confirmatory);
+    common::pilot(&f.home, vec![common::arm_a()]);
+    let key = keys::load_or_create(&f.home).unwrap();
+    let log = Log::of(&f.home, LogName::Plan);
+    log.open(&key, "other", 0.0).unwrap();
+    // The check shows slot 2 at 0.005; slot 1 closes as a discovery at the prompt.
+    let (r, out) = at_prompt(&f, &spec, || {
+        assert!(log.close(&key, "other", 1, 200.0).unwrap());
+    });
+    assert_eq!(r.unwrap().code, 0, "{out}");
+    assert!(out.contains("\nstream: slot 2, level 0.005\n"), "{out}");
+    assert!(
+        out.ends_with(
+            "level rose from 0.005 to 0.01 since the check\nregistered my-study: leaf 0, stream slot 2, level 0.01\n"
+        ),
+        "{out}"
+    );
+    let body = &records(&f.home.study_dir("my-study").join("records.jsonl"))[0]["record"]["body"];
+    assert_eq!(
+        body["alpha"],
+        json!({ "log": "planlog", "slot": 2, "level": 2.0 * FIRST })
+    );
 }
 
 #[test]

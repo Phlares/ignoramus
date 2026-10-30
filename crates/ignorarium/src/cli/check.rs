@@ -9,11 +9,11 @@ use crate::keys;
 use crate::planlog::store::PlanLog;
 use crate::prior::{PriorError, PriorUse};
 use crate::records;
-use crate::rules::{self, BoxRecords, CheckCtx};
+use crate::rules::{self, BoxRecords, CheckCtx, ReadOnce};
 use crate::schedule;
 use crate::spec::{self, LoadError, model::Spec};
 use crate::store::Store;
-use crate::stream::{self, Log, Next};
+use crate::stream::{self, Log, LogName, Next, StreamError};
 use ed25519_dalek::VerifyingKey;
 use serde_json::{Value, json};
 use std::path::{Component, Path, PathBuf};
@@ -105,17 +105,23 @@ impl BoxRecords for HomeRecords {
         Ok(registered.then_some(all))
     }
 
-    /// A stream with no log is empty and needs no key.
+    /// A stream with no log is empty and needs no key. Each slot a signed `register` record
+    /// of the box names must be in the stream, so a stream log that was moved, cut or rolled
+    /// back is an error, never a fresh budget.
     fn stream_next(&self, log: &str) -> Result<Next, String> {
-        let stream = Log::of(&self.home, log);
-        match self.key_for(stream.path())? {
-            None => stream::next_of(log, &[]).map_err(|e| e.to_string()),
-            Some(key) => stream.next(key).map_err(|e| e.to_string()),
-        }
+        let name = LogName::parse(log).map_err(|e| e.to_string())?;
+        let stream = Log::of(&self.home, name);
+        let all = match self.key_for(stream.path())? {
+            None => vec![],
+            Some(key) => records::read_all(stream.path(), key)
+                .map_err(|e| StreamError::from(e).to_string())?,
+        };
+        stream::next_of(name, &all, &self.held()?).map_err(|e| e.to_string())
     }
 
     fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String> {
-        let stream = Log::of(&self.home, log);
+        let name = LogName::parse(log).map_err(|e| e.to_string())?;
+        let stream = Log::of(&self.home, name);
         match self.key_for(stream.path())? {
             None => Ok(false),
             Some(key) => stream.closed(key, study, slot).map_err(|e| e.to_string()),
@@ -124,6 +130,24 @@ impl BoxRecords for HomeRecords {
 }
 
 impl HomeRecords {
+    /// The stream slot each study of the box holds, by study, from the `register` record that
+    /// opens its log. Only that first line is read and checked.
+    fn held(&self) -> Result<Vec<(String, Alpha)>, String> {
+        let mut out = Vec::new();
+        for (id, log) in records::logs(&self.home).map_err(|e| e.to_string())? {
+            let fault = |e: String| format!("study {id}: {e}");
+            let Some(key) = self.key_for(&log).map_err(fault)? else {
+                continue;
+            };
+            let first = records::first(&log, key).map_err(|e| fault(e.to_string()))?;
+            let alpha = first.as_ref().and_then(Register::of).and_then(|r| r.alpha);
+            if let (Some(r), Some(alpha)) = (first, alpha) {
+                out.push((r.study, alpha));
+            }
+        }
+        Ok(out)
+    }
+
     /// The key that verifies the log at `path`; `None` when there is no log. Only a log that
     /// does not exist needs no key: any other fault is an error.
     fn key_for(&self, path: &Path) -> Result<Option<&VerifyingKey>, String> {
@@ -231,10 +255,10 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         prior,
         machine_max_level: machine.max_level,
         spec_text: raw.text,
-        records: Box::new(HomeRecords {
+        records: Box::new(ReadOnce::new(HomeRecords {
             home: home.clone(),
             key,
-        }),
+        })),
         store,
         spec_hash: spec::hash_bytes(&raw.hash)
             .ok_or_else(|| CliError::usage(format!("{shown}: the spec hash is malformed")))?,
@@ -247,7 +271,7 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         filled,
         diags,
         estimate: None,
-        stream: rules::granted(&value, &cc),
+        stream: rules::granted(&value, &cc).ok().flatten(),
         value,
         ctx: cc,
     };

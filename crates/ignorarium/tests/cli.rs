@@ -5,7 +5,7 @@ use ignorarium::cli::check::{self, HomeRecords};
 use ignorarium::home::Home;
 use ignorarium::keys;
 use ignorarium::rules::BoxRecords;
-use ignorarium::stream;
+use ignorarium::stream::{self, LogName};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -1447,17 +1447,27 @@ fn a_broken_key_fails_only_the_checks_that_need_a_record() {
         ),
         "{out}"
     );
-    // A study with no log in the box needs no key to be not registered.
+    // A study with no log in the box needs no key to be not registered. The stream still
+    // needs it: each study log's register record must be checked against the stream.
     std::fs::write(
         &spec,
         text.replace("from = \"my-pilot\"", "from = \"later\""),
     )
     .unwrap();
-    let out = check_out(&home, &spec, 3);
+    let out = check_out(&home, &spec, 1);
     assert!(
         out.contains("Waits on study later, which is not registered."),
         "{out}"
     );
+    assert!(
+        out.contains(
+            "The planlog stream cannot be read: study my-pilot: key file has 5 bytes, expected 32."
+        ),
+        "{out}"
+    );
+    // With no study log in the box, no key is read at all.
+    std::fs::rename(home.join("studies/my-pilot"), home.join("moved-pilot")).unwrap();
+    assert!(check_out(&home, &spec, 3).contains("Waits on study later, which is not registered."));
 }
 
 #[test]
@@ -1531,7 +1541,7 @@ fn check_shows_the_slot_and_level_the_stream_would_give() {
     assert!(!home.join("stream/planlog.jsonl").exists());
     // Once a study holds slot 1, the next is slot 2; the review page shows it too.
     let key = keys::load_or_create(&box_home).unwrap();
-    stream::Log::of(&box_home, "planlog")
+    stream::Log::of(&box_home, LogName::Plan)
         .open(&key, "other", 0.0)
         .unwrap();
     assert!(check_out(&home, &spec, 0).contains("\nstream: slot 2, level 0.005\n"));
@@ -1561,7 +1571,7 @@ fn check_refuses_a_plan_beyond_the_tenth_slot() {
     let box_home = Home::open_at(&home).unwrap();
     common::pilot(&box_home, vec![common::arm_a()]);
     let key = keys::load_or_create(&box_home).unwrap();
-    let log = stream::Log::of(&box_home, "planlog");
+    let log = stream::Log::of(&box_home, LogName::Plan);
     for i in 1..=10 {
         log.open(&key, &format!("s{i:02}"), 0.0).unwrap();
     }

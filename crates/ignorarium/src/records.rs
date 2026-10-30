@@ -207,6 +207,20 @@ pub fn read_all(path: &Path, key: &VerifyingKey) -> Result<Vec<Record>, VerifyEr
     }
 }
 
+/// The first record of the log at `path`, checked as `read_all` checks it, without reading
+/// the rest of the file; `None` for a missing or empty log.
+pub fn first(path: &Path, key: &VerifyingKey) -> Result<Option<Record>, VerifyError> {
+    use std::io::BufRead;
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let mut line = Vec::new();
+    io::BufReader::new(file).read_until(b'\n', &mut line)?;
+    Ok(verified(&line, key)?.0.into_iter().next())
+}
+
 /// The records `buf` holds, each line checked in order, and the hash of the last one (the
 /// genesis value when there is none).
 fn verified(buf: &[u8], key: &VerifyingKey) -> Result<(Vec<Record>, String), VerifyError> {

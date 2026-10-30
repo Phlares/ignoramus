@@ -14,7 +14,7 @@ use crate::schedule::ROW_CAP;
 use crate::seed::seed;
 use crate::spec::model::{Claim, Outcome, SELECTED, StatisticSpec};
 use crate::store::Store;
-use crate::stream;
+use crate::stream::{self, LogName};
 use evidence::claim::{Bound, Statistic};
 use evidence::power::{Plan, Stratum, WORK, clusters_needed, mean_sd, simulate};
 use evidence::rng::Rng;
@@ -523,12 +523,14 @@ struct Absent;
 
 /// The level the stream of the plan's log gives it, `design.power` and
 /// `design.units_per_cluster`, when the gate can compute with them. `Ok(None)`: one is
-/// mistyped or out of range, which the generic rules report, or the stream gives no level,
-/// which E-STR-001 reports.
+/// mistyped or out of range, which the generic rules report, or the stream gives no level or
+/// cannot be read, which E-STR-001 reports from the same read.
 fn gate_design(spec: &Value, ctx: &CheckCtx) -> Result<Option<(f64, f64, u64)>, Absent> {
     let power = val(spec, "design.power").ok_or(Absent)?.as_f64();
     let per = val(spec, "design.units_per_cluster").and_then(Value::as_u64);
-    let level = granted(spec, ctx).map(|a| a.level).filter(|l| *l > 0.0);
+    let level = (granted(spec, ctx).ok().flatten())
+        .map(|a| a.level)
+        .filter(|l| *l > 0.0);
     Ok(match (level, power, per) {
         (Some(level), Some(power), Some(per)) if per >= 1 && open_unit(power) => {
             Some((level, power, per))
@@ -539,35 +541,41 @@ fn gate_design(spec: &Value, ctx: &CheckCtx) -> Result<Option<(f64, f64, u64)>, 
 
 /// The log a plan registers into, by `study.test_log`; `None` when that is not a bool.
 fn stream_log(spec: &Value) -> Option<&'static str> {
-    val(spec, "study.test_log")?.as_bool().map(stream::log_for)
+    let test_log = val(spec, "study.test_log")?.as_bool()?;
+    Some(LogName::of(test_log).as_str())
 }
 
-/// The slot and level the stream of a confirmatory plan's log would give it now; `None` for
-/// an exploratory plan, a `study.test_log` that is not a bool, or a stream that cannot be read.
-pub fn granted(spec: &Value, ctx: &CheckCtx) -> Option<Alpha> {
-    let log = stream_log(spec).filter(|_| confirmatory(spec))?;
-    let next = ctx.records.stream_next(log).ok()?;
-    Some(Alpha {
+/// The slot and level the stream of a confirmatory plan's log would give it now. `Ok(None)`
+/// for an exploratory plan or a `study.test_log` that is not a bool; `Err` when the stream
+/// cannot be read or trusted.
+pub fn granted(spec: &Value, ctx: &CheckCtx) -> Result<Option<Alpha>, String> {
+    let Some(log) = stream_log(spec).filter(|_| confirmatory(spec)) else {
+        return Ok(None);
+    };
+    let next = ctx.records.stream_next(log)?;
+    Ok(Some(Alpha {
         log: log.into(),
         slot: next.slot,
         level: next.level,
-    })
+    }))
 }
 
 /// E-STR-001 at `study.mode` of a confirmatory plan: the stream of its log gives level 0 (a
-/// slot beyond the stream's last), or cannot be read.
+/// slot beyond the plan stream's last), or cannot be read or trusted.
 fn stream_level(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
-    let Some(log) = stream_log(spec) else {
-        return vec![];
-    };
-    let detail = match ctx.records.stream_next(log) {
-        Ok(next) if next.level > 0.0 => return vec![],
-        Ok(next) => format!(
-            "Slot {} is beyond the {} slots of the {log} stream.",
-            next.slot,
-            stream::M
+    let detail = match granted(spec, ctx) {
+        Ok(None) => return vec![],
+        Ok(Some(a)) if a.level > 0.0 => return vec![],
+        Ok(Some(a)) => format!(
+            "Slot {} is beyond the {} slots of the {} stream.",
+            a.slot,
+            stream::M,
+            a.log
         ),
-        Err(e) => format!("The {log} stream cannot be read: {e}."),
+        Err(e) => format!(
+            "The {} stream cannot be read: {e}.",
+            stream_log(spec).unwrap_or_default()
+        ),
     };
     nodes(spec, pat)
         .into_iter()

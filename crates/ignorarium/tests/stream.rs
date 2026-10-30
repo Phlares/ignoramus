@@ -5,12 +5,12 @@ use ed25519_dalek::SigningKey;
 use evidence::elond::Gamma;
 use ignorarium::backend::level0::Level0;
 use ignorarium::cli::check::HomeRecords;
-use ignorarium::derived::{Analysis, StudyState};
+use ignorarium::derived::{Alpha, Analysis, StudyState};
 use ignorarium::keys;
 use ignorarium::records::{self, Record, RecordDraft};
 use ignorarium::rules::BoxRecords;
 use ignorarium::runner::{RunStatus, prepare_with, run};
-use ignorarium::stream::{self, Log, Next, StreamError};
+use ignorarium::stream::{self, Log, LogName, Next, StreamError};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Barrier;
@@ -44,7 +44,7 @@ fn the_first_slot_gets_0_005() {
     assert_eq!(stream::GAMMA, Gamma::Bounded { m: 10 });
     let lab = lab();
     let k = key(&lab);
-    let log = Log::of(&lab.home, "planlog");
+    let log = Log::of(&lab.home, LogName::Plan);
     // Asking writes nothing.
     let first = Next {
         slot: 1,
@@ -86,7 +86,7 @@ fn a_discovery_doubles_the_next_level() {
     let lab = lab();
     let k = key(&lab);
     let vk = k.verifying_key();
-    let log = Log::of(&lab.home, "planlog");
+    let log = Log::of(&lab.home, LogName::Plan);
     log.open(&k, "a", FIRST).unwrap();
     log.open(&k, "b", FIRST).unwrap();
     // 1 / 0.005 = 200: an e-value of 200 is a discovery.
@@ -128,7 +128,7 @@ fn a_discovery_doubles_the_next_level() {
 fn the_eleventh_slot_is_refused() {
     let lab = lab();
     let k = key(&lab);
-    let log = Log::of(&lab.home, "planlog");
+    let log = Log::of(&lab.home, LogName::Plan);
     for i in 1..=10 {
         let got = log.open(&k, &format!("s{i:02}"), FIRST).unwrap();
         assert_eq!(
@@ -157,11 +157,10 @@ fn the_eleventh_slot_is_refused() {
 
 #[test]
 fn concurrent_opens_get_distinct_slots() {
-    let lab = lab();
-    let k = key(&lab);
     for round in 0..32 {
-        let name = format!("round-{round}");
-        let log = Log::of(&lab.home, &name);
+        let lab = lab();
+        let k = key(&lab);
+        let log = Log::of(&lab.home, LogName::Plan);
         let gate = Barrier::new(2);
         let mut slots: Vec<u64> = std::thread::scope(|s| {
             let handles: Vec<_> = ["a", "b"]
@@ -179,7 +178,7 @@ fn concurrent_opens_get_distinct_slots() {
         slots.sort();
         assert_eq!(slots, [1, 2], "round {round}");
         assert_eq!(
-            kinds(&lab, &name),
+            kinds(&lab, "planlog"),
             ["stream.config", "stream.open", "stream.open"],
             "round {round}"
         );
@@ -190,7 +189,7 @@ fn concurrent_opens_get_distinct_slots() {
 fn a_level_lower_than_checked_writes_nothing() {
     let lab = lab();
     let k = key(&lab);
-    let log = Log::of(&lab.home, "planlog");
+    let log = Log::of(&lab.home, LogName::Plan);
     // On an empty stream, no config is written either.
     let e = log.open(&k, "a", 2.0 * FIRST).unwrap_err();
     assert!(
@@ -211,16 +210,28 @@ fn a_level_lower_than_checked_writes_nothing() {
 
 #[test]
 fn a_test_study_uses_the_test_stream() {
-    assert_eq!(stream::log_for(true), "testlog");
-    assert_eq!(stream::log_for(false), "planlog");
+    assert_eq!(LogName::of(true), LogName::Test);
+    assert_eq!(LogName::of(false), LogName::Plan);
+    for log in [LogName::Plan, LogName::Test] {
+        assert_eq!(LogName::parse(log.as_str()).unwrap(), log);
+    }
+    assert_eq!(LogName::Test.as_str(), "testlog");
+    assert_eq!(LogName::Plan.as_str(), "planlog");
+    // No other name builds a stream path.
+    for name in ["", "../planlog", "Planlog", "round-1", "studies/x"] {
+        assert!(
+            matches!(LogName::parse(name), Err(StreamError::Name)),
+            "{name}"
+        );
+    }
     let lab = lab();
     let k = key(&lab);
-    let tests = Log::of(&lab.home, "testlog");
+    let tests = Log::of(&lab.home, LogName::Test);
     assert_eq!(tests.open(&k, "trial", FIRST).unwrap().slot, 1);
     assert_eq!(all(&lab, "testlog")[1].body["log"], json!("testlog"));
     // The plan log's stream is untouched: its first slot is still free.
     assert!(!path(&lab, "planlog").exists());
-    let plans = Log::of(&lab.home, "planlog");
+    let plans = Log::of(&lab.home, LogName::Plan);
     assert_eq!(plans.next(&k.verifying_key()).unwrap().slot, 1);
     // A test stream's records copied over the plan stream do not replay there.
     std::fs::copy(path(&lab, "testlog"), path(&lab, "planlog")).unwrap();
@@ -233,10 +244,9 @@ fn a_test_study_uses_the_test_stream() {
 /// A record to plant: study, kind and body.
 type Planted = (String, &'static str, Value);
 
-/// Sign `bodies` into the stream log `planlog` by hand.
-fn plant(lab: &Lab, bodies: &[Planted]) {
+/// Sign `bodies` into the stream log `log` by hand.
+fn plant(lab: &Lab, log: &str, bodies: &[Planted]) {
     let k = key(lab);
-    std::fs::create_dir_all(path(lab, "planlog").parent().unwrap()).unwrap();
     for (study, kind, body) in bodies {
         let draft = RecordDraft {
             study: study.clone(),
@@ -244,7 +254,7 @@ fn plant(lab: &Lab, bodies: &[Planted]) {
             kind: kind.to_string(),
             body: body.clone(),
         };
-        records::append(&path(lab, "planlog"), &k, draft).unwrap();
+        records::append(&path(lab, log), &k, draft).unwrap();
     }
 }
 
@@ -254,8 +264,16 @@ fn config() -> Planted {
 }
 
 fn opened(study: &str, slot: u64, level: f64) -> Planted {
-    let body = json!({ "log": "planlog", "study": study, "slot": slot, "level": level });
+    opened_in("planlog", study, slot, level)
+}
+
+fn opened_in(log: &str, study: &str, slot: u64, level: f64) -> Planted {
+    let body = json!({ "log": log, "study": study, "slot": slot, "level": level });
     (study.into(), "stream.open", body)
+}
+
+fn epoch(n: u64) -> Planted {
+    (String::new(), "stream.epoch", json!({ "epoch": n }))
 }
 
 fn closed(slot: u64, study: &str, e: f64, discovery: bool) -> Planted {
@@ -284,8 +302,8 @@ fn a_config_record_that_differs_is_an_error() {
     for bodies in cases {
         let lab = lab();
         let k = key(&lab);
-        plant(&lab, &bodies);
-        let log = Log::of(&lab.home, "planlog");
+        plant(&lab, "planlog", &bodies);
+        let log = Log::of(&lab.home, LogName::Plan);
         let before = bytes(&lab, "planlog");
         assert!(
             matches!(log.next(&k.verifying_key()), Err(StreamError::Config)),
@@ -338,9 +356,9 @@ fn a_record_that_does_not_follow_from_the_replay_is_an_error() {
         let lab = lab();
         let k = key(&lab);
         let bodies: Vec<Planted> = std::iter::once(config()).chain(rest).collect();
-        plant(&lab, &bodies);
+        plant(&lab, "planlog", &bodies);
         let last = bodies.len() as u64 - 1;
-        let got = Log::of(&lab.home, "planlog").next(&k.verifying_key());
+        let got = Log::of(&lab.home, LogName::Plan).next(&k.verifying_key());
         assert!(
             matches!(got, Err(StreamError::Replay { seq, .. }) if seq == last),
             "{what}: {got:?}"
@@ -349,11 +367,184 @@ fn a_record_that_does_not_follow_from_the_replay_is_an_error() {
 }
 
 #[test]
+fn the_test_stream_starts_a_new_epoch_after_its_tenth_slot() {
+    let lab = lab();
+    let k = key(&lab);
+    let vk = k.verifying_key();
+    let log = Log::of(&lab.home, LogName::Test);
+    for i in 1..=10 {
+        log.open(&k, &format!("t{i:02}"), FIRST).unwrap();
+    }
+    // A discovery in the first epoch.
+    assert!(log.close(&k, "t01", 1, 200.0).unwrap());
+    // Slot 11 starts epoch 2 at the first level: the discovery stays in epoch 1.
+    let first_of_two = Next {
+        slot: 11,
+        level: FIRST,
+    };
+    assert_eq!(log.next(&vk).unwrap(), first_of_two);
+    assert_eq!(log.open(&k, "t11", FIRST).unwrap(), first_of_two);
+    let all = all(&lab, "testlog");
+    let tail: Vec<(&str, &Value)> = all[all.len() - 2..]
+        .iter()
+        .map(|r| (r.kind.as_str(), &r.body))
+        .collect();
+    assert_eq!(
+        tail,
+        [
+            ("stream.epoch", &json!({ "epoch": 2 })),
+            (
+                "stream.open",
+                &json!({ "log": "testlog", "study": "t11", "slot": 11, "level": FIRST })
+            ),
+        ]
+    );
+    // A slot of epoch 1 still closes, at its own level, and leaves epoch 2 alone.
+    assert!(log.close(&k, "t02", 2, 200.0).unwrap());
+    let second = Next {
+        slot: 12,
+        level: FIRST,
+    };
+    assert_eq!(log.next(&vk).unwrap(), second);
+    // A discovery in epoch 2 doubles its next level.
+    assert!(log.close(&k, "t11", 11, 200.0).unwrap());
+    assert_eq!(log.next(&vk).unwrap().level, 2.0 * FIRST);
+    assert!(log.closed(&vk, "t01", 1).unwrap());
+    assert!(log.closed(&vk, "t11", 11).unwrap());
+    assert!(!log.closed(&vk, "t03", 3).unwrap());
+}
+
+#[test]
+fn an_epoch_starts_only_after_a_full_test_epoch_and_never_in_the_plan_stream() {
+    let tens = |log: &str| -> Vec<Planted> {
+        (1..=10)
+            .map(|i| opened_in(log, &format!("t{i:02}"), i, FIRST))
+            .collect()
+    };
+    let cases: Vec<(&str, &str, Vec<Planted>, u64)> = vec![
+        (
+            "an epoch before the tenth slot",
+            "testlog",
+            tens("testlog")[..9].to_vec(),
+            2,
+        ),
+        ("a skipped epoch number", "testlog", tens("testlog"), 3),
+        ("an epoch in the plan stream", "planlog", tens("planlog"), 2),
+    ];
+    for (what, log, slots, n) in cases {
+        let lab = lab();
+        let k = key(&lab);
+        let mut bodies = vec![config()];
+        bodies.extend(slots);
+        bodies.push(epoch(n));
+        plant(&lab, log, &bodies);
+        let name = LogName::parse(log).unwrap();
+        let got = Log::of(&lab.home, name).next(&k.verifying_key());
+        let last = bodies.len() as u64 - 1;
+        assert!(
+            matches!(got, Err(StreamError::Replay { seq, .. }) if seq == last),
+            "{what}: {got:?}"
+        );
+    }
+    // The epoch the box writes replays.
+    let lab = lab();
+    let k = key(&lab);
+    let mut bodies = vec![config()];
+    bodies.extend(tens("testlog"));
+    bodies.push(epoch(2));
+    plant(&lab, "testlog", &bodies);
+    let got = Log::of(&lab.home, LogName::Test).next(&k.verifying_key());
+    assert_eq!(
+        got.unwrap(),
+        Next {
+            slot: 11,
+            level: FIRST
+        }
+    );
+}
+
+/// Sign a `register` record for study `id` that holds `alpha`, as `register` writes it.
+fn registered(lab: &Lab, id: &str, alpha: Alpha) {
+    let mut body = common::finished(vec![])[0].1.clone();
+    body["alpha"] = serde_json::to_value(alpha).unwrap();
+    common::plant(&lab.home, id, &[("register", body)]);
+}
+
+fn alpha(log: &str, slot: u64, level: f64) -> Alpha {
+    Alpha {
+        log: log.into(),
+        slot,
+        level,
+    }
+}
+
+#[test]
+fn a_stream_that_lacks_a_registered_slot_is_refused() {
+    let lab = lab();
+    let k = key(&lab);
+    let records = HomeRecords {
+        home: lab.home.clone(),
+        key: Ok(Some(k.verifying_key())),
+    };
+    let log = Log::of(&lab.home, LogName::Plan);
+    log.open(&k, "first", FIRST).unwrap();
+    registered(&lab, "first", alpha("planlog", 1, FIRST));
+    let kept = bytes(&lab, "planlog");
+    log.open(&k, "second", FIRST).unwrap();
+    registered(&lab, "second", alpha("planlog", 2, FIRST));
+    assert_eq!(records.stream_next("planlog").unwrap().slot, 3);
+    // An older copy of the stream: slot 2 is missing.
+    let current = bytes(&lab, "planlog");
+    std::fs::write(path(&lab, "planlog"), &kept).unwrap();
+    assert_eq!(
+        records.stream_next("planlog"),
+        Err("the stream lacks slot 2 of study second at level 0.005".to_string())
+    );
+    // The stream log moved away: slot 1 is missing too.
+    std::fs::rename(path(&lab, "planlog"), lab.root.join("moved.jsonl")).unwrap();
+    assert_eq!(
+        records.stream_next("planlog"),
+        Err("the stream lacks slot 1 of study first at level 0.005".to_string())
+    );
+    std::fs::write(path(&lab, "planlog"), &current).unwrap();
+    // A register record whose slot the stream gave another study.
+    registered(&lab, "third", alpha("planlog", 1, FIRST));
+    assert_eq!(
+        records.stream_next("planlog"),
+        Err("the stream lacks slot 1 of study third at level 0.005".to_string())
+    );
+    // A register record at another level than its slot's, in the test stream.
+    let lab = common::lab();
+    let k = key(&lab);
+    let records = HomeRecords {
+        home: lab.home.clone(),
+        key: Ok(Some(k.verifying_key())),
+    };
+    Log::of(&lab.home, LogName::Test)
+        .open(&k, "lone", FIRST)
+        .unwrap();
+    registered(&lab, "lone", alpha("testlog", 1, 0.01));
+    assert_eq!(
+        records.stream_next("testlog"),
+        Err("the stream lacks slot 1 of study lone at level 0.01".to_string())
+    );
+    // Each stream answers for its own slots only.
+    assert_eq!(records.stream_next("planlog").unwrap().slot, 1);
+    // A study log whose first record cannot be verified is an error, not a study to skip.
+    std::fs::create_dir_all(lab.home.study_dir("torn")).unwrap();
+    std::fs::write(lab.home.study_dir("torn").join("records.jsonl"), "{}\n").unwrap();
+    assert_eq!(
+        records.stream_next("planlog"),
+        Err("study torn: line 1 is not a whole record".to_string())
+    );
+}
+
+#[test]
 fn a_slot_closes_once_with_a_finite_e_value() {
     let lab = lab();
     let k = key(&lab);
     let vk = k.verifying_key();
-    let log = Log::of(&lab.home, "planlog");
+    let log = Log::of(&lab.home, LogName::Plan);
     log.open(&k, "a", FIRST).unwrap();
     let before = bytes(&lab, "planlog");
     // Another study's slot, a slot never opened, and e-values a record cannot hold.
@@ -403,8 +594,20 @@ fn a_box_reads_its_streams_and_needs_a_key_only_for_a_log_that_exists() {
         records(Ok(None)).stream_closed("planlog", "a", 1),
         Ok(false)
     );
+    // A name a register record could carry builds no path outside the two streams.
+    let named = "a stream log is planlog or testlog".to_string();
+    assert_eq!(
+        records(Ok(None)).stream_next("../studies/x"),
+        Err(named.clone())
+    );
+    assert_eq!(
+        records(Ok(None)).stream_closed("round-1", "a", 1),
+        Err(named)
+    );
     let k = key(&lab);
-    Log::of(&lab.home, "planlog").open(&k, "a", FIRST).unwrap();
+    Log::of(&lab.home, LogName::Plan)
+        .open(&k, "a", FIRST)
+        .unwrap();
     let missing = "the box key is missing".to_string();
     assert_eq!(
         records(Ok(None)).stream_next("planlog"),
@@ -427,7 +630,7 @@ fn a_box_reads_its_streams_and_needs_a_key_only_for_a_log_that_exists() {
             level: FIRST
         })
     );
-    Log::of(&lab.home, "planlog")
+    Log::of(&lab.home, LogName::Plan)
         .close(&k, "a", 1, 3.0)
         .unwrap();
     assert_eq!(with_key.stream_closed("planlog", "a", 1), Ok(true));
@@ -460,7 +663,7 @@ fn a_confirmatory_study_finishes_only_once_its_slot_closes() {
         StudyState::of(all, |log, slot| records.stream_closed(log, "conf", slot)).unwrap()
     };
     assert_eq!(state(), StudyState::NotFinished);
-    Log::of(&lab.home, "planlog")
+    Log::of(&lab.home, LogName::Plan)
         .close(&k, "conf", 1, 0.5)
         .unwrap();
     assert!(matches!(state(), StudyState::Finished(_)));
