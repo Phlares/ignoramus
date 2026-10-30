@@ -465,7 +465,7 @@ fn a_variance_record_must_exist_and_hold_the_stated_value() {
     let cases = [
         (Ok(None), "No record in this box has this hash."),
         (
-            Ok(Some(record("row", json!({})))),
+            Ok(Some(record("row", estimate("ppl-ratio", 4.0)))),
             "The record is not an estimate.",
         ),
         (

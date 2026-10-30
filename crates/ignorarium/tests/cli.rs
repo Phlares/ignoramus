@@ -1,4 +1,7 @@
+mod common;
+
 use assert_cmd::Command;
+use ignorarium::home::Home;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -1005,6 +1008,79 @@ fn check_refuses_a_made_up_variance_record() {
     assert!(out.contains("error[E-CNF-003]"), "{out}");
     assert!(
         out.contains("No record in this box has this hash."),
+        "{out}"
+    );
+}
+
+/// The template as a confirmatory plan that states variance 4 and takes it from `source`.
+fn confirmatory_from(source: &str) -> String {
+    std::fs::read_to_string(TEMPLATE)
+        .unwrap()
+        .replace("mode = \"exploratory\"", "mode = \"confirmatory\"")
+        .replace("value = 0.0", "value = 4.0")
+        .replace("source = \"stated\"", &format!("source = \"{source}\""))
+}
+
+fn check_out(home: &Path, spec: &Path, code: i32) -> String {
+    stdout(&bin(home).arg("check").arg(spec).assert().code(code))
+}
+
+#[test]
+fn check_accepts_a_variance_record_that_holds_the_stated_value() {
+    let (_d, home, spec) = setup(|t| t);
+    let h = common::plant_estimate(&Home::open_at(&home).unwrap(), "ppl-ratio", 4.0);
+    std::fs::write(&spec, confirmatory_from(&format!("record:{h}"))).unwrap();
+    let out = check_out(&home, &spec, 1);
+    assert!(!out.contains("E-CNF-003"), "{out}");
+}
+
+#[test]
+fn check_refuses_a_variance_record_with_another_value() {
+    let (_d, home, spec) = setup(|t| t);
+    let h = common::plant_estimate(&Home::open_at(&home).unwrap(), "ppl-ratio", 5.0);
+    std::fs::write(&spec, confirmatory_from(&format!("record:{h}"))).unwrap();
+    let out = check_out(&home, &spec, 1);
+    assert!(out.contains("error[E-CNF-003]"), "{out}");
+    assert!(
+        out.contains("The record holds variance 5, and the plan states 4."),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_broken_key_fails_only_the_checks_that_need_a_record() {
+    let (_d, home, spec) = setup(|t| t);
+    Home::open_at(&home).unwrap();
+    std::fs::write(home.join("keys/box.ed25519"), b"short").unwrap();
+    // An exploratory plan reads no record, so the key is never read.
+    assert!(!check_out(&home, &spec, 0).contains("E-CNF-003"));
+    std::fs::write(
+        &spec,
+        confirmatory_from(&format!("record:{}", "0".repeat(64))),
+    )
+    .unwrap();
+    let out = check_out(&home, &spec, 1);
+    assert!(out.contains("error[E-CNF-003]"), "{out}");
+    assert!(
+        out.contains("The box cannot read its records: key file has 5 bytes"),
+        "{out}"
+    );
+}
+
+#[test]
+fn logs_without_a_box_key_cannot_answer() {
+    let (_d, home, spec) = setup(|t| t);
+    Home::open_at(&home).unwrap();
+    std::fs::create_dir(home.join("studies/old")).unwrap();
+    std::fs::write(home.join("studies/old/records.jsonl"), "{}\n").unwrap();
+    std::fs::write(
+        &spec,
+        confirmatory_from(&format!("record:{}", "0".repeat(64))),
+    )
+    .unwrap();
+    let out = check_out(&home, &spec, 1);
+    assert!(
+        out.contains("The box cannot read its records: the box key is missing"),
         "{out}"
     );
 }

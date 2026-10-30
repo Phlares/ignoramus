@@ -821,5 +821,15 @@ fn find_fails_on_a_log_that_does_not_verify() {
         .replace("\"n\":2", "\"n\":9");
     std::fs::write(&p, damaged).unwrap();
     let err = records::find(&home, &k.verifying_key(), &records::hash(&first)).unwrap_err();
-    assert!(matches!(err, VerifyError::BadHash { seq: 0 }), "{err}");
+    assert!(matches!(err, VerifyError::In { .. }), "{err}");
+    assert_eq!(err.to_string(), "study b: record 0: hash does not match");
+}
+
+#[test]
+fn find_skips_entries_that_are_not_study_folders() {
+    let k = key(1);
+    let (_d, home, first, _) = two_studies(&k);
+    std::fs::write(home.root.join("studies/notes.txt"), "x").unwrap();
+    let got = records::find(&home, &k.verifying_key(), &records::hash(&first)).unwrap();
+    assert_eq!(got, Some(first));
 }

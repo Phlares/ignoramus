@@ -81,6 +81,11 @@ pub enum VerifyError {
         seq: u64,
     },
     Io(io::Error),
+    /// The failure is in the log of this study.
+    In {
+        study: String,
+        cause: Box<VerifyError>,
+    },
 }
 
 impl std::fmt::Display for VerifyError {
@@ -91,6 +96,7 @@ impl std::fmt::Display for VerifyError {
             VerifyError::BadSig { seq } => write!(f, "record {seq}: signature does not match"),
             VerifyError::BrokenChain { seq } => write!(f, "record {seq}: chain is broken"),
             VerifyError::Io(e) => write!(f, "I/O failed: {e}"),
+            VerifyError::In { study, cause } => write!(f, "study {study}: {cause}"),
         }
     }
 }
@@ -179,28 +185,43 @@ pub fn read_all(path: &Path, key: &VerifyingKey) -> Result<Vec<Record>, VerifyEr
 
 /// Hex SHA-256 of the record's canonical bytes: the `hash` that `append` stores.
 pub fn hash(r: &Record) -> String {
-    // A record is plain data, so canonical serialization cannot fail.
-    sha256_hex(&canonical_of(r).unwrap_or_default())
+    let bytes =
+        canonical_of(r).expect("a record is plain data, so canonical serialization cannot fail");
+    sha256_hex(&bytes)
 }
 
-/// The record with this hash, from any study log in the box, read in sorted folder order.
-/// A log that fails verification is an error, never skipped.
-pub fn find(home: &Home, key: &VerifyingKey, hash: &str) -> Result<Option<Record>, VerifyError> {
-    let mut dirs = Vec::new();
+/// The study folders of the box that hold a record log, as (study id, log path), sorted by id.
+/// Entries that are not folders are skipped.
+pub fn logs(home: &Home) -> io::Result<Vec<(String, std::path::PathBuf)>> {
+    let mut out = Vec::new();
     match std::fs::read_dir(home.root.join("studies")) {
         Ok(rd) => {
             for e in rd {
-                dirs.push(e?.path());
+                let e = e?;
+                let log = e.path().join("records.jsonl");
+                if e.file_type()?.is_dir() && log.exists() {
+                    out.push((e.file_name().to_string_lossy().into_owned(), log));
+                }
             }
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.into()),
+        Err(e) => return Err(e),
     }
-    dirs.sort();
+    out.sort();
+    Ok(out)
+}
+
+/// The record with this hash, from any study log in the box, read in sorted folder order.
+/// A log that fails verification is an error that names its study, never skipped.
+pub fn find(home: &Home, key: &VerifyingKey, hash: &str) -> Result<Option<Record>, VerifyError> {
     // Every log is verified, even after a match: a box with a damaged log answers nothing.
     let mut found = None;
-    for d in dirs {
-        for r in read_all(&d.join("records.jsonl"), key)? {
+    for (study, log) in logs(home)? {
+        let read = read_all(&log, key).map_err(|cause| VerifyError::In {
+            study,
+            cause: Box::new(cause),
+        })?;
+        for r in read {
             if found.is_none() && self::hash(&r) == hash {
                 found = Some(r);
             }

@@ -47,18 +47,24 @@ impl PriorUse for Unreadable {
     }
 }
 
-/// The records of the box in `home`. With no box key there are none.
+/// The records of the box in `home`. `key` is the box key, or why it cannot be read.
+/// With no key the box holds no records, unless a study log exists: that log cannot be trusted.
 pub struct HomeRecords {
     pub home: Home,
-    pub key: Option<VerifyingKey>,
+    pub key: Result<Option<VerifyingKey>, String>,
 }
 
 impl BoxRecords for HomeRecords {
     fn find(&self, hash: &str) -> Result<Option<records::Record>, String> {
-        let Some(key) = &self.key else {
-            return Ok(None);
-        };
-        records::find(&self.home, key, hash).map_err(|e| e.to_string())
+        match &self.key {
+            Err(e) => Err(e.clone()),
+            Ok(Some(key)) => records::find(&self.home, key, hash).map_err(|e| e.to_string()),
+            Ok(None) => match records::logs(&self.home) {
+                Ok(logs) if logs.is_empty() => Ok(None),
+                Ok(_) => Err("the box key is missing".to_string()),
+                Err(e) => Err(e.to_string()),
+            },
+        }
     }
 }
 
@@ -98,8 +104,8 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         Err(e) => Box::new(Unreadable(e.to_string())),
     };
     let key = keys::load(home)
-        .map_err(|e| CliError::usage(e.to_string()))?
-        .map(|k| k.verifying_key());
+        .map(|k| k.map(|k| k.verifying_key()))
+        .map_err(|e| e.to_string());
     let cc = CheckCtx {
         study_dir: study_dir(spec_path),
         prior,
