@@ -300,18 +300,23 @@ struct Binfmt {
 }
 
 impl Binfmt {
-    /// The host's. binfmt_misc not mounted lists nothing.
+    /// The host's.
     fn host() -> Binfmt {
         Binfmt {
-            list: || match std::fs::read_dir(BINFMT) {
-                Ok(dir) => dir
-                    .map(|e| Ok(e?.file_name().to_string_lossy().into_owned()))
-                    .collect(),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
-                Err(e) => Err(e),
-            },
+            list: || names_in(Path::new(BINFMT)),
             read: |name| std::fs::read_to_string(Path::new(BINFMT).join(name)),
         }
+    }
+}
+
+/// The names in the folder `dir`; none when it does not exist, as binfmt_misc may not be.
+fn names_in(dir: &Path) -> io::Result<Vec<String>> {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => entries
+            .map(|e| Ok(e?.file_name().to_string_lossy().into_owned()))
+            .collect(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e),
     }
 }
 
@@ -766,6 +771,23 @@ mod tests {
             panic!("probed available")
         };
         assert!(why.starts_with("cannot run /nonexistent/bwrap: "), "{why}");
+    }
+
+    #[test]
+    fn names_in_lists_a_folder_and_nothing_for_a_missing_one() {
+        let d = tempfile::TempDir::new().unwrap();
+        std::fs::write(d.path().join("WSLInterop"), "").unwrap();
+        std::fs::write(d.path().join("status"), "").unwrap();
+        let mut got = names_in(d.path()).unwrap();
+        got.sort();
+        assert_eq!(got, ["WSLInterop", "status"]);
+        assert_eq!(
+            names_in(&d.path().join("absent")).unwrap(),
+            Vec::<String>::new()
+        );
+        // A path that is not a folder is an error, not an empty listing.
+        let err = names_in(&d.path().join("status")).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::ENOTDIR));
     }
 
     #[test]
