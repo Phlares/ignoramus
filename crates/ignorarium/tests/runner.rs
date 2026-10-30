@@ -8,10 +8,13 @@ use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome, Watch};
 use ignorarium::budget::{Cost, FakeMeter, MeterError};
 use ignorarium::canon::sha256_hex;
 use ignorarium::control::State;
-use ignorarium::derived::{Analysis, Estimate, StudyState, contrast_key};
+use ignorarium::derived::{
+    Analysis, BoundResult, Estimate, Register, StudyState, Verdict, contrast_key,
+};
 use ignorarium::planlog::store::PlanLog;
 use ignorarium::prior::{PriorUse, file_hashes};
 use ignorarium::runner::{RunError, RunPlan, RunStatus, prepare, prepare_with, run, up_to};
+use ignorarium::stream::{Log, LogName};
 use ignorarium::{analysis, estimate, keys, records, schedule, spec};
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -273,7 +276,8 @@ fn run_writes_one_record_per_row_in_order() {
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
     let key = keys::load(&lab.home).unwrap().unwrap();
     let log = dir.join("records.jsonl");
-    assert_eq!(records::verify(&log, &key.verifying_key()).unwrap(), 9);
+    // Register, 6 rows, then the analysis, estimate and verdict records.
+    assert_eq!(records::verify(&log, &key.verifying_key()).unwrap(), 10);
     let rows = rows_of(&lab, "s1");
     assert_eq!(rows.len(), 6);
     for (i, r) in rows.iter().enumerate() {
@@ -2088,17 +2092,25 @@ fn after_the_rows(lab: &Lab, id: &str) -> Vec<String> {
     all[last + 1..].iter().map(|r| r.kind.clone()).collect()
 }
 
-/// Keep the first `n` records of the study's log: the log a crash after record `n` leaves.
-fn keep_records(dir: &std::path::Path, n: usize) {
-    let log = dir.join("records.jsonl");
-    let text = std::fs::read_to_string(&log).unwrap();
-    std::fs::write(&log, text.split_inclusive('\n').take(n).collect::<String>()).unwrap();
+/// Keep the first `n` records of the log at `path`: the log a crash after record `n` leaves.
+fn keep_lines(path: &std::path::Path, n: usize) {
+    let text = std::fs::read_to_string(path).unwrap();
+    std::fs::write(path, text.split_inclusive('\n').take(n).collect::<String>()).unwrap();
 }
 
+/// Keep the first `n` records of the study's log.
+fn keep_records(dir: &std::path::Path, n: usize) {
+    keep_lines(&dir.join("records.jsonl"), n);
+}
+
+/// True when the study is finished as a later study reads it, its stream slot included.
 fn finished(lab: &Lab, id: &str) -> bool {
-    let all = common::records_of(lab, id);
-    // An exploratory study holds no stream slot.
-    let state = StudyState::of(Some(all), |_, _| Ok(false)).unwrap();
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let closed = |log: &str, slot| {
+        let log = LogName::parse(log).map_err(|e| e.to_string())?;
+        (Log::of(&lab.home, log).closed(&key.verifying_key(), id, slot)).map_err(|e| e.to_string())
+    };
+    let state = StudyState::of(Some(common::records_of(lab, id)), closed).unwrap();
     matches!(state, StudyState::Finished(_))
 }
 
@@ -2114,8 +2126,9 @@ fn a_finished_run_writes_each_record_once_and_heals_a_crash() {
     );
     let plan = plan_of(&lab, "fin");
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
-    // Register, 6 rows, the analysis record, then one estimate per hypothesis.
-    let kinds = ["analysis", "estimate", "estimate"];
+    // Register, 6 rows, the analysis record, one estimate per hypothesis, then one verdict per
+    // hypothesis.
+    let kinds = ["analysis", "estimate", "estimate", "verdict", "verdict"];
     assert_eq!(after_the_rows(&lab, "fin"), kinds);
     assert!(finished(&lab, "fin"));
     let all = common::records_of(&lab, "fin");
@@ -2123,8 +2136,17 @@ fn a_finished_run_writes_each_record_once_and_heals_a_crash() {
     let version = env!("CARGO_PKG_VERSION");
     assert_eq!(
         (a.box_version.as_str(), a.estimates, a.verdicts, a.slot),
-        (version, 2, 0, None)
+        (version, 2, 2, None)
     );
+    // Neither hypothesis has a claim: each gets verdict `none`.
+    let verdicts = |all: &[records::Record]| -> Vec<(String, String)> {
+        (all[10..].iter())
+            .map(|r| Verdict::of(r).unwrap())
+            .map(|v| (v.hypothesis, v.verdict))
+            .collect()
+    };
+    let none = |h: &str| (h.to_string(), "none".to_string());
+    assert_eq!(verdicts(&all), [none("H1"), none("H2")]);
     // The commit hashes the stored spec's question, outcomes and design, then the version.
     let mut stored = spec::load(&dir.join("spec.toml")).unwrap().value;
     estimate::apply_defaults(&mut stored);
@@ -2133,7 +2155,10 @@ fn a_finished_run_writes_each_record_once_and_heals_a_crash() {
     stored["design"]["power"] = serde_json::json!(0.95);
     assert_ne!(a.commit, analysis::commit(&stored, version).unwrap());
     assert_ne!(a.commit, analysis::commit(&stored, "9.9.9").unwrap());
-    let es: Vec<Estimate> = all[8..].iter().map(|r| Estimate::of(r).unwrap()).collect();
+    let es: Vec<Estimate> = all[8..10]
+        .iter()
+        .map(|r| Estimate::of(r).unwrap())
+        .collect();
     assert_eq!(es[0].hypothesis, "H1");
     assert_eq!(es[1].hypothesis, "H2");
     for e in &es {
@@ -2143,22 +2168,24 @@ fn a_finished_run_writes_each_record_once_and_heals_a_crash() {
     }
     // A second run adds nothing.
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
-    assert_eq!(common::records_of(&lab, "fin").len(), 10);
+    assert_eq!(common::records_of(&lab, "fin").len(), 12);
     // A crash after any record of the tail: the next run adds what is missing, once.
-    for kept in [10, 9, 8] {
+    for kept in [12, 11, 10, 9, 8] {
         keep_records(&dir, kept);
-        assert_eq!(finished(&lab, "fin"), kept == 10, "kept {kept}");
+        assert_eq!(finished(&lab, "fin"), kept == 12, "kept {kept}");
         assert_eq!(run(&plan).unwrap(), RunStatus::Done);
         assert_eq!(after_the_rows(&lab, "fin"), kinds, "kept {kept}");
         assert!(finished(&lab, "fin"));
+        let all = common::records_of(&lab, "fin");
         assert_eq!(
-            common::records_of(&lab, "fin")[8..]
+            all[8..10]
                 .iter()
                 .map(|r| Estimate::of(r).unwrap().hypothesis)
                 .collect::<Vec<_>>(),
             ["H1", "H2"],
             "kept {kept}"
         );
+        assert_eq!(verdicts(&all), [none("H1"), none("H2")], "kept {kept}");
     }
     // A crash after the last row and before the analysis record: it is written first.
     keep_records(&dir, 7);
@@ -2282,10 +2309,15 @@ fn a_heal_by_another_box_version_is_refused_only_when_it_adds_something() {
         other => panic!("{other:?}"),
     }
     assert_eq!(common::records_of(&lab, "vers").len(), 9);
-    // With every estimate there, nothing is added and nothing is refused.
+    // With every estimate there and a verdict missing, it is still refused.
     append_record(&lab, "vers", "estimate", all[9].body.clone());
+    append_record(&lab, "vers", "verdict", all[10].body.clone());
+    assert!(matches!(run(&plan), Err(RunError::Records(_))));
+    assert_eq!(common::records_of(&lab, "vers").len(), 11);
+    // With every record there, nothing is added and nothing is refused.
+    append_record(&lab, "vers", "verdict", all[11].body.clone());
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
-    assert_eq!(common::records_of(&lab, "vers").len(), 10);
+    assert_eq!(common::records_of(&lab, "vers").len(), 12);
 }
 
 /// `staged`, with arm-b's `bits` taken from study `chooser`.
@@ -2370,4 +2402,200 @@ fn estimate_keys_match_across_studies_with_the_same_resolved_params() {
     }
     assert_eq!(hashes[0], hashes[1]);
     assert_ne!(hashes[0], hashes[2]);
+}
+
+// ---- a finished run records a verdict per hypothesis and closes its stream slot ----
+
+/// `common::confirmatory` with one unit per cluster: 15 clusters, 30 rows. Its claim: below 0
+/// by the median.
+fn one_unit_each(t: String) -> String {
+    common::confirmatory(t).replace("units = 3", "units = 1")
+}
+
+/// A payload whose `arm-a` value is `v` against the reference's 8: 6 pairs to -25 %, 10 to
+/// +25 %.
+fn arm_a_at(v: u32) -> String {
+    format!(
+        "#!/bin/sh\ncase \"$2\" in exact) v=8;; *) v={v};; esac\nprintf '{{\"ppl\": %s}}' \"$v\" > \"$IGNORARIUM_OUT/values.json\"\n"
+    )
+}
+
+/// The records of the stream of `log`, as (kind, body).
+fn stream_of(lab: &Lab, log: LogName) -> Vec<(String, serde_json::Value)> {
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let path = Log::of(&lab.home, log).path().to_path_buf();
+    (records::read_all(&path, &key.verifying_key())
+        .unwrap()
+        .into_iter())
+    .map(|r| (r.kind, r.body))
+    .collect()
+}
+
+/// The confirmatory study `id`, its spec edited by `edit` after `one_unit_each`, registered in
+/// a box whose `my-pilot` gives the sd and icc, then run to the end with `payload` on `backend`.
+fn tested(
+    lab: &Lab,
+    id: &str,
+    edit: impl Fn(String) -> String,
+    payload: &str,
+    backend: Box<dyn Backend>,
+) -> RunPlan {
+    common::pilot(&lab.home, vec![common::arm_a()]);
+    register_study(lab, id, |t| edit(one_unit_each(t)), &[], payload);
+    let mut plan = plan_of(lab, id);
+    plan.backend = backend;
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    plan
+}
+
+/// The one verdict record of the study.
+fn verdict_of(lab: &Lab, id: &str) -> Verdict {
+    let vs = kind_of(lab, id, "verdict");
+    assert_eq!(vs.len(), 1);
+    Verdict::of(&vs[0]).unwrap()
+}
+
+/// The level of the stream slot the study's register record holds.
+fn level_of(lab: &Lab, id: &str) -> f64 {
+    let register = Register::of(&kind_of(lab, id, "register")[0]).unwrap();
+    register.alpha.unwrap().level
+}
+
+fn close_of(id: &str, e: f64, discovery: bool) -> (String, serde_json::Value) {
+    let body = serde_json::json!({ "slot": 1, "study": id, "e_value": e, "discovery": discovery });
+    ("stream.close".into(), body)
+}
+
+#[test]
+fn a_planted_effect_passes_and_closes_a_discovery() {
+    let lab = lab();
+    // Every unit pairs to -25 %, below the margin 0: each of the 15 clusters scores 1, and the
+    // 14 bets of 1/2 give 1.5^14 = 292, past 1 / 0.005.
+    tested(&lab, "planted", |t| t, &arm_a_at(6), Box::new(Level0));
+    let v = verdict_of(&lab, "planted");
+    let level = level_of(&lab, "planted");
+    let e = v.e_value.unwrap();
+    assert!(
+        (e - 1.5f64.powi(14)).abs() < 1e-9 && e >= 1.0 / level,
+        "{e}"
+    );
+    let want = Verdict {
+        hypothesis: "H1".into(),
+        verdict: "pass".into(),
+        basis: "test".into(),
+        level: Some(level),
+        e_value: Some(e),
+        bounds: vec![BoundResult {
+            stratum: "".into(),
+            side: "below".into(),
+            margin: 0.0,
+            clusters: 15,
+            value: Some(e),
+        }],
+        incomplete_units: 0,
+        reason: None,
+    };
+    assert_eq!(v, want);
+    // The slot closes with the study's e-value: a discovery at its level.
+    let stream = stream_of(&lab, LogName::Plan);
+    assert_eq!(stream.last(), Some(&close_of("planted", e, true)));
+    assert!(finished(&lab, "planted"));
+}
+
+#[test]
+fn a_null_study_fails_and_closes_without_a_discovery() {
+    let lab = lab();
+    // Every unit pairs to +25 %: no cluster lies below the margin, and the test never bets.
+    // The study registers into the test log, and its slot closes there.
+    let test_log = |t: String| t.replace("test_log = false", "test_log = true");
+    tested(&lab, "null", test_log, &arm_a_at(10), Box::new(Level0));
+    let v = verdict_of(&lab, "null");
+    assert_eq!(
+        (v.verdict.as_str(), v.e_value, v.reason),
+        ("fail", Some(1.0), None)
+    );
+    let stream = stream_of(&lab, LogName::Test);
+    assert_eq!(stream.last(), Some(&close_of("null", 1.0, false)));
+    assert!(stream_of(&lab, LogName::Plan).is_empty());
+    assert!(finished(&lab, "null"));
+}
+
+#[test]
+fn a_void_row_in_scope_fails_the_claim() {
+    let lab = lab();
+    // The planted effect, with row 0 void: its unit has no paired value.
+    let (b, _) = fake(vec![Exit::Payload(1)]);
+    tested(&lab, "void", |t| t, &arm_a_at(6), Box::new(b));
+    assert_eq!(rows_of(&lab, "void")[0].body["exit"], "payload:1");
+    let v = verdict_of(&lab, "void");
+    assert_eq!(
+        (v.verdict.as_str(), v.e_value, v.incomplete_units),
+        ("fail", Some(0.0), 1)
+    );
+    assert_eq!(v.reason.as_deref(), Some("incomplete units in scope: 1"));
+    // The bound reports the test on the 14 complete clusters.
+    assert_eq!(v.bounds[0].clusters, 14);
+    let e = v.bounds[0].value.unwrap();
+    assert!((e - 1.5f64.powi(13)).abs() < 1e-9, "{e}");
+    // The slot still closes, with e-value 0.
+    let stream = stream_of(&lab, LogName::Plan);
+    assert_eq!(stream.last(), Some(&close_of("void", 0.0, false)));
+    assert!(finished(&lab, "void"));
+}
+
+#[test]
+fn verdicts_and_the_close_are_written_once() {
+    let lab = lab();
+    let plan = tested(&lab, "once", |t| t, &arm_a_at(6), Box::new(Level0));
+    let dir = lab.home.study_dir("once");
+    let stream = Log::of(&lab.home, LogName::Plan).path().to_path_buf();
+    let kinds = ["analysis", "estimate", "verdict"];
+    assert_eq!(after_the_rows(&lab, "once"), kinds);
+    let all = common::records_of(&lab, "once");
+    let n = all.len();
+    let a = all.iter().find_map(Analysis::of).unwrap();
+    assert_eq!((a.estimates, a.verdicts, a.slot), (1, 1, Some(1)));
+    let closed = stream_of(&lab, LogName::Plan);
+    let kinds_of = |s: &[(String, serde_json::Value)]| -> Vec<String> {
+        s.iter().map(|(k, _)| k.clone()).collect()
+    };
+    assert_eq!(
+        kinds_of(&closed),
+        ["stream.config", "stream.open", "stream.close"]
+    );
+    let bodies = |rs: &[records::Record]| -> Vec<serde_json::Value> {
+        rs.iter().map(|r| r.body.clone()).collect()
+    };
+    // A second run adds nothing, to the study's log or to the stream.
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(common::records_of(&lab, "once").len(), n);
+    assert_eq!(stream_of(&lab, LogName::Plan), closed);
+    // A crash before the close: after the verdict, after the estimate, after the analysis
+    // record, or before it. The next run adds what is missing, once, and closes the slot
+    // with the same e-value.
+    for kept in [n, n - 1, n - 2, n - 3] {
+        keep_records(&dir, kept);
+        keep_lines(&stream, 2);
+        assert!(!finished(&lab, "once"), "kept {kept}");
+        assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+        assert_eq!(after_the_rows(&lab, "once"), kinds, "kept {kept}");
+        let now = common::records_of(&lab, "once");
+        assert_eq!(bodies(&now[n - 3..]), bodies(&all[n - 3..]), "kept {kept}");
+        assert_eq!(stream_of(&lab, LogName::Plan), closed, "kept {kept}");
+        assert!(finished(&lab, "once"), "kept {kept}");
+    }
+    // Another box version wrote every record but the close: it is refused, and the slot stays
+    // open for that box.
+    keep_records(&dir, n - 3);
+    let mut old = all[n - 3].body.clone();
+    old["box_version"] = serde_json::json!("0.0.0");
+    append_record(&lab, "once", "analysis", old);
+    append_record(&lab, "once", "estimate", all[n - 2].body.clone());
+    append_record(&lab, "once", "verdict", all[n - 1].body.clone());
+    keep_lines(&stream, 2);
+    match run(&plan) {
+        Err(RunError::Records(why)) => assert!(why.contains("0.0.0"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(stream_of(&lab, LogName::Plan).len(), 2);
 }

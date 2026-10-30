@@ -2,14 +2,21 @@
 //! condition's value for the same unit and repeat.
 use crate::canon::{sha256_hex, to_canonical};
 use crate::derived::{
-    ANALYSIS, Analysis, Candidate, ESTIMATE, Estimate, Register, Selection, contrast_key,
+    ANALYSIS, Analysis, BoundResult, Candidate, ESTIMATE, Estimate, Register, Selection, VERDICT,
+    Verdict, contrast_key,
 };
 use crate::prior::same_data;
 use crate::records::{self, Record, RecordDraft};
 use crate::runner::{RunError, RunPlan, stored_spec};
 use crate::schedule::SELECTION_STAGE;
-use crate::spec::model::{Direction, Outcome, Paired as Rule, Role, SELECTED, Spec};
+use crate::seed::seed;
+use crate::spec::model::{
+    Claim, Direction, Hypothesis, Mode, Paired as Rule, Role, SELECTED, Spec,
+};
+use crate::stream::{Log, LogName};
 use crate::units::{self, Cluster};
+use evidence::rng::Rng;
+use evidence::{Tail, claim, tree};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -197,19 +204,12 @@ pub fn estimates(
         let Some(terms) = terms else { continue };
         let (key, key_hash) =
             contrast_key(outcome, u64::from(spec.design.repeats), &reference, &terms);
-        let mut groups: Vec<&str> = Vec::new();
-        for g in h.strata.iter().map(String::as_str).chain([""]) {
-            if !groups.contains(&g) {
-                groups.push(g);
-            }
+        let mut groups = claim_strata(h);
+        if !groups.contains(&"") {
+            groups.push("");
         }
         for stratum in groups {
-            let samples: Vec<Vec<f64>> = (clusters.iter())
-                .filter(|c| c.role == Role::Confirmation)
-                .filter(|c| stratum.is_empty() || c.stratum == stratum)
-                .map(|c| cluster_values(c, outcome, &h.contrast, paired))
-                .filter(|xs| !xs.is_empty())
-                .collect();
+            let (samples, _) = group(clusters, stratum, &outcome.id, &h.contrast, paired);
             if let Some(f) = fit(&samples) {
                 out.push(Estimate {
                     hypothesis: h.id.clone(),
@@ -229,10 +229,34 @@ pub fn estimates(
     out
 }
 
+/// The confirmation clusters of `stratum` (every one for the pooled group `""`) that have a
+/// complete unit, each as the contrast's values over its complete units, and the count of
+/// picked units in them all that are incomplete.
+fn group(
+    clusters: &[Cluster],
+    stratum: &str,
+    outcome: &str,
+    contrast: &BTreeMap<String, f64>,
+    paired: &Paired,
+) -> (Vec<Vec<f64>>, u64) {
+    let mut incomplete = 0;
+    let samples = (clusters.iter())
+        .filter(|c| c.role == Role::Confirmation)
+        .filter(|c| stratum.is_empty() || c.stratum == stratum)
+        .map(|c| {
+            let xs = cluster_values(c, outcome, contrast, paired);
+            incomplete += (c.picked.len() - xs.len()) as u64;
+            xs
+        })
+        .filter(|xs| !xs.is_empty())
+        .collect();
+    (samples, incomplete)
+}
+
 /// The contrast's value for each picked unit of `c` that has a paired value for every term.
 fn cluster_values(
     c: &Cluster,
-    outcome: &Outcome,
+    outcome: &str,
     contrast: &BTreeMap<String, f64>,
     paired: &Paired,
 ) -> Vec<f64> {
@@ -240,7 +264,7 @@ fn cluster_values(
         .filter_map(|&i| {
             let unit = units::key(&c.path, i);
             (contrast.iter())
-                .map(|(cond, w)| Some(w * paired.get(&unit, cond, &outcome.id)?))
+                .map(|(cond, w)| Some(w * paired.get(&unit, cond, outcome)?))
                 .sum::<Option<f64>>()
         })
         .collect()
@@ -288,6 +312,184 @@ fn fit(samples: &[Vec<f64>]) -> Option<Fit> {
     (mean.is_finite() && var.is_finite()).then_some(Fit { mean, var, icc })
 }
 
+/// One verdict per hypothesis, in spec order, and for a confirmatory study the e-value its
+/// stream slot closes with. A hypothesis with no claim gets `none`. A claim is held in each
+/// stratum it lists, or in the pooled group `""` when it lists none. There each confirmation
+/// cluster with a complete unit gives one observation per bound (`claim::observation`), from
+/// its complete units only.
+/// - Confirmatory: per stratum, the observations in the order `claim::order` draws from
+///   `seed(spec_hash, "test/<id>/<stratum>")`, then each bound's `claim::e_value`. The
+///   hypothesis takes the least of them, an e-value under the union of the bounds' nulls, or 0
+///   when a unit in scope is incomplete. `tree::decide` splits `level` by `alpha_share` and
+///   passes each hypothesis it rejects; its merged e-value is the study's, or 0 when it cannot
+///   decide.
+/// - Exploratory: the claim passes when `claim::holds` for every bound in every stratum.
+///
+/// An e-value past the largest float is kept as that float: records and the stream hold
+/// finite numbers, and a smaller e-value is still one.
+pub fn verdicts(
+    spec: &Spec,
+    paired: &Paired,
+    clusters: &[Cluster],
+    spec_hash: &[u8; 32],
+    level: Option<f64>,
+) -> (Vec<Verdict>, Option<f64>) {
+    let tested = spec.study.mode == Mode::Confirmatory;
+    let hypotheses = &spec.question.hypotheses;
+    let mut out: Vec<Verdict> = (hypotheses.iter())
+        .map(|h| judge(h, paired, clusters, spec_hash, tested))
+        .collect();
+    if !tested {
+        return (out, None);
+    }
+    let claims: Vec<usize> = (0..out.len()).filter(|&i| out[i].basis == TEST).collect();
+    let shares: Vec<f64> = (claims.iter())
+        .map(|&i| hypotheses[i].alpha_share.unwrap_or(0.0))
+        .collect();
+    let es: Vec<Option<f64>> = claims.iter().map(|&i| out[i].e_value).collect();
+    let study = match tree::decide(level.unwrap_or(0.0), &shares, &es) {
+        Ok(tree) => {
+            for (k, &i) in claims.iter().enumerate() {
+                out[i].level = Some(tree.levels[k]);
+                if tree.rejected[k] {
+                    out[i].verdict = PASS.into();
+                }
+            }
+            finite(tree.e_value)
+        }
+        Err(e) => {
+            let why = format!("the study's level does not split over its claims: {e}");
+            for &i in &claims {
+                out[i].reason.get_or_insert_with(|| why.clone());
+            }
+            0.0
+        }
+    };
+    (out, Some(study))
+}
+
+const PASS: &str = "pass";
+const NONE: &str = "none";
+const TEST: &str = "test";
+
+/// The verdict on `h` before the level is split: a claim fails until the tree passes it.
+fn judge(
+    h: &Hypothesis,
+    paired: &Paired,
+    clusters: &[Cluster],
+    spec_hash: &[u8; 32],
+    tested: bool,
+) -> Verdict {
+    let scopes: Vec<Scope> = (claim_strata(h).into_iter())
+        .map(|s| {
+            let (samples, incomplete) = group(clusters, s, &h.outcome, &h.contrast, paired);
+            (s, samples, incomplete)
+        })
+        .collect();
+    let incomplete = scopes.iter().map(|(_, _, n)| n).sum();
+    let mut v = Verdict {
+        hypothesis: h.id.clone(),
+        verdict: NONE.into(),
+        basis: NONE.into(),
+        level: None,
+        e_value: None,
+        bounds: vec![],
+        incomplete_units: incomplete,
+        reason: None,
+    };
+    let Some(claim) = h.claim else {
+        return v;
+    };
+    v.verdict = "fail".into();
+    v.basis = if tested { TEST } else { "estimate" }.into();
+    let results = match held(h, &claim, &scopes, spec_hash, tested) {
+        Ok(results) => results,
+        Err(e) => {
+            v.reason = Some(format!("the claim cannot be tested: {e}"));
+            v.e_value = tested.then_some(0.0);
+            return v;
+        }
+    };
+    let holds = results.iter().all(|(_, holds)| *holds);
+    v.bounds = results.into_iter().map(|(b, _)| b).collect();
+    if tested && incomplete > 0 {
+        v.reason = Some(format!("incomplete units in scope: {incomplete}"));
+        v.e_value = Some(0.0);
+    } else if tested {
+        let least = v.bounds.iter().filter_map(|b| b.value).reduce(f64::min);
+        v.e_value = Some(least.unwrap_or(0.0));
+    } else if holds {
+        v.verdict = PASS.into();
+    }
+    v
+}
+
+/// One stratum of a claim's scope: its name, the values of each cluster's complete units, and
+/// the count of incomplete units.
+type Scope<'a> = (&'a str, Vec<Vec<f64>>, u64);
+
+/// Each bound of `claim` in each of `scopes`, with whether it holds by the point estimate. In
+/// a test the bound's value is its e-value, else the mean of its observations.
+fn held(
+    h: &Hypothesis,
+    claim: &Claim,
+    scopes: &[Scope],
+    spec_hash: &[u8; 32],
+    tested: bool,
+) -> Result<Vec<(BoundResult, bool)>, evidence::Error> {
+    let stat = (h.statistic.as_ref())
+        .ok_or(evidence::Error::Parameter("statistic"))?
+        .to_evidence();
+    let mut out = Vec::new();
+    for (stratum, samples, _) in scopes {
+        let path = format!("test/{}/{stratum}", h.id);
+        let order = claim::order(samples.len(), &mut Rng::from_seed(seed(spec_hash, &path)));
+        for b in claim.bounds() {
+            let obs = (order.iter())
+                .map(|&i| claim::observation(&stat, &b, &samples[i]))
+                .collect::<Result<Vec<f64>, _>>()?;
+            let value = if tested {
+                Some(finite(claim::e_value(&stat, &b, &obs)?))
+            } else {
+                (!obs.is_empty()).then(|| obs.iter().sum::<f64>() / obs.len() as f64)
+            };
+            let side = if b.tail == Tail::Lower {
+                "below"
+            } else {
+                "above"
+            };
+            let result = BoundResult {
+                stratum: stratum.to_string(),
+                side: side.into(),
+                margin: b.margin,
+                clusters: obs.len() as u64,
+                value,
+            };
+            out.push((result, claim::holds(&stat, &b, &obs)?));
+        }
+    }
+    Ok(out)
+}
+
+fn finite(e: f64) -> f64 {
+    e.min(f64::MAX)
+}
+
+/// The strata a claim of `h` is held in: each it lists, once, in order; `""`, the pooled
+/// group, when it lists none.
+fn claim_strata(h: &Hypothesis) -> Vec<&str> {
+    let mut strata: Vec<&str> = Vec::new();
+    for s in &h.strata {
+        if !strata.contains(&s.as_str()) {
+            strata.push(s);
+        }
+    }
+    if strata.is_empty() {
+        strata.push("");
+    }
+    strata
+}
+
 /// SHA-256 hex of the canonical `{"question", "outcomes", "design"}` of `spec` followed by
 /// `box_version`: what the analysis asked, and the box that ran it.
 pub fn commit(spec: &Value, box_version: &str) -> Result<String, RunError> {
@@ -300,8 +502,10 @@ pub fn commit(spec: &Value, box_version: &str) -> Result<String, RunError> {
 }
 
 /// When every scheduled row has a record, add what the study's results still lack: the
-/// `analysis` record first, which states how many records follow it, then each estimate it
-/// promises. A call after a crash adds only what is missing; a complete study gets nothing.
+/// `analysis` record first, which states how many records follow it, then each estimate and
+/// each verdict it promises, and last, for a study that holds a stream slot, the close of that
+/// slot with the study's e-value. A call after a crash adds only what is missing; a complete
+/// study gets nothing.
 pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
     let dir = plan.home.study_dir(&plan.study_id);
     let log = dir.join("records.jsonl");
@@ -315,28 +519,46 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
     }
     let selection = all.iter().find_map(Selection::of);
     let clusters = distinct_clusters(units::clusters(&plan.spec, &plan.spec_hash), &plan.inputs);
+    let pairs = paired(&plan.spec, &all);
     let wanted = estimates(
         &plan.spec,
         &plan.params,
-        &paired(&plan.spec, &all),
+        &pairs,
         &clusters,
         selection.as_ref(),
     );
+    let alpha = all.iter().find_map(Register::of).and_then(|r| r.alpha);
+    let level = alpha.as_ref().map(|a| a.level);
+    let (judged, study_e) = verdicts(&plan.spec, &pairs, &clusters, &plan.spec_hash, level);
     let (_, value, hash, _) = stored_spec(&dir)?;
     if hash != plan.spec_hash {
         return Err(RunError::SpecChanged);
     }
+    // The slot still open, with the stream that holds it.
+    let open = match &alpha {
+        Some(a) => {
+            let stream = Log::of(&plan.home, LogName::parse(&a.log)?);
+            let closed = stream.closed(&plan.key.verifying_key(), &plan.study_id, a.slot)?;
+            (!closed).then_some((stream, a.slot))
+        }
+        None => None,
+    };
     let version = env!("CARGO_PKG_VERSION");
     let mut have = BTreeSet::new();
+    let mut have_verdicts = BTreeSet::new();
     match all.iter().position(|r| r.kind == ANALYSIS) {
         Some(at) => {
             let promised = Analysis::of(&all[at])
                 .ok_or_else(|| RunError::Records("the analysis record does not parse".into()))?;
-            let after = all[at + 1..].iter().filter_map(Estimate::of);
-            have.extend(after.map(|e| identity(&e)));
-            if promised.box_version != version
-                && wanted.iter().any(|e| !have.contains(&identity(e)))
-            {
+            let after = &all[at + 1..];
+            have.extend(after.iter().filter_map(Estimate::of).map(|e| identity(&e)));
+            have_verdicts.extend(after.iter().filter_map(Verdict::of).map(|v| v.hypothesis));
+            let missing = wanted.iter().any(|e| !have.contains(&identity(e)))
+                || judged
+                    .iter()
+                    .any(|v| !have_verdicts.contains(&v.hypothesis))
+                || open.is_some();
+            if promised.box_version != version && missing {
                 return Err(RunError::Records(format!(
                     "the analysis record was written by box {}; box {version} does not add to it",
                     promised.box_version
@@ -348,16 +570,23 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
                 commit: commit(&value, version)?,
                 box_version: version.into(),
                 estimates: wanted.len() as u64,
-                verdicts: 0,
-                slot: (all.iter().find_map(Register::of))
-                    .and_then(|r| r.alpha)
-                    .map(|a| a.slot),
+                verdicts: judged.len() as u64,
+                slot: alpha.as_ref().map(|a| a.slot),
             };
             append(plan, &log, ANALYSIS, &body)?;
         }
     }
     for e in wanted.iter().filter(|e| !have.contains(&identity(e))) {
         append(plan, &log, ESTIMATE, e)?;
+    }
+    for v in judged
+        .iter()
+        .filter(|v| !have_verdicts.contains(&v.hypothesis))
+    {
+        append(plan, &log, VERDICT, v)?;
+    }
+    if let Some((stream, slot)) = open {
+        stream.close(&plan.key, &plan.study_id, slot, study_e.unwrap_or(0.0))?;
     }
     Ok(())
 }

@@ -83,7 +83,8 @@ fn clip(x: f64, lo: f64, hi: f64) -> f64 {
 pub fn observation(stat: &Statistic, bound: &Bound, units: &[f64]) -> Result<f64, Error> {
     let side = claimed_side(bound)?;
     Ok(match *stat {
-        Statistic::Mean { lo, hi } => mean(units.iter().map(|&x| clip(x, lo, hi))),
+        // The mean is clipped too: rounding can carry the mean of units at an end past it.
+        Statistic::Mean { lo, hi } => clip(mean(units.iter().map(|&x| clip(x, lo, hi))), lo, hi),
         Statistic::Quantile(_) => {
             let on = units.iter().filter(|&&x| on_side(x, bound.margin, side));
             on.count() as f64 / units.len() as f64

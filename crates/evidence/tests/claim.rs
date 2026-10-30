@@ -240,6 +240,20 @@ fn observation_is_the_mean_or_the_share_on_the_claimed_side() {
 }
 
 #[test]
+fn a_cluster_at_an_end_of_the_range_stays_inside_it() {
+    // Three units at -0.1 sum to -0.30000000000000004, whose third lies just past -0.1, and
+    // the same at 0.1. A cluster whose units all lie at an end, or past it, still scores.
+    let stat = Statistic::Mean { lo: -0.1, hi: 0.1 };
+    for (bound, end) in [(below(0.0), -0.1), (above(0.0), 0.1)] {
+        for units in [[end; 3], [50.0 * end; 3]] {
+            let x = observation(&stat, &bound, &units).unwrap();
+            assert_eq!(x, end, "{units:?}");
+            close(e_value(&stat, &bound, &[x, x]).unwrap(), 1.5);
+        }
+    }
+}
+
+#[test]
 fn holds_is_inclusive_at_the_margin() {
     let mean = Statistic::Mean {
         lo: -10.0,

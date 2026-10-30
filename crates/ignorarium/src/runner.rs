@@ -18,6 +18,7 @@ use crate::records::{self, RecordDraft, RecordError, VerifyError};
 use crate::schedule::{self, CONFIRMATION_STAGE, Row, SELECTION_STAGE, Schedule, ScheduleError};
 use crate::spec::model::{Mode, Param, Role, SELECTED, Spec, param_path};
 use crate::store::Store;
+use crate::stream::StreamError;
 use crate::view::{self, ViewError};
 use crate::{analysis, canon, keys, spec, sys, values};
 use ed25519_dalek::SigningKey;
@@ -210,6 +211,13 @@ impl From<VerifyError> for RunError {
 impl From<RecordError> for RunError {
     fn from(e: RecordError) -> Self {
         RunError::Records(e.to_string())
+    }
+}
+
+/// A stream that cannot be read, trusted or appended to is a records fault.
+impl From<StreamError> for RunError {
+    fn from(e: StreamError) -> Self {
+        RunError::Records(format!("stream: {e}"))
     }
 }
 

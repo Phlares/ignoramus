@@ -153,6 +153,53 @@ impl Analysis {
     }
 }
 
+/// What a finished run found for one hypothesis. `verdict` is `pass`, `fail` or `none`.
+/// `basis` names what decided it: `test`, the e-value test of a confirmatory study; `estimate`,
+/// the point estimate of an exploratory claim; `none`, a hypothesis with no claim.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Verdict {
+    pub hypothesis: String,
+    pub verdict: String,
+    pub basis: String,
+    /// The hypothesis's share of the study's level; a test only.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub level: Option<f64>,
+    /// The least e-value of its bounds, or 0 when a unit in scope is incomplete or the test
+    /// refuses the claim; a test only.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub e_value: Option<f64>,
+    /// Each bound in each stratum the claim is held to.
+    pub bounds: Vec<BoundResult>,
+    /// Picked units in scope without a paired value for every term of the contrast.
+    pub incomplete_units: u64,
+    /// Why a claim failed before its value could decide.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub reason: Option<String>,
+}
+
+impl Verdict {
+    /// `None` for another kind of record, or a body that does not parse.
+    pub fn of(r: &Record) -> Option<Verdict> {
+        body_of(r, VERDICT)
+    }
+}
+
+/// One bound of a claim in one stratum (`""` pools every confirmation cluster): `below` or
+/// `above` its margin, over the clusters that give an observation. `value` is the bound's
+/// e-value in a test and the mean of its observations in an estimate; an estimate with no
+/// observation has none.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoundResult {
+    pub stratum: String,
+    pub side: String,
+    pub margin: f64,
+    pub clusters: u64,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub value: Option<f64>,
+}
+
 /// What a study's records allow a later study to read.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StudyState {
@@ -189,10 +236,10 @@ impl StudyState {
             .filter_map(Estimate::of)
             .map(|e| (e.hypothesis, e.key_hash, e.stratum))
             .collect();
-        let verdicts: BTreeSet<&str> = after
+        let verdicts: BTreeSet<String> = after
             .iter()
-            .filter(|r| r.kind == VERDICT)
-            .filter_map(|r| r.body["hypothesis"].as_str())
+            .filter_map(Verdict::of)
+            .map(|v| v.hypothesis)
             .collect();
         if (estimates.len() as u64) < promised.estimates
             || (verdicts.len() as u64) < promised.verdicts

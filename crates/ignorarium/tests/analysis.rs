@@ -1,9 +1,13 @@
-use ignorarium::analysis::{distinct_clusters, estimates, paired, select};
-use ignorarium::derived::{Candidate, Estimate, Selection, contrast_key};
+use evidence::Tail;
+use evidence::claim::{Bound, Statistic, e_value, order};
+use evidence::rng::Rng;
+use ignorarium::analysis::{Paired, distinct_clusters, estimates, paired, select, verdicts};
+use ignorarium::derived::{BoundResult, Candidate, Estimate, Selection, Verdict, contrast_key};
 use ignorarium::records::Record;
+use ignorarium::seed::seed;
 use ignorarium::spec::model::{Direction, Role, SelectionRule, Spec};
 use ignorarium::units::Cluster;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 fn spec(kind: &str) -> Spec {
@@ -606,4 +610,424 @@ fn clusters_that_hold_the_same_data_count_once() {
     let mut mixed = all[..2].to_vec();
     mixed[1].role = Role::Selection;
     assert_eq!(distinct_clusters(mixed, &hashes).len(), 2);
+}
+
+// ---- verdicts ----
+
+const HASH: [u8; 32] = [7; 32];
+/// The level of the first slot of a stream.
+const LEVEL: f64 = 0.005;
+
+/// The template's one hypothesis, difference-paired against `base`, in a study of `mode`: it
+/// holds `strata` to `claim` by `statistic`, with the whole level.
+fn claimed(mode: &str, strata: &[&str], claim: Value, statistic: Value) -> Spec {
+    let mut v = ignorarium::spec::load("../../templates/numeric-ablation.toml".as_ref())
+        .unwrap()
+        .value;
+    v["study"]["mode"] = json!(mode);
+    v["outcomes"][0]["paired"] = json!("difference");
+    v["design"]["reference"] = json!("base");
+    let h = &mut v["question"]["hypotheses"][0];
+    h["strata"] = json!(strata);
+    h["claim"] = claim;
+    h["statistic"] = statistic;
+    h["alpha_share"] = json!(1.0);
+    Spec::from_value(&v).unwrap()
+}
+
+/// A claim below 0 on the mean, in the range [-1, 1].
+fn below_zero(mode: &str, strata: &[&str]) -> Spec {
+    claimed(
+        mode,
+        strata,
+        json!({ "below": 0.0 }),
+        json!({ "mean": [-1.0, 1.0] }),
+    )
+}
+
+/// A confirmation cluster: its path, its stratum, and the paired value of each unit.
+type Group = (String, String, Vec<f64>);
+
+fn group(path: &str, stratum: &str, xs: &[f64]) -> Group {
+    (path.into(), stratum.into(), xs.to_vec())
+}
+
+/// `n` clusters `<prefix><i>` in `stratum`, each of one unit at `x`.
+fn same(prefix: &str, stratum: &str, n: usize, x: f64) -> Vec<Group> {
+    (0..n)
+        .map(|i| group(&format!("{prefix}{i}"), stratum, &[x]))
+        .collect()
+}
+
+/// The paired values and the clusters of `groups`, every unit picked.
+fn data(spec: &Spec, groups: &[Group]) -> (Paired, Vec<Cluster>) {
+    let mut rows = Vec::new();
+    let mut clusters = Vec::new();
+    for (path, stratum, xs) in groups {
+        rows.extend(arm_a_rows(path, xs));
+        clusters.push(cluster(path, stratum, xs.len() as u32));
+    }
+    (paired(spec, &rows), clusters)
+}
+
+/// The order the test of hypothesis `id` takes the `n` clusters of `stratum` in.
+fn seeded_order(id: &str, stratum: &str, n: usize) -> Vec<usize> {
+    let path = format!("test/{id}/{stratum}");
+    order(n, &mut Rng::from_seed(seed(&HASH, &path)))
+}
+
+fn bound(stratum: &str, side: &str, margin: f64, clusters: u64, value: f64) -> BoundResult {
+    BoundResult {
+        stratum: stratum.into(),
+        side: side.into(),
+        margin,
+        clusters,
+        value: Some(value),
+    }
+}
+
+const MEAN: Statistic = Statistic::Mean { lo: -1.0, hi: 1.0 };
+const BELOW_ZERO: Bound = Bound {
+    tail: Tail::Lower,
+    margin: 0.0,
+};
+
+/// The e-value of `n` clusters at -1 below 0 on [-1, 1]: each scores 1, and the n - 1 bets of
+/// 1/2 give 1.5^(n - 1).
+fn strong(n: usize) -> f64 {
+    let e = e_value(&MEAN, &BELOW_ZERO, &vec![-1.0; n]).unwrap();
+    assert!((e / 1.5f64.powi(n as i32 - 1) - 1.0).abs() < 1e-12, "{e}");
+    e
+}
+
+#[test]
+fn a_confirmatory_claim_tests_each_bound_on_one_observation_per_cluster_in_a_seeded_order() {
+    let spec = claimed(
+        "confirmatory",
+        &[],
+        json!({ "within": [-0.5, 0.5] }),
+        json!({ "mean": [-1.0, 1.0] }),
+    );
+    // Cluster means 0.25, 0 (the 4 is clipped to 1 first), -0.25, 0.25 and 0.125.
+    let groups = [
+        group("c0", "", &[0.0, 0.5]),
+        group("c1", "", &[4.0, -1.0]),
+        group("c2", "", &[-0.25]),
+        group("c3", "", &[0.25, 0.25, 0.25]),
+        group("c4", "", &[0.125]),
+    ];
+    let (p, clusters) = data(&spec, &groups);
+    let means = [0.25, 0.0, -0.25, 0.25, 0.125];
+    let obs: Vec<f64> = (seeded_order("H1", "", 5).into_iter())
+        .map(|i| means[i])
+        .collect();
+    let e = |tail, margin, obs: &[f64]| e_value(&MEAN, &Bound { tail, margin }, obs).unwrap();
+    let (above, below) = (e(Tail::Upper, -0.5, &obs), e(Tail::Lower, 0.5, &obs));
+    // The order matters: the clusters in spec order give another e-value.
+    assert_ne!(above, e(Tail::Upper, -0.5, &means));
+    // The means lie nearer the upper margin, so the hypothesis takes the lower bound's e-value.
+    assert!(1.01 < below && below < above, "{below} {above}");
+    // It passes at a level whose threshold 1 / level the e-value reaches, and fails just above.
+    for (level, verdict) in [(1.01 / below, "pass"), (0.99 / below, "fail")] {
+        let (vs, study) = verdicts(&spec, &p, &clusters, &HASH, Some(level));
+        let want = Verdict {
+            hypothesis: "H1".into(),
+            verdict: verdict.into(),
+            basis: "test".into(),
+            level: Some(level),
+            e_value: Some(below),
+            bounds: vec![
+                bound("", "above", -0.5, 5, above),
+                bound("", "below", 0.5, 5, below),
+            ],
+            incomplete_units: 0,
+            reason: None,
+        };
+        assert_eq!(vs, [want], "{level}");
+        // One hypothesis with the whole level: the study's e-value is its own.
+        assert_eq!(study, Some(below), "{level}");
+    }
+}
+
+#[test]
+fn every_stratum_must_hold() {
+    let spec = below_zero("confirmatory", &["code", "article"]);
+    let mut groups = same("c", "code", 15, -1.0);
+    groups.extend(same("a", "article", 15, 1.0));
+    let (p, clusters) = data(&spec, &groups);
+    let (vs, study) = verdicts(&spec, &p, &clusters, &HASH, Some(LEVEL));
+    // The code stratum alone passes; in the article stratum every cluster lies above 0, and
+    // the test never bets.
+    assert!(strong(15) >= 1.0 / LEVEL);
+    let v = &vs[0];
+    assert_eq!(
+        v.bounds,
+        [
+            bound("code", "below", 0.0, 15, strong(15)),
+            bound("article", "below", 0.0, 15, 1.0),
+        ]
+    );
+    assert_eq!(
+        (v.verdict.as_str(), v.e_value, study),
+        ("fail", Some(1.0), Some(1.0))
+    );
+    // With the article clusters below 0 too, it passes.
+    let groups = [same("c", "code", 15, -1.0), same("a", "article", 15, -1.0)].concat();
+    let (p, clusters) = data(&spec, &groups);
+    let (vs, _) = verdicts(&spec, &p, &clusters, &HASH, Some(LEVEL));
+    assert_eq!(
+        (vs[0].verdict.as_str(), vs[0].e_value),
+        ("pass", Some(strong(15)))
+    );
+}
+
+#[test]
+fn an_out_of_range_cluster_mean_is_clipped_into_the_claim() {
+    // Each unit is clipped to the range [-0.1, 0.1] before the mean: clusters of three units
+    // at -5 give -0.1, the end of the range, and score as -0.1 does. The test sees no value
+    // out of range, so no cluster gives e-value 0.
+    let spec = claimed(
+        "confirmatory",
+        &[],
+        json!({ "below": 0.0 }),
+        json!({ "mean": [-0.1, 0.1] }),
+    );
+    let groups: Vec<Group> = (0..15)
+        .map(|i| group(&format!("c{i}"), "", &[-5.0; 3]))
+        .collect();
+    let (p, clusters) = data(&spec, &groups);
+    let (vs, _) = verdicts(&spec, &p, &clusters, &HASH, Some(LEVEL));
+    let stat = Statistic::Mean { lo: -0.1, hi: 0.1 };
+    let want = e_value(&stat, &BELOW_ZERO, &[-0.1; 15]).unwrap();
+    assert!(want >= 1.0 / LEVEL);
+    assert_eq!(
+        (vs[0].verdict.as_str(), vs[0].e_value),
+        ("pass", Some(want))
+    );
+}
+
+#[test]
+fn only_an_incomplete_unit_in_scope_fails_the_claim() {
+    let spec = below_zero("confirmatory", &["code"]);
+    let mut groups = same("c", "code", 15, -1.0);
+    groups.push(group("a", "article", &[-1.0]));
+    groups.push(group("s", "code", &[-1.0]));
+    let (p, mut clusters) = data(&spec, &groups);
+    clusters[16].role = Role::Selection;
+    // Unit #1 of the article cluster and of the selection cluster has no paired value; neither
+    // is in the scope of a claim on code.
+    clusters[15].picked.push(1);
+    clusters[16].picked.push(1);
+    let judge = |spec: &Spec, clusters: &[Cluster]| {
+        verdicts(spec, &p, clusters, &HASH, Some(LEVEL)).0.remove(0)
+    };
+    let v = judge(&spec, &clusters);
+    assert_eq!((v.verdict.as_str(), v.e_value), ("pass", Some(strong(15))));
+    assert_eq!((v.incomplete_units, v.reason), (0, None));
+    // A pooled claim holds every confirmation cluster, the article one included.
+    let pooled = judge(&below_zero("confirmatory", &[]), &clusters);
+    assert_eq!((pooled.incomplete_units, pooled.e_value), (1, Some(0.0)));
+    // A code unit with no paired value is in scope: the claim fails closed, and says why.
+    clusters[0].picked.push(1);
+    let v = judge(&spec, &clusters);
+    assert_eq!(
+        (v.verdict.as_str(), v.e_value, v.incomplete_units),
+        ("fail", Some(0.0), 1)
+    );
+    assert_eq!(v.reason.as_deref(), Some("incomplete units in scope: 1"));
+    // The bound reports the test on the complete units, which alone would pass.
+    assert_eq!(v.bounds, [bound("code", "below", 0.0, 15, strong(15))]);
+}
+
+#[test]
+fn an_exploratory_quantile_claim_passes_on_its_point_estimate() {
+    // "At least 90 % of the 48 matrices at or below 0": one cluster of 48 units, and 2 more
+    // units with no paired value. The point estimate counts the complete units only.
+    let spec = claimed(
+        "exploratory",
+        &[],
+        json!({ "below": 0.0 }),
+        json!({ "quantile": 0.9 }),
+    );
+    let judge = |at_or_below: usize| {
+        let xs: Vec<f64> = (0..48)
+            .map(|i| if i < at_or_below { 0.0 } else { 1.0 })
+            .collect();
+        let (p, mut clusters) = data(&spec, &[group("m", "", &xs)]);
+        clusters[0].picked.extend([48, 49]);
+        verdicts(&spec, &p, &clusters, &HASH, Some(LEVEL))
+    };
+    let (vs, study) = judge(44);
+    let want = Verdict {
+        hypothesis: "H1".into(),
+        verdict: "pass".into(),
+        basis: "estimate".into(),
+        level: None,
+        e_value: None,
+        bounds: vec![bound("", "below", 0.0, 1, 44.0 / 48.0)],
+        incomplete_units: 2,
+        reason: None,
+    };
+    assert_eq!(vs, [want]);
+    // No test, no e-value for the stream.
+    assert_eq!(study, None);
+    // 43 of 48 is under 0.9; so would 44 of 50 be, had the incomplete units counted.
+    let (vs, _) = judge(43);
+    assert_eq!(
+        (vs[0].verdict.as_str(), vs[0].bounds[0].value),
+        ("fail", Some(43.0 / 48.0))
+    );
+}
+
+#[test]
+fn a_descriptive_hypothesis_gets_verdict_none() {
+    let spec = one_hypothesis(&[]);
+    let (p, mut clusters) = data(&spec, &[group("c", "", &[1.0, 2.0])]);
+    clusters[0].picked.push(2);
+    let (vs, study) = verdicts(&spec, &p, &clusters, &HASH, None);
+    assert_eq!(study, None);
+    let body = serde_json::to_value(&vs).unwrap();
+    assert_eq!(
+        body,
+        json!([{
+            "hypothesis": "H1", "verdict": "none", "basis": "none", "level": null,
+            "e_value": null, "bounds": [], "incomplete_units": 1, "reason": null
+        }])
+    );
+    // The record reads back as itself; one without a field, or with another, does not.
+    let record = |body: Value| Record {
+        kind: "verdict".into(),
+        body,
+        ..ok("u", "c", 0, 1.0)
+    };
+    assert_eq!(Verdict::of(&record(body[0].clone())), Some(vs[0].clone()));
+    let mut short = body[0].clone();
+    short.as_object_mut().unwrap().remove("e_value");
+    assert_eq!(Verdict::of(&record(short)), None);
+    let mut long = body[0].clone();
+    long["extra"] = json!(1);
+    assert_eq!(Verdict::of(&record(long)), None);
+    // A confirmatory study with no claim to test still closes its slot: with e-value 0.
+    let mut confirmatory = spec.clone();
+    confirmatory.study.mode = ignorarium::spec::model::Mode::Confirmatory;
+    let (vs, study) = verdicts(&confirmatory, &p, &clusters, &HASH, Some(LEVEL));
+    assert_eq!((vs[0].verdict.as_str(), study), ("none", Some(0.0)));
+}
+
+#[test]
+fn the_level_splits_by_alpha_share() {
+    // H1 holds code with share 0.75, H2 describes, and H3 holds article with share 0.25.
+    let mut v = ignorarium::spec::load("../../templates/numeric-ablation.toml".as_ref())
+        .unwrap()
+        .value;
+    v["study"]["mode"] = json!("confirmatory");
+    v["outcomes"][0]["paired"] = json!("difference");
+    v["design"]["reference"] = json!("base");
+    let mut h1 = v["question"]["hypotheses"][0].clone();
+    let mut h2 = h1.clone();
+    h2["id"] = json!("H2");
+    h1["strata"] = json!(["code"]);
+    h1["claim"] = json!({ "below": 0.0 });
+    h1["statistic"] = json!({ "mean": [-1.0, 1.0] });
+    h1["alpha_share"] = json!(0.75);
+    let mut h3 = h1.clone();
+    h3["id"] = json!("H3");
+    h3["strata"] = json!(["article"]);
+    h3["alpha_share"] = json!(0.25);
+    v["question"]["hypotheses"] = json!([h1, h2, h3]);
+    let spec = Spec::from_value(&v).unwrap();
+    let groups = [same("c", "code", 15, -1.0), same("a", "article", 16, -1.0)].concat();
+    let (p, clusters) = data(&spec, &groups);
+    let (vs, study) = verdicts(&spec, &p, &clusters, &HASH, Some(LEVEL));
+    let (e1, e3) = (strong(15), strong(16));
+    // H1 needs 1 / 0.00375 = 267 and has 292; H3 needs 1 / 0.00125 = 800 and has 438, which
+    // the whole level (200) would pass.
+    let got: Vec<(&str, &str, Option<f64>, Option<f64>)> = (vs.iter())
+        .map(|v| {
+            (
+                v.hypothesis.as_str(),
+                v.verdict.as_str(),
+                v.level,
+                v.e_value,
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("H1", "pass", Some(LEVEL * 0.75), Some(e1)),
+            ("H2", "none", None, None),
+            ("H3", "fail", Some(LEVEL * 0.25), Some(e3)),
+        ]
+    );
+    assert!(e3 >= 1.0 / LEVEL);
+    // The study's e-value is the mean of the claims' e-values, weighted by their shares.
+    let mean = 0.75 * e1 + 0.25 * e3;
+    assert!((study.unwrap() - mean).abs() < 1e-9, "{study:?} {mean}");
+    // A claim without a share leaves the level unsplit: every claim fails, and the study
+    // closes with e-value 0.
+    v["question"]["hypotheses"][2]
+        .as_object_mut()
+        .unwrap()
+        .remove("alpha_share");
+    let spec = Spec::from_value(&v).unwrap();
+    let (vs, study) = verdicts(&spec, &p, &clusters, &HASH, Some(LEVEL));
+    let why = "the study's level does not split over its claims: invalid parameter: weights";
+    for i in [0, 2] {
+        assert_eq!(
+            (vs[i].verdict.as_str(), vs[i].reason.as_deref()),
+            ("fail", Some(why))
+        );
+    }
+    assert_eq!((vs[1].reason.as_deref(), study), (None, Some(0.0)));
+}
+
+#[test]
+fn a_claim_the_test_cannot_take_fails_closed() {
+    // A margin at an end of the mean range, and a claim with no statistic: the rules refuse
+    // both, and a run that meets one fails the claim, with e-value 0 in a test.
+    let mut cases = Vec::new();
+    for (mode, tested) in [("confirmatory", true), ("exploratory", false)] {
+        let claim = json!({ "below": 1.0 });
+        let edge = claimed(mode, &[], claim.clone(), json!({ "mean": [-1.0, 1.0] }));
+        let mut bare = edge.clone();
+        bare.question.hypotheses[0].statistic = None;
+        cases.push((edge, "invalid parameter: bounds", tested));
+        cases.push((bare, "invalid parameter: statistic", tested));
+    }
+    for (spec, why, tested) in cases {
+        let (p, clusters) = data(&spec, &same("c", "", 15, -1.0));
+        let (vs, _) = verdicts(&spec, &p, &clusters, &HASH, Some(LEVEL));
+        let v = &vs[0];
+        assert_eq!(v.verdict, "fail", "{why}");
+        assert_eq!(
+            v.reason,
+            Some(format!("the claim cannot be tested: {why}")),
+            "{why}"
+        );
+        assert_eq!(v.e_value, tested.then_some(0.0), "{why}");
+        assert!(v.bounds.is_empty(), "{why}");
+    }
+}
+
+#[test]
+fn an_e_value_too_large_for_a_float_is_kept_finite() {
+    // 1,800 clusters at -1: 1.5^1799 overflows a float. Records and the stream hold finite
+    // numbers, and the largest float is a smaller e-value, so still one.
+    let spec = below_zero("confirmatory", &[]);
+    let (p, clusters) = data(&spec, &same("c", "", 1800, -1.0));
+    assert_eq!(
+        e_value(&MEAN, &BELOW_ZERO, &[-1.0; 1800]).unwrap(),
+        f64::INFINITY
+    );
+    let (vs, study) = verdicts(&spec, &p, &clusters, &HASH, Some(LEVEL));
+    assert_eq!(
+        (vs[0].verdict.as_str(), vs[0].e_value, study),
+        ("pass", Some(f64::MAX), Some(f64::MAX))
+    );
+    assert_eq!(vs[0].bounds[0].value, Some(f64::MAX));
+    assert_eq!(
+        serde_json::to_value(&vs[0]).unwrap()["e_value"],
+        json!(f64::MAX)
+    );
 }

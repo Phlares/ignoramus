@@ -662,6 +662,14 @@ fn a_confirmatory_study_finishes_only_once_its_slot_closes() {
         let all = records.study("conf").unwrap();
         StudyState::of(all, |log, slot| records.stream_closed(log, "conf", slot)).unwrap()
     };
+    // The run closed the slot.
+    assert!(matches!(state(), StudyState::Finished(_)));
+    // A stream without the close, as a crash before it leaves one: not finished until the
+    // slot closes.
+    let stream = path(&lab, "planlog");
+    let text = std::fs::read_to_string(&stream).unwrap();
+    let open: String = text.split_inclusive('\n').take(2).collect();
+    std::fs::write(&stream, open).unwrap();
     assert_eq!(state(), StudyState::NotFinished);
     Log::of(&lab.home, LogName::Plan)
         .close(&k, "conf", 1, 0.5)

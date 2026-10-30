@@ -284,7 +284,14 @@ fn a_study_is_finished_once_every_record_its_analysis_promises_follows_it() {
     let analysis = at(2, "analysis", analysis_body());
     let e1 = at(3, "estimate", estimate_for("H1", ""));
     let e2 = at(4, "estimate", estimate_for("H1", "code"));
-    let verdict = at(5, "verdict", json!({ "hypothesis": "H1" }));
+    let verdict = at(
+        5,
+        "verdict",
+        json!({
+            "hypothesis": "H1", "verdict": "none", "basis": "none", "level": null,
+            "e_value": null, "bounds": [], "incomplete_units": 0, "reason": null
+        }),
+    );
     // Slot 3, which the analysis promises, is closed.
     let state = |records: &[&Record]| {
         let all = records.iter().map(|r| (*r).clone()).collect();
@@ -296,6 +303,12 @@ fn a_study_is_finished_once_every_record_its_analysis_promises_follows_it() {
     assert_eq!(state(&[&register, &analysis]), StudyState::NotFinished);
     assert_eq!(
         state(&[&register, &analysis, &e1, &e2]),
+        StudyState::NotFinished
+    );
+    // A verdict record that does not parse is no verdict.
+    let torn = at(8, "verdict", json!({ "hypothesis": "H1" }));
+    assert_eq!(
+        state(&[&register, &analysis, &e1, &e2, &torn]),
         StudyState::NotFinished
     );
     assert_eq!(
