@@ -1,6 +1,6 @@
 //! `check`: load a spec, run every rule, and report. Shared with `review`.
 use super::{CliError, Ctx, Done, Run, out};
-use crate::derived::Register;
+use crate::derived::{Alpha, Register};
 use crate::diag::{Diagnostic, Severity, render_human};
 use crate::estimate::{Estimate, defaults_json, estimate};
 use crate::home::Home;
@@ -13,6 +13,7 @@ use crate::rules::{self, BoxRecords, CheckCtx};
 use crate::schedule;
 use crate::spec::{self, LoadError, model::Spec};
 use crate::store::Store;
+use crate::stream::{self, Log, Next};
 use ed25519_dalek::VerifyingKey;
 use serde_json::{Value, json};
 use std::path::{Component, Path, PathBuf};
@@ -34,6 +35,8 @@ pub struct Assessed {
     pub input_hashes: Vec<(String, Option<(String, String)>)>,
     /// What the rules read, the box's records among them; `register` resolves from it.
     pub ctx: CheckCtx,
+    /// For a confirmatory plan, the slot and level the stream would give it now.
+    pub stream: Option<Alpha>,
 }
 
 /// The code of a value that waits on a study that has not finished.
@@ -91,15 +94,8 @@ impl BoxRecords for HomeRecords {
             return Ok(None);
         }
         let log = self.home.study_dir(id).join("records.jsonl");
-        match log.symlink_metadata() {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.to_string()),
-            Ok(_) => {}
-        }
-        let key = match &self.key {
-            Err(e) => return Err(e.clone()),
-            Ok(None) => return Err("the box key is missing".into()),
-            Ok(Some(key)) => key,
+        let Some(key) = self.key_for(&log)? else {
+            return Ok(None);
         };
         let all = records::read_all(&log, key).map_err(|e| e.to_string())?;
         if let Some(r) = all.iter().find(|r| r.study != id) {
@@ -107,6 +103,40 @@ impl BoxRecords for HomeRecords {
         }
         let registered = all.iter().any(|r| Register::of(r).is_some());
         Ok(registered.then_some(all))
+    }
+
+    /// A stream with no log is empty and needs no key.
+    fn stream_next(&self, log: &str) -> Result<Next, String> {
+        let stream = Log::of(&self.home, log);
+        match self.key_for(stream.path())? {
+            None => stream::next_of(log, &[]).map_err(|e| e.to_string()),
+            Some(key) => stream.next(key).map_err(|e| e.to_string()),
+        }
+    }
+
+    fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String> {
+        let stream = Log::of(&self.home, log);
+        match self.key_for(stream.path())? {
+            None => Ok(false),
+            Some(key) => stream.closed(key, study, slot).map_err(|e| e.to_string()),
+        }
+    }
+}
+
+impl HomeRecords {
+    /// The key that verifies the log at `path`; `None` when there is no log. Only a log that
+    /// does not exist needs no key: any other fault is an error.
+    fn key_for(&self, path: &Path) -> Result<Option<&VerifyingKey>, String> {
+        match path.symlink_metadata() {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.to_string()),
+            Ok(_) => {}
+        }
+        match &self.key {
+            Err(e) => Err(e.clone()),
+            Ok(None) => Err("the box key is missing".into()),
+            Ok(Some(key)) => Ok(Some(key)),
+        }
     }
 }
 
@@ -214,10 +244,11 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         root: cc.root.clone(),
         hash: raw.hash,
         input_hashes: input_hashes(&cc.store, &cc.root, &value),
-        value,
         filled,
         diags,
         estimate: None,
+        stream: rules::granted(&value, &cc),
+        value,
         ctx: cc,
     };
     if !a.has_errors() {
@@ -251,6 +282,11 @@ pub fn figure_lines(e: &Estimate) -> Vec<String> {
     ]
 }
 
+/// `stream: slot <n>, level <level>`.
+pub fn stream_line(a: &Alpha) -> String {
+    format!("stream: slot {}, level {}", a.slot, stream::shown(a.level))
+}
+
 pub fn default_lines(a: &Assessed) -> Vec<String> {
     a.filled
         .iter()
@@ -273,6 +309,9 @@ fn render(a: &Assessed) -> String {
         s.push_str(&format!("estimate:\n{}\n", indented(figure_lines(e))));
         s.push_str(&format!("label: {}\n\n", e.label_earnable));
         s.push_str(&format!("defaults:\n{}\n", indented(default_lines(a))));
+    }
+    if let Some(granted) = &a.stream {
+        s.push_str(&format!("{}\n", stream_line(granted)));
     }
     s.push_str(&format!("spec: {}\n", a.hash));
     s
@@ -317,6 +356,7 @@ fn render_json(a: &Assessed) -> Result<String, CliError> {
         "diagnostics": a.diags,
         "pending": a.pending(),
         "power": power,
+        "stream": a.stream,
         "estimate": estimate,
         "defaults": defaults_json(&a.filled),
         "hash": a.hash,

@@ -4,7 +4,7 @@
 //! is missing or mistyped: the generic rules report that.
 use super::generic::{applies, diagnostic, join, join_key, plain_key, safe_key, select};
 use super::{BoxRecords, Check, NoRecords, Rule, has_format, is_study_id};
-use crate::derived::{Estimate, Selection, StudyState, contrast_key};
+use crate::derived::{Alpha, Estimate, Selection, StudyState, contrast_key};
 use crate::diag::Diagnostic;
 use crate::inputs::{self, Found};
 use crate::power::{required_clusters, z};
@@ -14,6 +14,7 @@ use crate::schedule::ROW_CAP;
 use crate::seed::seed;
 use crate::spec::model::{Claim, Outcome, SELECTED, StatisticSpec};
 use crate::store::Store;
+use crate::stream;
 use evidence::claim::{Bound, Statistic};
 use evidence::power::{Plan, Stratum, WORK, clusters_needed, mean_sd, simulate};
 use evidence::rng::Rng;
@@ -74,6 +75,7 @@ const NAMED: &[(&str, NamedFn)] = &[
     ("label-allowed-for-mode", label_allowed),
     ("power-at-side", power_at_side),
     ("power-met", power_met),
+    ("stream-level", stream_level),
     ("estimates-from-record", estimates_from_record),
     ("reference-finished", reference_finished),
     ("reference-not-self", reference_not_self),
@@ -375,23 +377,21 @@ const REPS: u32 = 4000;
 pub const CAP: u32 = 1024;
 
 /// E-CNF-002, at each hypothesis with a claim that E-CNF-001, E-HYP-003 and E-HYP-004 accept
-/// and whose estimates are found: `gate` must find the power the claim needs. An absent alpha
-/// or power cannot be computed, so it fails closed; a mistyped or out-of-range one, or a units
-/// per cluster below 1, is the generic rules'.
+/// and whose estimates are found: `gate` must find the power the claim needs. An absent power
+/// cannot be computed, so it fails closed; a mistyped or out-of-range one, or a units per
+/// cluster below 1, is the generic rules', and a stream that gives no level is E-STR-001's.
 fn power_met(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     let claimed: Vec<(String, &Value)> = nodes(spec, pat)
         .into_iter()
         .filter(|(_, h)| has_claim(h))
         .collect();
-    let design = match gate_design(spec) {
-        Err(absent) => {
+    let design = match gate_design(spec, ctx) {
+        Err(Absent) => {
             return claimed
-                .iter()
-                .flat_map(|(path, _)| {
-                    absent.iter().map(move |f| Hit {
-                        path: path.clone(),
-                        detail: Some(format!("Cannot compute power: design.{f} is absent.")),
-                    })
+                .into_iter()
+                .map(|(path, _)| Hit {
+                    path,
+                    detail: Some("Cannot compute power: design.power is absent.".into()),
                 })
                 .collect();
         }
@@ -502,7 +502,7 @@ fn decimals(x: f64) -> String {
 
 /// The simulated power of each confirmatory hypothesis the gate simulates, in order.
 pub fn power(spec: &Value, ctx: &CheckCtx) -> Vec<Power> {
-    let Ok(Some(design)) = gate_design(spec) else {
+    let Ok(Some(design)) = gate_design(spec, ctx) else {
         return vec![];
     };
     if !confirmatory(spec) {
@@ -518,30 +518,64 @@ pub fn power(spec: &Value, ctx: &CheckCtx) -> Vec<Power> {
         .collect()
 }
 
-/// `design.alpha`, `design.power` and `design.units_per_cluster`, when the gate can compute
-/// with them. `Err` lists the absent ones of alpha and power; `Ok(None)`: one is mistyped or
-/// out of range, which the generic rules report.
-fn gate_design(spec: &Value) -> Result<Option<(f64, f64, u64)>, Vec<&'static str>> {
-    let fields = ["alpha", "power"].map(|f| (f, val(spec, &format!("design.{f}"))));
-    if fields
-        .iter()
-        .any(|(_, v)| v.is_some_and(|v| !v.is_number()))
-    {
-        return Ok(None);
-    }
-    let absent: Vec<&str> = fields
-        .iter()
-        .filter(|(_, v)| v.is_none())
-        .map(|(f, _)| *f)
-        .collect();
-    if !absent.is_empty() {
-        return Err(absent);
-    }
-    let [alpha, power] = fields.map(|(_, v)| v.and_then(Value::as_f64).unwrap_or_default());
+/// `design.power` is absent.
+struct Absent;
+
+/// The level the stream of the plan's log gives it, `design.power` and
+/// `design.units_per_cluster`, when the gate can compute with them. `Ok(None)`: one is
+/// mistyped or out of range, which the generic rules report, or the stream gives no level,
+/// which E-STR-001 reports.
+fn gate_design(spec: &Value, ctx: &CheckCtx) -> Result<Option<(f64, f64, u64)>, Absent> {
+    let power = val(spec, "design.power").ok_or(Absent)?.as_f64();
     let per = val(spec, "design.units_per_cluster").and_then(Value::as_u64);
-    Ok(per
-        .filter(|n| *n >= 1 && open_unit(alpha) && open_unit(power))
-        .map(|per| (alpha, power, per)))
+    let level = granted(spec, ctx).map(|a| a.level).filter(|l| *l > 0.0);
+    Ok(match (level, power, per) {
+        (Some(level), Some(power), Some(per)) if per >= 1 && open_unit(power) => {
+            Some((level, power, per))
+        }
+        _ => None,
+    })
+}
+
+/// The log a plan registers into, by `study.test_log`; `None` when that is not a bool.
+fn stream_log(spec: &Value) -> Option<&'static str> {
+    val(spec, "study.test_log")?.as_bool().map(stream::log_for)
+}
+
+/// The slot and level the stream of a confirmatory plan's log would give it now; `None` for
+/// an exploratory plan, a `study.test_log` that is not a bool, or a stream that cannot be read.
+pub fn granted(spec: &Value, ctx: &CheckCtx) -> Option<Alpha> {
+    let log = stream_log(spec).filter(|_| confirmatory(spec))?;
+    let next = ctx.records.stream_next(log).ok()?;
+    Some(Alpha {
+        log: log.into(),
+        slot: next.slot,
+        level: next.level,
+    })
+}
+
+/// E-STR-001 at `study.mode` of a confirmatory plan: the stream of its log gives level 0 (a
+/// slot beyond the stream's last), or cannot be read.
+fn stream_level(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let Some(log) = stream_log(spec) else {
+        return vec![];
+    };
+    let detail = match ctx.records.stream_next(log) {
+        Ok(next) if next.level > 0.0 => return vec![],
+        Ok(next) => format!(
+            "Slot {} is beyond the {} slots of the {log} stream.",
+            next.slot,
+            stream::M
+        ),
+        Err(e) => format!("The {log} stream cannot be read: {e}."),
+    };
+    nodes(spec, pat)
+        .into_iter()
+        .map(|(path, _)| Hit {
+            path,
+            detail: Some(detail.clone()),
+        })
+        .collect()
 }
 
 /// What the power gate finds for one hypothesis.
@@ -554,7 +588,7 @@ enum Gate {
 }
 
 /// The power gate of hypothesis `h`. It simulates the test the box runs (`evidence::claim`) at
-/// level `design.alpha` x `alpha_share`. In each group the claim is tested in, units have the
+/// the stream's level x `alpha_share`. In each group the claim is tested in, units have the
 /// sd and icc of the group's estimate around a mean at `power_at` (a mean claim), or at
 /// `power_at` - sd z(q), which puts the units' q-quantile at `power_at` (a quantile claim), over
 /// the group's own clusters. The seed is `power/<id>` under the spec hash. A mean claim first
@@ -564,12 +598,12 @@ enum Gate {
 /// there fails without simulating. `None` when a rule before it reports the hypothesis, or a
 /// group has no cluster (E-HYP-002).
 fn gate(spec: &Value, ctx: &CheckCtx, h: &Value, design: (f64, f64, u64)) -> Option<Gate> {
-    let (alpha, target, per) = design;
+    let (stream_level, target, per) = design;
     let sized = sizing(h)?;
     let Some(Lookup::Found(groups)) = estimates_of(spec, h, ctx) else {
         return None;
     };
-    let level = alpha * sized.share;
+    let level = stream_level * sized.share;
     let groups: Vec<(StratumInput, Vec<u32>)> = (groups.into_iter())
         .map(|g| {
             let sizes = (cluster_sizes(spec, ctx, &g.stratum, per).into_iter())
@@ -818,15 +852,21 @@ pub enum Taken {
 /// The condition that study `from` selected, from its `selection` record. The study must have
 /// finished.
 pub fn selected_by(ctx: &CheckCtx, from: &str) -> Taken {
-    let all = match ctx.records.study(from) {
+    let read = ctx.records.study(from).and_then(|all| {
+        let state = StudyState::of(all.clone(), |log, slot| {
+            ctx.records.stream_closed(log, from, slot)
+        })?;
+        Ok((all, state))
+    });
+    let (all, state) = match read {
         Err(e) => {
             return Taken::Refused(format!(
                 "The box cannot read the records of study {from}: {e}."
             ));
         }
-        Ok(all) => all,
+        Ok(read) => read,
     };
-    match StudyState::of(all.clone()) {
+    match state {
         StudyState::NotRegistered => Taken::Pending(waits(from, "not registered")),
         StudyState::NotFinished => Taken::Pending(waits(from, "not finished")),
         StudyState::Finished(_) => {
@@ -859,7 +899,10 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
     let from = study_ref(spec, reference)?;
     let contrasts = contrasts(spec, hyp, ctx)?;
     let groups = groups_of(hyp)?;
-    let records = match ctx.records.study(from).map(StudyState::of) {
+    let state = ctx.records.study(from).and_then(|all| {
+        StudyState::of(all, |log, slot| ctx.records.stream_closed(log, from, slot))
+    });
+    let records = match state {
         Err(e) => {
             return Some(Lookup::Missing(format!(
                 "The box cannot read the records of study {from}: {e}."

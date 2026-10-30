@@ -184,6 +184,8 @@ fn page(a: &Assessed) -> String {
     s.push_str(&format!("\n## Conditions\n\n{}", bullets(conditions)));
     s.push_str("\n## Estimate\n\n");
     s.push_str(&est.map_or(NO_ESTIMATE.into(), |e| bullets(check::figure_lines(e))));
+    let level = a.stream.iter().map(check::stream_line);
+    s.push_str(&format!("\n## Level\n\n{}", bullets(level)));
     let power = rules::power(&a.value, &a.ctx)
         .into_iter()
         .map(|p| format!("{}: {}", p.hypothesis, p.sentence()));

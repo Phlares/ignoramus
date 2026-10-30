@@ -5,6 +5,7 @@ use ignorarium::cli::check::{self, HomeRecords};
 use ignorarium::home::Home;
 use ignorarium::keys;
 use ignorarium::rules::BoxRecords;
+use ignorarium::stream;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -46,9 +47,9 @@ fn no_unit(t: String) -> String {
     t.replace("unit = \"ratio\"", "unit = \"\"")
 }
 
-/// Drops the alpha line so the default fills it.
-fn no_alpha(t: String) -> String {
-    t.replace("alpha = 0.005\n", "")
+/// Drops the power line so the default fills it.
+fn no_power(t: String) -> String {
+    t.replace("power = 0.8\n", "")
 }
 
 #[test]
@@ -104,7 +105,7 @@ fn guide_prints_steps_in_order() {
 
 #[test]
 fn check_passes_the_template_and_prints_the_estimate() {
-    let (_d, home, spec) = setup(no_alpha);
+    let (_d, home, spec) = setup(no_power);
     let a = bin(&home).arg("check").arg(&spec).assert().code(0);
     let out = stdout(&a);
     for want in [
@@ -116,7 +117,7 @@ fn check_passes_the_template_and_prints_the_estimate() {
         "money: $0.00",
         "long job: no",
         "label: signal",
-        "design.alpha = 0.005",
+        "design.power = 0.8",
     ] {
         assert!(out.contains(want), "missing {want:?} in:\n{out}");
     }
@@ -156,7 +157,7 @@ fn check_json_is_machine_readable() {
 
 #[test]
 fn check_json_passing_plan_has_estimate_and_defaults() {
-    let (_d, home, spec) = setup(no_alpha);
+    let (_d, home, spec) = setup(no_power);
     let a = bin(&home)
         .arg("check")
         .arg(&spec)
@@ -179,7 +180,7 @@ fn check_json_passing_plan_has_estimate_and_defaults() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|d| d["path"] == "design.alpha" && d["value"] == 0.005)
+            .any(|d| d["path"] == "design.power" && d["value"] == 0.8)
     );
 }
 
@@ -1367,13 +1368,13 @@ fn the_gate_gives_the_same_verdict_on_every_check() {
     assert_eq!(
         first,
         json!([{
-            "hypothesis": "H1", "power": 0.3565, "target": 0.8, "clusters": { "": 15 },
-            "needed": 21
+            "hypothesis": "H1", "power": 0.35825, "target": 0.8, "clusters": { "": 15 },
+            "needed": 20
         }])
     );
     assert_eq!(power(1), first);
     let sentence =
-        "Simulated power 0.35 with 15 clusters in the pooled group; about 21 clusters reach 0.80.";
+        "Simulated power 0.35 with 15 clusters in the pooled group; about 20 clusters reach 0.80.";
     assert!(check_out(&home, &spec, 1).contains(sentence));
     let page = stdout(&bin(&home).arg("review").arg(&spec).assert().code(1));
     assert!(
@@ -1496,6 +1497,103 @@ fn a_log_without_a_register_record_is_not_a_registered_study() {
         out.contains("Waits on study my-pilot, which is not registered."),
         "{out}"
     );
+}
+
+// ---- stream ----
+
+fn check_json(home: &Path, spec: &Path, code: i32) -> Value {
+    json_out(
+        &bin(home)
+            .arg("check")
+            .arg(spec)
+            .arg("--json")
+            .assert()
+            .code(code),
+    )
+}
+
+#[test]
+fn check_shows_the_slot_and_level_the_stream_would_give() {
+    let (_d, home, spec) = setup(common::confirmatory);
+    let box_home = Home::open_at(&home).unwrap();
+    common::pilot(&box_home, vec![common::arm_a()]);
+    let out = check_out(&home, &spec, 0);
+    assert!(
+        out.contains("\nstream: slot 1, level 0.005\nspec: "),
+        "{out}"
+    );
+    let v = check_json(&home, &spec, 0);
+    assert_eq!(
+        v["stream"],
+        json!({ "log": "planlog", "slot": 1, "level": 0.005000000000000001 })
+    );
+    // A check writes nothing to the stream.
+    assert!(!home.join("stream/planlog.jsonl").exists());
+    // Once a study holds slot 1, the next is slot 2; the review page shows it too.
+    let key = keys::load_or_create(&box_home).unwrap();
+    stream::Log::of(&box_home, "planlog")
+        .open(&key, "other", 0.0)
+        .unwrap();
+    assert!(check_out(&home, &spec, 0).contains("\nstream: slot 2, level 0.005\n"));
+    let page = stdout(&bin(&home).arg("review").arg(&spec).assert().code(0));
+    assert!(
+        page.contains("\n## Level\n\n- stream: slot 2, level 0.005\n\n## Power\n"),
+        "{page}"
+    );
+    // A test study reads the test stream, which is still empty.
+    let text = std::fs::read_to_string(&spec).unwrap();
+    std::fs::write(&spec, text.replace("test_log = false", "test_log = true")).unwrap();
+    assert_eq!(
+        check_json(&home, &spec, 0)["stream"],
+        json!({ "log": "testlog", "slot": 1, "level": 0.005000000000000001 })
+    );
+    // An exploratory plan takes no slot.
+    let (_d, home, spec) = setup(|t| t);
+    assert!(!check_out(&home, &spec, 0).contains("stream:"));
+    assert_eq!(check_json(&home, &spec, 0)["stream"], Value::Null);
+    let page = stdout(&bin(&home).arg("review").arg(&spec).assert().code(0));
+    assert!(page.contains("\n## Level\n\n- none\n"), "{page}");
+}
+
+#[test]
+fn check_refuses_a_plan_beyond_the_tenth_slot() {
+    let (_d, home, spec) = setup(common::confirmatory);
+    let box_home = Home::open_at(&home).unwrap();
+    common::pilot(&box_home, vec![common::arm_a()]);
+    let key = keys::load_or_create(&box_home).unwrap();
+    let log = stream::Log::of(&box_home, "planlog");
+    for i in 1..=10 {
+        log.open(&key, &format!("s{i:02}"), 0.0).unwrap();
+    }
+    let v = check_json(&home, &spec, 1);
+    let errors: Vec<&Value> = (v["diagnostics"].as_array().unwrap().iter())
+        .filter(|d| d["severity"] == "error")
+        .collect();
+    assert_eq!(errors.len(), 1, "{v}");
+    assert_eq!(
+        (&errors[0]["code"], &errors[0]["path"]),
+        (&json!("E-STR-001"), &json!("study.mode"))
+    );
+    assert_eq!(
+        errors[0]["problem"],
+        "The stream gives this confirmatory study no level. Slot 11 is beyond the 10 slots of the planlog stream."
+    );
+    assert_eq!(
+        v["stream"],
+        json!({ "log": "planlog", "slot": 11, "level": 0.0 })
+    );
+    assert_eq!(v["power"], json!([]));
+    let out = check_out(&home, &spec, 1);
+    assert!(out.contains("error[E-STR-001]"), "{out}");
+    assert!(out.contains("\nstream: slot 11, level 0\n"), "{out}");
+    // A damaged stream log fails the check closed.
+    std::fs::write(home.join("stream/planlog.jsonl"), "{}\n").unwrap();
+    let v = check_json(&home, &spec, 1);
+    assert_eq!(
+        with_code(&v, "E-STR-001")[0]["problem"],
+        "The stream gives this confirmatory study no level. The planlog stream cannot be read: the log fails verification: line 1 is not a whole record."
+    );
+    assert_eq!(v["stream"], Value::Null);
 }
 
 #[test]
@@ -1801,7 +1899,7 @@ fn a_signed_import_record_holds_the_file_name_only() {
 
 #[test]
 fn check_creates_no_store_folder() {
-    let (_d, home, spec) = setup(no_alpha);
+    let (_d, home, spec) = setup(no_power);
     bin(&home).arg("check").arg(&spec).assert().code(0);
     assert!(!home.join("store").exists());
 }

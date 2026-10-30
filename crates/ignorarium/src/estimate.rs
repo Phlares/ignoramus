@@ -9,7 +9,6 @@ use serde_json::{Map, Value, json};
 type Make = fn(&Value) -> Value;
 
 const DEFAULTS: &[(&str, Make)] = &[
-    ("design.alpha", |_| json!(0.005)),
     ("design.power", |_| json!(0.8)),
     ("design.repeats", |_| json!(1)),
     ("design.pick", |_| json!("seeded")),

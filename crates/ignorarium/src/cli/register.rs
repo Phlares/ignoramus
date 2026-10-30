@@ -4,7 +4,7 @@ use super::check::{self, Assessed, PENDING};
 use super::{CliError, Ctx, Done};
 use crate::backend::output::file_digest;
 use crate::canon::to_canonical;
-use crate::derived::{REGISTER, Register, Resolved};
+use crate::derived::{Alpha, REGISTER, Register, Resolved};
 use crate::diag::render_human;
 use crate::estimate::defaults_json;
 use crate::files::{self, WriteOnceError, write_once};
@@ -18,6 +18,7 @@ use crate::rules::{self, Lookup, Taken};
 use crate::spec::model::{Condition, Param, Spec, param_path};
 use crate::spec::{self};
 use crate::store::Store;
+use crate::stream::{self, Log, StreamError};
 use crate::{keys, time};
 use ed25519_dalek::SigningKey;
 use serde_json::{Map, Value, json};
@@ -77,15 +78,16 @@ struct Frozen {
     resolved: Vec<Resolved>,
 }
 
-/// The body of the `register` record. A confirmatory plan waits for a timestamp, which a later version adds.
+/// The body of the `register` record. A confirmatory plan holds the stream slot `alpha`, and
+/// waits for a timestamp, which a later version adds.
 fn record_body(
     hash: &str,
     leaf: u64,
     log: &str,
     filled: &[(String, Value)],
-    confirmatory: bool,
     root: &Path,
     frozen: &Frozen,
+    alpha: Option<Alpha>,
 ) -> Result<Value, CliError> {
     let root = root
         .to_str()
@@ -99,7 +101,8 @@ fn record_body(
         payload: frozen.payload.clone(),
         inputs: frozen.inputs.clone(),
         resolved: frozen.resolved.clone(),
-        timestamp: confirmatory.then(|| "pending".into()),
+        timestamp: alpha.is_some().then(|| "pending".into()),
+        alpha,
     })
     .map_err(|e| io("register record", e))
 }
@@ -171,6 +174,9 @@ pub fn run(
     for r in &resolved {
         writeln!(output, "{}", taken(r)).map_err(say)?;
     }
+    if let Some(granted) = &a.stream {
+        writeln!(output, "{}", check::stream_line(granted)).map_err(say)?;
+    }
     write!(output, "{PROMPT} ").map_err(say)?;
     output.flush().map_err(say)?;
     let mut typed = String::new();
@@ -186,8 +192,11 @@ pub fn run(
         inputs,
         resolved,
     };
-    let leaf = store(spec_path, home, &spec, &a, &key, &frozen)?;
-    writeln!(output, "registered {id}: leaf {leaf}").map_err(say)?;
+    let (leaf, alpha) = store(spec_path, home, &spec, &a, &key, &frozen)?;
+    let slot = alpha.as_ref().map_or(String::new(), |a| {
+        format!(", stream slot {}, level {}", a.slot, stream::shown(a.level))
+    });
+    writeln!(output, "registered {id}: leaf {leaf}{slot}").map_err(say)?;
     Ok(done(0, Some(leaf)))
 }
 
@@ -394,12 +403,14 @@ fn hold_inputs(
     Ok(held)
 }
 
-/// Re-read the spec and check both log tails, stage and publish the study folder, then
-/// append the plan leaf and the `register` record. Another process can register the same id
-/// between the check and the publish; the rename refuses it, before any leaf is appended. A
-/// fault after the rename is an I/O fault in an append and leaves a folder without a record.
-/// The log appends are not atomic with the earlier-use lookup in `check`; v0 accepts that.
-/// `check_tails` runs before `append` takes its lock.
+/// Re-read the spec and check both log tails, stage and publish the study folder, then open
+/// the stream slot of a confirmatory plan and append the plan leaf and the `register` record.
+/// Another process can register the same id between the check and the publish; the rename
+/// refuses it, before any slot opens or leaf is appended. The slot opens under the stream's
+/// lock at a level no lower than the check showed, or nothing is written to the stream; a
+/// refusal or fault after the rename leaves a folder without a record. The log appends are
+/// not atomic with the earlier-use lookup in `check`; v0 accepts that. `check_tails` runs
+/// before `append` takes its lock. Returns the leaf and the slot.
 fn store(
     spec_path: &Path,
     home: &Home,
@@ -407,7 +418,7 @@ fn store(
     a: &Assessed,
     key: &SigningKey,
     frozen: &Frozen,
-) -> Result<u64, CliError> {
+) -> Result<(u64, Option<Alpha>), CliError> {
     let bytes = std::fs::read(spec_path).map_err(|e| io("cannot read spec", e))?;
     let raw = spec::parse(&bytes).map_err(|e| io("cannot read spec", e))?;
     if raw.hash != a.hash {
@@ -416,11 +427,7 @@ fn store(
     let canon = to_canonical(&raw.value).map_err(|e| io("canonical form", e))?;
     let id = spec.study.id.as_str();
     let mode = mode_of(a);
-    let log = if spec.study.test_log {
-        "testlog"
-    } else {
-        "planlog"
-    };
+    let log = stream::log_for(spec.study.test_log);
     let plan_log = PlanLog::open(&home.root.join(log))
         .and_then(|l| l.check_tails().map(|()| l))
         .map_err(|e| io(log, e))?;
@@ -433,7 +440,27 @@ fn store(
             _ => io("cannot publish the study folder", format!("{e}; {kept}")),
         }
     })?;
-    // Only appends from here: a lost rename above appended no leaf.
+    // Only appends from here: a lost rename above opened no slot and appended no leaf.
+    let alpha = match &a.stream {
+        None => None,
+        Some(checked) => {
+            let next = Log::of(home, log)
+                .open(key, id, checked.level)
+                .map_err(|e| match e {
+                    StreamError::Lower { .. } => {
+                        let mut r = refusal("E-STR-001", &e.to_string());
+                        r.msg = format!("{}; {}", r.msg, kept(&dir));
+                        r
+                    }
+                    e => io("stream", e),
+                })?;
+            Some(Alpha {
+                log: log.into(),
+                slot: next.slot,
+                level: next.level,
+            })
+        }
+    };
     let data_hashes = a
         .input_hashes
         .iter()
@@ -465,14 +492,14 @@ fn store(
                 leaf,
                 log,
                 &a.filled,
-                mode == "confirmatory",
                 &a.root,
                 frozen,
+                alpha.clone(),
             )?,
         },
     )
     .map_err(|e| io("records.jsonl", e))?;
-    Ok(leaf)
+    Ok((leaf, alpha))
 }
 
 /// What a refusal after staging says: no study, and where the staged files are.
@@ -533,8 +560,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_a_confirmatory_record_is_pending() {
-        let filled = [("design.alpha".to_string(), json!(0.005))];
+    fn only_a_confirmatory_record_is_pending_and_holds_its_slot() {
+        let filled = [("design.power".to_string(), json!(0.8))];
         let root = Path::new("/work/study");
         let frozen = Frozen {
             payload: "ab".repeat(32),
@@ -546,20 +573,39 @@ mod tests {
                 value: json!({ "": { "sd": 2.0, "icc": 0.1 } }),
             }],
         };
-        let exp = record_body("sha256:ab", 3, "planlog", &filled, false, root, &frozen).unwrap();
+        let exp = record_body("sha256:ab", 3, "planlog", &filled, root, &frozen, None).unwrap();
         assert_eq!(
             exp,
             json!({"spec_hash": "sha256:ab", "leaf": 3, "log": "planlog",
-                   "defaults": [{"path": "design.alpha", "value": 0.005}],
+                   "defaults": [{"path": "design.power", "value": 0.8}],
                    "root": "/work/study", "payload": "ab".repeat(32),
                    "inputs": [["data/x.txt", "cd".repeat(32)]],
                    "resolved": [{ "path": "question.hypotheses[0].estimates",
                                   "study": "pilot", "records": ["ef".repeat(32)],
-                                  "value": { "": { "sd": 2.0, "icc": 0.1 } } }]})
+                                  "value": { "": { "sd": 2.0, "icc": 0.1 } } }],
+                   "alpha": null})
         );
-        let conf = record_body("sha256:ab", 3, "testlog", &filled, true, root, &frozen).unwrap();
+        let slot = Alpha {
+            log: "testlog".into(),
+            slot: 2,
+            level: 0.01,
+        };
+        let conf = record_body(
+            "sha256:ab",
+            3,
+            "testlog",
+            &filled,
+            root,
+            &frozen,
+            Some(slot),
+        );
+        let conf = conf.unwrap();
         assert_eq!(conf["timestamp"], "pending");
         assert_eq!(conf["log"], "testlog");
+        assert_eq!(
+            conf["alpha"],
+            json!({ "log": "testlog", "slot": 2, "level": 0.01 })
+        );
     }
 
     #[test]
@@ -586,6 +632,7 @@ mod tests {
             estimate: None,
             input_hashes: vec![],
             ctx: rules::CheckCtx::empty(root),
+            stream: None,
         };
         let e = resolve(&a, &[]).unwrap_err();
         assert_eq!(e.code, 1);

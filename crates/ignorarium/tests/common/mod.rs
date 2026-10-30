@@ -5,7 +5,7 @@ use ignorarium::derived;
 use ignorarium::home::Home;
 use ignorarium::rules::BoxRecords;
 use ignorarium::spec::model::{Direction, Outcome, Paired, SelectionRule};
-use ignorarium::{keys, records, spec};
+use ignorarium::{keys, records, spec, stream};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -411,6 +411,7 @@ pub fn finished(estimates: Vec<serde_json::Value>) -> Vec<(&'static str, serde_j
         payload: "cd".repeat(32),
         inputs: vec![],
         resolved: vec![],
+        alpha: None,
         timestamp: None,
     };
     let analysis = derived::Analysis {
@@ -471,6 +472,40 @@ impl BoxRecords for Studies {
             Some((_, found)) => found.clone().map(Some),
             None => Ok(None),
         }
+    }
+
+    /// Each stream is empty.
+    fn stream_next(&self, log: &str) -> Result<stream::Next, String> {
+        stream::next_of(log, &[]).map_err(|e| e.to_string())
+    }
+
+    fn stream_closed(&self, _: &str, _: &str, _: u64) -> Result<bool, String> {
+        Ok(false)
+    }
+}
+
+/// `Studies` whose stream of `log` gives `next`; another log cannot be read.
+pub struct Streamed {
+    pub studies: Studies,
+    pub log: &'static str,
+    pub next: Result<stream::Next, String>,
+}
+
+impl BoxRecords for Streamed {
+    fn study(&self, id: &str) -> Result<Option<Vec<records::Record>>, String> {
+        self.studies.study(id)
+    }
+
+    fn stream_next(&self, log: &str) -> Result<stream::Next, String> {
+        if log == self.log {
+            self.next.clone()
+        } else {
+            Err(format!("no {log} stream here"))
+        }
+    }
+
+    fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String> {
+        self.studies.stream_closed(log, study, slot)
     }
 }
 

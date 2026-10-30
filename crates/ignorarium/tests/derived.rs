@@ -1,5 +1,7 @@
 use ignorarium::canon::{sha256_hex, to_canonical};
-use ignorarium::derived::{Analysis, Estimate, Register, Selection, StudyState, contrast_key};
+use ignorarium::derived::{
+    Alpha, Analysis, Estimate, Register, Selection, StudyState, contrast_key,
+};
 use ignorarium::records::Record;
 use ignorarium::spec::model::{Direction, Outcome, Paired};
 use serde_json::{Value, json};
@@ -53,7 +55,8 @@ fn register_body() -> Value {
         "resolved": [{
             "path": "question.hypotheses[0].estimates", "study": "pilot",
             "records": ["e".repeat(64)], "value": { "": { "sd": 2.0, "icc": 0.1 } }
-        }]
+        }],
+        "alpha": null
     })
 }
 
@@ -81,10 +84,21 @@ fn a_register_record_parses_with_its_root() {
     assert_eq!(frozen.value, json!({ "": { "sd": 2.0, "icc": 0.1 } }));
     assert_eq!(serde_json::to_value(&r).unwrap(), register_body());
     assert_eq!(r.timestamp, None);
+    assert_eq!(r.alpha, None);
     let mut b = register_body();
     b["timestamp"] = json!("pending");
-    let r = Register::of(&rec("register", b)).unwrap();
+    b["alpha"] = json!({ "log": "planlog", "slot": 4, "level": 0.01 });
+    let r = Register::of(&rec("register", b.clone())).unwrap();
     assert_eq!(r.timestamp.as_deref(), Some("pending"));
+    let alpha = Alpha {
+        log: "planlog".into(),
+        slot: 4,
+        level: 0.01,
+    };
+    assert_eq!(r.alpha, Some(alpha));
+    assert_eq!(serde_json::to_value(&r).unwrap(), b);
+    b["alpha"]["extra"] = json!(1);
+    assert_eq!(Register::of(&rec("register", b)), None);
 }
 
 #[test]
@@ -99,6 +113,7 @@ fn a_register_record_with_a_missing_or_extra_field_does_not_parse() {
         "payload",
         "inputs",
         "resolved",
+        "alpha",
     ] {
         let mut b = register_body();
         b.as_object_mut().unwrap().remove(field);
@@ -261,14 +276,20 @@ fn estimate_for(hypothesis: &str, stratum: &str) -> Value {
 
 #[test]
 fn a_study_is_finished_once_every_record_its_analysis_promises_follows_it() {
-    assert_eq!(StudyState::of(None), StudyState::NotRegistered);
+    assert_eq!(
+        StudyState::of(None, |_, _| panic!("no study, no slot")),
+        Ok(StudyState::NotRegistered)
+    );
     let register = at(0, "register", register_body());
     let analysis = at(2, "analysis", analysis_body());
     let e1 = at(3, "estimate", estimate_for("H1", ""));
     let e2 = at(4, "estimate", estimate_for("H1", "code"));
     let verdict = at(5, "verdict", json!({ "hypothesis": "H1" }));
-    let state =
-        |records: &[&Record]| StudyState::of(Some(records.iter().map(|r| (*r).clone()).collect()));
+    // Slot 3, which the analysis promises, is closed.
+    let state = |records: &[&Record]| {
+        let all = records.iter().map(|r| (*r).clone()).collect();
+        StudyState::of(Some(all), |_, _| Ok(true)).unwrap()
+    };
     // No analysis record yet, or one whose estimates and verdict are not all there. A crash
     // after the analysis record leaves the study unfinished, not finished without values.
     assert_eq!(state(&[&register]), StudyState::NotFinished);
@@ -310,14 +331,48 @@ fn a_study_is_finished_once_every_record_its_analysis_promises_follows_it() {
     // An analysis record that does not parse promises nothing a reader can trust.
     let torn = at(2, "analysis", json!({ "commit": "c" }));
     assert_eq!(state(&[&register, &torn]), StudyState::NotFinished);
-    // An analysis that promises nothing finishes the study at once.
+    // An analysis that promises nothing finishes the study at once, and asks for no slot.
     let mut nothing = analysis_body();
     nothing["estimates"] = json!(0);
     nothing["verdicts"] = json!(0);
+    nothing["slot"] = Value::Null;
     let bare = [register.clone(), at(2, "analysis", nothing)];
     assert_eq!(
-        StudyState::of(Some(bare.to_vec())),
-        StudyState::Finished(vec![])
+        StudyState::of(Some(bare.to_vec()), |_, _| panic!("no slot to ask for")),
+        Ok(StudyState::Finished(vec![]))
+    );
+}
+
+#[test]
+fn a_study_with_a_stream_slot_is_finished_only_once_the_slot_closes() {
+    let mut promised = analysis_body();
+    promised["estimates"] = json!(0);
+    promised["verdicts"] = json!(0);
+    let all = vec![
+        at(0, "register", register_body()),
+        at(1, "analysis", promised),
+    ];
+    let asked = std::cell::RefCell::new(vec![]);
+    let state = |closed: Result<bool, String>| {
+        StudyState::of(Some(all.clone()), |log, slot| {
+            asked.borrow_mut().push((log.to_string(), slot));
+            closed
+        })
+    };
+    // The reader asks the stream of the register record's log for the analysis's slot.
+    assert_eq!(state(Ok(true)), Ok(StudyState::Finished(vec![])));
+    assert_eq!(*asked.borrow(), [("planlog".to_string(), 3)]);
+    assert_eq!(state(Ok(false)), Ok(StudyState::NotFinished));
+    // A stream that cannot be read is an error, never "not finished".
+    assert_eq!(
+        state(Err("line 1 is not a whole record".into())),
+        Err("line 1 is not a whole record".to_string())
+    );
+    // A slot with no register record to name its log is not closed.
+    let no_register = vec![all[1].clone()];
+    assert_eq!(
+        StudyState::of(Some(no_register), |_, _| Ok(true)),
+        Ok(StudyState::NotFinished)
     );
 }
 

@@ -231,7 +231,6 @@ pub struct Design {
     pub reference: String,
     pub repeats: u32,
     pub row_seconds: f64,
-    pub alpha: f64,
     pub power: f64,
     /// Units each cluster gives the study, at most.
     pub units_per_cluster: u32,

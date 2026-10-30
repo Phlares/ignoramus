@@ -1,7 +1,9 @@
 //! Reading the rows back: each condition's value for a unit, paired with the reference
 //! condition's value for the same unit and repeat.
 use crate::canon::{sha256_hex, to_canonical};
-use crate::derived::{ANALYSIS, Analysis, Candidate, ESTIMATE, Estimate, Selection, contrast_key};
+use crate::derived::{
+    ANALYSIS, Analysis, Candidate, ESTIMATE, Estimate, Register, Selection, contrast_key,
+};
 use crate::prior::same_data;
 use crate::records::{self, Record, RecordDraft};
 use crate::runner::{RunError, RunPlan, stored_spec};
@@ -347,7 +349,9 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
                 box_version: version.into(),
                 estimates: wanted.len() as u64,
                 verdicts: 0,
-                slot: None,
+                slot: (all.iter().find_map(Register::of))
+                    .and_then(|r| r.alpha)
+                    .map(|a| a.slot),
             };
             append(plan, &log, ANALYSIS, &body)?;
         }

@@ -164,7 +164,6 @@ fn label_earnable_follows_mode() {
 
 fn defaults() -> Vec<(&'static str, &'static str, Value)> {
     vec![
-        ("design.alpha", "/design/alpha", json!(0.005)),
         ("design.power", "/design/power", json!(0.8)),
         ("design.repeats", "/design/repeats", json!(1)),
         ("design.pick", "/design/pick", json!("seeded")),
@@ -187,7 +186,6 @@ fn each_default_is_filled_when_absent() {
 #[test]
 fn present_values_are_left_alone() {
     let mut v = template();
-    v["design"]["alpha"] = json!(0.01);
     v["design"]["power"] = json!(0.9);
     v["design"]["repeats"] = json!(3);
     v["design"]["pick"] = json!("first");
@@ -221,7 +219,6 @@ fn absent_parent_is_created_and_non_table_parent_skipped() {
     assert_eq!(
         paths(apply_defaults(&mut v)),
         [
-            "design.alpha",
             "design.power",
             "design.repeats",
             "design.pick",
@@ -338,7 +335,6 @@ fn defaults_table_matches_the_templates() {
             .unwrap()
             .value;
         for ptr in [
-            "/design/alpha",
             "/design/power",
             "/design/repeats",
             "/design/pick",
@@ -371,8 +367,8 @@ fn ctx(dir: &Path) -> CheckCtx {
     }
 }
 
-/// Confirmatory with a mean claim sized by `my-pilot`, alpha and power absent: 2 clusters
-/// against the 14 needed.
+/// Confirmatory with a mean claim sized by `my-pilot`, power absent: 2 clusters against the 14
+/// needed.
 fn thin() -> Value {
     let mut v = template();
     v["study"]["mode"] = json!("confirmatory");
@@ -384,7 +380,6 @@ fn thin() -> Value {
     h["alpha_share"] = json!(1.0);
     v["design"]["units_per_cluster"] = json!(5);
     v["inputs"] = json!(clusters("confirmation", 2, 5));
-    remove(&mut v, "/design/alpha");
     remove(&mut v, "/design/power");
     v
 }
@@ -394,14 +389,13 @@ fn check_all_fills_defaults_before_the_power_gate() {
     let dir = tempfile::tempdir().unwrap();
     let v = thin();
     let (out, filled, diags) = rules::check_all(&v, &v0(), &ctx(dir.path()));
-    assert_eq!(out["design"]["alpha"], json!(0.005));
     assert_eq!(out["design"]["power"], json!(0.8));
-    assert_eq!(paths(filled), ["design.alpha", "design.power"]);
+    assert_eq!(paths(filled), ["design.power"]);
     let cnf: Vec<_> = diags.iter().filter(|d| d.code == "E-CNF-002").collect();
     assert_eq!(cnf.len(), 1);
     assert!(!cnf[0].problem.contains("Cannot compute power"));
     // The input is untouched.
-    assert!(v["design"].get("alpha").is_none());
+    assert!(v["design"].get("power").is_none());
 }
 
 #[test]
@@ -417,14 +411,13 @@ fn check_named_alone_fails_closed_without_defaults() {
 }
 
 /// Paths of the numeric fields in the template.
-const NUMERIC: [&[&str]; 9] = [
+const NUMERIC: [&[&str]; 8] = [
     &["scope", "min_isolation"],
     &["scope", "budget", "cpu_hours"],
     &["scope", "budget", "wall_hours"],
     &["scope", "budget", "money_usd"],
     &["design", "repeats"],
     &["design", "row_seconds"],
-    &["design", "alpha"],
     &["design", "power"],
     &["design", "units_per_cluster"],
 ];

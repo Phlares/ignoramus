@@ -5,6 +5,7 @@ use ignorarium::diag::{Diagnostic, Severity};
 use ignorarium::prior::{NoPriorUse, PriorError, PriorUse, normalized_sha256};
 use ignorarium::records;
 use ignorarium::rules::{self, CheckCtx, Lookup, Power, Rule, StratumInput, estimate_inputs};
+use ignorarium::stream::Next;
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -156,8 +157,8 @@ fn hyp(field: &str, v: Option<Value>) -> Edit {
 
 /// A confirmatory plan that passes every named check: 35 confirmation inputs of 5 units. At sd
 /// 2 and icc 0 a cluster mean has sd 0.89; 30 below the margin, in a range of half-width 50,
-/// each scores about -0.6, and the simulated test at alpha 0.005 and power 0.8 needs 22
-/// clusters (31 at a share of 0.1). A selection stage picks `arm-a` or `arm-b` on the selection
+/// each scores about -0.6, and the simulated test at the first stream level (0.005) and power
+/// 0.8 needs 22 clusters (31 at a share of 0.1). A selection stage picks `arm-a` or `arm-b` on the selection
 /// input, and the confirmation stage runs the pick, which `h1()` tests.
 fn ok() -> Value {
     let mut s = spec_at("../../templates/numeric-ablation.toml");
@@ -887,12 +888,9 @@ fn faults() -> Vec<Fault> {
         f(vec![("/design/units_per_cluster", j(json!(-5)))], vec![]),
         f(vec![("/design/units_per_cluster", j(json!(0)))], vec![]),
         // Power-gate guards: with 2 clusters the gate fires if it computes, so [] means it skipped.
-        f(guard("/design/alpha", json!(0.0)), vec![]),
-        f(guard("/design/alpha", json!(1.0)), vec![]),
         f(guard("/design/power", json!(0.0)), vec![]),
         f(guard("/design/power", json!(1.0)), vec![]),
-        f(guard("/design/alpha", json!("x")), vec![]),
-        f(guard("/design/alpha", json!(0.45)), vec![POWER]),
+        f(guard("/design/power", json!("x")), vec![]),
         f(guard("/design/power", json!(0.999)), vec![POWER]),
         f(guard("/design/power", json!(0.5)), vec![POWER]),
         f(
@@ -909,8 +907,7 @@ fn faults() -> Vec<Fault> {
             guard("/question/hypotheses/0/claim", json!({})),
             vec![("E-HYP-003", "question.hypotheses[0].claim")],
         ),
-        // Fail closed: an absent alpha or power cannot be computed.
-        f(vec![("/design/alpha", None)], vec![POWER]),
+        // Fail closed: an absent power cannot be computed.
         f(vec![("/design/power", None)], vec![POWER]),
         // An empty array as an element is no input, and no cluster.
         f(
@@ -1676,19 +1673,26 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
         "E-HYP-002",
         "E-HYP-003",
         "E-HYP-004",
+        "E-STR-001",
     ]
     .into_iter()
     .map(String::from)
     .collect();
     assert_eq!(in_file, want);
-    // E-CNF-005 and E-HSH-001 read files; their tests are below. E-SEC-001 is in tests/scan.rs.
+    // E-CNF-005 and E-HSH-001 read files and E-STR-001 the stream; their tests are below.
+    // E-SEC-001 is in tests/scan.rs.
     let in_rows: BTreeSet<String> = faults()
         .iter()
         .flat_map(|r| r.want.iter().map(|w| w.0.to_string()))
         .collect();
     let missing: Vec<_> = want
         .difference(&in_rows)
-        .filter(|c| !matches!(c.as_str(), "E-CNF-005" | "E-HSH-001" | "E-SEC-001"))
+        .filter(|c| {
+            !matches!(
+                c.as_str(),
+                "E-CNF-005" | "E-HSH-001" | "E-SEC-001" | "E-STR-001"
+            )
+        })
         .collect();
     assert!(missing.is_empty(), "{missing:?}");
 }
@@ -1754,24 +1758,49 @@ fn power_gate_problem_states_both_numbers() {
     );
 }
 
+/// `ok()`'s context with a box whose stream of `log` gives `next`.
+fn streamed(dir: &Path, log: &'static str, next: Result<Next, String>) -> CheckCtx {
+    CheckCtx {
+        records: Box::new(common::Streamed {
+            studies: holding(pilot_estimates()),
+            log,
+            next,
+        }),
+        ..ctx(dir)
+    }
+}
+
+/// The z floor's details only: a floor that passes gives way to the simulation.
+fn floor_details(d: Vec<Diagnostic>) -> Vec<String> {
+    d.into_iter()
+        .map(|d| d.problem.rsplit_once(". ").unwrap().1.to_string())
+        .filter(|d| d.ends_with(" clusters the power gate needs."))
+        .collect()
+}
+
 #[test]
-fn power_gate_uses_alpha_power_share_and_defaults() {
+fn power_gate_uses_the_stream_level_power_share_and_defaults() {
     let dir = study_dir();
-    // The z floor's details only: a floor that passes gives way to the simulation.
-    let detail = |edits: Vec<Edit>| -> Vec<String> {
-        named(&edited(&edits), dir.path())
-            .into_iter()
-            .map(|d| d.problem.rsplit_once(". ").unwrap().1.to_string())
-            .filter(|d| d.ends_with(" clusters the power gate needs."))
-            .collect()
+    let detail = |edits: Vec<Edit>| floor_details(named(&edited(&edits), dir.path()));
+    // The stream's level 0.05 (nine discoveries closed) needs 5 clusters.
+    let ninth = Ok(Next {
+        slot: 10,
+        level: 0.05,
+    });
+    let at_ninth = |edits: Vec<Edit>| {
+        let ctx = streamed(dir.path(), "planlog", ninth.clone());
+        floor_details(rules::check_named(&edited(&edits), v0(), &ctx))
     };
-    // alpha 0.05 needs 5 clusters.
     let mut e = and(near(), power_edits(5, 5));
-    e.push(("/design/alpha", j(json!(0.05))));
-    assert!(detail(e.clone()).is_empty());
+    assert!(at_ninth(e.clone()).is_empty());
+    // The first slot's level, 0.005, needs 10.
+    assert_eq!(
+        detail(e.clone()),
+        ["Stratum fiction has 5 of the 10 clusters the power gate needs."]
+    );
     e[3] = ("/inputs", j(inputs(4, 5)));
     assert_eq!(
-        detail(e),
+        at_ninth(e),
         ["Stratum fiction has 4 of the 5 clusters the power gate needs."]
     );
     // Higher power needs more clusters.
@@ -1817,6 +1846,56 @@ fn power_gate_uses_alpha_power_share_and_defaults() {
         "{}",
         d[0].problem
     );
+}
+
+#[test]
+fn a_confirmatory_plan_needs_a_level_from_the_stream_of_its_log() {
+    let dir = study_dir();
+    let run = |s: &Value, log, next: Result<Next, String>| {
+        rules::check_named(s, v0(), &streamed(dir.path(), log, next))
+    };
+    const NO_LEVEL: &str = "The stream gives this confirmatory study no level.";
+    // Slot 11 has level 0. E-STR-001 alone: the power gate has no level to size at.
+    let beyond = || {
+        Ok(Next {
+            slot: 11,
+            level: 0.0,
+        })
+    };
+    let d = run(&ok(), "planlog", beyond());
+    assert_eq!(codes_paths(&d), [("E-STR-001", "study.mode")]);
+    assert_eq!(
+        d[0].problem,
+        format!("{NO_LEVEL} Slot 11 is beyond the 10 slots of the planlog stream.")
+    );
+    // A stream log that cannot be read fails closed.
+    let d = run(&ok(), "planlog", Err("line 1 is not a whole record".into()));
+    assert_eq!(codes_paths(&d), [("E-STR-001", "study.mode")]);
+    assert_eq!(
+        d[0].problem,
+        format!("{NO_LEVEL} The planlog stream cannot be read: line 1 is not a whole record.")
+    );
+    // A test study takes its level from the test stream.
+    let testing = edited(&[("/study/test_log", j(json!(true)))]);
+    let d = run(&testing, "planlog", beyond());
+    assert_eq!(
+        d[0].problem,
+        format!("{NO_LEVEL} The testlog stream cannot be read: no testlog stream here.")
+    );
+    let first = || {
+        Ok(Next {
+            slot: 1,
+            level: 0.005,
+        })
+    };
+    assert!(run(&testing, "testlog", first()).is_empty());
+    assert!(run(&ok(), "planlog", first()).is_empty());
+    // An exploratory plan takes no level; a test_log that is not a bool is the generic
+    // rules', and the gate skips it.
+    let exploratory = edited(&exploring(vec![]));
+    assert!(run(&exploratory, "planlog", Err("unread".into())).is_empty());
+    let mistyped = edited(&[("/study/test_log", j(json!("yes")))]);
+    assert!(run(&mistyped, "planlog", Err("unread".into())).is_empty());
 }
 
 #[test]
@@ -2257,36 +2336,20 @@ fn symlinks_under_the_study_folder_are_refused_and_never_read() {
 }
 
 #[test]
-fn absent_power_fields_say_which_is_missing() {
+fn an_absent_power_says_it_is_missing() {
     let dir = study_dir();
-    for field in ["alpha", "power"] {
-        let ptr: &'static str = Box::leak(format!("/design/{field}").into_boxed_str());
-        let d = named(&edited(&[(ptr, None)]), dir.path());
-        assert_eq!(d.len(), 1, "{field}");
-        assert_eq!(
-            d[0].problem,
-            format!(
-                "The confirmation sample is too small. Cannot compute power: design.{field} is absent."
-            )
-        );
-    }
-    // Two absent fields give two diagnostics; a mistyped one among them skips the gate.
-    let d = named(
-        &edited(&[("/design/alpha", None), ("/design/power", None)]),
-        dir.path(),
+    let d = named(&edited(&[("/design/power", None)]), dir.path());
+    assert_eq!(codes_paths(&d), [POWER]);
+    assert_eq!(
+        d[0].problem,
+        "The confirmation sample is too small. Cannot compute power: design.power is absent."
     );
-    assert_eq!(codes_paths(&d), [POWER, POWER]);
-    assert!(
-        named(
-            &edited(&[("/design/alpha", None), ("/design/power", j(json!("x")))]),
-            dir.path()
-        )
-        .is_empty()
-    );
+    // A mistyped power skips the gate.
+    assert!(named(&edited(&[("/design/power", j(json!("x")))]), dir.path()).is_empty());
     // Only a hypothesis the gate sizes is reported.
     let d = named(
         &edited(&[
-            ("/design/alpha", None),
+            ("/design/power", None),
             ("/question/hypotheses", j(json!([descriptive("P1"), h1()]))),
         ]),
         dir.path(),

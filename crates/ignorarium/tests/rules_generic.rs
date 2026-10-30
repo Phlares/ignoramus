@@ -59,9 +59,9 @@ fn faults() -> Vec<Fault> {
         ),
         (
             "E-RNG-001",
-            "/design/alpha",
-            Some(json!(0.0)),
-            "design.alpha",
+            "/design/power",
+            Some(json!(0.4)),
+            "design.power",
         ),
         ("E-FMT-001", "/study/id", Some(json!("étude-1")), "study.id"),
         (
@@ -273,7 +273,7 @@ fn templates_have_no_generic_errors_and_no_unknown_keys() {
 fn three_faults() -> Value {
     let rows = faults();
     let pick = |i: usize| rows[i].clone();
-    // study.mode removed, alpha 0, study.id non-ASCII.
+    // study.mode removed, power 0.4, study.id non-ASCII.
     faulted(&[pick(0), pick(3), pick(4)])
 }
 
@@ -284,7 +284,7 @@ fn all_faults_reported_at_once_in_rule_file_order() {
         codes_paths(&d),
         [
             ("E-REQ-001", "study.mode"),
-            ("E-RNG-001", "design.alpha"),
+            ("E-RNG-001", "design.power"),
             ("E-FMT-001", "study.id"),
             ("W-LIC-001", "inputs[0].licence.spdx"),
             ("W-LIC-001", "inputs[1].licence.spdx"),
@@ -626,7 +626,6 @@ fn fields_with_defaults_are_never_required() {
         .map(|r| r.path)
         .collect();
     for p in [
-        "design.alpha",
         "design.power",
         "design.repeats",
         "mutations.depth_cap",
@@ -659,11 +658,7 @@ fn rng_codes(spec: &Value) -> Vec<String> {
 
 #[test]
 fn range_bounds_hold_on_both_sides() {
-    let cases: [(&[&str], Value, bool); 14] = [
-        (&["design", "alpha"], json!(0), true),
-        (&["design", "alpha"], json!(0.0000001), false),
-        (&["design", "alpha"], json!(0.5), false),
-        (&["design", "alpha"], json!(0.5000001), true),
+    let cases: [(&[&str], Value, bool); 10] = [
         (&["design", "power"], json!(0.4999), true),
         (&["design", "power"], json!(0.5), false),
         (&["design", "power"], json!(0.999), false),
@@ -681,6 +676,17 @@ fn range_bounds_hold_on_both_sides() {
         assert_eq!(got, want, "{path:?} = {v}");
     }
     assert!(rng_codes(&with(&["scope", "min_isolation"], json!(0))).is_empty());
+}
+
+#[test]
+fn a_plan_cannot_set_its_own_alpha() {
+    // The level comes from the box-wide stream, so design.alpha is an unknown key.
+    let d = rules::check_generic(&with(&["design", "alpha"], json!(0.005)), &v0());
+    let errors: Vec<_> = (d.iter())
+        .filter(|x| x.severity == Severity::Error)
+        .map(|x| (x.code.as_str(), x.path.as_str()))
+        .collect();
+    assert_eq!(errors, [("E-KEY-001", "design.alpha")]);
 }
 
 #[test]
@@ -715,9 +721,9 @@ fn type_rules_accept_and_reject_the_right_values() {
             .iter()
             .any(|d| d.code == "E-TYP-001" && d.path == path.join("."))
     };
-    assert!(!bad(&["design", "alpha"], json!(1))); // float takes an int
-    assert!(!bad(&["design", "alpha"], json!("!nonfinite:nan"))); // E-NUM-001 reports it
-    assert!(bad(&["design", "alpha"], json!("x")));
+    assert!(!bad(&["design", "power"], json!(1))); // float takes an int
+    assert!(!bad(&["design", "power"], json!("!nonfinite:nan"))); // E-NUM-001 reports it
+    assert!(bad(&["design", "power"], json!("x")));
     assert!(bad(&["design", "repeats"], json!(1.5))); // int rejects float
     assert!(bad(&["design", "repeats"], json!(true)));
     assert!(!bad(&["design", "repeats"], json!(-1))); // negative and

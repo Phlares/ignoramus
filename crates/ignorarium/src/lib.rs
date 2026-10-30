@@ -28,6 +28,7 @@ pub mod schedule;
 pub mod seed;
 pub mod spec;
 pub mod store;
+pub mod stream;
 pub mod sys;
 pub mod time;
 pub mod units;

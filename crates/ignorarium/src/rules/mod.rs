@@ -1,5 +1,6 @@
 //! Typed rules, loaded from data. `generic` runs the data-driven checks; `named` the cross-field ones.
 use crate::diag::Severity;
+use crate::stream::Next;
 use regex::Regex;
 use serde::Deserialize;
 use std::path::Path;
@@ -9,8 +10,8 @@ mod generic;
 mod named;
 pub use generic::{check_generic, safe_key};
 pub use named::{
-    CAP, CheckCtx, Lookup, Power, StratumInput, Taken, check_named, estimate_inputs, input_path,
-    power, read_regular, selected_by,
+    CAP, CheckCtx, Lookup, Power, StratumInput, Taken, check_named, estimate_inputs, granted,
+    input_path, power, read_regular, selected_by,
 };
 
 /// The records of a box, by study. An `Err` is a log that cannot be read or trusted.
@@ -18,6 +19,10 @@ pub trait BoxRecords {
     /// The verified records of the registered study `id`, in order; `None` when no study
     /// with that id is registered in the box.
     fn study(&self, id: &str) -> Result<Option<Vec<crate::records::Record>>, String>;
+    /// The slot and level the stream of `log` would give a study that opened a slot now.
+    fn stream_next(&self, log: &str) -> Result<Next, String>;
+    /// True when slot `slot` of the stream of `log` was opened by study `study` and is closed.
+    fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String>;
 }
 
 /// An empty box.
@@ -26,6 +31,15 @@ pub struct NoRecords;
 impl BoxRecords for NoRecords {
     fn study(&self, _: &str) -> Result<Option<Vec<crate::records::Record>>, String> {
         Ok(None)
+    }
+
+    /// Each stream is empty.
+    fn stream_next(&self, log: &str) -> Result<Next, String> {
+        crate::stream::next_of(log, &[]).map_err(|e| e.to_string())
+    }
+
+    fn stream_closed(&self, _: &str, _: &str, _: u64) -> Result<bool, String> {
+        Ok(false)
     }
 }
 

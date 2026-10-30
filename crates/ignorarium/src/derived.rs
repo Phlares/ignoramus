@@ -61,8 +61,21 @@ pub struct Register {
     pub inputs: Vec<(String, String)>,
     /// The values the plan takes from other studies, as registration found them.
     pub resolved: Vec<Resolved>,
+    /// The stream slot a confirmatory plan holds; `None` for an exploratory one. Written as
+    /// `null`, never left out.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub alpha: Option<Alpha>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
+}
+
+/// A slot of the stream of `log` and the level it gives the study that holds it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Alpha {
+    pub log: String,
+    pub slot: u64,
+    pub level: f64,
 }
 
 impl Register {
@@ -153,17 +166,22 @@ pub enum StudyState {
 impl StudyState {
     /// `records` is the log of a registered study, or `None` for no registered study. The
     /// study is finished when its first `analysis` record is followed by every estimate and
-    /// verdict that record promises. A run that stopped after the analysis record is not
-    /// finished: its next run adds what is missing.
-    pub fn of(records: Option<Vec<Record>>) -> StudyState {
+    /// verdict that record promises, and the stream slot it promises is closed: `closed(log,
+    /// slot)` says so for the stream of the log the study registered in. A run that stopped
+    /// after the analysis record is not finished: its next run adds what is missing. An error
+    /// from `closed` is the stream's.
+    pub fn of(
+        records: Option<Vec<Record>>,
+        closed: impl FnOnce(&str, u64) -> Result<bool, String>,
+    ) -> Result<StudyState, String> {
         let Some(records) = records else {
-            return StudyState::NotRegistered;
+            return Ok(StudyState::NotRegistered);
         };
         let Some(at) = records.iter().position(|r| r.kind == ANALYSIS) else {
-            return StudyState::NotFinished;
+            return Ok(StudyState::NotFinished);
         };
         let Some(promised) = Analysis::of(&records[at]) else {
-            return StudyState::NotFinished;
+            return Ok(StudyState::NotFinished);
         };
         let after = &records[at + 1..];
         let estimates: BTreeSet<(String, String, String)> = after
@@ -179,9 +197,16 @@ impl StudyState {
         if (estimates.len() as u64) < promised.estimates
             || (verdicts.len() as u64) < promised.verdicts
         {
-            return StudyState::NotFinished;
+            return Ok(StudyState::NotFinished);
         }
-        StudyState::Finished(after.to_vec())
+        if let Some(slot) = promised.slot {
+            let log = records.iter().find_map(Register::of).map(|r| r.log);
+            match log {
+                Some(log) if closed(&log, slot)? => {}
+                _ => return Ok(StudyState::NotFinished),
+            }
+        }
+        Ok(StudyState::Finished(after.to_vec()))
     }
 }
 

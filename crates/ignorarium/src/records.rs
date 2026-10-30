@@ -1,6 +1,6 @@
 //! Signed, hash-chained record log: one JSON line per record.
-use crate::canon::{canonical_of, sha256_hex};
-use crate::files::{Tail, locked_append};
+use crate::canon::{canonical_line, canonical_of, sha256_hex};
+use crate::files::{Tail, locked_append, locked_write, read_whole};
 use crate::home::Home;
 use crate::keys::{sign_hex, verify_hex};
 use crate::time::now_rfc3339;
@@ -46,6 +46,8 @@ pub enum RecordError {
     /// The last line of the log is not a whole stored record.
     CorruptTail,
     Io(io::Error),
+    /// A record already in the log fails verification.
+    Log(VerifyError),
 }
 
 impl std::fmt::Display for RecordError {
@@ -53,6 +55,7 @@ impl std::fmt::Display for RecordError {
         match self {
             RecordError::CorruptTail => write!(f, "last line of the log is not a whole record"),
             RecordError::Io(e) => write!(f, "I/O failed: {e}"),
+            RecordError::Log(e) => write!(f, "the log fails verification: {e}"),
         }
     }
 }
@@ -113,7 +116,27 @@ fn parse_line(line: &[u8]) -> Option<Stored> {
     serde_json::from_slice(line.strip_suffix(b"\n")?).ok()
 }
 
-/// Append one record under an exclusive lock. Returns the stored record.
+/// The draft as record `seq`, chained after the record whose hash is `prev`, and signed.
+fn seal(seq: u64, prev: String, d: RecordDraft, key: &SigningKey) -> io::Result<Stored> {
+    let record = Record {
+        seq,
+        prev,
+        study: d.study,
+        row: d.row,
+        kind: d.kind,
+        body: d.body,
+        ts: now_rfc3339(),
+    };
+    let bytes = canonical_of(&record)?;
+    Ok(Stored {
+        hash: sha256_hex(&bytes),
+        sig: sign_hex(key, &bytes),
+        record,
+    })
+}
+
+/// Append one record under an exclusive lock, chained to the last line alone. Returns the
+/// stored record.
 pub fn append(path: &Path, key: &SigningKey, d: RecordDraft) -> Result<Record, RecordError> {
     let mut out = None;
     locked_append(path, |tail| {
@@ -125,27 +148,48 @@ pub fn append(path: &Path, key: &SigningKey, d: RecordDraft) -> Result<Record, R
             }
             Tail::Partial(_) => return Err(RecordError::CorruptTail),
         };
-        let record = Record {
-            seq,
-            prev,
-            study: d.study,
-            row: d.row,
-            kind: d.kind,
-            body: d.body,
-            ts: now_rfc3339(),
-        };
-        let bytes = canonical_of(&record)?;
-        let stored = Stored {
-            hash: sha256_hex(&bytes),
-            sig: sign_hex(key, &bytes),
-            record,
-        };
-        let mut line = canonical_of(&stored)?;
-        line.push(b'\n');
+        let stored = seal(seq, prev, d, key)?;
+        let line = canonical_line(&stored)?;
         out = Some(stored.record);
         Ok(line)
     })?;
     out.ok_or_else(|| io::Error::other("no record built").into())
+}
+
+/// `make`'s error, or an I/O fault as a `RecordError`.
+struct Failed<E>(E);
+
+impl<E: From<RecordError>> From<io::Error> for Failed<E> {
+    fn from(e: io::Error) -> Self {
+        Failed(E::from(RecordError::Io(e)))
+    }
+}
+
+/// Under the log's exclusive lock, read and verify every record, then append what `make`
+/// returns for them, chained after the last, in one write. A log that fails verification is
+/// refused before `make` runs; when `make` fails, nothing is written. Returns the records
+/// appended.
+pub fn append_with<E: From<RecordError>>(
+    path: &Path,
+    key: &SigningKey,
+    make: impl FnOnce(&[Record]) -> Result<Vec<RecordDraft>, E>,
+) -> Result<Vec<Record>, E> {
+    let mut out = Vec::new();
+    locked_write(path, |f| -> Result<Vec<u8>, Failed<E>> {
+        let buf = read_whole(f)?;
+        let (all, mut prev) = verified(&buf, &key.verifying_key())
+            .map_err(|e| Failed(E::from(RecordError::Log(e))))?;
+        let mut lines = Vec::new();
+        for d in make(&all).map_err(Failed)? {
+            let stored = seal((all.len() + out.len()) as u64, prev, d, key)?;
+            lines.extend(canonical_line(&stored)?);
+            prev = stored.hash;
+            out.push(stored.record);
+        }
+        Ok(lines)
+    })
+    .map_err(|Failed(e)| e)?;
+    Ok(out)
 }
 
 /// Check every line in order. Returns the number of records.
@@ -156,11 +200,16 @@ pub fn verify(path: &Path, key: &VerifyingKey) -> Result<u64, VerifyError> {
 /// Check every line in order and return the records. A missing file holds none. The file is
 /// read once, so each record returned is a line that was checked.
 pub fn read_all(path: &Path, key: &VerifyingKey) -> Result<Vec<Record>, VerifyError> {
-    let buf = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e.into()),
-    };
+    match std::fs::read(path) {
+        Ok(buf) => verified(&buf, key).map(|(all, _)| all),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The records `buf` holds, each line checked in order, and the hash of the last one (the
+/// genesis value when there is none).
+fn verified(buf: &[u8], key: &VerifyingKey) -> Result<(Vec<Record>, String), VerifyError> {
     let mut prev = GENESIS_PREV.to_string();
     let mut out = Vec::new();
     for (i, raw) in buf.split_inclusive(|&b| b == b'\n').enumerate() {
@@ -180,7 +229,7 @@ pub fn read_all(path: &Path, key: &VerifyingKey) -> Result<Vec<Record>, VerifyEr
         prev = s.hash;
         out.push(s.record);
     }
-    Ok(out)
+    Ok((out, prev))
 }
 
 /// Hex SHA-256 of the record's canonical bytes: the `hash` that `append` stores.

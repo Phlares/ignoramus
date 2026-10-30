@@ -156,19 +156,35 @@ pub fn read_tail<R: Read + Seek>(r: &mut R) -> io::Result<Tail> {
     })
 }
 
-/// Append one write to a log under an exclusive lock. `build` sees the
-/// log's tail and returns the bytes to write; they go out in one
-/// `write_all`, then fsync.
+/// Every byte of `r`, from its start.
+pub fn read_whole<R: Read + Seek>(r: &mut R) -> io::Result<Vec<u8>> {
+    r.seek(SeekFrom::Start(0))?;
+    let mut buf = Vec::new();
+    r.read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
+/// Append one write to a log under an exclusive lock. `build` reads what it
+/// needs from the locked file and returns the bytes to write; they go out in
+/// one `write_all`, then fsync.
+pub fn locked_write<E: From<io::Error>>(
+    path: &Path,
+    build: impl FnOnce(&mut fs::File) -> Result<Vec<u8>, E>,
+) -> Result<(), E> {
+    let mut f = open_log(path)?;
+    f.lock()?;
+    let bytes = build(&mut f)?;
+    f.write_all(&bytes)?;
+    f.sync_all()?;
+    Ok(())
+}
+
+/// `locked_write` where `build` sees only the log's tail.
 pub fn locked_append<E: From<io::Error>>(
     path: &Path,
     build: impl FnOnce(Tail) -> Result<Vec<u8>, E>,
 ) -> Result<(), E> {
-    let mut f = open_log(path)?;
-    f.lock()?;
-    let bytes = build(read_tail(&mut f)?)?;
-    f.write_all(&bytes)?;
-    f.sync_all()?;
-    Ok(())
+    locked_write(path, |f| build(read_tail(f)?))
 }
 
 /// Append `v` as one canonical JSON line under an exclusive lock. A log that ends in a

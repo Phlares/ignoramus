@@ -49,7 +49,6 @@ stratum = "genre"               # optional; "" if none
 reference = "exact"             # condition id of the reference arm
 repeats = 1
 row_seconds = 60.0              # estimate per row, until a record gives one
-alpha = 0.005
 power = 0.8
 units_per_cluster = 1           # units each cluster gives the study, at most
 pick = "seeded"                 # seeded | first: which of a cluster's units the study takes

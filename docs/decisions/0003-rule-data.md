@@ -14,7 +14,8 @@ Decision:
 Fail closed:
 
 - If the plan log cannot be read, the data-reuse check reports a problem. It does not pass the plan.
-- If `design.alpha` or `design.power` is missing, the power check reports a problem. It does not assume a default.
+- If `design.power` is missing, the power check reports a problem. It does not assume a default.
+- If the stream a confirmatory plan takes its level from cannot be read, the check reports a problem (E-STR-001). It does not assume a level.
 
 Why:
 

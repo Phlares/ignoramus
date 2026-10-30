@@ -4,4 +4,4 @@ mode = "exploratory"
 
 [design]
 repeats = 1
-alpha = 0.005
+power = 0.8

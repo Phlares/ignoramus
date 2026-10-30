@@ -2097,7 +2097,9 @@ fn keep_records(dir: &std::path::Path, n: usize) {
 
 fn finished(lab: &Lab, id: &str) -> bool {
     let all = common::records_of(lab, id);
-    matches!(StudyState::of(Some(all)), StudyState::Finished(_))
+    // An exploratory study holds no stream slot.
+    let state = StudyState::of(Some(all), |_, _| Ok(false)).unwrap();
+    matches!(state, StudyState::Finished(_))
 }
 
 #[test]
@@ -2128,7 +2130,7 @@ fn a_finished_run_writes_each_record_once_and_heals_a_crash() {
     estimate::apply_defaults(&mut stored);
     assert_eq!(a.commit, analysis::commit(&stored, version).unwrap());
     assert_eq!(a.commit.len(), 64);
-    stored["design"]["alpha"] = serde_json::json!(0.5);
+    stored["design"]["power"] = serde_json::json!(0.95);
     assert_ne!(a.commit, analysis::commit(&stored, version).unwrap());
     assert_ne!(a.commit, analysis::commit(&stored, "9.9.9").unwrap());
     let es: Vec<Estimate> = all[8..].iter().map(|r| Estimate::of(r).unwrap()).collect();
@@ -2249,7 +2251,7 @@ fn finish_refuses_when_the_spec_changed_since_registration() {
     keep_records(&dir, 7);
     let path = dir.join("spec.toml");
     let text = std::fs::read_to_string(&path).unwrap();
-    std::fs::write(&path, text.replace("alpha = 0.005", "alpha = 0.006")).unwrap();
+    std::fs::write(&path, text.replace("power = 0.8", "power = 0.9")).unwrap();
     assert!(matches!(
         analysis::finish(&plan),
         Err(RunError::SpecChanged)

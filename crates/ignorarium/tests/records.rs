@@ -236,6 +236,116 @@ fn two_threads_append_without_gaps() {
     assert_eq!(seqs, (0..100).collect::<Vec<u64>>());
 }
 
+#[test]
+fn append_with_sees_every_record_and_chains_what_make_returns() {
+    let d = tempfile::tempdir().unwrap();
+    let k = key(1);
+    let p = three(d.path(), &k);
+    let made = records::append_with(&p, &k, |all| {
+        let rows: Vec<Option<u64>> = all.iter().map(|r| r.row).collect();
+        assert_eq!(rows, [Some(0), Some(1), Some(2)]);
+        Ok::<_, records::RecordError>(vec![draft(3), draft(4)])
+    })
+    .unwrap();
+    assert_eq!(
+        made.iter().map(|r| (r.seq, r.row)).collect::<Vec<_>>(),
+        [(3, Some(3)), (4, Some(4))]
+    );
+    let all = records::read_all(&p, &k.verifying_key()).unwrap();
+    assert_eq!(all[3..], made[..]);
+    assert_eq!(all[4].prev, records::hash(&all[3]));
+    // A make that fails writes nothing; so does one that returns no draft.
+    let before = std::fs::read(&p).unwrap();
+    let e = records::append_with(&p, &k, |_| {
+        Err::<Vec<RecordDraft>, _>(records::RecordError::CorruptTail)
+    });
+    assert!(matches!(e, Err(records::RecordError::CorruptTail)));
+    assert!(
+        records::append_with(&p, &k, |_| Ok::<_, records::RecordError>(vec![]))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(std::fs::read(&p).unwrap(), before);
+}
+
+#[test]
+fn append_with_refuses_a_log_that_fails_verification() {
+    let d = tempfile::tempdir().unwrap();
+    let k = key(1);
+    let p = three(d.path(), &k);
+    let mut v = lines(&p);
+    v[1] = v[1].replace("\"n\":1}", "\"n\":9}");
+    write_lines(&p, &v);
+    let before = std::fs::read(&p).unwrap();
+    let e = records::append_with(&p, &k, |_| -> Result<_, records::RecordError> {
+        panic!("make must not run on a damaged log")
+    });
+    assert!(matches!(
+        e,
+        Err(records::RecordError::Log(VerifyError::BadHash { seq: 1 }))
+    ));
+    // A log another key signed fails at its first record.
+    let other = d.path().join("other");
+    std::fs::create_dir(&other).unwrap();
+    let e = records::append_with(&three(&other, &k), &key(2), |_| {
+        Ok::<_, records::RecordError>(vec![draft(9)])
+    });
+    assert!(matches!(
+        e,
+        Err(records::RecordError::Log(VerifyError::BadSig { seq: 0 }))
+    ));
+    assert_eq!(std::fs::read(&p).unwrap(), before);
+}
+
+#[test]
+fn append_with_holds_the_lock_while_make_runs() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let d = tempfile::tempdir().unwrap();
+    let k = key(1);
+    let p = d.path().join("log.jsonl");
+    std::thread::scope(|s| {
+        let (p, k) = (&p, &k);
+        let (entered, in_first) = mpsc::channel();
+        // Held in this closure, so a failed assert drops it and the first make returns.
+        let (release, go) = mpsc::channel::<()>();
+        let (seen, second_made) = mpsc::channel();
+        let first = s.spawn(move || {
+            records::append_with(p, k, |all| {
+                entered.send(all.len()).unwrap();
+                let _ = go.recv();
+                Ok::<_, records::RecordError>(vec![draft(0)])
+            })
+        });
+        assert_eq!(in_first.recv().unwrap(), 0);
+        let second = s.spawn(move || {
+            records::append_with(p, k, |all| {
+                seen.send(all.to_vec()).unwrap();
+                Ok::<_, records::RecordError>(vec![draft(1)])
+            })
+        });
+        // While the first make runs, the second waits on the lock: its make does not run,
+        // and the log stays empty.
+        assert!(
+            second_made
+                .recv_timeout(Duration::from_millis(300))
+                .is_err()
+        );
+        assert_eq!(std::fs::read(p).unwrap(), b"");
+        release.send(()).unwrap();
+        first.join().unwrap().unwrap();
+        // Once the first returns, the second's make sees the first record.
+        let saw = second_made.recv().unwrap();
+        assert_eq!(saw.iter().map(|r| r.row).collect::<Vec<_>>(), [Some(0)]);
+        second.join().unwrap().unwrap();
+    });
+    let all = records::read_all(&p, &k.verifying_key()).unwrap();
+    assert_eq!(
+        all.iter().map(|r| (r.seq, r.row)).collect::<Vec<_>>(),
+        [(0, Some(0)), (1, Some(1))]
+    );
+}
+
 fn event(name: &str) -> Event {
     Event {
         ts: "2000-02-29T00:00:00.000Z".into(),
@@ -344,7 +454,7 @@ fn home_creates_subdirs_and_study_dir() {
     let d = tempfile::tempdir().unwrap();
     let root = d.path().join("box");
     let h = Home::open_at(&root).unwrap();
-    for n in ["keys", "planlog", "testlog", "studies"] {
+    for n in ["keys", "planlog", "testlog", "studies", "stream"] {
         assert!(root.join(n).is_dir(), "{n}");
     }
     assert_eq!(h.study_dir("abc"), root.join("studies").join("abc"));
@@ -361,7 +471,7 @@ fn home_dirs_are_0700_and_existing_are_tightened() {
     std::fs::create_dir_all(root.join("keys")).unwrap();
     std::fs::set_permissions(root.join("keys"), std::fs::Permissions::from_mode(0o755)).unwrap();
     Home::open_at(&root).unwrap();
-    for n in ["keys", "planlog", "testlog", "studies"] {
+    for n in ["keys", "planlog", "testlog", "studies", "stream"] {
         let m = std::fs::metadata(root.join(n))
             .unwrap()
             .permissions()

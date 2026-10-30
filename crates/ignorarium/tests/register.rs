@@ -8,7 +8,7 @@ use ignorarium::keys;
 use ignorarium::planlog::commitment;
 use ignorarium::planlog::store::{Leaf, PlanLog};
 use ignorarium::prior::normalized_sha256;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::io::{BufRead, Cursor, Read};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -177,19 +177,19 @@ fn success_writes_four_files_a_plan_leaf_and_a_record() {
 
 #[test]
 fn defaults_are_recorded_and_the_stored_spec_is_the_authors() {
-    let (f, spec) = setup("numeric-ablation", |t| t.replace("alpha = 0.005\n", ""));
+    let (f, spec) = setup("numeric-ablation", |t| t.replace("power = 0.8\n", ""));
     go(&f, &spec, &answer(&spec), true).0.unwrap();
     let dir = f.home.study_dir("my-study");
     let body = records(&dir.join("records.jsonl"))[0]["record"]["body"].clone();
     let d = body["defaults"].as_array().unwrap();
     assert!(
         d.iter()
-            .any(|x| x["path"] == "design.alpha" && x["value"] == 0.005),
+            .any(|x| x["path"] == "design.power" && x["value"] == 0.8),
         "{d:?}"
     );
     let json: Value =
         serde_json::from_slice(&std::fs::read(dir.join("spec.json")).unwrap()).unwrap();
-    assert!(json["design"].get("alpha").is_none());
+    assert!(json["design"].get("power").is_none());
 }
 
 #[test]
@@ -538,13 +538,7 @@ fn an_input_that_appears_after_the_check_is_refused() {
 
 #[test]
 fn the_commitment_binds_the_authors_spec_not_the_defaulted_one() {
-    let (f, spec) = setup("numeric-ablation", |t| {
-        t.replace(
-            "alpha = 0.005
-",
-            "",
-        )
-    });
+    let (f, spec) = setup("numeric-ablation", |t| t.replace("power = 0.8\n", ""));
     go(&f, &spec, &answer(&spec), true).0.unwrap();
     let dir = f.home.study_dir("my-study");
     let salt: [u8; 32] = std::fs::read(dir.join("salt")).unwrap().try_into().unwrap();
@@ -580,6 +574,107 @@ fn a_confirmatory_plan_registers_with_a_pending_timestamp() {
         leaves(&f.home.root.join("planlog"))[0].mode.as_deref(),
         Some("confirmatory")
     );
+}
+
+/// The first slot's level: 0.05 x 1/10, as f64 arithmetic gives it.
+const FIRST: f64 = 0.005000000000000001;
+
+fn stream_of(f: &Fixture, log: &str) -> Vec<Value> {
+    records(&f.home.root.join(format!("stream/{log}.jsonl")))
+        .into_iter()
+        .map(|l| l["record"].clone())
+        .collect()
+}
+
+#[test]
+fn check_shows_the_level_and_register_spends_it() {
+    let (f, spec) = setup("numeric-ablation", common::confirmatory);
+    common::pilot(&f.home, vec![common::arm_a()]);
+    let (r, out) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap().code, 0, "{out}");
+    // The person approves the level with the plan; register spends that slot.
+    let shown = out.find("\nstream: slot 1, level 0.005\n").expect(&out);
+    assert!(shown < out.find(PROMPT).unwrap(), "{out}");
+    assert!(
+        out.ends_with("registered my-study: leaf 0, stream slot 1, level 0.005\n"),
+        "{out}"
+    );
+    let stream = stream_of(&f, "planlog");
+    let kinds: Vec<&Value> = stream.iter().map(|r| &r["kind"]).collect();
+    assert_eq!(kinds, [&json!("stream.config"), &json!("stream.open")]);
+    assert_eq!(
+        stream[1]["body"],
+        json!({ "log": "planlog", "study": "my-study", "slot": 1, "level": FIRST })
+    );
+    let body = &records(&f.home.study_dir("my-study").join("records.jsonl"))[0]["record"]["body"];
+    assert_eq!(
+        body["alpha"],
+        json!({ "log": "planlog", "slot": 1, "level": FIRST })
+    );
+    // The next plan would get slot 2.
+    let key = keys::load(&f.home).unwrap().unwrap();
+    let next = ignorarium::stream::Log::of(&f.home, "planlog")
+        .next(&key.verifying_key())
+        .unwrap();
+    assert_eq!((next.slot, next.level), (2, FIRST));
+    // An exploratory plan takes no slot.
+    let (f, spec) = setup("numeric-ablation", same);
+    let (r, out) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap().code, 0, "{out}");
+    assert!(!out.contains("stream"), "{out}");
+    let body = &records(&f.home.study_dir("my-study").join("records.jsonl"))[0]["record"]["body"];
+    assert_eq!(body["alpha"], Value::Null);
+    assert!(stream_of(&f, "planlog").is_empty());
+}
+
+#[test]
+fn a_test_study_spends_a_slot_of_the_test_stream() {
+    let (f, spec) = setup("numeric-ablation", |t| {
+        common::confirmatory(t).replace("test_log = false", "test_log = true")
+    });
+    common::pilot(&f.home, vec![common::arm_a()]);
+    let (r, out) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap().code, 0, "{out}");
+    let rec = &records(&f.home.study_dir("my-study").join("records.jsonl"))[0]["record"];
+    assert_eq!(rec["body"]["log"], "testlog");
+    assert_eq!(
+        rec["body"]["alpha"],
+        json!({ "log": "testlog", "slot": 1, "level": FIRST })
+    );
+    assert_eq!(stream_of(&f, "testlog").len(), 2);
+    assert!(stream_of(&f, "planlog").is_empty());
+}
+
+#[test]
+fn a_slot_lost_at_the_prompt_is_refused_before_the_plan_leaf() {
+    let (f, spec) = setup("numeric-ablation", common::confirmatory);
+    common::pilot(&f.home, vec![common::arm_a()]);
+    let key = keys::load_or_create(&f.home).unwrap();
+    let log = ignorarium::stream::Log::of(&f.home, "planlog");
+    for i in 1..=9 {
+        log.open(&key, &format!("s{i}"), 0.0).unwrap();
+    }
+    // The check shows slot 10; another study takes it while the person reads the prompt.
+    let (r, out) = at_prompt(&f, &spec, || {
+        log.open(&key, "rival", 0.0).unwrap();
+    });
+    assert!(out.contains("\nstream: slot 10, level 0.005\n"), "{out}");
+    let e = r.unwrap_err();
+    assert_eq!(e.code, 1, "{}", e.msg);
+    assert!(e.msg.starts_with("E-STR-001: "), "{}", e.msg);
+    assert!(
+        e.msg
+            .contains(" Found: slot 11 has level 0, below the 0.005 the check showed."),
+        "{}",
+        e.msg
+    );
+    assert!(e.msg.contains("the study was not registered"), "{}", e.msg);
+    // No slot for it, no plan leaf and no register record.
+    let stream = stream_of(&f, "planlog");
+    assert_eq!(stream.len(), 11);
+    assert!(stream.iter().all(|r| r["study"] != "my-study"));
+    assert!(leaves(&f.home.root.join("planlog")).is_empty());
+    assert!(!f.home.study_dir("my-study").join("records.jsonl").exists());
 }
 
 #[test]

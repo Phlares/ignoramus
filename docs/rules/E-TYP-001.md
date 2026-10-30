@@ -82,7 +82,6 @@ A wrong type changes what the value means, and later checks cannot read it.
 - `design.reference` (type)
 - `design.repeats` (type)
 - `design.row_seconds` (type)
-- `design.alpha` (type)
 - `design.power` (type)
 - `design.units_per_cluster` (type)
 - `design.pick` (type)
