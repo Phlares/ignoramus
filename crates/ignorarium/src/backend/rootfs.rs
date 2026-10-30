@@ -9,14 +9,15 @@
 //! all. It records nothing else. Each layer is then read from where it lies. A manifest may
 //! name at most `MAX_LAYERS` layers.
 //!
-//! One budget bounds an extraction (`WRITE_CAP` bytes). Every byte the two passes over the
-//! outer archive read counts. Every decoded byte read from a layer stream counts, in both
-//! passes over the layer, and so does `ENTRY` for every entry written (folder, file,
-//! symbolic link, hard link, and each parent folder a path implies) as an estimate of its inode
-//! and metadata. The one count bounds the data written, the decoding work and the number of
-//! entries. Each layer is decoded twice, so `WRITE_CAP` admits about 16 GiB of decoded layer
-//! data, the parts outside the kept folders included. An image over the budget fails and
-//! publishes nothing.
+//! One budget bounds an extraction (`WRITE_CAP` bytes). Every byte read from the archive
+//! counts: in the two passes over the outer archive, and in the two passes over each layer.
+//! So does every byte decoded from a gzip layer, and `ENTRY` for every entry written (folder,
+//! file, symbolic link, hard link, and each parent folder a path implies) as an estimate of
+//! its inode and metadata. The one count bounds the data written, the decoding work and the
+//! number of entries. The outer archive is read up to twice and each layer twice more: with
+//! the manifest last, as `docker save` writes it, about 8 GiB of plain layer data fits, the
+//! parts outside the kept folders included. A gzip layer costs four times its compressed size
+//! and twice its decoded size. An image over the budget fails and publishes nothing.
 //!
 //! The extraction records the path of every file and link it writes. A second count bounds
 //! that memory: the bytes of every path recorded, `RECORD_CAP` in all. An image over it fails
@@ -350,8 +351,8 @@ impl Meter {
             cap,
             format!(
                 "the image is over the extraction budget of {cap} bytes (archive bytes read \
-                 to find its members, decoded layer bytes read in two passes, and {ENTRY} per \
-                 entry written)"
+                 to find its members and in two passes over each layer, bytes decoded from \
+                 gzip layers, and {ENTRY} per entry written)"
             ),
         )
     }
@@ -499,25 +500,30 @@ impl<'a> Tree<'a> {
 
     /// One pass over the layer's members.
     fn layer(&mut self, layer: &mut dyn Read, pass: Pass) -> Result<(), RootfsError> {
+        // Every byte read from the layer counts, and for gzip every decoded byte as well: a
+        // decoder can read many bytes that decode to nothing.
+        let mut raw = Metered {
+            inner: layer,
+            meter: self.budget,
+        };
         let mut head = Vec::new();
-        layer.take(HEAD).read_to_end(&mut head)?;
+        (&mut raw).take(HEAD).read_to_end(&mut head)?;
         let kind = compression(&head);
-        let joined = io::Cursor::new(head).chain(layer);
+        let joined = io::Cursor::new(head).chain(raw);
         // Decoded here, so the same reader parses a plain and a gzip layer.
         let stream: Box<dyn Read + '_> = match kind {
             None => Box::new(joined),
-            Some("gzip") => Box::new(flate2::read::MultiGzDecoder::new(joined)),
+            Some("gzip") => Box::new(Metered {
+                inner: flate2::read::MultiGzDecoder::new(joined),
+                meter: self.budget,
+            }),
             Some(name) => {
                 return Err(RootfsError::Format(format!(
                     "unsupported compression: {name}"
                 )));
             }
         };
-        let counted = Metered {
-            inner: stream,
-            meter: self.budget,
-        };
-        each_entry(counted, |entry| {
+        each_entry(stream, |entry| {
             if let Some(path) = normalize(&entry.path_bytes())? {
                 match pass {
                     Pass::Whiteouts => self.whiteout(&path)?,

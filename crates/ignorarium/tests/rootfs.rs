@@ -1395,8 +1395,8 @@ fn the_paths_an_extraction_records_are_capped() {
 fn over_budget(store: &Store, digest: &str, cap: u64) {
     let message = format!(
         "bad image archive: the image is over the extraction budget of {cap} bytes \
-         (archive bytes read to find its members, decoded layer bytes read in two passes, \
-         and 4096 per entry written)"
+         (archive bytes read to find its members and in two passes over each layer, bytes \
+         decoded from gzip layers, and 4096 per entry written)"
     );
     fails_cleanly(store, digest, budget(cap), &message);
 }
@@ -1811,6 +1811,21 @@ fn many_tiny_members_of_the_archive_count_against_the_budget() {
 }
 
 #[test]
+fn the_compressed_bytes_of_a_gzip_layer_count_against_the_budget() {
+    let (_h, store) = store();
+    // 5000 empty gzip members, about 20 bytes each, decode to nothing; then the tar.
+    let empty = gzip(b"");
+    let mut layer = empty.repeat(5000);
+    layer.extend(gzip(&layer_bytes(&[M::File("usr/a", "A")])));
+    assert!(layer.len() > 100_000, "{}", layer.len());
+    let digest = image_of(&store, &[layer]);
+    // Two passes read the layer's 100 KB; what they decode is a few KiB.
+    over_budget(&store, &digest, 64 << 10);
+    let root = from_store(&store, &digest).unwrap();
+    assert_eq!(fs::read_to_string(root.join("usr/a")).unwrap(), "A");
+}
+
+#[test]
 fn a_compression_bomb_stops_at_the_cap() {
     let (_h, store) = store();
     let big = "0".repeat(4 << 20);
@@ -1828,12 +1843,16 @@ fn many_empty_entries_are_stopped_by_the_entry_charge() {
     let members: Vec<M> = names.iter().map(|n| M::File(n, "")).collect();
     let plain = layer_bytes(&members);
     let layer = gzip(&plain);
+    let raw = 2 * layer.len() as u64;
     assert!(layer.len() * 20 < plain.len(), "{}", layer.len());
     let digest = image_of(&store, &[layer]);
-    // The decoded bytes, 2 * (1000 * 512 + 512) = 1025024, fit in 2 MiB; the 1001 entries
-    // written (1000 files and `usr`) at 4096 each do not.
+    // The decoded bytes, 2 * (1000 * 512 + 512) = 1025024, and the compressed bytes both
+    // passes read fit in 2 MiB; the 1001 entries written (1000 files and `usr`) at 4096 each
+    // do not.
     over_budget(&store, &digest, 2 << 20);
-    assert!(from_store_capped(&store, &digest, budget(OUTER + 1_025_024 + 1001 * 4096)).is_ok());
+    let cost = OUTER + raw + 1_025_024 + 1001 * 4096;
+    over_budget(&store, &digest, cost - 1);
+    assert!(from_store_capped(&store, &digest, budget(cost)).is_ok());
 }
 
 #[test]
