@@ -37,8 +37,11 @@ const REAP_LIMIT: Duration = Duration::from_secs(5);
 const REAP_POLL: Duration = Duration::from_millis(5);
 /// Where the box binary appears in the self-test sandbox.
 const BOX_PATH: &str = "/box/ignorarium";
-/// WSL's binfmt_misc handler, which starts Windows programs.
-const WSL_INTEROP: &str = "/proc/sys/fs/binfmt_misc/WSLInterop";
+/// Where binfmt_misc handlers are registered.
+const BINFMT: &str = "/proc/sys/fs/binfmt_misc";
+/// The name WSL gives its handlers for Windows programs, as a prefix: `WSLInterop`,
+/// `WSLInterop-late`.
+const INTEROP: &str = "WSLInterop";
 
 /// The level 1 backend. Its first sandbox makes the calling process a child subreaper
 /// for the rest of its life: bubblewrap leaves the sandbox's PID 1 unreaped, and the box
@@ -52,9 +55,8 @@ pub struct Level1 {
     /// Marks descriptors close-on-exec from the box before it starts bubblewrap. A field
     /// so a test can stand in a kernel that lacks the call.
     close_range: fn() -> io::Result<()>,
-    /// The text of WSL's interop handler entry, when the host has one. A field so a test
-    /// can stand in a host.
-    interop: fn() -> Option<String>,
+    /// Where the probe reads binfmt_misc, for WSL's interop handlers.
+    binfmt: Binfmt,
     /// `bwrap --version`, read on first use: every row record names the launcher.
     version: OnceLock<Result<Version, String>>,
 }
@@ -84,7 +86,7 @@ impl Level1 {
             bwrap,
             exe,
             close_range: || sys::close_range_cloexec(libc::c_uint::MAX, libc::c_uint::MAX),
-            interop: || std::fs::read_to_string(WSL_INTEROP).ok(),
+            binfmt: Binfmt::host(),
             version: OnceLock::new(),
         }
     }
@@ -130,7 +132,7 @@ impl Level1 {
                 "level 1 needs Linux 5.11 or later (close_range with CLOSE_RANGE_CLOEXEC): {e}"
             ));
         }
-        if let Some(why) = interop_fault((self.interop)().as_deref()) {
+        if let Some(why) = interop_fault(self.binfmt) {
             return Some(why);
         }
         let (text, number) = match self.version() {
@@ -289,18 +291,57 @@ impl Level1 {
     }
 }
 
-/// Why WSL interop makes level 1 unsafe, from the text of its handler entry. With the `F`
-/// flag the kernel opened the interpreter when the handler was registered, so a program in
-/// the sandbox could start Windows programs outside it. Without `F` (WSL's default `P`), the
-/// interpreter is looked up in the sandbox's root, where it is not. `None` for no handler.
-fn interop_fault(entry: Option<&str>) -> Option<String> {
-    let flags = entry?.lines().find_map(|l| l.strip_prefix("flags:"))?;
-    flags.contains('F').then(|| {
-        format!(
-            "{WSL_INTEROP} has the F flag, so a program in the sandbox could start Windows \
-             programs outside it"
-        )
-    })
+/// How the probe reads binfmt_misc: the entry names, and one entry's text. Fields, so a test
+/// can stand in a host.
+#[derive(Clone, Copy)]
+struct Binfmt {
+    list: fn() -> io::Result<Vec<String>>,
+    read: fn(&str) -> io::Result<String>,
+}
+
+impl Binfmt {
+    /// The host's. binfmt_misc not mounted lists nothing.
+    fn host() -> Binfmt {
+        Binfmt {
+            list: || match std::fs::read_dir(BINFMT) {
+                Ok(dir) => dir
+                    .map(|e| Ok(e?.file_name().to_string_lossy().into_owned()))
+                    .collect(),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+                Err(e) => Err(e),
+            },
+            read: |name| std::fs::read_to_string(Path::new(BINFMT).join(name)),
+        }
+    }
+}
+
+/// Why WSL interop makes level 1 unsafe, if it does: an enabled interop handler with the `F`
+/// flag, or one the probe cannot read. With `F` the kernel opened the interpreter when the
+/// handler was registered, so a program in the sandbox could start Windows programs outside
+/// it. Without `F` (WSL's default `P`), the interpreter is looked up in the sandbox's root,
+/// where it is not. Other handlers run their interpreter inside the sandbox.
+fn interop_fault(binfmt: Binfmt) -> Option<String> {
+    let names = match (binfmt.list)() {
+        Ok(names) => names,
+        Err(e) => return Some(format!("cannot list {BINFMT}: {e}")),
+    };
+    names
+        .iter()
+        .filter(|n| n.starts_with(INTEROP))
+        .find_map(|name| {
+            let text = match (binfmt.read)(name) {
+                Ok(text) => text,
+                Err(e) => return Some(format!("cannot read {BINFMT}/{name}: {e}")),
+            };
+            let enabled = text.lines().next() == Some("enabled");
+            let flags = text.lines().find_map(|l| l.strip_prefix("flags:"));
+            (enabled && flags.is_some_and(|f| f.contains('F'))).then(|| {
+                format!(
+                    "{BINFMT}/{name} has the F flag, so a program in the sandbox could start \
+                 Windows programs outside it"
+                )
+            })
+        })
 }
 
 /// The self-test's outcome and what it cost.
@@ -639,35 +680,88 @@ mod tests {
     }
 
     #[test]
-    fn wsl_interop_with_the_f_flag_makes_level_1_unavailable() {
-        let entry = |flags: &str| {
-            format!("enabled\ninterpreter /init\nflags: {flags}\noffset 0\nmagic 4d5a\n")
+    fn an_enabled_wsl_interop_handler_with_the_f_flag_makes_level_1_unavailable() {
+        const P: &str = "enabled\ninterpreter /init\nflags: P\noffset 0\nmagic 4d5a\n";
+        const PF: &str = "enabled\ninterpreter /init\nflags: PF\noffset 0\nmagic 4d5a\n";
+        const OFF_F: &str = "disabled\ninterpreter /init\nflags: F\noffset 0\nmagic 4d5a\n";
+        fn names(n: &[&str]) -> io::Result<Vec<String>> {
+            Ok(n.iter().map(|s| s.to_string()).collect())
+        }
+        fn both() -> io::Result<Vec<String>> {
+            names(&["register", "status", "WSLInterop", "WSLInterop-late"])
+        }
+        let p_only = Binfmt {
+            list: || names(&["register", "status", "WSLInterop"]),
+            read: |n| match n {
+                "WSLInterop" => Ok(P.into()),
+                _ => panic!("read {n}"),
+            },
+        };
+        assert_eq!(interop_fault(p_only), None);
+        let late_f = Binfmt {
+            list: both,
+            read: |n| match n {
+                "WSLInterop" => Ok(P.into()),
+                "WSLInterop-late" => Ok(PF.into()),
+                _ => panic!("read {n}"),
+            },
         };
         assert_eq!(
-            interop_fault(Some(&entry("PF"))),
+            interop_fault(late_f),
             Some(
-                "/proc/sys/fs/binfmt_misc/WSLInterop has the F flag, so a program in the \
+                "/proc/sys/fs/binfmt_misc/WSLInterop-late has the F flag, so a program in the \
                  sandbox could start Windows programs outside it"
                     .into()
             )
         );
-        assert!(interop_fault(Some(&entry("F"))).is_some());
-        for none in [
-            Some(entry("P")),
-            Some(entry("")),
-            Some("enabled\n".into()),
-            None,
+        let disabled_f = Binfmt {
+            list: both,
+            read: |n| match n {
+                "WSLInterop" => Ok(P.into()),
+                "WSLInterop-late" => Ok(OFF_F.into()),
+                _ => panic!("read {n}"),
+            },
+        };
+        assert_eq!(interop_fault(disabled_f), None);
+        let unreadable = Binfmt {
+            list: both,
+            read: |n| match n {
+                "WSLInterop" => Ok(P.into()),
+                _ => Err(io::Error::from_raw_os_error(libc::EACCES)),
+            },
+        };
+        assert_eq!(
+            interop_fault(unreadable),
+            Some(
+                "cannot read /proc/sys/fs/binfmt_misc/WSLInterop-late: Permission denied \
+                 (os error 13)"
+                    .into()
+            )
+        );
+        // Not mounted, or only other handlers: nothing to read, nothing to refuse.
+        for list in [
+            || names(&[]),
+            || names(&["register", "status", "qemu-aarch64"]),
         ] {
-            assert_eq!(interop_fault(none.as_deref()), None, "{none:?}");
+            let read: fn(&str) -> io::Result<String> = |n| panic!("read {n}");
+            assert_eq!(interop_fault(Binfmt { list, read }), None);
         }
-        // The probe asks first: with `F`, it never reaches bubblewrap.
+        let unlisted = Binfmt {
+            list: || Err(io::Error::from_raw_os_error(libc::EIO)),
+            read: |n| panic!("read {n}"),
+        };
+        assert_eq!(
+            interop_fault(unlisted),
+            Some("cannot list /proc/sys/fs/binfmt_misc: Input/output error (os error 5)".into())
+        );
+        // The probe asks before it runs bubblewrap.
         let mut b = Level1::with("/nonexistent/bwrap".into(), PathBuf::new());
-        b.interop = || Some("enabled\ninterpreter /init\nflags: PF\n".into());
+        b.binfmt = late_f;
         let Probe::Unavailable(why) = b.probe() else {
             panic!("probed available")
         };
-        assert!(why.contains("has the F flag"), "{why}");
-        b.interop = || Some("enabled\ninterpreter /init\nflags: P\n".into());
+        assert!(why.contains("WSLInterop-late has the F flag"), "{why}");
+        b.binfmt = p_only;
         let Probe::Unavailable(why) = b.probe() else {
             panic!("probed available")
         };

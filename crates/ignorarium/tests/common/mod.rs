@@ -236,23 +236,36 @@ pub fn skip_level1() -> bool {
     true
 }
 
-/// WSL's binfmt_misc handler for Windows programs.
-pub const WSL_INTEROP: &str = "/proc/sys/fs/binfmt_misc/WSLInterop";
+/// Where binfmt_misc handlers are registered.
+pub const BINFMT: &str = "/proc/sys/fs/binfmt_misc";
 
-/// Whether WSL's interop handler has the `F` flag; `None` when the host has no handler.
-pub fn interop_f_flag() -> Option<bool> {
-    let entry = std::fs::read_to_string(WSL_INTEROP).ok()?;
-    let flags = entry.lines().find_map(|l| l.strip_prefix("flags:"));
-    Some(flags.is_some_and(|f| f.contains('F')))
+/// `None` when this host has no WSL interop handler. Otherwise whether level 1 refuses the
+/// host: a `WSLInterop` handler is enabled with the `F` flag, or cannot be read.
+pub fn interop_refused() -> Option<bool> {
+    let names: Vec<String> = std::fs::read_dir(BINFMT)
+        .ok()?
+        .filter_map(|e| Some(e.ok()?.file_name().to_string_lossy().into_owned()))
+        .filter(|n| n.starts_with("WSLInterop"))
+        .collect();
+    let refused = |name: &String| match std::fs::read_to_string(Path::new(BINFMT).join(name)) {
+        Ok(t) => {
+            let flags = t.lines().find_map(|l| l.strip_prefix("flags:"));
+            t.lines().next() == Some("enabled") && flags.is_some_and(|f| f.contains('F'))
+        }
+        Err(_) => true,
+    };
+    (!names.is_empty()).then(|| names.iter().any(refused))
 }
 
 /// Why bubblewrap cannot run a level 1 sandbox on this host, or `None` when it can.
 /// Found by calling `bwrap` directly, never through the box's code, so a fault in that
-/// code fails the level 1 tests instead of skipping them. A WSL interop handler with the
-/// `F` flag makes level 1 refuse the host, as the probe does.
+/// code fails the level 1 tests instead of skipping them. A WSL interop handler that level 1
+/// refuses (see `interop_refused`) makes the host one without level 1, as the probe does.
 pub fn no_level1() -> Option<String> {
-    if interop_f_flag() == Some(true) {
-        return Some(format!("{WSL_INTEROP} has the F flag"));
+    if interop_refused() == Some(true) {
+        return Some(format!(
+            "a WSL interop handler in {BINFMT} has the F flag or cannot be read"
+        ));
     }
     let run = |args: &[&str]| std::process::Command::new("bwrap").args(args).output();
     let version = match run(&["--version"]) {
