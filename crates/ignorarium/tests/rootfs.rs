@@ -328,6 +328,38 @@ fn a_link_named_like_the_manifest_or_a_layer_is_not_that_file() {
 }
 
 #[test]
+fn the_first_file_of_a_repeated_name_counts() {
+    let (_h, store) = store();
+    let first = layer_bytes(&[M::File("usr/a", "first")]);
+    let second = layer_bytes(&[M::File("usr/a", "second")]);
+    let other = layer_bytes(&[M::File("usr/b", "b")]);
+    // The second copy of `l0/layer.tar` comes before `l1/layer.tar`, so the pass that finds
+    // the layers reads it. The second manifest names a layer the archive lacks.
+    let mut b = tar::Builder::new(Vec::new());
+    for (name, data) in [
+        (
+            "manifest.json",
+            &br#"[{"Layers":["l0/layer.tar","l1/layer.tar"]}]"#[..],
+        ),
+        ("manifest.json", &br#"[{"Layers":["l9/layer.tar"]}]"#[..]),
+        ("l0/layer.tar", &first[..]),
+        ("l0/layer.tar", &second[..]),
+        ("l1/layer.tar", &other[..]),
+    ] {
+        let mut h = tar::Header::new_gnu();
+        h.set_path(name).unwrap();
+        h.set_mode(0o644);
+        h.set_size(data.len() as u64);
+        h.set_cksum();
+        b.append(&h, data).unwrap();
+    }
+    let digest = store.put(&b.into_inner().unwrap()).unwrap();
+    let root = from_store(&store, &digest).unwrap();
+    assert_eq!(files_under(&root), ["usr", "usr/a", "usr/b"]);
+    assert_eq!(fs::read_to_string(root.join("usr/a")).unwrap(), "first");
+}
+
+#[test]
 fn a_layer_the_archive_lacks_is_a_format_error() {
     let (_h, store) = store();
     let a = TempDir::new().unwrap();

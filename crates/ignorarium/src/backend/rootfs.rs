@@ -6,8 +6,8 @@
 //!
 //! The outer archive is read in two passes: the first stops at `manifest.json`, the second
 //! records where the data of each layer the manifest names lies, and stops once it has them
-//! all. It records nothing else. Each layer is then read from where it lies. A manifest may
-//! name at most `MAX_LAYERS` layers.
+//! all. It records nothing else. The first regular file of each name counts. Each layer is
+//! then read from where it lies. A manifest may name at most `MAX_LAYERS` layers.
 //!
 //! One budget bounds an extraction (`WRITE_CAP` bytes). Every byte read from the archive
 //! counts: in the two passes over the outer archive, and in the two passes over each layer.
