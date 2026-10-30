@@ -305,16 +305,27 @@ fn network_is_off_inside() {
     assert!(o.wall_seconds < 5.0, "{}", o.wall_seconds);
 }
 
-/// WSL runs Windows programs through this binfmt_misc handler. Its interpreter, `/init`, is
-/// looked up in the root of the process that starts the program.
-const WSL_INTEROP: &str = "/proc/sys/fs/binfmt_misc/WSLInterop";
 const WHOAMI: &str = "/mnt/c/Windows/System32/whoami.exe";
 
+/// WSL runs Windows programs through a binfmt_misc handler. Without the `F` flag (WSL's
+/// default `P`), its interpreter, `/init`, is looked up in the root of the process that starts
+/// the program, so a sandboxed payload cannot run one. With `F`, level 1 refuses the host.
 #[test]
 fn a_windows_program_in_the_input_cannot_run_in_the_sandbox() {
-    if !Path::new(WSL_INTEROP).exists() {
-        println!("skip wsl: {WSL_INTEROP} is absent, so this is not WSL with interop");
-        return;
+    match common::interop_f_flag() {
+        None => {
+            let at = common::WSL_INTEROP;
+            println!("skip wsl: {at} is absent, so this is not WSL with interop");
+            return;
+        }
+        Some(true) => {
+            let Probe::Unavailable(why) = backend().probe() else {
+                panic!("level 1 probed available with the F flag")
+            };
+            assert!(why.contains("has the F flag"), "{why}");
+            return;
+        }
+        Some(false) => {}
     }
     let Some(b) = ready() else { return };
     let (_d, job) = row(

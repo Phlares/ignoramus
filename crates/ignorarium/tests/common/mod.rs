@@ -236,10 +236,24 @@ pub fn skip_level1() -> bool {
     true
 }
 
+/// WSL's binfmt_misc handler for Windows programs.
+pub const WSL_INTEROP: &str = "/proc/sys/fs/binfmt_misc/WSLInterop";
+
+/// Whether WSL's interop handler has the `F` flag; `None` when the host has no handler.
+pub fn interop_f_flag() -> Option<bool> {
+    let entry = std::fs::read_to_string(WSL_INTEROP).ok()?;
+    let flags = entry.lines().find_map(|l| l.strip_prefix("flags:"));
+    Some(flags.is_some_and(|f| f.contains('F')))
+}
+
 /// Why bubblewrap cannot run a level 1 sandbox on this host, or `None` when it can.
 /// Found by calling `bwrap` directly, never through the box's code, so a fault in that
-/// code fails the level 1 tests instead of skipping them.
+/// code fails the level 1 tests instead of skipping them. A WSL interop handler with the
+/// `F` flag makes level 1 refuse the host, as the probe does.
 pub fn no_level1() -> Option<String> {
+    if interop_f_flag() == Some(true) {
+        return Some(format!("{WSL_INTEROP} has the F flag"));
+    }
     let run = |args: &[&str]| std::process::Command::new("bwrap").args(args).output();
     let version = match run(&["--version"]) {
         Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),

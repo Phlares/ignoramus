@@ -37,6 +37,8 @@ const REAP_LIMIT: Duration = Duration::from_secs(5);
 const REAP_POLL: Duration = Duration::from_millis(5);
 /// Where the box binary appears in the self-test sandbox.
 const BOX_PATH: &str = "/box/ignorarium";
+/// WSL's binfmt_misc handler, which starts Windows programs.
+const WSL_INTEROP: &str = "/proc/sys/fs/binfmt_misc/WSLInterop";
 
 /// The level 1 backend. Its first sandbox makes the calling process a child subreaper
 /// for the rest of its life: bubblewrap leaves the sandbox's PID 1 unreaped, and the box
@@ -50,6 +52,9 @@ pub struct Level1 {
     /// Marks descriptors close-on-exec from the box before it starts bubblewrap. A field
     /// so a test can stand in a kernel that lacks the call.
     close_range: fn() -> io::Result<()>,
+    /// The text of WSL's interop handler entry, when the host has one. A field so a test
+    /// can stand in a host.
+    interop: fn() -> Option<String>,
     /// `bwrap --version`, read on first use: every row record names the launcher.
     version: OnceLock<Result<Version, String>>,
 }
@@ -79,6 +84,7 @@ impl Level1 {
             bwrap,
             exe,
             close_range: || sys::close_range_cloexec(libc::c_uint::MAX, libc::c_uint::MAX),
+            interop: || std::fs::read_to_string(WSL_INTEROP).ok(),
             version: OnceLock::new(),
         }
     }
@@ -113,8 +119,9 @@ impl Level1 {
             })
     }
 
-    /// Why level 1 cannot run here, if it cannot: bubblewrap is missing or older than the
-    /// floor, or a test sandbox on the host root fails.
+    /// Why level 1 cannot run here, if it cannot: the kernel lacks a call, WSL interop reaches
+    /// out of a sandbox, bubblewrap is missing or older than the floor, or a test sandbox on
+    /// the host root fails.
     fn fault(&self) -> Option<String> {
         // `sys::inherit_only` needs this call in every spawn. Test it here, so a kernel
         // without it is named, not blamed on bubblewrap's "Invalid argument".
@@ -122,6 +129,9 @@ impl Level1 {
             return Some(format!(
                 "level 1 needs Linux 5.11 or later (close_range with CLOSE_RANGE_CLOEXEC): {e}"
             ));
+        }
+        if let Some(why) = interop_fault((self.interop)().as_deref()) {
+            return Some(why);
         }
         let (text, number) = match self.version() {
             Ok((text, number)) => (text, *number),
@@ -277,6 +287,20 @@ impl Level1 {
             cpu_unknown: l.cpu_unknown,
         }
     }
+}
+
+/// Why WSL interop makes level 1 unsafe, from the text of its handler entry. With the `F`
+/// flag the kernel opened the interpreter when the handler was registered, so a program in
+/// the sandbox could start Windows programs outside it. Without `F` (WSL's default `P`), the
+/// interpreter is looked up in the sandbox's root, where it is not. `None` for no handler.
+fn interop_fault(entry: Option<&str>) -> Option<String> {
+    let flags = entry?.lines().find_map(|l| l.strip_prefix("flags:"))?;
+    flags.contains('F').then(|| {
+        format!(
+            "{WSL_INTEROP} has the F flag, so a program in the sandbox could start Windows \
+             programs outside it"
+        )
+    })
 }
 
 /// The self-test's outcome and what it cost.
@@ -608,6 +632,42 @@ mod tests {
         );
         // The kernel check passes here, so the probe reaches bubblewrap and names it.
         let b = Level1::with("/nonexistent/bwrap".into(), PathBuf::new());
+        let Probe::Unavailable(why) = b.probe() else {
+            panic!("probed available")
+        };
+        assert!(why.starts_with("cannot run /nonexistent/bwrap: "), "{why}");
+    }
+
+    #[test]
+    fn wsl_interop_with_the_f_flag_makes_level_1_unavailable() {
+        let entry = |flags: &str| {
+            format!("enabled\ninterpreter /init\nflags: {flags}\noffset 0\nmagic 4d5a\n")
+        };
+        assert_eq!(
+            interop_fault(Some(&entry("PF"))),
+            Some(
+                "/proc/sys/fs/binfmt_misc/WSLInterop has the F flag, so a program in the \
+                 sandbox could start Windows programs outside it"
+                    .into()
+            )
+        );
+        assert!(interop_fault(Some(&entry("F"))).is_some());
+        for none in [
+            Some(entry("P")),
+            Some(entry("")),
+            Some("enabled\n".into()),
+            None,
+        ] {
+            assert_eq!(interop_fault(none.as_deref()), None, "{none:?}");
+        }
+        // The probe asks first: with `F`, it never reaches bubblewrap.
+        let mut b = Level1::with("/nonexistent/bwrap".into(), PathBuf::new());
+        b.interop = || Some("enabled\ninterpreter /init\nflags: PF\n".into());
+        let Probe::Unavailable(why) = b.probe() else {
+            panic!("probed available")
+        };
+        assert!(why.contains("has the F flag"), "{why}");
+        b.interop = || Some("enabled\ninterpreter /init\nflags: P\n".into());
         let Probe::Unavailable(why) = b.probe() else {
             panic!("probed available")
         };
