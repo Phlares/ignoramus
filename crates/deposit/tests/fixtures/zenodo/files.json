@@ -1,0 +1,22 @@
+[
+  {
+    "checksum": "5d41402abc4b2a76b9719d911017c592",
+    "filename": "a.txt",
+    "filesize": 5,
+    "id": "0b9d5f1e-2c1a-4d6e-9f3b-1a2b3c4d5e6f",
+    "links": {
+      "download": "https://sandbox.zenodo.org/api/files/568377dd-daf8-4a0d-9d9d-c1c1d8b3c2c1/a.txt",
+      "self": "https://sandbox.zenodo.org/api/deposit/depositions/123456/files/0b9d5f1e-2c1a-4d6e-9f3b-1a2b3c4d5e6f"
+    }
+  },
+  {
+    "checksum": "5eb63bbbe01eeed093cb22bb8f5acdc3",
+    "filename": "b.zip",
+    "filesize": 11,
+    "id": "7c6e5d4c-3b2a-4190-8f7e-6d5c4b3a2918",
+    "links": {
+      "download": "https://sandbox.zenodo.org/api/files/568377dd-daf8-4a0d-9d9d-c1c1d8b3c2c1/b.zip",
+      "self": "https://sandbox.zenodo.org/api/deposit/depositions/123456/files/7c6e5d4c-3b2a-4190-8f7e-6d5c4b3a2918"
+    }
+  }
+]

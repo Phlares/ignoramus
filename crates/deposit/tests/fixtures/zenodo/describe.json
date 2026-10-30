@@ -1,0 +1,18 @@
+{
+  "id": 123456,
+  "links": {
+    "bucket": "https://sandbox.zenodo.org/api/files/568377dd-daf8-4a0d-9d9d-c1c1d8b3c2c1",
+    "self": "https://sandbox.zenodo.org/api/deposit/depositions/123456"
+  },
+  "metadata": {
+    "access_right": "open",
+    "prereserve_doi": {
+      "doi": "10.5072/zenodo.123456",
+      "recid": 123456
+    },
+    "title": "Sleep study",
+    "upload_type": "dataset"
+  },
+  "state": "unsubmitted",
+  "submitted": false
+}

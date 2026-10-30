@@ -1,0 +1,17 @@
+{
+  "created": "2026-10-29T09:00:00.000000+00:00",
+  "id": 123456,
+  "links": {
+    "bucket": "https://sandbox.zenodo.org/api/files/568377dd-daf8-4a0d-9d9d-c1c1d8b3c2c1",
+    "html": "https://sandbox.zenodo.org/deposit/123456",
+    "self": "https://sandbox.zenodo.org/api/deposit/depositions/123456"
+  },
+  "metadata": {
+    "prereserve_doi": {
+      "doi": "10.5072/zenodo.123456",
+      "recid": 123456
+    }
+  },
+  "state": "unsubmitted",
+  "submitted": false
+}
