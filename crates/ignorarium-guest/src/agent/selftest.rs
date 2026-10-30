@@ -1,5 +1,7 @@
-//! Checks that the guest has no way out: loopback only, no route, no path to the host.
+//! Checks that the guest has no way out: loopback only, no route, no path to the host, and
+//! no io_uring.
 use crate::proto::SelfTest;
+use crate::sys;
 use std::fs;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
@@ -10,6 +12,7 @@ pub fn run(net_dir: &Path, host_connect: impl Fn() -> io::Result<()>) -> SelfTes
         only_loopback: only_loopback(net_dir),
         route_blocked: route_blocked(),
         host_path_blocked: host_connect().is_err(),
+        io_uring_errno: sys::io_uring_setup_errno(),
     }
 }
 

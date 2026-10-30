@@ -162,7 +162,7 @@ fn probe_lists_every_fault() {
 fn probe_checks_both_pins() {
     let d = TempDir::new().unwrap();
     let (x, agent) = (d.path().join("x"), d.path().join("agent"));
-    fs::write(&x, "x").unwrap();
+    write_exec(&x, "x");
     fs::write(&agent, static_elf()).unwrap();
     let b = with_kvm(Path::new("/dev/null"), &x, &x, &agent);
     let found = sha256_file(&x).unwrap();
@@ -180,6 +180,44 @@ fn probe_checks_both_pins() {
         ]
     );
     assert!(VMM.sha256.starts_with("4f4f98a3") && KERNEL.sha256.starts_with("edfeb8a8"));
+}
+
+#[test]
+fn probe_needs_a_vmm_it_can_run() {
+    let d = TempDir::new().unwrap();
+    let (vmm, agent) = (d.path().join("vmm"), d.path().join("agent"));
+    fs::write(&vmm, "x").unwrap();
+    fs::write(&agent, static_elf()).unwrap();
+    let vmm_fault = |mode: u32| {
+        fs::set_permissions(&vmm, Permissions::from_mode(mode)).unwrap();
+        faults(&with_kvm(Path::new("/dev/null"), &vmm, &vmm, &agent)).remove(0)
+    };
+    let not_run = format!("{} has mode 644, so it cannot run", vmm.display());
+    assert_eq!(vmm_fault(0o644), not_run);
+    // Any execute bit lets the pin check read on.
+    for mode in [0o744, 0o654, 0o645] {
+        assert!(vmm_fault(mode).contains("expected sha256"), "{mode:o}");
+    }
+}
+
+#[test]
+fn the_defaults_size_each_row_s_machine() {
+    let b = Level2::with("v".into(), "k".into(), "a".into());
+    assert_eq!(
+        (&b.kvm, &b.vmm, &b.kernel, &b.agent),
+        (
+            &PathBuf::from("/dev/kvm"),
+            &PathBuf::from("v"),
+            &PathBuf::from("k"),
+            &PathBuf::from("a")
+        )
+    );
+    assert_eq!((b.cpus, b.mem_mib, b.out_mib), (1, 1024, 256));
+    let secs = Duration::from_secs;
+    assert_eq!(
+        (b.boot_timeout, b.exit_timeout, b.report_slack),
+        (secs(30), secs(10), secs(30))
+    );
 }
 
 #[test]
@@ -328,6 +366,7 @@ fn passing() -> proto::SelfTest {
         only_loopback: true,
         route_blocked: true,
         host_path_blocked: true,
+        io_uring_errno: Some(libc::EPERM),
     }
 }
 
@@ -354,8 +393,43 @@ fn selftest_of_maps_the_guest_checks() {
     assert_eq!(with(|g| g.route_blocked = false), ["connect"]);
     assert_eq!(with(|g| g.only_loopback = false), ["connect"]);
     assert_eq!(with(|g| g.host_path_blocked = false), ["vsock"]);
+    // io_uring, as level 1 reads the same call.
+    let io_uring = |errno: Option<i32>| {
+        selftest_of(&proto::SelfTest {
+            io_uring_errno: errno,
+            ..passing()
+        })
+    };
+    let t = io_uring(Some(libc::ENOSYS));
+    assert!(t.io_uring_blocked && t.io_uring_absent);
+    assert_eq!(t.io_uring_state(), "absent");
+    assert_eq!(io_uring(Some(libc::EPERM)).io_uring_state(), "denied");
+    for open in [None, Some(libc::EACCES)] {
+        assert_eq!(io_uring(open).failed(), ["io_uring"], "{open:?}");
+    }
 }
 
+#[test]
+fn the_guest_and_the_box_agree_on_a_passing_self_test() {
+    // The guest decides whether the payload runs; the box decides whether the row stands.
+    let errnos = [
+        libc::EPERM,
+        libc::ENOSYS,
+        libc::EAFNOSUPPORT,
+        libc::EACCES,
+        libc::EINVAL,
+    ];
+    for io_uring_errno in errnos.map(Some).into_iter().chain([None]) {
+        for host_path_blocked in [true, false] {
+            let g = proto::SelfTest {
+                io_uring_errno,
+                host_path_blocked,
+                ..passing()
+            };
+            assert_eq!(g.ok(), selftest_of(&g).ok(), "{g:?}");
+        }
+    }
+}
 fn ran(end: Option<End>, selftest: proto::SelfTest) -> Result<VmOutcome, VmError> {
     Ok(VmOutcome {
         report: Report {
@@ -513,7 +587,7 @@ fn outcome_of_maps_every_guest_ending() {
         ),
     ];
     for (i, (res, exit, cpu, unknown, selftest, hash)) in table.into_iter().enumerate() {
-        let o = outcome_of(res, 2.5);
+        let o = outcome_of(res, 2.5, 1);
         assert_eq!(o.exit, exit, "case {i}");
         assert_eq!(o.cpu_seconds, cpu, "case {i}");
         assert_eq!(
@@ -525,6 +599,42 @@ fn outcome_of_maps_every_guest_ending() {
         assert_eq!(o.output_hash, hash, "case {i}");
         assert_eq!(o.wall_seconds, 2.5, "case {i}");
     }
+}
+
+fn with_cpu(cpu_seconds: f64) -> Result<VmOutcome, VmError> {
+    let mut res = ran(Some(End::Code(0)), passing());
+    if let Ok(o) = &mut res {
+        o.report.cpu_seconds = cpu_seconds;
+    }
+    res
+}
+
+#[test]
+fn outcome_of_refuses_a_report_no_guest_can_mean() {
+    // Two vCPUs over a 2.5 s row use at most 5 CPU seconds.
+    for cpu in [0.0, 5.0] {
+        assert_eq!(outcome_of(with_cpu(cpu), 2.5, 2).exit, Exit::Ok, "{cpu}");
+    }
+    for cpu in [-0.5, 5.001, f64::NAN, f64::INFINITY] {
+        let o = outcome_of(with_cpu(cpu), 2.5, 2);
+        let why =
+            format!("the guest reported {cpu} CPU seconds, outside 0 to 5 for 2 vCPUs over 2.5 s");
+        assert_eq!(o.exit, Exit::Infra(why), "{cpu}");
+        assert_eq!(o.cpu_seconds, 0.0);
+        assert_eq!(
+            o.cpu_unknown.as_deref(),
+            Some(
+                "the guest reported a CPU time it cannot have used, so the payload's CPU time is unknown"
+            )
+        );
+        assert_eq!(o.output_hash, "");
+    }
+    let o = outcome_of(ran(Some(End::Signal(i32::MAX)), passing()), 2.5, 1);
+    assert_eq!(
+        o.exit,
+        Exit::Infra("the guest reported signal 2147483647".into())
+    );
+    assert_eq!((o.output_hash.as_str(), o.cpu_seconds), ("", 0.75));
 }
 
 #[test]
@@ -637,6 +747,103 @@ fn a_stop_before_the_vm_skips_what_is_left() {
     assert!(disk.is_file());
 }
 
+/// A backend whose VMM writes its arguments to `<dir>/args` and exits at once, so every row
+/// ends before boot, and a row for it: environment root, payload and folders, all in `dir`.
+fn fake_box(dir: &Path) -> (Level2, RowJob) {
+    for f in ["root", "in", "out", "payload"] {
+        fs::create_dir(dir.join(f)).unwrap();
+    }
+    for f in ["in", "payload"] {
+        fs::set_permissions(dir.join(f), Permissions::from_mode(0o755)).unwrap();
+    }
+    write_exec(&dir.join("payload/run"), "#!/bin/sh\n");
+    let vmm = dir.join("vmm");
+    let args = dir.join("args");
+    write_exec(
+        &vmm,
+        &format!("#!/bin/sh\necho \"$@\" > {}\n", args.display()),
+    );
+    fs::write(dir.join("agent"), static_elf()).unwrap();
+    let b = Level2::with(vmm, dir.join("kernel"), dir.join("agent"));
+    let job = RowJob {
+        argv: vec![dir.join("payload/run").to_string_lossy().into()],
+        input_dir: dir.join("in"),
+        output_dir: dir.join("out"),
+        wall_timeout: LONG,
+        rootfs: Some(dir.join("root")),
+        ..RowJob::default()
+    };
+    (b, job)
+}
+
+fn boot_failed(exit: &Exit) -> bool {
+    matches!(exit, Exit::Infra(why) if why.starts_with("boot failed: the VMM exited (exit status: 0)"))
+}
+
+fn names(dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn a_row_removes_its_scratch_folder_and_a_dead_box_s() {
+    const NAME: &str = "a_row_removes_its_scratch_folder_and_a_dead_box_s";
+    if !is_child(NAME) {
+        let d = TempDir::new().unwrap();
+        let tmp = d.path().join("tmp");
+        fs::create_dir(&tmp).unwrap();
+        assert!(in_child(NAME, d.path(), &[("TMPDIR", tmp.as_os_str())]));
+        return;
+    }
+    let dir = std::env::current_dir().unwrap();
+    let tmp = dir.join("tmp");
+    assert_eq!(std::env::temp_dir(), tmp);
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let dead = child.id();
+    child.wait().unwrap();
+    // A dead box's scratch, one of a live process (PID 1), and a folder that is not scratch.
+    for name in [
+        format!("ignorarium-vm-{dead}-0"),
+        "ignorarium-vm-1-0".into(),
+        "other".into(),
+    ] {
+        fs::create_dir_all(tmp.join(name).join("work")).unwrap();
+    }
+    let (b, job) = fake_box(&dir);
+    let o = b.run_row(&job, &|| true).unwrap();
+    assert!(boot_failed(&o.exit), "{o:?}");
+    // The row ran in its own scratch folder, under the temp folder.
+    let args = fs::read_to_string(dir.join("args")).unwrap();
+    let initramfs = args
+        .split(' ')
+        .skip_while(|a| *a != "--initramfs")
+        .nth(1)
+        .unwrap();
+    let scratch = tmp.join(format!("ignorarium-vm-{}-0", std::process::id()));
+    assert_eq!(Path::new(initramfs), scratch.join("initramfs.cpio"));
+    assert_eq!(names(&tmp), ["ignorarium-vm-1-0", "other"]);
+}
+
+#[test]
+fn a_failed_agent_read_is_tried_again_next_row() {
+    let d = TempDir::new().unwrap();
+    let (mut b, job) = fake_box(d.path());
+    b.agent = d.path().join("later");
+    let o = b.run_row(&job, &|| true).unwrap();
+    let why = format!("cannot read the agent {}: ", b.agent.display());
+    assert!(
+        matches!(&o.exit, Exit::Infra(w) if w.starts_with(&why)),
+        "{o:?}"
+    );
+    fs::write(&b.agent, static_elf()).unwrap();
+    let o = b.run_row(&job, &|| true).unwrap();
+    assert!(boot_failed(&o.exit), "{o:?}");
+}
+
 #[test]
 fn a_required_level2_turns_a_skip_into_a_failure() {
     const NAME: &str = "a_required_level2_turns_a_skip_into_a_failure";
@@ -679,12 +886,14 @@ fn the_payload_sees_guest_paths() {
     let (_d, job) = row(
         &r,
         "printf '%s %s %s %s %s' \"$0\" \"$IGNORARIUM_IN\" \"$IGNORARIUM_OUT\" \"$1\" \"$2\" \
-         > \"$IGNORARIUM_OUT/paths\"",
+         > \"$IGNORARIUM_OUT/paths\"; echo rel > relative",
         LONG,
     );
     let o = r.level2.run_row(&job, &|| true).unwrap();
     assert_eq!(o.exit, Exit::Ok, "{o:?}");
     assert_eq!(read(&job, "paths"), "/payload/run /in /out --condition a");
+    // The payload starts in its output folder, as at level 1.
+    assert_eq!(read(&job, "relative"), "rel\n");
 }
 
 #[test]
@@ -723,7 +932,9 @@ fn started_names_one_group() {
 }
 
 /// Says stop half a second after the guest connects: the host removes its listening
-/// socket then, so the payload is running by the stop.
+/// socket then, so the payload is most likely running by the stop. No channel reaches the
+/// host from the payload, so no marker can prove it; the host's path while the guest runs
+/// is pinned by the fake-VMM test `a_stop_while_the_guest_runs_kills_the_group`.
 #[derive(Default)]
 struct StopOnceRunning {
     pid: Cell<Option<u32>>,

@@ -3,7 +3,9 @@ mod common;
 use common::write_exec;
 use ignorarium_guest::agent::payload::{self, Ran};
 use ignorarium_guest::agent::selftest::{self, route_blocked};
-use ignorarium_guest::agent::steps::{disk_by_serial, disk_bytes, mix_seed, now_nanos, set_clock};
+use ignorarium_guest::agent::steps::{
+    disable_io_uring, disk_by_serial, disk_bytes, mix_seed, now_nanos, set_clock,
+};
 use ignorarium_guest::agent::{gate, sandbox};
 use ignorarium_guest::pack;
 use ignorarium_guest::proto::{End, Job, SEED_ENV, SelfTest};
@@ -253,7 +255,68 @@ fn selftest_with(ok: bool) -> SelfTest {
         only_loopback: true,
         route_blocked: true,
         host_path_blocked: ok,
+        io_uring_errno: Some(libc::EPERM),
     }
+}
+
+#[test]
+fn selftest_tries_io_uring_setup() {
+    let d = net_with(&["lo"]);
+    let t = selftest::run(d.path(), || Err(io::Error::other("refused")));
+    assert_eq!(
+        t.io_uring_errno,
+        ignorarium_guest::sys::io_uring_setup_errno()
+    );
+}
+
+#[test]
+fn the_guest_counts_io_uring_as_blocked_only_when_refused() {
+    // The filter's answer, or a kernel without the call; any other errno leaves it open.
+    let cases = [
+        (Some(libc::EPERM), true),
+        (Some(libc::ENOSYS), true),
+        (Some(libc::EAFNOSUPPORT), true),
+        (Some(libc::EACCES), false),
+        (Some(libc::EINVAL), false),
+        (None, false),
+    ];
+    for (io_uring_errno, ok) in cases {
+        let t = SelfTest {
+            io_uring_errno,
+            ..selftest_with(true)
+        };
+        assert_eq!(t.ok(), ok, "{io_uring_errno:?}");
+    }
+}
+
+#[test]
+fn disable_io_uring_sets_the_switch_for_every_process() {
+    let d = tempfile::tempdir().unwrap();
+    let switch = d.path().join("io_uring_disabled");
+    fs::write(&switch, "0").unwrap();
+    disable_io_uring(&switch).unwrap();
+    assert_eq!(fs::read_to_string(&switch).unwrap(), "2");
+    // A kernel without the switch is left as it is.
+    disable_io_uring(&d.path().join("absent")).unwrap();
+    assert!(!d.path().join("absent").exists());
+    assert!(disable_io_uring(d.path()).is_err());
+}
+
+#[test]
+fn payload_runs_in_the_folder_it_is_given() {
+    let d = tempfile::tempdir().unwrap();
+    let j = sh("pwd > \"$OUT/pwd\"; echo rel > relative", d.path());
+    assert_eq!(
+        payload::run_as(&j, None, d.path()).unwrap().end,
+        End::Code(0)
+    );
+    let pwd = fs::read_to_string(d.path().join("pwd")).unwrap();
+    assert_eq!(Path::new(pwd.trim()), d.path());
+    assert_eq!(
+        fs::read_to_string(d.path().join("relative")).unwrap(),
+        "rel
+"
+    );
 }
 
 fn ran_with(packed: Result<&str, &str>) -> io::Result<(Ran, Result<String, String>)> {

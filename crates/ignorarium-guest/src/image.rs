@@ -59,12 +59,13 @@ pub fn has_interp(elf: &[u8]) -> io::Result<bool> {
     if !elf.starts_with(b"\x7fELF\x02\x01") {
         return Err(bad());
     }
-    let le = |at: u64, n: u64| -> io::Result<u64> {
-        let end = at.checked_add(n).ok_or_else(bad)?;
-        let range =
-            usize::try_from(at).map_err(|_| bad())?..usize::try_from(end).map_err(|_| bad())?;
-        let bytes = elf.get(range).ok_or_else(bad)?;
-        Ok(bytes.iter().rev().fold(0, |v, &b| v << 8 | u64::from(b)))
+    // A field of `n` bytes (at most 8), little-endian.
+    let le = |at: u64, n: usize| -> io::Result<u64> {
+        let start = usize::try_from(at).map_err(|_| bad())?;
+        let end = start.checked_add(n).ok_or_else(bad)?;
+        let mut field = [0u8; 8];
+        field[..n].copy_from_slice(elf.get(start..end).ok_or_else(bad)?);
+        Ok(u64::from_le_bytes(field))
     };
     let (phoff, size, count) = (le(0x20, 8)?, le(0x36, 2)?, le(0x38, 2)?);
     for i in 0..count {

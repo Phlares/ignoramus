@@ -118,6 +118,8 @@ fn a_row_runs_in_a_fresh_vm() {
         st.only_loopback && st.route_blocked && st.host_path_blocked,
         "{st:?}"
     );
+    // The agent switches io_uring off, so the guest kernel refuses it to every process.
+    assert_eq!(st.io_uring_errno, Some(libc::EPERM), "{st:?}");
     assert_eq!(o.report.end, Some(End::Code(0)));
     assert_eq!(o.output_hash, o.report.output_hash);
     assert_eq!(row.out("seed"), hex::encode(SEED));
@@ -313,6 +315,25 @@ fn the_payload_folder_is_read_only_at_slash_payload() {
     assert_eq!(o.report.end, Some(End::Code(0)));
     assert_eq!(row.out("argv0"), "/payload/run");
     assert_eq!(row.out("touch"), "refused\n");
+}
+
+#[test]
+#[ignore = "boots a VM; see the top of the file"]
+fn the_payload_starts_in_out() {
+    // As at level 1, so a payload that writes a relative path works at both levels.
+    let row = Row::sh("pwd > /out/pwd; echo rel > relative");
+    let o = row.run();
+    assert_eq!(o.report.end, Some(End::Code(0)));
+    assert_eq!(
+        row.out("pwd"),
+        "/out
+"
+    );
+    assert_eq!(
+        row.out("relative"),
+        "rel
+"
+    );
 }
 
 #[test]

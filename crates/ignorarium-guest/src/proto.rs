@@ -30,11 +30,25 @@ pub struct SelfTest {
     pub only_loopback: bool,
     pub route_blocked: bool,
     pub host_path_blocked: bool,
+    /// The errno of `io_uring_setup`; `None` when the call worked.
+    pub io_uring_errno: Option<i32>,
 }
 
 impl SelfTest {
     pub fn ok(&self) -> bool {
-        self.only_loopback && self.route_blocked && self.host_path_blocked
+        self.only_loopback
+            && self.route_blocked
+            && self.host_path_blocked
+            && self.io_uring_blocked()
+    }
+
+    /// `EPERM` is a refusal; `ENOSYS` and `EAFNOSUPPORT` mean the kernel lacks the call. Any
+    /// other errno leaves it open. The box reads a level 1 sandbox's call the same way.
+    fn io_uring_blocked(&self) -> bool {
+        matches!(
+            self.io_uring_errno,
+            Some(libc::EPERM | libc::ENOSYS | libc::EAFNOSUPPORT)
+        )
     }
 }
 

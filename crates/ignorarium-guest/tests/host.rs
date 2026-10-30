@@ -282,6 +282,7 @@ fn report(hash: &str, end: Option<End>) -> ToHost {
             only_loopback: true,
             route_blocked: true,
             host_path_blocked: true,
+            io_uring_errno: Some(libc::EPERM),
         },
         clock_unix_nanos: 1,
         end,
@@ -1106,5 +1107,86 @@ fn a_refused_pack_is_reported_without_outputs() {
         Some("outputs exceed the output limit of 8388608 bytes")
     );
     assert_eq!(fs::read_dir(&rig.out).unwrap().count(), 0);
+    rig.pid_gone();
+}
+
+/// Sends a frame that never ends, one byte every 2 ms, until the host hangs up or 10 s pass.
+fn fast_trickle(s: &mut UnixStream) {
+    let t = Instant::now();
+    let mut bytes = [0u8, 0, 0xff, 0xff]
+        .into_iter()
+        .chain(std::iter::repeat(b'x'));
+    while t.elapsed() < Duration::from_secs(10) {
+        if s.write_all(&[bytes.next().unwrap()]).is_err() {
+            return;
+        }
+        thread::sleep(ms(2));
+    }
+}
+
+#[test]
+fn a_trickling_guest_cannot_hold_off_a_stop() {
+    let rig = Rig::sleeper();
+    let job_read = Arc::new(AtomicBool::new(false));
+    let flag = job_read.clone();
+    let h = rig.guest(move |s, c| {
+        hello(s);
+        read_job(s, c);
+        flag.store(true, Ordering::SeqCst);
+        // Faster than the host's poll, so no socket wait ever times out.
+        fast_trickle(s);
+    });
+    let watch = Seen {
+        stop_on: Some(job_read),
+        ..Seen::default()
+    };
+    let res = rig.run_watched(&watch);
+    let returned = Instant::now();
+    assert!(matches!(res, Err(VmError::Stopped)), "{res:?}");
+    assert!(watch.since_stop(returned) < Duration::from_secs(1));
+    h.join().unwrap();
+    rig.pid_gone();
+}
+
+#[test]
+fn a_closure_that_says_stop_stops_the_row_before_the_vmm_starts() {
+    let mut rig = Rig::sleeper();
+    // A watch that never said stop would boot the fake VMM and time out.
+    rig.vm.boot_timeout = ms(300);
+    let res = rig.run_watched(&|| false);
+    assert!(matches!(res, Err(VmError::Stopped)), "{res:?}");
+    assert!(!rig.work.join("vmm.log").exists(), "the VMM started");
+}
+
+#[test]
+fn a_stop_in_the_exit_grace_ends_the_vmm_at_once() {
+    let mut rig = Rig::sleeper();
+    rig.vm.exit_timeout = Duration::from_secs(10);
+    let reported = Arc::new(AtomicBool::new(false));
+    let flag = reported.clone();
+    let h = rig.guest(move |s, c| {
+        hello(s);
+        read_job(s, c);
+        put_out(&c.work, &packed(&c.src));
+        let hash = tree_hash(&c.src).unwrap();
+        write_frame(s, &report(&hash, Some(End::Code(0)))).unwrap();
+        // The host is in the exit grace by now: the fake VMM never exits by itself.
+        thread::sleep(ms(100));
+        flag.store(true, Ordering::SeqCst);
+    });
+    let watch = Seen {
+        stop_on: Some(reported),
+        ..Seen::default()
+    };
+    let res = rig.run_watched(&watch);
+    h.join().unwrap();
+    // The report is in hand, so the row stands.
+    let o = res.unwrap();
+    assert_eq!(o.output_hash, rig.src_hash());
+    assert!(
+        o.timings.stop < Duration::from_secs(2),
+        "{:?}",
+        o.timings.stop
+    );
     rig.pid_gone();
 }

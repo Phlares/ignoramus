@@ -2,12 +2,14 @@
 //! `ignorarium_guest::host::run_row`. The environment, the inputs and the payload's folder
 //! reach the guest as read-only disks; the outputs come back as a pack. Cloud Hypervisor:
 //! <https://github.com/cloud-hypervisor/cloud-hypervisor>.
-use super::selftest::SelfTest;
+use super::selftest::{Call, SelfTest};
 use super::{Backend, Exit, Probe, RowJob, RowOutcome, TIMEOUT_CODE, Watch};
 use crate::files::temp_beside;
 use ignorarium_guest::host::{self, HostJob, Timings, Vm, VmError, VmOutcome};
 use ignorarium_guest::image::{self, KERNEL, Pin, VMM, check_pin, has_interp};
 use ignorarium_guest::proto::{self, End, GUEST_IN, GUEST_OUT, GUEST_PAYLOAD};
+use rustix::io::Errno;
+use rustix::process::{Pid, geteuid, test_kill_process};
 use std::fs;
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
@@ -21,6 +23,10 @@ const VMM_VAR: &str = "IGNORARIUM_VM_VMM";
 const KERNEL_VAR: &str = "IGNORARIUM_VM_KERNEL";
 const AGENT_VAR: &str = "IGNORARIUM_VM_AGENT";
 const NO_REPORT: &str = "the guest sent no report, so the payload's CPU time is unknown";
+const BAD_CPU: &str =
+    "the guest reported a CPU time it cannot have used, so the payload's CPU time is unknown";
+/// The prefix of a row's scratch folder in the temp folder; the box's pid and a count follow.
+const SCRATCH: &str = "ignorarium-vm-";
 
 /// Rows this process has started, so each gets its own scratch folder.
 static ROWS: AtomicU64 = AtomicU64::new(0);
@@ -45,26 +51,26 @@ pub struct Level2 {
     pub report_slack: Duration,
     /// The first line of `<vmm> --version`, read on first use.
     version: OnceLock<Option<String>>,
-    /// The initramfs that holds the agent, built on first use.
-    initramfs: OnceLock<Result<Vec<u8>, String>>,
+    /// The initramfs that holds the agent, built on the first read that works.
+    initramfs: OnceLock<Vec<u8>>,
 }
 
 impl Default for Level2 {
+    fn default() -> Self {
+        Level2::new()
+    }
+}
+
+impl Level2 {
     /// The files that `IGNORARIUM_VM_VMM`, `IGNORARIUM_VM_KERNEL` and `IGNORARIUM_VM_AGENT`
     /// name. An unset one leaves an empty path, which the probe names.
-    fn default() -> Self {
+    pub fn new() -> Level2 {
         let var = |name| {
             std::env::var_os(name)
                 .map(PathBuf::from)
                 .unwrap_or_default()
         };
         Level2::with(var(VMM_VAR), var(KERNEL_VAR), var(AGENT_VAR))
-    }
-}
-
-impl Level2 {
-    pub fn new() -> Level2 {
-        Level2::default()
     }
 
     pub fn with(vmm: PathBuf, kernel: PathBuf, agent: PathBuf) -> Level2 {
@@ -107,7 +113,9 @@ impl Level2 {
                     check(path)
                 }
             };
-        faults.extend(file(VMM_VAR, &self.vmm, VMM.name, &|p| pinned(p, &VMM)));
+        faults.extend(file(VMM_VAR, &self.vmm, VMM.name, &|p| {
+            runnable(p).or_else(|| pinned(p, &VMM))
+        }));
         faults.extend(file(KERNEL_VAR, &self.kernel, KERNEL.name, &|p| {
             pinned(p, &KERNEL)
         }));
@@ -125,14 +133,14 @@ impl Level2 {
         faults
     }
 
-    /// The initramfs that holds the agent.
+    /// The initramfs that holds the agent. A failed read is tried again on the next call.
     fn initramfs(&self) -> Result<&[u8], String> {
-        let built = self.initramfs.get_or_init(|| {
-            fs::read(&self.agent)
-                .map(|agent| image::initramfs(&agent))
-                .map_err(|e| format!("cannot read the agent {}: {e}", self.agent.display()))
-        });
-        built.as_deref().map_err(String::clone)
+        if let Some(built) = self.initramfs.get() {
+            return Ok(built);
+        }
+        let agent = fs::read(&self.agent)
+            .map_err(|e| format!("cannot read the agent {}: {e}", self.agent.display()))?;
+        Ok(self.initramfs.get_or_init(|| image::initramfs(&agent)))
     }
 
     /// Runs one row and returns its outcome, with the host's timings when the machine ran to
@@ -147,7 +155,7 @@ impl Level2 {
         let wall = || start.elapsed().as_secs_f64();
         let ended = |res: Result<VmOutcome, VmError>| -> io::Result<_> {
             let timings = res.as_ref().ok().map(|o| o.timings.clone());
-            Ok((outcome_of(res, wall()), timings))
+            Ok((outcome_of(res, wall(), self.cpus), timings))
         };
         let infra = |why: String| -> io::Result<_> {
             let o = RowOutcome {
@@ -214,6 +222,19 @@ fn pinned(path: &Path, pin: &Pin) -> Option<String> {
         Ok(()) => None,
         // A mismatch: the message names the pin, the path and both hashes.
         Err(e) if e.kind() == io::ErrorKind::InvalidData => Some(e.to_string()),
+        Err(e) => Some(format!("{}: {e}", path.display())),
+    }
+}
+
+/// Why the box cannot start `path`, if it cannot: no execute bit at all.
+fn runnable(path: &Path) -> Option<String> {
+    match fs::metadata(path) {
+        Ok(m) if m.mode() & 0o111 != 0 => None,
+        Ok(m) => Some(format!(
+            "{} has mode {:o}, so it cannot run",
+            path.display(),
+            m.mode() & 0o7777
+        )),
         Err(e) => Some(format!("{}: {e}", path.display())),
     }
 }
@@ -309,23 +330,25 @@ pub fn guest_job(job: &RowJob) -> Result<HostJob, String> {
 }
 
 /// The guest's self-test as the record level 1 writes, so the `sandbox.selftest` event and
-/// its readers stay as they are. The payload runs on the guest's kernel, out of reach of
-/// the host's io_uring, so that check holds without a test of its own and is not recorded
-/// as absent.
+/// its readers stay as they are. The guest's `io_uring_setup` reads as level 1's does:
+/// denied, absent or open.
 pub fn selftest_of(t: &proto::SelfTest) -> SelfTest {
+    let io_uring = Call::of(t.io_uring_errno);
     SelfTest {
         connect_blocked: t.only_loopback && t.route_blocked,
         vsock_blocked: t.host_path_blocked,
-        io_uring_blocked: true,
+        io_uring_blocked: io_uring != Call::Open,
         vsock_absent: false,
-        io_uring_absent: false,
+        io_uring_absent: io_uring == Call::Absent,
     }
 }
 
 /// The row's outcome from what `host::run_row` returned, `wall_seconds` after the row
-/// started. A failed self-test never ran the payload. Without a report the payload's CPU is
-/// unknown, unless the VMM never started, the guest never spoke, or the box stopped the row.
-pub fn outcome_of(res: Result<VmOutcome, VmError>, wall_seconds: f64) -> RowOutcome {
+/// started, for a machine of `cpus` vCPUs. A failed self-test never ran the payload. Without
+/// a report the payload's CPU is unknown, unless the VMM never started, the guest never
+/// spoke, or the box stopped the row. A report no guest can mean (more CPU than the row had,
+/// a signal past the exit codes) is a fault, not data.
+pub fn outcome_of(res: Result<VmOutcome, VmError>, wall_seconds: f64, cpus: u32) -> RowOutcome {
     let o = match res {
         Ok(o) => o,
         Err(e) => {
@@ -350,6 +373,21 @@ pub fn outcome_of(res: Result<VmOutcome, VmError>, wall_seconds: f64) -> RowOutc
     };
     let r = o.report;
     let selftest = selftest_of(&r.selftest);
+    let most = wall_seconds * f64::from(cpus);
+    if !(0.0..=most).contains(&r.cpu_seconds) {
+        let why = format!(
+            "the guest reported {} CPU seconds, outside 0 to {most} for {cpus} vCPUs over {wall_seconds} s",
+            r.cpu_seconds
+        );
+        return RowOutcome {
+            exit: Exit::Infra(why),
+            cpu_seconds: 0.0,
+            wall_seconds,
+            output_hash: String::new(),
+            selftest: Some(selftest),
+            cpu_unknown: Some(BAD_CPU.into()),
+        };
+    }
     let exit = if !selftest.ok() {
         Exit::Infra(format!(
             "guest self-test failed: {} was not blocked",
@@ -361,7 +399,10 @@ pub fn outcome_of(res: Result<VmOutcome, VmError>, wall_seconds: f64) -> RowOutc
             (Some(End::Code(0)), Some(why)) => Exit::Void(format!("cannot pack output: {why}")),
             (Some(End::Code(0)), None) => Exit::Ok,
             (Some(End::Code(c)), _) => Exit::Payload(c),
-            (Some(End::Signal(s)), _) => Exit::Payload(128 + s),
+            (Some(End::Signal(s)), _) => 128i32.checked_add(s).map_or_else(
+                || Exit::Infra(format!("the guest reported signal {s}")),
+                Exit::Payload,
+            ),
             (Some(End::Timeout), _) => Exit::Payload(TIMEOUT_CODE),
         }
     };
@@ -405,8 +446,10 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(initramfs: &[u8]) -> io::Result<Scratch> {
+        let temp = std::env::temp_dir();
+        sweep(&temp);
         let n = ROWS.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("ignorarium-vm-{}-{n}", std::process::id()));
+        let dir = temp.join(format!("{SCRATCH}{}-{n}", std::process::id()));
         fs::DirBuilder::new().mode(0o700).create(&dir)?;
         let scratch = Scratch(dir);
         fs::write(scratch.0.join("initramfs.cpio"), initramfs)?;
@@ -418,6 +461,31 @@ impl Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Removes the scratch folders that boxes left when they died mid-row: this user's
+/// `ignorarium-vm-<pid>-<n>` folders whose pid no process has. A pid in use, by any process,
+/// keeps its folders.
+fn sweep(temp: &Path) {
+    let Ok(entries) = fs::read_dir(temp) else {
+        return;
+    };
+    let me = geteuid().as_raw();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let pid = name
+            .to_str()
+            .and_then(|n| n.strip_prefix(SCRATCH)?.split_once('-'))
+            .and_then(|(pid, _)| pid.parse::<i32>().ok())
+            .and_then(Pid::from_raw);
+        let mine = entry.metadata().is_ok_and(|m| m.is_dir() && m.uid() == me);
+        if let Some(pid) = pid
+            && mine
+            && test_kill_process(pid) == Err(Errno::SRCH)
+        {
+            let _ = fs::remove_dir_all(entry.path());
+        }
     }
 }
 

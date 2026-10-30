@@ -54,6 +54,22 @@ pub fn children_cpu_seconds() -> io::Result<f64> {
     Ok(secs(ru.ru_utime) + secs(ru.ru_stime))
 }
 
+/// The errno of `io_uring_setup`, or `None` when it succeeds (its descriptor is closed
+/// again).
+pub fn io_uring_setup_errno() -> Option<i32> {
+    // The kernel's `struct io_uring_params` is 120 bytes, all-zero for a plain ring.
+    let mut params = [0u64; 15];
+    // SAFETY: io_uring_setup reads and writes only the 120-byte params struct, which
+    // `params` is, and takes the entry count by value.
+    let fd = unsafe { libc::syscall(libc::SYS_io_uring_setup, 1u32, params.as_mut_ptr()) };
+    if fd < 0 {
+        return io::Error::last_os_error().raw_os_error();
+    }
+    // SAFETY: the kernel just returned `fd`, which nothing else owns.
+    unsafe { libc::close(fd as libc::c_int) };
+    None
+}
+
 /// Sends SIGKILL to every process but this one. Only PID 1 may call it: there it reaches
 /// every other process of the guest, and outside a guest it would reach far more.
 pub fn kill_all_others() -> io::Result<()> {

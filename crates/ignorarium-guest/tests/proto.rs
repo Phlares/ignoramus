@@ -17,6 +17,7 @@ fn report() -> Report {
             only_loopback: true,
             route_blocked: true,
             host_path_blocked: false,
+            io_uring_errno: Some(1),
         },
         clock_unix_nanos: 42,
         end: Some(End::Signal(9)),
@@ -126,11 +127,12 @@ fn seed_hex_must_be_64_lowercase_hex() {
 }
 
 #[test]
-fn selftest_ok_needs_all_three() {
+fn selftest_ok_needs_every_check() {
     let t = SelfTest {
         only_loopback: true,
         route_blocked: true,
         host_path_blocked: true,
+        io_uring_errno: Some(libc::EPERM),
     };
     assert!(t.ok());
     assert!(

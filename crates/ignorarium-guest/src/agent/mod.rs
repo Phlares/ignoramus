@@ -26,7 +26,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::thread::sleep;
 use std::time::Duration;
-use steps::{disk_by_serial, disk_bytes, mix_seed, now_nanos, set_clock};
+use steps::{disable_io_uring, disk_by_serial, disk_bytes, mix_seed, now_nanos, set_clock};
 
 /// The payload's user and group: `nobody` and `nogroup` in Debian-based images.
 pub const PAYLOAD_UID: u32 = 65534;
@@ -66,6 +66,7 @@ fn run() -> io::Result<()> {
             _ => {}
         }
     }
+    disable_io_uring(Path::new("/proc/sys/kernel/io_uring_disabled"))?;
     let sys_block = Path::new("/sys/block");
     let disk = |serial| disk_by_serial(sys_block, serial);
     let (rootfs, inputs, out) = (disk(SERIAL_ROOTFS)?, disk(SERIAL_IN)?, disk(SERIAL_OUT)?);
@@ -128,10 +129,11 @@ fn row(chan: &mut File, out_disk: &mut File, out_bytes: u64) -> io::Result<Repor
         std::env::set_current_dir("/")?;
         // Inherited by the payload, so no setuid file gives it root again.
         set_no_new_privs(true)?;
-        let ran = payload::run_as(&job, Some((PAYLOAD_UID, PAYLOAD_GID)))?;
+        // The payload starts in its output folder, as at level 1.
+        let out = Path::new(GUEST_OUT);
+        let ran = payload::run_as(&job, Some((PAYLOAD_UID, PAYLOAD_GID)), out)?;
         kill_all_others()?;
         reap_all()?;
-        let out = Path::new(GUEST_OUT);
         let mut w = BufWriter::new(out_disk);
         match pack::write(out, &mut w, out_bytes) {
             Ok(_) => {}

@@ -12,6 +12,7 @@ use crate::proto::{
     SERIAL_ROOTFS, ToHost, read_frame, write_frame,
 };
 use crate::tree::{tree_hash, walk};
+use rustix::io::Errno;
 use rustix::process::{Pid, Signal, kill_process_group};
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -232,24 +233,29 @@ impl Vmm {
         })
     }
 
-    /// Waits up to `grace` for the VMM to exit by itself, then ends it.
-    fn stop(&mut self, grace: Duration) -> io::Result<()> {
+    /// Waits up to `grace` for the VMM to exit by itself, then ends it; at once on a stop.
+    fn stop(&mut self, grace: Duration, watch: &dyn Watch) -> io::Result<()> {
         let end = Instant::now() + grace;
-        while Instant::now() < end && !exited(self.pid)? {
+        while Instant::now() < end && !exited(self.pid)? && watch.tick() {
             sleep(POLL);
         }
         self.end().map(drop)
     }
 
-    /// Kills the group, then reaps the leader. A later call returns the same status.
+    /// Kills the group, then reaps the leader. A group kill that fails for any reason but a
+    /// group already gone is an error, after the reap. A later call returns the same status.
     fn end(&mut self) -> io::Result<ExitStatus> {
+        let mut fault = None;
         if !self.killed {
             self.killed = true;
-            let _ = kill_process_group(self.pid, Signal::KILL);
+            fault = kill_process_group(self.pid, Signal::KILL)
+                .err()
+                .filter(|&e| e != Errno::SRCH);
             // A leader that moved to another group is not in this one.
             let _ = self.child.kill();
         }
-        self.child.wait()
+        let status = self.child.wait()?;
+        fault.map_or(Ok(status), |e| Err(e.into()))
     }
 }
 
@@ -301,12 +307,14 @@ fn accept(
 
 /// Reads from and writes to a stream until an absolute deadline. A guest that trickles
 /// bytes or drains slowly cannot stretch the wait: each call gets only the time that is left.
-/// A socket wait lasts at most `POLL` and the watch ticks between waits. A wait that moves
-/// no bytes never ends a call, so a frame that arrives in pieces stays whole.
+/// A socket wait lasts at most `POLL`, and the watch ticks once `POLL` has passed since its
+/// last tick, bytes or none, so a guest that trickles cannot hold off a stop. A wait that
+/// moves no bytes never ends a call, so a frame that arrives in pieces stays whole.
 struct Until<'a> {
     stream: &'a mut UnixStream,
     at: Instant,
     watch: &'a dyn Watch,
+    last_tick: Instant,
     /// Set once the watch said stop.
     stopped: bool,
 }
@@ -315,7 +323,17 @@ struct Until<'a> {
 /// call. A write this small fills one buffer, so it waits at most once.
 const WRITE_CHUNK: usize = 2048;
 
-impl Until<'_> {
+impl<'a> Until<'a> {
+    fn new(stream: &'a mut UnixStream, at: Instant, watch: &'a dyn Watch) -> Until<'a> {
+        Until {
+            stream,
+            at,
+            watch,
+            last_tick: Instant::now(),
+            stopped: false,
+        }
+    }
+
     /// Runs `op` with a socket timeout until it moves bytes, the deadline passes
     /// (`TimedOut`) or the watch says stop.
     fn wait<T>(
@@ -327,17 +345,21 @@ impl Until<'_> {
             if left.is_zero() {
                 return Err(io::ErrorKind::TimedOut.into());
             }
-            match op(self.stream, left.min(POLL)) {
+            let done = op(self.stream, left.min(POLL));
+            if self.last_tick.elapsed() >= POLL {
+                self.last_tick = Instant::now();
+                if !self.watch.tick() {
+                    self.stopped = true;
+                    return Err(io::Error::other("stopped"));
+                }
+            }
+            match done {
                 Err(e)
                     if matches!(
                         e.kind(),
                         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                     ) => {}
                 done => return done,
-            }
-            if !self.watch.tick() {
-                self.stopped = true;
-                return Err(io::Error::other("stopped"));
             }
         }
     }
@@ -390,12 +412,7 @@ fn recv(
     on_timeout: fn(String) -> VmError,
     work: &Path,
 ) -> Result<ToHost, VmError> {
-    let mut until = Until {
-        stream,
-        at,
-        watch,
-        stopped: false,
-    };
+    let mut until = Until::new(stream, at, watch);
     let frame = read_frame(&mut until);
     until.mapped(frame, |e| match e.kind() {
         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => on_timeout(with_log(
@@ -562,12 +579,7 @@ pub fn run_row(
     let sent = Instant::now();
     let wire = wire_job(job, now_nanos());
     let report_by = sent + job.wall_timeout + vm.report_slack;
-    let mut until = Until {
-        stream: &mut chan,
-        at: report_by,
-        watch,
-        stopped: false,
-    };
+    let mut until = Until::new(&mut chan, report_by, watch);
     let sent_job = write_frame(&mut until, &wire);
     until.mapped(sent_job, |e| match e.kind() {
         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
@@ -598,7 +610,7 @@ pub fn run_row(
 
     // The agent syncs the pack before it reports, so a VMM that lingers is killed.
     let stopping = Instant::now();
-    vmm.stop(vm.exit_timeout)?;
+    vmm.stop(vm.exit_timeout, watch)?;
     let stop = stopping.elapsed();
 
     let extracting = Instant::now();

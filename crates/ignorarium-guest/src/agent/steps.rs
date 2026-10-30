@@ -23,6 +23,18 @@ fn reseeded(r: io::Result<()>) -> io::Result<()> {
     }
 }
 
+/// Turns io_uring off for every process, root included, so the self-test sees it refused as a
+/// level 1 sandbox does. A kernel without the switch is left as it is; the self-test then
+/// finds the call absent or open. The switch:
+/// <https://docs.kernel.org/admin-guide/sysctl/kernel.html#io-uring-disabled>
+pub fn disable_io_uring(switch: &Path) -> io::Result<()> {
+    match fs::OpenOptions::new().write(true).open(switch) {
+        Ok(mut f) => f.write_all(b"2"),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 pub fn set_clock(unix_nanos: u64) -> io::Result<()> {
     let ts = Timespec {
         tv_sec: (unix_nanos / 1_000_000_000) as _,
