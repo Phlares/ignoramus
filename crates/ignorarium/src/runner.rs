@@ -1,9 +1,11 @@
 //! The run engine: writes the schedule, runs each row on a backend, records each row.
 //! A row is done when its signed record exists. A crash before the record reruns the row.
+use crate::backend::rootfs;
 use crate::backend::{self, Backend, Exit, Probe, RowJob, RowOutcome, Watch};
 use crate::budget::{Alerts, Cost, CostMeter, Decision, HostMeter, decide, dimension_name};
 use crate::canon::sha256_hex;
 use crate::control::{self, ControlError, ControlFile, RunLock, Signal, State};
+use crate::environ::{Builder, Built, Recipe};
 use crate::estimate::{apply_defaults, estimate, units};
 use crate::events::{self, Event};
 use crate::home::Home;
@@ -14,6 +16,7 @@ use crate::records::{self, RecordDraft, RecordError, VerifyError};
 use crate::rules::input_bytes;
 use crate::schedule::{self, Row, Schedule, ScheduleError};
 use crate::spec::model::{Role, Spec};
+use crate::store::Store;
 use crate::{keys, spec, sys};
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
@@ -31,10 +34,15 @@ const MIN_TIMEOUT: Duration = Duration::from_secs(60);
 const TIMEOUT_FACTOR: f64 = 10.0;
 const PATH_ENV: &str = "/usr/bin:/bin";
 const PAUSE_REQUESTED: &str = "a pause was requested";
+const EVENT_LOG: &str = "the event log cannot be written";
 const INTERRUPTED: &str = "interrupted by a signal";
 const REAPED: &str = "SIGCHLD is ignored; the box cannot see a row end";
 /// The payload, relative to the study folder.
 const PAYLOAD: &str = "payload/run";
+/// The recipe folder, relative to the study folder.
+const RECIPE: &str = "env";
+/// The environment name of a run on the host root.
+const HOST: &str = "host";
 
 pub struct RunPlan {
     pub home: Home,
@@ -47,6 +55,10 @@ pub struct RunPlan {
     pub inputs: InputHashes,
     pub payload: PathBuf,
     pub payload_sha256: String,
+    /// The environment root rows run in; `None` is the host root.
+    pub rootfs: Option<PathBuf>,
+    /// `"host"`, or the store digest of the environment image.
+    pub environment: String,
     /// Cumulative cost, read before each row.
     pub meter: Box<dyn CostMeter>,
     /// Interval between `heartbeat` events while a row runs.
@@ -73,6 +85,12 @@ pub enum RunError {
     /// The payload file differs from `pins.payload`.
     PayloadChanged,
     NoPayload(String),
+    /// `pins.environment` names an image that is not in the store.
+    EnvironmentMissing(String),
+    /// `pins.environment` is not a store digest (64 lowercase hex characters).
+    EnvironmentPin(String),
+    /// The environment cannot be built or extracted.
+    Environment(String),
     NoKey,
     /// Another run of this study holds the run lock.
     Busy,
@@ -101,6 +119,13 @@ impl fmt::Display for RunError {
             RunError::SpecChanged => write!(f, "the stored spec differs from the registered hash"),
             RunError::PayloadChanged => write!(f, "the payload differs from pins.payload"),
             RunError::NoPayload(e) => write!(f, "cannot read the payload: {e}"),
+            RunError::EnvironmentMissing(d) => {
+                write!(f, "the pinned environment {d} is not in the store")
+            }
+            RunError::EnvironmentPin(p) => {
+                write!(f, "pins.environment {p:?} is not a store digest")
+            }
+            RunError::Environment(e) => write!(f, "environment: {e}"),
             RunError::NoKey => write!(f, "the box key does not exist"),
             RunError::Busy => write!(f, "another run of this study is in progress"),
             RunError::Unsafe(p) => write!(f, "{p} is a symbolic link"),
@@ -172,7 +197,7 @@ pub fn up_to(backends: Vec<Box<dyn Backend>>, max: u8) -> Vec<Box<dyn Backend>> 
     backends.into_iter().filter(|b| b.level() <= max).collect()
 }
 
-/// Load a registered study, gate its late data, write its schedule, and pick the lowest
+/// Load a registered study, gate its late data, write its schedule, and pick the highest
 /// backend that meets `scope.min_isolation`.
 pub fn prepare_with(
     home: &Home,
@@ -196,10 +221,28 @@ pub fn prepare_with(
     let backend = backends
         .into_iter()
         .filter(|b| b.level() >= need)
-        .min_by_key(|b| b.level())
+        .max_by_key(|b| b.level())
         .ok_or(RunError::NoBackend { need, have })?;
 
     let (payload, payload_sha256) = read_payload(&dir)?;
+    let (rootfs, environment) = if backend.level() >= 1 {
+        let store = Store::open(&home.root).map_err(io)?;
+        let pin = spec.pins.environment.trim();
+        let found = environment(&store, &dir, pin, Builder::detect().as_ref())?;
+        if let Some(b) = &found.built {
+            let attrs = json!({
+                "recipe_hash": b.recipe_hash,
+                "image_digest": b.image_digest,
+                "store_digest": b.store_digest,
+                "pinned": b.pinned,
+            });
+            let level = if b.pinned { "info" } else { "warn" };
+            emit_event(&dir, &spec_hash, None, "env.build", level, attrs)?;
+        }
+        (found.rootfs, found.name)
+    } else {
+        (None, HOST.into())
+    };
     let pin = spec.pins.payload.trim();
     let pin = pin.strip_prefix("sha256:").unwrap_or(pin);
     if !pin.is_empty() && pin != payload_sha256 {
@@ -233,8 +276,73 @@ pub fn prepare_with(
         inputs,
         payload,
         payload_sha256,
+        rootfs,
+        environment,
         meter: Box::new(HostMeter::new(machine.rate_usd_per_hour)),
         heartbeat: HEARTBEAT,
+    })
+}
+
+/// Where rows run: the root folder (`None` is the host's) and its name.
+pub struct Environment {
+    pub rootfs: Option<PathBuf>,
+    /// `"host"`, or the store digest of the image.
+    pub name: String,
+    /// What the build made, when this call built the image.
+    pub built: Option<Built>,
+}
+
+/// The environment for a level 1 row. A non-empty `pin` is the store digest of a saved
+/// image, used as is. Otherwise the recipe in `<study>/env/` is built with `builder` and its
+/// image used; with no recipe the host root is used.
+pub fn environment(
+    store: &Store,
+    study: &Path,
+    pin: &str,
+    builder: Option<&Builder>,
+) -> Result<Environment, RunError> {
+    let given = pin;
+    let pin = pin.strip_prefix("sha256:").unwrap_or(pin);
+    let (digest, built) = if !pin.is_empty() {
+        if store.path(pin).is_err() {
+            return Err(RunError::EnvironmentPin(given.into()));
+        }
+        if !store.has(pin) {
+            return Err(RunError::EnvironmentMissing(pin.into()));
+        }
+        (pin.to_string(), None)
+    } else {
+        no_links(study, &[RECIPE])?;
+        let recipe = study.join(RECIPE);
+        if !recipe.is_dir() {
+            return Ok(Environment {
+                rootfs: None,
+                name: HOST.into(),
+                built: None,
+            });
+        }
+        let builder = builder.ok_or_else(|| {
+            RunError::Environment(
+                concat!(
+                    "the study has an env/ recipe but neither docker nor podman is on PATH; ",
+                    "build the image elsewhere and pin its store digest in pins.environment"
+                )
+                .into(),
+            )
+        })?;
+        Recipe::load(&recipe).map_err(|e| {
+            RunError::Environment(format!("cannot read env/Dockerfile and env/uv.lock: {e}"))
+        })?;
+        let built = crate::environ::build(builder, &recipe, store)
+            .map_err(|e| RunError::Environment(e.to_string()))?;
+        (built.store_digest.clone(), Some(built))
+    };
+    let root =
+        rootfs::from_store(store, &digest).map_err(|e| RunError::Environment(e.to_string()))?;
+    Ok(Environment {
+        rootfs: Some(root),
+        name: digest,
+        built,
     })
 }
 
@@ -298,6 +406,8 @@ pub struct Progress {
     pub conditions: BTreeMap<String, (u64, u64)>,
     /// Rows whose exit is not `ok`.
     pub voided: u64,
+    /// Attempts, recorded as a row or as spend, whose CPU count could not be read.
+    pub unknown_cpu: u64,
     /// Attempts beyond the first, over all recorded rows.
     pub retried: u64,
     /// Spend in the records, money at the machine rate.
@@ -332,6 +442,7 @@ pub fn progress(
         done: seen.len(),
         conditions,
         voided: tally.voided,
+        unknown_cpu: tally.unknown_cpu,
         retried: tally.retried,
         cost: tally.cost(machine.rate_usd_per_hour),
     })
@@ -456,6 +567,7 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
                 why,
                 in_flight: None,
             },
+            None,
         );
     }
     match control::end_orphan(&plan.home, &plan.study_id) {
@@ -466,12 +578,20 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
         Ok(None) => {}
         Err(e) => {
             let why = format!("cannot end the row a dead box left: {e}");
-            return halt(plan, &dir, lock, Halt::Pause(why));
+            return halt(plan, &dir, lock, Halt::Pause(why), None);
         }
     }
     State::Running
         .write(&plan.home, &plan.study_id)
         .map_err(io)?;
+    let launch = json!({
+        "isolation": plan.backend.level(),
+        "launcher": plan.backend.launcher(),
+        "environment": plan.environment,
+    });
+    let resumed = all.iter().any(|r| r.kind == "row" || r.kind == "spend");
+    let name = if resumed { "run.resume" } else { "run.start" };
+    log_event(plan, &dir, None, name, "info", launch)?;
     let control = ControlFile::of(&plan.home, &plan.study_id);
     let watch = RunWatch {
         plan,
@@ -480,6 +600,7 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
         row: RefCell::new((0, String::new())),
         last_beat: Cell::new(Instant::now()),
         ended: RefCell::new(None),
+        failed: RefCell::new(None),
     };
     let done: BTreeSet<u64> = all
         .iter()
@@ -494,13 +615,16 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
         .filter(|r| !done.contains(&r.index))
     {
         if let Some(h) = at_boundary(&control) {
-            return halt(plan, &dir, lock, h);
+            return halt(plan, &dir, lock, h, None);
         }
         if let Some(h) = gate(plan, &dir, &mut books)? {
-            return halt(plan, &dir, lock, h);
+            return halt(plan, &dir, lock, h, None);
         }
-        if let Some(h) = run_row(plan, row, &dir, &log, &mut books, &watch)? {
-            return halt(plan, &dir, lock, h);
+        let h = run_row(plan, row, &dir, &log, &mut books, &watch)?;
+        // A failed event write is a failed internal check: the run pauses after the row.
+        let failed = watch.failed.take();
+        if let Some(h) = h.or_else(|| failed.is_some().then(|| Halt::Pause(EVENT_LOG.into()))) {
+            return halt(plan, &dir, lock, h, failed);
         }
     }
     State::Done.write(&plan.home, &plan.study_id).map_err(io)?;
@@ -623,26 +747,37 @@ impl Halt {
     }
 }
 
-/// End the run. A pause writes `run.pause` and the paused state; a stop writes the stop trace.
-fn halt(plan: &RunPlan, dir: &Path, lock: &RunLock, h: Halt) -> Result<RunStatus, RunError> {
+/// End the run. A pause writes the paused state, then `run.pause`; a stop writes the stop
+/// trace, its record first. `failed` is an event write that failed during the row this halt
+/// ends. When it is set, or `run.pause` cannot be written, the pause also stays a pending
+/// request, so no run goes past it without a resume, and the failure is the result.
+fn halt(
+    plan: &RunPlan,
+    dir: &Path,
+    lock: &RunLock,
+    h: Halt,
+    failed: Option<RunError>,
+) -> Result<RunStatus, RunError> {
     match h {
         Halt::Pause(why) => {
-            log_event(
-                plan,
-                dir,
-                None,
-                "run.pause",
-                "warn",
-                json!({ "reason": why }),
-            )?;
             State::Paused(why.clone())
                 .write(&plan.home, &plan.study_id)
                 .map_err(io)?;
-            Ok(RunStatus::Paused(why))
+            let attrs = json!({ "reason": why });
+            let logged = log_event(plan, dir, None, "run.pause", "warn", attrs);
+            match failed.or(logged.err()) {
+                None => Ok(RunStatus::Paused(why)),
+                Some(e) => {
+                    ControlFile::of(&plan.home, &plan.study_id)
+                        .request_pause()
+                        .map_err(io)?;
+                    Err(e)
+                }
+            }
         }
         Halt::Stop { why, in_flight } => {
             lock.stop(&plan.key, &why, in_flight)?;
-            Ok(RunStatus::Stopped(why))
+            failed.map_or(Ok(RunStatus::Stopped(why)), Err)
         }
     }
 }
@@ -660,11 +795,23 @@ fn log_event(
     level: &str,
     attrs: Value,
 ) -> Result<(), RunError> {
+    emit_event(dir, &plan.spec_hash, span, name, level, attrs)
+}
+
+/// One event line in `dir`'s log, in the trace of the study with `spec_hash`.
+fn emit_event(
+    dir: &Path,
+    spec_hash: &[u8; 32],
+    span: Option<&str>,
+    name: &str,
+    level: &str,
+    attrs: Value,
+) -> Result<(), RunError> {
     events::emit(
         &dir.join("events.jsonl"),
         Event {
             ts: crate::time::now_rfc3339(),
-            trace_id: events::trace_id(&plan.spec_hash),
+            trace_id: events::trace_id(spec_hash),
             span_id: span.map(String::from),
             name: name.into(),
             level: level.into(),
@@ -686,6 +833,8 @@ struct RunWatch<'a> {
     last_beat: Cell<Instant>,
     /// Why this watch ended the row early, once it has: a stop seen, or a fault.
     ended: RefCell<Option<Halt>>,
+    /// The first event write that failed during the row in flight.
+    failed: RefCell<Option<RunError>>,
 }
 
 impl RunWatch<'_> {
@@ -698,6 +847,13 @@ impl RunWatch<'_> {
     fn end(&self, h: Halt) {
         self.ended.borrow_mut().get_or_insert(h);
     }
+
+    /// Keep the first event write of the row that fails; the row's records still land.
+    fn keep(&self, written: Result<(), RunError>) {
+        if let Err(e) = written {
+            self.failed.borrow_mut().get_or_insert(e);
+        }
+    }
 }
 
 impl Watch for RunWatch<'_> {
@@ -706,7 +862,7 @@ impl Watch for RunWatch<'_> {
             self.last_beat.set(Instant::now());
             let (index, span) = self.row.borrow().clone();
             let attrs = json!({ "row": index });
-            // A failed write shows at the row's end event, which ends the run.
+            // A failed write shows at the row's end event, which pauses the run.
             let _ = log_event(self.plan, self.dir, Some(&span), "heartbeat", "info", attrs);
         }
         // A failed or busy read is retried on the next tick; a boundary pauses on a failure.
@@ -750,6 +906,7 @@ struct Tally {
     wall: f64,
     voided: u64,
     retried: u64,
+    unknown_cpu: u64,
 }
 
 impl Tally {
@@ -763,6 +920,7 @@ impl Tally {
             t.cpu += num("cpu_seconds");
             t.wall += num("wall_seconds");
             t.rows += u64::from(r.kind == "row");
+            t.unknown_cpu += u64::from(r.body.get("cpu_unknown").is_some());
             if r.kind == "row" {
                 t.voided += u64::from(r.body["exit"] != "ok");
                 t.retried += r.body["attempts"].as_u64().unwrap_or(1).saturating_sub(1);
@@ -812,7 +970,7 @@ fn run_row(
     log_event(plan, dir, Some(&span), "row.start", "info", start)?;
     let (exit, halt) = attempt_row(plan, row, dir, log, books, watch)?;
     let end = json!({ "row": row.index, "exit": exit });
-    log_event(plan, dir, Some(&span), "row.end", "info", end)?;
+    watch.keep(log_event(plan, dir, Some(&span), "row.end", "info", end));
     Ok(halt)
 }
 
@@ -828,10 +986,15 @@ fn attempt_row(
     watch: &RunWatch,
 ) -> Result<(String, Option<Halt>), RunError> {
     let mut attempts = 0u32;
+    let mut unknown = false;
+    let span = watch.row.borrow().1.clone();
+    // An attempt's events come after its record, so a failed event write cannot lose the
+    // attempt's spend.
+    let noted = |o: &RowOutcome| attempt_events(plan, dir, &span, row.index, o);
     let outcome = loop {
         attempts += 1;
         let job = job_for(plan, row, dir)?;
-        let o = plan
+        let mut o = plan
             .backend
             .run_row(&job, watch)
             .unwrap_or_else(|e| RowOutcome {
@@ -839,12 +1002,20 @@ fn attempt_row(
                 cpu_seconds: 0.0,
                 wall_seconds: 0.0,
                 output_hash: String::new(),
-                selftest_ok: false,
+                selftest: None,
+                cpu_unknown: None,
             });
+        // A meter that cannot read is charged the row estimate, as the fail-safe rule says,
+        // and the run pauses once the row is recorded.
+        if o.cpu_unknown.is_some() {
+            o.cpu_seconds = o.cpu_seconds.max(books.per_row.cpu_seconds);
+            unknown = true;
+        }
         control::row_ended(&plan.home, &plan.study_id);
         // A row ended early is not data: its spend is recorded, and the run ends.
         if let Some(h) = watch.ended.borrow_mut().take() {
             unrecorded(plan, log, row, books, &o, &h.reason())?;
+            watch.keep(noted(&o));
             return Ok((h.exit().into(), Some(h)));
         }
         // A stop nobody asked for is a backend fault: void the row and pause, no retry.
@@ -866,10 +1037,32 @@ fn attempt_row(
             &o,
             &format!("infrastructure fault: {why}"),
         )?;
-        let halt = match plan.backend.probe() {
-            Probe::Unavailable(why) => Some(Halt::Pause(format!("backend unavailable: {why}"))),
-            Probe::Available => gate(plan, dir, books)?,
+        watch.keep(noted(&o));
+        let failed = || watch.failed.borrow().is_some();
+        let halt = if failed() {
+            None
+        } else {
+            match plan.backend.probe() {
+                Probe::Unavailable(why) => Some(Halt::Pause(format!("backend unavailable: {why}"))),
+                // The gate fails only on an alert write, held as any failed event write is.
+                Probe::Available => gate(plan, dir, books).unwrap_or_else(|e| {
+                    watch.keep(Err(e));
+                    None
+                }),
+            }
         };
+        // No new attempt once the event log fails: the run pauses after the row, for the
+        // attempt's unknown CPU count when it has one.
+        let event_log = || Halt::Pause(EVENT_LOG.into());
+        let halt = halt.or_else(|| {
+            failed().then(|| {
+                if unknown {
+                    unknown_cpu(row)
+                } else {
+                    event_log()
+                }
+            })
+        });
         if let Some(h) = halt {
             return Ok((h.exit().into(), Some(h)));
         }
@@ -886,6 +1079,8 @@ fn attempt_row(
         "repeat": row.repeat,
         "seed": row.seed_hex,
         "isolation": plan.backend.level(),
+        "launcher": plan.backend.launcher(),
+        "environment": plan.environment,
         "payload_sha256": plan.payload_sha256,
         "data_hashes": plan.inputs.iter().filter_map(|(_, h)| h.as_ref()).collect::<Vec<_>>(),
         "cpu_seconds": outcome.cpu_seconds,
@@ -896,6 +1091,9 @@ fn attempt_row(
     });
     if let Some(why) = reason {
         body["reason"] = json!(why);
+    }
+    if let Some(why) = &outcome.cpu_unknown {
+        body["cpu_unknown"] = json!(why);
     }
     records::append(
         log,
@@ -908,14 +1106,54 @@ fn attempt_row(
         },
     )?;
     books.add(plan, &outcome, true);
+    watch.keep(noted(&outcome));
     let halt = match outcome.exit {
         Exit::Infra(why) => Some(Halt::Pause(format!(
             "row {} voided by infrastructure faults: {why}",
             row.index
         ))),
-        _ => None,
+        _ => unknown.then(|| unknown_cpu(row)),
     };
     Ok((exit, halt))
+}
+
+/// The pause for a row whose CPU count the backend could not read.
+fn unknown_cpu(row: &Row) -> Halt {
+    Halt::Pause(format!(
+        "row {} has an unknown CPU count; it is charged the row estimate",
+        row.index
+    ))
+}
+
+/// The events of one recorded attempt: what the self-test found, and the charge for a CPU
+/// count the backend could not read.
+fn attempt_events(
+    plan: &RunPlan,
+    dir: &Path,
+    span: &str,
+    row: u64,
+    o: &RowOutcome,
+) -> Result<(), RunError> {
+    if let Some(t) = &o.selftest {
+        let attrs = json!({
+            "row": row,
+            "connect_blocked": t.connect_blocked,
+            "vsock_blocked": t.vsock_blocked,
+            "io_uring_blocked": t.io_uring_blocked,
+            "vsock": t.vsock_state(),
+            "io_uring": t.io_uring_state(),
+        });
+        log_event(plan, dir, Some(span), "sandbox.selftest", "info", attrs)?;
+    }
+    if let Some(reason) = &o.cpu_unknown {
+        let attrs = json!({
+            "row": row,
+            "reason": reason,
+            "charged_cpu_seconds": o.cpu_seconds,
+        });
+        log_event(plan, dir, Some(span), "row.cpu_unknown", "warn", attrs)?;
+    }
+    Ok(())
 }
 
 /// An attempt no row record holds: its spend goes into one signed `spend` record, so a
@@ -928,8 +1166,11 @@ fn unrecorded(
     o: &RowOutcome,
     reason: &str,
 ) -> Result<(), RunError> {
-    let body =
+    let mut body =
         json!({ "cpu_seconds": o.cpu_seconds, "wall_seconds": o.wall_seconds, "reason": reason });
+    if let Some(why) = &o.cpu_unknown {
+        body["cpu_unknown"] = json!(why);
+    }
     records::append(
         log,
         &plan.key,
@@ -977,14 +1218,12 @@ fn job_for(plan: &RunPlan, row: &Row, dir: &Path) -> Result<RowJob, RunError> {
             ("PATH".into(), PATH_ENV.into()),
             ("IGNORARIUM_SEED".into(), row.seed_hex.clone()),
             ("IGNORARIUM_ROW".into(), row.index.to_string()),
-            ("IGNORARIUM_IN".into(), text(&input_dir)),
-            ("IGNORARIUM_OUT".into(), text(&out)),
         ],
         input_dir,
         output_dir: out,
         seed,
         wall_timeout: wall_timeout(plan.spec.design.row_seconds),
-        rootfs: None,
+        rootfs: plan.rootfs.clone(),
     })
 }
 

@@ -18,6 +18,7 @@ pub mod register;
 mod resume;
 mod review;
 mod run;
+mod selftest;
 pub mod status;
 pub mod stop;
 mod verify;
@@ -200,6 +201,8 @@ enum Dev {
         #[arg(long, default_value = "docs/rules")]
         out: PathBuf,
     },
+    /// Check the sandbox this runs in. Prints one JSON line; exits 102 when it fails.
+    Selftest,
 }
 
 impl Verb {
@@ -219,6 +222,7 @@ impl Verb {
             Verb::Resume { .. } => "resume",
             Verb::Stop { .. } => "stop",
             Verb::Dev(Dev::GenRuleDocs { .. }) => "dev.gen-rule-docs",
+            Verb::Dev(Dev::Selftest) => "dev.selftest",
         }
     }
 
@@ -238,6 +242,7 @@ impl Verb {
             Verb::Resume { study } => resume::run(ctx, &study),
             Verb::Stop { study, reason } => stop::run(ctx, &study, &reason),
             Verb::Dev(Dev::GenRuleDocs { out }) => docs::run(&out),
+            Verb::Dev(Dev::Selftest) => selftest::run(),
         }
     }
 }
@@ -264,6 +269,10 @@ where
         let _ = writeln!(std::io::stderr(), "error: {}", e.msg);
         Done::exit(e.code)
     });
+    // The self-test runs in a sandbox where the event log is out of reach.
+    if name == "dev.selftest" {
+        return done.code;
+    }
     if let Err(e) = emit(&ctx, name, &done) {
         let _ = writeln!(
             std::io::stderr(),

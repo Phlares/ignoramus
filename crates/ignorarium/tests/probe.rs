@@ -3,8 +3,16 @@ use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome, Watch, level
 use ignorarium::files::replace_atomic;
 use ignorarium::machine::{self, Machine};
 
+/// What `ignorarium probe` does: ask the backends, then measure.
+fn probe(home: &std::path::Path, b: &[Box<dyn Backend>]) -> Result<Machine, machine::MachineError> {
+    machine::measure(home, &machine::probe_backends(b))
+}
+
 struct Fake(u8, bool);
 impl Backend for Fake {
+    fn launcher(&self) -> String {
+        "process".into()
+    }
     fn level(&self) -> u8 {
         self.0
     }
@@ -21,7 +29,8 @@ impl Backend for Fake {
             cpu_seconds: 0.0,
             wall_seconds: 0.0,
             output_hash: String::new(),
-            selftest_ok: true,
+            selftest: None,
+            cpu_unknown: None,
         })
     }
 }
@@ -30,11 +39,11 @@ impl Backend for Fake {
 fn probe_reports_the_highest_available_level() {
     let d = tempfile::tempdir().unwrap();
     let down: Vec<Box<dyn Backend>> = vec![Box::new(Level0), Box::new(Fake(1, false))];
-    assert_eq!(machine::probe(d.path(), &down).unwrap().max_level, 0);
+    assert_eq!(probe(d.path(), &down).unwrap().max_level, 0);
     let up: Vec<Box<dyn Backend>> = vec![Box::new(Level0), Box::new(Fake(1, true))];
-    assert_eq!(machine::probe(d.path(), &up).unwrap().max_level, 1);
+    assert_eq!(probe(d.path(), &up).unwrap().max_level, 1);
     let skip: Vec<Box<dyn Backend>> = vec![Box::new(Fake(2, false)), Box::new(Fake(1, true))];
-    assert_eq!(machine::probe(d.path(), &skip).unwrap().max_level, 1);
+    assert_eq!(probe(d.path(), &skip).unwrap().max_level, 1);
 }
 
 #[test]
@@ -47,7 +56,7 @@ fn probe_fills_host_facts() {
     )
     .unwrap();
     let b: Vec<Box<dyn Backend>> = vec![Box::new(Level0)];
-    let m = machine::probe(d.path(), &b).unwrap();
+    let m = probe(d.path(), &b).unwrap();
     let host = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap();
     assert_eq!(m.name, host.trim());
     assert_eq!(
@@ -71,7 +80,7 @@ fn probe_keeps_a_configured_rate() {
     )
     .unwrap();
     let b: Vec<Box<dyn Backend>> = vec![Box::new(Level0), Box::new(Fake(1, true))];
-    let m = machine::probe(d.path(), &b).unwrap();
+    let m = probe(d.path(), &b).unwrap();
     assert_eq!(m.max_level, 1);
     assert_eq!(m.rate_usd_per_hour, 0.5);
     assert!(m.experiment_mode);
@@ -165,7 +174,7 @@ fn replace_atomic_takes_a_bare_file_name() {
 fn probe_with_no_backends_gives_level_zero() {
     let d = tempfile::tempdir().unwrap();
     let none: Vec<Box<dyn Backend>> = vec![];
-    assert_eq!(machine::probe(d.path(), &none).unwrap().max_level, 0);
+    assert_eq!(probe(d.path(), &none).unwrap().max_level, 0);
 }
 
 #[test]
@@ -176,7 +185,7 @@ fn probe_refuses_a_bad_machine_file_and_leaves_it_alone() {
 ";
     std::fs::write(&f, bad).unwrap();
     let b: Vec<Box<dyn Backend>> = vec![Box::new(Level0)];
-    let e = machine::probe(d.path(), &b).unwrap_err();
+    let e = probe(d.path(), &b).unwrap_err();
     assert!(e.to_string().contains("rate_usd_per_hour"), "{e}");
     assert_eq!(std::fs::read_to_string(&f).unwrap(), bad);
     std::fs::write(
@@ -185,5 +194,5 @@ fn probe_refuses_a_bad_machine_file_and_leaves_it_alone() {
 ",
     )
     .unwrap();
-    assert!(machine::probe(d.path(), &b).is_err());
+    assert!(probe(d.path(), &b).is_err());
 }

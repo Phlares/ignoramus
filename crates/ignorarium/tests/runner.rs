@@ -33,6 +33,9 @@ struct Fake {
 }
 
 impl Backend for Fake {
+    fn launcher(&self) -> String {
+        "process".into()
+    }
     fn level(&self) -> u8 {
         self.level
     }
@@ -103,6 +106,7 @@ fn run_writes_one_record_per_row_in_order() {
         assert_eq!(r.body["exit"], "ok");
         assert_eq!(r.body["attempts"], 1);
         assert_eq!(r.body["isolation"], 0);
+        assert_eq!(r.body["launcher"], "process");
         assert_eq!(r.body["payload_sha256"], plan.payload_sha256.as_str());
         assert_eq!(r.body["data_hashes"].as_array().unwrap().len(), 1);
         assert_eq!(r.body["output_hash"].as_str().unwrap().len(), 64);
@@ -350,6 +354,9 @@ struct SignalAfterRow0 {
 }
 
 impl Backend for SignalAfterRow0 {
+    fn launcher(&self) -> String {
+        "process".into()
+    }
     fn level(&self) -> u8 {
         0
     }
@@ -710,21 +717,25 @@ fn need_isolation(t: String) -> String {
 }
 
 #[test]
-fn the_lowest_backend_that_meets_min_isolation_runs() {
+fn the_highest_backend_that_meets_min_isolation_runs() {
     let lab = lab();
     plain(&lab, "lvl0");
     register_study(&lab, "lvl1", need_isolation, &[], PAYLOAD);
-    let pick = |id: &str| {
-        let all = vec![fake_at(2), fake_at(0), fake_at(1)];
+    let pick = |id: &str, levels: &[u8]| {
+        let all = levels.iter().map(|&l| fake_at(l)).collect();
         prepare_with(&lab.home, id, all).unwrap().backend.level()
     };
-    assert_eq!(pick("lvl0"), 0);
-    assert_eq!(pick("lvl1"), 1);
+    assert_eq!(pick("lvl0", &[2, 0, 1]), 2);
+    assert_eq!(pick("lvl0", &[0, 1]), 1);
+    assert_eq!(pick("lvl0", &[1, 0]), 1);
+    assert_eq!(pick("lvl0", &[0]), 0);
+    assert_eq!(pick("lvl1", &[2, 0, 1]), 2);
+    assert_eq!(pick("lvl1", &[0, 1]), 1);
     let only0 = prepare_with(&lab.home, "lvl1", vec![fake_at(0)])
         .err()
         .unwrap();
     assert!(
-        matches!(only0, RunError::NoBackend { need: 1, .. }),
+        matches!(&only0, RunError::NoBackend { need: 1, have } if *have == [0]),
         "{only0}"
     );
 }
@@ -1294,4 +1305,36 @@ fn attempts_before_a_backend_pause_are_spend_that_counts_on_resume() {
             assert_eq!(c.cpu_seconds, wall / 2.0);
         }
     }
+}
+
+#[test]
+fn run_start_names_the_isolation_and_the_launcher() {
+    let lab = lab();
+    let dir = plain(&lab, "starts");
+    assert_eq!(run(&plan_of(&lab, "starts")).unwrap(), RunStatus::Done);
+    let ev = events_of(&dir);
+    let starts = named(&ev, "run.start");
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0]["attrs"]["isolation"], 0);
+    assert_eq!(starts[0]["attrs"]["launcher"], "process");
+}
+
+#[test]
+fn a_resumed_run_writes_run_resume_and_no_second_run_start() {
+    let lab = lab();
+    let dir = plain(&lab, "resumes");
+    let mut plan = plan_of(&lab, "resumes");
+    let infra = || Exit::Infra("box fault".into());
+    plan.backend = Box::new(fake(vec![infra(), infra(), infra(), infra()]).0);
+    assert!(matches!(run(&plan).unwrap(), RunStatus::Paused(_)));
+    let ev = events_of(&dir);
+    assert_eq!(named(&ev, "run.start").len(), 1);
+    assert!(named(&ev, "run.resume").is_empty());
+    assert_eq!(run(&plan_of(&lab, "resumes")).unwrap(), RunStatus::Done);
+    let ev = events_of(&dir);
+    assert_eq!(named(&ev, "run.start").len(), 1);
+    let resumes = named(&ev, "run.resume");
+    assert_eq!(resumes.len(), 1);
+    assert_eq!(resumes[0]["attrs"]["isolation"], 0);
+    assert_eq!(resumes[0]["attrs"]["launcher"], "process");
 }
