@@ -15,4 +15,10 @@ Content store:
 - The store keeps blobs under their SHA-256 in `store/`. It adds no crate: `sha2` and `hex` already exist.
 - A blob is written once and never changes. The same bytes always land at the same path.
 
+Input view (amended):
+
+- Rows see only the inputs the plan declares. `run` builds `studies/<id>/in/`: one hard link per declared input to its stored blob, at the declared path, and nothing else. The links share the blob's read-only mode, and the view's folders are read-only too. The payload finds the view at `IGNORARIUM_IN`.
+- Level 1 binds the view read-only at `/in`. A level 2 backend builds its read-only input disk, mounted at `/in`, from the view (0010). Level 0 hands the payload the view folder itself, with no isolation.
+- Before, a row saw the study's `data/` folder. A file the plan did not declare, such as a model kept beside the data, was then either visible without a pin or not visible at all.
+
 Why: each part has one job, and the unsafe system calls stay in one module behind safe functions.
