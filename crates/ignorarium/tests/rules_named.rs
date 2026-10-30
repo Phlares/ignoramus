@@ -965,6 +965,19 @@ fn edited(edits: &[Edit]) -> Value {
 }
 
 #[test]
+fn an_empty_box_has_no_study_and_no_closed_slot() {
+    let empty = rules::NoRecords;
+    assert_eq!(empty.study("pilot"), Ok(None));
+    assert_eq!(empty.stream_closed("planlog", "pilot", 1), Ok(false));
+    for log in ["planlog", "testlog"] {
+        let next = empty.stream_next(log).unwrap();
+        assert_eq!(next.slot, 1, "{log}");
+        assert!((next.level - 0.005).abs() < 1e-12, "{log}: {}", next.level);
+    }
+    assert!(empty.stream_next("other").is_err());
+}
+
+#[test]
 fn checks_read_files_from_the_context_root() {
     let dir = study_dir();
     let other = tempfile::tempdir().unwrap();
@@ -1781,6 +1794,23 @@ fn floor_details(d: Vec<Diagnostic>) -> Vec<String> {
 }
 
 #[test]
+fn the_z_floor_sizes_at_the_distance_from_power_at_to_the_margin() {
+    // `near()` moved up by 3: margin 3, power_at 2, range [-2, 8]. The distance is still 1,
+    // so 5 clusters are short of the same 10; the sum 5 would ask for 1.
+    let dir = study_dir();
+    let mut e = and(near(), power_edits(5, 5));
+    e.extend([
+        hyp("claim", j(json!({ "below": 3.0 }))),
+        hyp("power_at", j(json!(2.0))),
+        hyp("statistic", j(json!({ "mean": [-2.0, 8.0] }))),
+    ]);
+    assert_eq!(
+        floor_details(named(&edited(&e), dir.path())),
+        ["Stratum fiction has 5 of the 10 clusters the power gate needs."]
+    );
+}
+
+#[test]
 fn power_gate_uses_the_stream_level_power_share_and_defaults() {
     let dir = study_dir();
     let detail = |edits: Vec<Edit>| floor_details(named(&edited(&edits), dir.path()));
@@ -1962,6 +1992,32 @@ fn every_rule_of_one_check_sees_one_stream_read() {
     let exploratory = edited(&exploring(vec![]));
     assert_eq!(rules::granted(&exploratory, &ctx), Ok(None));
     assert_eq!(reads.get(), 1);
+}
+
+/// A box that answers every closed-slot question with `closed`, for `(planlog, pilot, 3)`.
+struct Slots(Result<bool, String>);
+
+impl BoxRecords for Slots {
+    fn study(&self, _: &str) -> Result<Option<Vec<records::Record>>, String> {
+        Ok(None)
+    }
+
+    fn stream_next(&self, _: &str) -> Result<Next, String> {
+        Err("not read".into())
+    }
+
+    fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String> {
+        assert_eq!((log, study, slot), ("planlog", "pilot", 3));
+        self.0.clone()
+    }
+}
+
+#[test]
+fn read_once_passes_closed_slots_through() {
+    for closed in [Ok(false), Ok(true), Err("bad line".to_string())] {
+        let once = rules::ReadOnce::new(Slots(closed.clone()));
+        assert_eq!(once.stream_closed("planlog", "pilot", 3), closed);
+    }
 }
 
 #[test]
@@ -2766,6 +2822,22 @@ fn a_plan_the_simulation_refuses_fails_closed() {
     );
     assert!(rules::power(&ok(), &with_box(dir.path(), held(1.5))).is_empty());
     assert!(rules::check_named(&ok(), v0(), &with_box(dir.path(), held(1.0))).is_empty());
+}
+
+#[test]
+fn a_power_that_meets_the_target_exactly_passes_and_searches_nothing() {
+    // The seed comes from the check's spec hash, not from design.power, so the same plan
+    // simulates the same power at any target: set the target to that power.
+    let dir = study_dir();
+    // `near()` with 60 clusters simulates a power of about 0.5.
+    let mut spec = edited(&and(near(), power_edits(5, 60)));
+    let p = rules::power(&spec, &ctx(dir.path()))[0].power;
+    assert!((0.5..0.999).contains(&p), "{p}");
+    spec["design"]["power"] = json!(p);
+    let at = rules::power(&spec, &ctx(dir.path()));
+    assert_eq!((at[0].power, at[0].target, at[0].needed), (p, p, None));
+    let d = named(&spec, dir.path());
+    assert!(d.iter().all(|x| x.code != "E-CNF-002"), "{d:?}");
 }
 
 #[test]

@@ -205,6 +205,9 @@ fn changes_name_what_moved_and_hash_a_file_whose_ctime_alone_moved() {
     let c = view::changes(&dir, &inputs, &seen).unwrap();
     assert_eq!((c.inputs.as_slice(), c.other), (none, false));
     assert_eq!(c.now, seen);
+    // A file whose stamp did not move is not read: a digest it would not match goes unseen.
+    let unread = [("data//a.txt".to_string(), "0".repeat(64))];
+    assert_eq!(view::changes(&dir, &unread, &seen).unwrap().inputs, none);
     // A mode change moves the ctime alone: the file is hashed and its bytes are the same.
     tick();
     std::fs::set_permissions(&blob, PermissionsExt::from_mode(0o644)).unwrap();
@@ -249,4 +252,23 @@ fn changes_name_what_moved_and_hash_a_file_whose_ctime_alone_moved() {
     assert_eq!((c.inputs.as_slice(), c.other), (none, true));
     // A missing view is an error.
     assert!(view::changes(&fresh.study.join("none"), &inputs, &seen).is_err());
+}
+
+#[test]
+fn view_errors_name_the_input() {
+    let shown = |e: ViewError| e.to_string();
+    assert_eq!(
+        shown(ViewError::Missing("data/a.txt".into())),
+        "the store has no blob for input data/a.txt"
+    );
+    assert_eq!(
+        shown(ViewError::Changed("data/a.txt".into())),
+        "input data/a.txt no longer hashes to its digest"
+    );
+    assert_eq!(
+        shown(ViewError::Unsafe("../a".into())),
+        "input path ../a could leave the view"
+    );
+    let io = std::io::Error::other("disk gone");
+    assert_eq!(shown(ViewError::from(io)), "disk gone");
 }

@@ -609,8 +609,12 @@ fn a_mode_change_on_a_blob_does_not_pause_the_run() {
     let blob = blob_of(&lab, b"calibration");
     let edit = edits_in_row_0(&format!("chmod u+w '{}'", blob.display()));
     common::with_payload(&lab, "chmod", &edit);
-    assert_eq!(run(&plan_of(&lab, "chmod")).unwrap(), RunStatus::Done);
+    let plan = plan_of(&lab, "chmod");
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
     assert_eq!(rows_of(&lab, "chmod").len(), 6);
+    // The next attempt keeps the new stamp, so later attempts do not hash the file again.
+    let now = ignorarium::view::scan(&plan.view).unwrap();
+    assert_eq!(*plan.view_seen.borrow(), now);
 }
 
 #[test]

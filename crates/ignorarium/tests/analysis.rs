@@ -65,6 +65,21 @@ fn percent_pairs_by_unit_and_repeat() {
 }
 
 #[test]
+fn units_lists_each_paired_unit_once() {
+    // a#0 pairs one condition besides the reference, a#1 none, a#2 two.
+    let rows = [
+        ok("a#0", "base", 0, 100.0),
+        ok("a#0", "new", 0, 110.0),
+        ok("a#1", "base", 0, 100.0),
+        ok("a#2", "base", 0, 100.0),
+        ok("a#2", "new", 0, 110.0),
+        ok("a#2", "other", 0, 120.0),
+    ];
+    let p = paired(&spec("percent"), &rows);
+    assert_eq!(p.units().collect::<Vec<_>>(), ["a#0", "a#1", "a#2"]);
+}
+
+#[test]
 fn difference_is_condition_minus_reference_and_repeats_average() {
     let rows = [
         ok("a#0", "base", 0, 100.0),
@@ -1000,6 +1015,27 @@ fn an_exploratory_quantile_claim_passes_on_its_point_estimate() {
         (vs[0].verdict.as_str(), vs[0].bounds[0].value),
         ("fail", Some(43.0 / 48.0))
     );
+}
+
+#[test]
+fn an_exploratory_bound_reports_the_mean_of_its_cluster_observations() {
+    // Three clusters with means -1, -0.5 and 0: the point estimate is their mean, -0.5, not
+    // the mean of the four units (-0.625).
+    let spec = claimed(
+        "exploratory",
+        &[],
+        json!({ "below": 0.0 }),
+        json!({ "mean": [-1.0, 1.0] }),
+    );
+    let groups = [
+        group("a", "", &[-1.0]),
+        group("b", "", &[-0.5]),
+        group("c", "", &[0.5, -0.5]),
+    ];
+    let (p, clusters) = data(&spec, &groups);
+    let (vs, _) = decided(&spec, &p, &clusters, None);
+    assert_eq!(vs[0].verdict, "pass");
+    assert_eq!(vs[0].bounds, [bound("", "below", 0.0, 3, -0.5)]);
 }
 
 #[test]

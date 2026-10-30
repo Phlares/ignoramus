@@ -230,6 +230,9 @@ fn meta_is_none_for_an_unknown_digest_and_refuses_a_bad_one() {
     let (_d, s) = open();
     assert_eq!(s.meta(HELLO).unwrap(), None);
     assert!(matches!(s.meta("../x"), Err(StoreError::BadDigest)));
+    // A meta entry the store cannot read is an error, not an absent meta.
+    std::fs::create_dir_all(meta_file(&s, HELLO)).unwrap();
+    assert!(matches!(s.meta(HELLO), Err(StoreError::Io(_))));
 }
 
 #[test]

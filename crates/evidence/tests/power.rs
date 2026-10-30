@@ -138,6 +138,80 @@ fn a_quantile_claim_is_sized_on_the_share_of_units() {
 }
 
 #[test]
+fn with_sd_0_every_quantile_unit_sits_at_the_unit_mean() {
+    // Every unit at -1, below the margin 0: each of 9 clusters gives a share of 1, and the
+    // wealth 1.5^8 = 25.6 passes 1 / 0.05 in every replicate. A unit that strays fails some.
+    let p = Plan {
+        stat: Statistic::Quantile(0.5),
+        ..plan(vec![Stratum {
+            sd: 0.0,
+            ..stratum(9, 0.0)
+        }])
+    };
+    let e = evidence::claim::e_value(&p.stat, &p.bounds[0], &[1.0; 9]).unwrap();
+    assert!((e - 1.5f64.powi(8)).abs() < 1e-9, "{e}");
+    assert_eq!(power(&p), 1.0);
+    let mut above = p.clone();
+    above.strata[0].unit_mean = 1.0;
+    assert_eq!(power(&above), 0.0);
+}
+
+#[test]
+fn the_quantile_simulation_matches_a_direct_one_at_icc_0_and_1() {
+    // Units at -1, unit sd 1, margin 0: a unit is at or below it when its draw Z <= 1
+    // (p = 0.841). With icc 0 each of a cluster's 4 units draws its own Z; with icc 1 they all
+    // share one, so the share is 1 or 0. The simulation's power matches a direct one over such
+    // shares, within Monte Carlo error.
+    for (icc, n) in [(0.0, 12), (1.0, 12)] {
+        let p = Plan {
+            stat: Statistic::Quantile(0.5),
+            ..plan(vec![stratum(n, icc)])
+        };
+        let mut rng = Rng::from_seed([5; 32]);
+        let mut share = || {
+            let at_or_below = |rng: &mut Rng| f64::from(u8::from(rng.normal() <= 1.0));
+            if icc == 1.0 {
+                at_or_below(&mut rng)
+            } else {
+                (0..4).map(|_| at_or_below(&mut rng)).sum::<f64>() / 4.0
+            }
+        };
+        let passed = (0..REPS)
+            .filter(|_| {
+                let shares: Vec<f64> = (0..n).map(|_| share()).collect();
+                let e = evidence::claim::e_value(&p.stat, &p.bounds[0], &shares).unwrap();
+                e >= 1.0 / p.level
+            })
+            .count();
+        let direct = passed as f64 / f64::from(REPS);
+        let simulated = power(&p);
+        assert!((0.2..0.8).contains(&direct), "{icc}: {direct}");
+        assert!(
+            (simulated - direct).abs() < 0.06,
+            "{icc}: {simulated} {direct}"
+        );
+    }
+}
+
+#[test]
+fn a_bound_passes_when_its_e_value_reaches_one_over_the_level() {
+    // With sd 0 every replicate draws the same cluster means, so the e-value is fixed: at a
+    // level whose inverse is exactly that e-value every replicate passes, and at the nearest
+    // smaller level whose inverse exceeds it none does.
+    let p = plan(vec![Stratum {
+        sd: 0.0,
+        ..stratum(20, 0.0)
+    }]);
+    let e = evidence::claim::e_value(&p.stat, &p.bounds[0], &[-1.0; 20]).unwrap();
+    assert!(e > 1.0, "{e}");
+    let near = |k: i64| f64::from_bits((1.0 / e).to_bits().wrapping_add_signed(k));
+    let level = (0..8).map(near).find(|l| 1.0 / l == e).unwrap();
+    let below = (-8..0).rev().map(near).find(|l| 1.0 / l > e).unwrap();
+    assert_eq!(power(&Plan { level, ..p.clone() }), 1.0);
+    assert_eq!(power(&Plan { level: below, ..p }), 0.0);
+}
+
+#[test]
 fn the_simulation_is_fixed_by_its_seed() {
     let p = plan(vec![stratum(20, 0.0)]);
     let a = simulate(&p, REPS, &mut Rng::from_seed(SEED)).unwrap();
@@ -238,6 +312,12 @@ fn a_plan_over_the_work_budget_is_refused() {
     assert!(simulate(&edge, 1_000_000, &mut rng).is_ok());
     assert_eq!(
         simulate(&median(vec![100]), 1_000_000, &mut rng),
+        Err(Error::Parameter("work"))
+    );
+    // The search runs at the budget too, and refuses one value more.
+    assert_eq!(clusters_needed(&edge, 0.0, 1_000_000, SEED, 1), Ok(Some(1)));
+    assert_eq!(
+        clusters_needed(&median(vec![100]), 0.0, 1_000_000, SEED, 1),
         Err(Error::Parameter("work"))
     );
     // The search counts every trial: 1 cluster of 20,000 units draws 40 million values, and

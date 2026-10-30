@@ -305,6 +305,12 @@ fn first_checks_the_first_line_alone() {
         records::first(&p, &vk),
         Err(VerifyError::Parse { line: 1 })
     ));
+    // A log the box cannot open for another reason than its absence is an error, not empty:
+    // here a path below a regular file.
+    assert!(matches!(
+        records::first(&p.join("below"), &vk),
+        Err(VerifyError::Io(_))
+    ));
 }
 
 #[test]
@@ -972,6 +978,34 @@ fn find_fails_on_a_log_that_does_not_verify() {
     let err = records::find(&home, &k.verifying_key(), &records::hash(&first)).unwrap_err();
     assert!(matches!(err, VerifyError::In { .. }), "{err}");
     assert_eq!(err.to_string(), "study b: record 0: hash does not match");
+}
+
+#[test]
+fn find_fails_when_the_studies_folder_cannot_be_read() {
+    // No studies folder holds no record; a studies entry that is not a folder is an error.
+    let d = tempfile::tempdir().unwrap();
+    let home = Home::open_at(&d.path().join("home")).unwrap();
+    let v = key(1).verifying_key();
+    std::fs::remove_dir(home.root.join("studies")).unwrap();
+    assert_eq!(records::find(&home, &v, &"0".repeat(64)).unwrap(), None);
+    std::fs::write(home.root.join("studies"), "x").unwrap();
+    let err = records::find(&home, &v, &"0".repeat(64)).unwrap_err();
+    assert!(matches!(err, VerifyError::Io(_)), "{err}");
+}
+
+#[test]
+fn logs_lists_only_study_folders_that_hold_a_log() {
+    let k = key(1);
+    let (_d, home, ..) = two_studies(&k);
+    std::fs::create_dir(home.study_dir("c")).unwrap();
+    std::fs::write(home.root.join("studies/notes.txt"), "x").unwrap();
+    let ids: Vec<String> = (records::logs(&home).unwrap().into_iter())
+        .map(|(id, log)| {
+            assert_eq!(log, home.study_dir(&id).join("records.jsonl"));
+            id
+        })
+        .collect();
+    assert_eq!(ids, ["a", "b"]);
 }
 
 #[test]

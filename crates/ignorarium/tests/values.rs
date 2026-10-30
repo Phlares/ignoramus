@@ -45,16 +45,23 @@ fn non_finite_extra_or_missing_values_are_refused() {
     bad(r#"{"ppl": 1e999}"#, &["ppl"], "number");
     bad(r#"{"ppl": NaN}"#, &["ppl"], "JSON");
     bad(r#"{"ppl": Infinity}"#, &["ppl"], "JSON");
-    bad(r#"[1]"#, &["ppl"], "object");
+    bad(
+        r#"[1]"#,
+        &["ppl"],
+        "invalid type: sequence, expected an object",
+    );
     bad(r#"{"ppl": 1} x"#, &["ppl"], "JSON");
     bad("", &["ppl"], "JSON");
-    // A missing file is a refusal too.
+    // A missing file is a refusal too; a file that cannot be opened says why.
     let d = TempDir::new().unwrap();
-    assert!(
-        read(d.path(), &["ppl"])
-            .unwrap_err()
-            .contains("values.json")
+    assert_eq!(
+        read(d.path(), &["ppl"]).unwrap_err(),
+        "values.json is missing"
     );
+    let not_a_folder = d.path().join("out");
+    std::fs::write(&not_a_folder, "x").unwrap();
+    let e = read(&not_a_folder, &["ppl"]).unwrap_err();
+    assert!(e.starts_with("cannot open values.json: "), "{e}");
 }
 
 #[test]
