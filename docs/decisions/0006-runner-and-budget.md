@@ -4,8 +4,9 @@
 
 Decision:
 
-- A backend runs one row and returns an outcome. The run engine owns order, records and resume. Level 0 is the only backend in this release: a bare child process with no network or filesystem isolation. Isolation arrives with level 1.
+- A backend runs one row and returns an outcome. The run engine owns order, records and resume. Level 0 runs a bare child process with no network or filesystem isolation. Level 1 runs it in a bubblewrap sandbox (0008). `prepare` picks the highest level the machine reaches that meets `min_isolation`; `run --max-level 0` forces level 0.
 - Level 0 has no PID namespace. If the box dies, a payload process group can outlive it. A later `stop` kills that group only while its leader still lives. A payload that detaches from its group is out of reach at this level.
+- Level 1 closes that gap (0008). Each row has its own PID namespace, which the kernel empties when its PID 1 dies, a detached process included. PID 1 dies with bubblewrap, so a stop, a timeout or the death of the box ends the whole sandbox.
 - A row is done when its signed record exists. A crash before the record reruns the row. A voided row has a record, so it counts as done on resume and does not run again.
 - Spend goes into signed records: one per row, and one per attempt that has no row record, such as a retried attempt or a row ended early. A resume sums them, so no spend counts twice, and a crash loses at most the in-flight row's spend.
 - An infrastructure fault, where the payload could not run or be reaped, retries the row at most three times. Each retry first passes the health check, the budget, the re-hash and the signal check. A payload result is void and never retried; an output the payload left unhashable is such a result.
