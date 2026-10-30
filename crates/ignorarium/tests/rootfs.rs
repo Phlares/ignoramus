@@ -296,6 +296,38 @@ fn a_manifest_may_name_at_most_256_layers() {
 }
 
 #[test]
+fn a_link_named_like_the_manifest_or_a_layer_is_not_that_file() {
+    let (_h, store) = store();
+    let mut b = tar::Builder::new(Vec::new());
+    for name in ["manifest.json", "l0/layer.tar"] {
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Symlink);
+        h.set_path(name).unwrap();
+        h.set_link_name("elsewhere").unwrap();
+        h.set_mode(0o777);
+        h.set_size(0);
+        h.set_cksum();
+        b.append(&h, &b""[..]).unwrap();
+    }
+    let manifest = br#"[{"Layers":["l0/layer.tar"]}]"#;
+    let layer = layer_bytes(&[M::File("usr/a", "A")]);
+    for (name, data) in [
+        ("manifest.json", &manifest[..]),
+        ("l0/layer.tar", &layer[..]),
+    ] {
+        let mut h = tar::Header::new_gnu();
+        h.set_path(name).unwrap();
+        h.set_mode(0o644);
+        h.set_size(data.len() as u64);
+        h.set_cksum();
+        b.append(&h, data).unwrap();
+    }
+    let digest = store.put(&b.into_inner().unwrap()).unwrap();
+    let root = from_store(&store, &digest).unwrap();
+    assert_eq!(fs::read_to_string(root.join("usr/a")).unwrap(), "A");
+}
+
+#[test]
 fn a_layer_the_archive_lacks_is_a_format_error() {
     let (_h, store) = store();
     let a = TempDir::new().unwrap();
