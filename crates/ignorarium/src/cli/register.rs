@@ -14,8 +14,9 @@ use crate::payload::{self, PayloadError};
 use crate::planlog::store::{Leaf, PlanLog};
 use crate::planlog::{commitment, family};
 use crate::records::{self, RecordDraft};
-use crate::rules::{self, Lookup};
-use crate::spec::{self, model::Spec};
+use crate::rules::{self, Lookup, Taken};
+use crate::spec::model::{Condition, Param, Spec, param_path};
+use crate::spec::{self};
 use crate::store::Store;
 use crate::{keys, time};
 use ed25519_dalek::SigningKey;
@@ -152,8 +153,8 @@ pub fn run(
     if a.has_errors() {
         return Ok(done(1, None));
     }
-    let resolved = resolve(&a)?;
     let spec = Spec::from_value(&a.value).map_err(|e| io("spec does not fit the schema", e))?;
+    let resolved = resolve(&a, &spec.design.conditions)?;
     let id = spec.study.id.as_str();
     if home.study_dir(id).symlink_metadata().is_ok() {
         return Err(refusal("E-REG-002", ""));
@@ -191,10 +192,11 @@ pub fn run(
 }
 
 /// The values the plan takes from other studies: for each hypothesis with a claim in a
-/// confirmatory plan, the sd and icc per group and the estimate records they come from. A value
-/// still pending refuses, naming the study to wait for, and so does one the box no longer
-/// finds as the check found it.
-fn resolve(a: &Assessed) -> Result<Vec<Resolved>, CliError> {
+/// confirmatory plan, the sd and icc per group and the estimate records they come from; for
+/// each condition param that names a study, the condition that study selected and its
+/// `selection` record. A value still pending refuses, naming the study to wait for, and so
+/// does one the box no longer finds as the check found it.
+fn resolve(a: &Assessed, conditions: &[Condition]) -> Result<Vec<Resolved>, CliError> {
     let hypotheses = a.value["question"]["hypotheses"]
         .as_array()
         .map_or(&[][..], Vec::as_slice);
@@ -208,9 +210,18 @@ fn resolve(a: &Assessed) -> Result<Vec<Resolved>, CliError> {
                 (i, path, h["estimates"]["from"].as_str().unwrap_or_default())
             })
     };
+    let params: Vec<(String, &str)> = (conditions.iter().enumerate())
+        .flat_map(|(i, c)| {
+            c.params.iter().filter_map(move |(k, p)| match p {
+                Param::Ref(r) => Some((param_path(i, k), r.from.as_str())),
+                Param::Value(_) => None,
+            })
+        })
+        .collect();
     let pending = a.pending();
     let mut waits: Vec<String> = Vec::new();
-    for (_, path, study) in claimed() {
+    let named = claimed().map(|(_, path, study)| (path, study));
+    for (path, study) in named.chain(params.iter().map(|(p, s)| (p.clone(), *s))) {
         let wait = format!("register after {study} finishes");
         if pending.contains(&path.as_str()) && !waits.contains(&wait) {
             waits.push(wait);
@@ -222,18 +233,16 @@ fn resolve(a: &Assessed) -> Result<Vec<Resolved>, CliError> {
             waits.join("; ")
         )));
     }
-    if mode_of(a) != "confirmatory" {
-        return Ok(vec![]);
-    }
+    let drifted = |path: &str, why: &str| {
+        CliError::refuse(format!(
+            "{path} no longer reads as the check read it: {why} The study was not registered."
+        ))
+    };
     let mut out = Vec::new();
-    for (i, path, study) in claimed() {
+    for (i, path, study) in claimed().filter(|_| mode_of(a) == "confirmatory") {
         let groups = match rules::estimate_inputs(&a.value, i, &a.ctx) {
             Lookup::Found(groups) => groups,
-            Lookup::Pending(why) | Lookup::Missing(why) => {
-                return Err(CliError::refuse(format!(
-                    "{path} no longer reads as the check read it: {why} The study was not registered."
-                )));
-            }
+            Lookup::Pending(why) | Lookup::Missing(why) => return Err(drifted(&path, &why)),
         };
         let mut records: Vec<String> = Vec::new();
         let mut value = Map::new();
@@ -256,12 +265,26 @@ fn resolve(a: &Assessed) -> Result<Vec<Resolved>, CliError> {
             value: Value::Object(value),
         });
     }
+    for (path, study) in params {
+        match rules::selected_by(&a.ctx, study) {
+            Taken::Found { selected, record } => out.push(Resolved {
+                path,
+                study: study.into(),
+                records: vec![record],
+                value: json!(selected),
+            }),
+            Taken::Pending(why) | Taken::Refused(why) => return Err(drifted(&path, &why)),
+        }
+    }
     Ok(out)
 }
 
 /// `takes <path> from <study>: stratum <name> sd <sd>, icc <icc>; …`, the values a person
 /// approves with the plan.
 fn taken(r: &Resolved) -> String {
+    if let Some(condition) = r.value.as_str() {
+        return format!("takes {} from {}: condition {condition}", r.path, r.study);
+    }
     let groups: Vec<String> = r
         .value
         .as_object()
@@ -564,7 +587,7 @@ mod tests {
             input_hashes: vec![],
             ctx: rules::CheckCtx::empty(root),
         };
-        let e = resolve(&a).unwrap_err();
+        let e = resolve(&a, &[]).unwrap_err();
         assert_eq!(e.code, 1);
         assert_eq!(
             e.msg,

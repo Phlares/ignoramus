@@ -2285,3 +2285,87 @@ fn a_heal_by_another_box_version_is_refused_only_when_it_adds_something() {
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
     assert_eq!(common::records_of(&lab, "vers").len(), 10);
 }
+
+/// `staged`, with arm-b's `bits` taken from study `chooser`.
+fn choosing(t: String) -> String {
+    staged(t).replace(
+        "params = { bits = 8 }",
+        "params = { bits = { from = \"chooser\" } }",
+    )
+}
+
+/// The study `id` in the lab's box, finished, with the selection of `selected`.
+fn chose(lab: &Lab, id: &str, selected: &str) -> Vec<String> {
+    common::plant(&lab.home, id, &common::finished_selecting(selected, vec![]))
+}
+
+#[test]
+fn the_payload_gets_the_resolved_param() {
+    let lab = lab();
+    chose(&lab, "chooser", "arm-a");
+    let dir = register_study(&lab, "taking", choosing, &[], STAGED);
+    let plan = plan_of(&lab, "taking");
+    assert_eq!(plan.params["exact"], serde_json::json!({}));
+    assert_eq!(
+        plan.params["arm-a"],
+        serde_json::json!({ "bits": 4, "mode": "fast" })
+    );
+    assert_eq!(plan.params["arm-b"], serde_json::json!({ "bits": "arm-a" }));
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    for row in &plan.schedule.rows {
+        let got = std::fs::read_to_string(dir.join(format!("run/rows/{}/out/params", row.index)))
+            .unwrap();
+        let want = match row.condition.as_str() {
+            "exact" => "{}",
+            "arm-a" => r#"{"bits":4,"mode":"fast"}"#,
+            _ => r#"{"bits":"arm-a"}"#,
+        };
+        assert_eq!(got, want, "row {}", row.index);
+    }
+}
+
+#[test]
+fn prepare_refuses_when_a_frozen_record_is_gone() {
+    let lab = lab();
+    let planted = chose(&lab, "chooser", "arm-a");
+    register_study(&lab, "taking", choosing, &[], STAGED);
+    plan_of(&lab, "taking");
+    // The parent's folder moves away; the box no longer holds the record the value came from.
+    std::fs::rename(lab.home.study_dir("chooser"), lab.root.join("moved")).unwrap();
+    match err_of(&lab, "taking") {
+        RunError::Records(why) => assert_eq!(why, format!("frozen record {} is gone", planted[1])),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn estimate_keys_match_across_studies_with_the_same_resolved_params() {
+    let lab = lab();
+    let mut hashes = Vec::new();
+    for (study, parent, selected) in [
+        ("first", "chooser-1", "arm-a"),
+        ("second", "chooser-2", "arm-a"),
+        ("third", "chooser-3", "arm-b"),
+    ] {
+        chose(&lab, parent, selected);
+        let from = format!("params = {{ bits = {{ from = \"{parent}\" }} }}");
+        let edit = move |t: String| staged(t).replace("params = { bits = 8 }", &from);
+        register_study(&lab, study, edit, &[], STAGED);
+        assert_eq!(run(&plan_of(&lab, study)).unwrap(), RunStatus::Done);
+        let es = kind_of(&lab, study, "estimate");
+        assert_eq!(es.len(), 1);
+        let e = Estimate::of(&es[0]).unwrap();
+        // The key holds the selected condition, never the unresolved reference.
+        let terms = [(
+            "arm-b".to_string(),
+            1.0,
+            serde_json::json!({ "bits": selected }),
+        )];
+        let reference = ("exact".to_string(), serde_json::json!({}));
+        let (key, hash) = contrast_key(&common::ppl_ratio(), 1, &reference, &terms);
+        assert_eq!((e.key, e.key_hash.clone()), (key, hash));
+        hashes.push(e.key_hash);
+    }
+    assert_eq!(hashes[0], hashes[1]);
+    assert_ne!(hashes[0], hashes[2]);
+}

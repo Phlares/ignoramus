@@ -16,4 +16,5 @@ A follow-on plan is written and checked before the study it builds on runs. Its 
 
 ## Applies to
 
-- `question.hypotheses[*].estimates` (named:reference-finished), when mode = confirmatory
+- `question.hypotheses[*].estimates` (named:reference-finished)
+- `design.conditions[*].params.*` (named:reference-finished)

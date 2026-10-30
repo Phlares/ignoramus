@@ -932,3 +932,58 @@ fn a_stored_input_whose_blob_changed_after_the_check_is_refused() {
     assert!(e.msg.contains("changed"), "{}", e.msg);
     assert!(!f.home.study_dir("my-study").exists());
 }
+
+/// The template with arm-a's `bits` taken from study `my-chooser`.
+fn taking(t: String) -> String {
+    t.replace(
+        "# params = { bits = 4 }",
+        "params = { bits = { from = \"my-chooser\" } }  #",
+    )
+}
+
+#[test]
+fn register_freezes_the_selected_condition() {
+    let (f, spec) = setup("numeric-ablation", taking);
+    let planted = common::plant(
+        &f.home,
+        "my-chooser",
+        &common::finished_selecting("arm-b", vec![]),
+    );
+    let (r, out) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap().code, 0, "{out}");
+    assert!(
+        out.contains(
+            "takes design.conditions[1].params.bits from my-chooser: condition arm-b
+"
+        ),
+        "{out}"
+    );
+    let rp = f.home.study_dir("my-study").join("records.jsonl");
+    // The selection record is the second record of the chooser: after its register record.
+    assert_eq!(
+        records(&rp)[0]["record"]["body"]["resolved"],
+        serde_json::json!([{
+            "path": "design.conditions[1].params.bits",
+            "study": "my-chooser",
+            "records": [planted[1]],
+            "value": "arm-b",
+        }])
+    );
+}
+
+#[test]
+fn register_refuses_a_param_that_waits_or_has_no_selection() {
+    let (f, spec) = setup("numeric-ablation", taking);
+    let (r, out) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(
+        r.unwrap_err().msg,
+        "W-REF-001: a value waits on a study that has not finished; register after my-chooser finishes. See docs/rules/W-REF-001.md"
+    );
+    assert!(out.contains("warning[W-REF-001]"), "{out}");
+    common::plant(&f.home, "my-chooser", &common::finished(vec![]));
+    let (r, out) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap().code, 1, "{out}");
+    assert!(out.contains("error[E-REF-002]"), "{out}");
+    assert!(!out.contains(PROMPT), "{out}");
+    assert!(!f.home.study_dir("my-study").exists());
+}

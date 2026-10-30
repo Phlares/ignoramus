@@ -4,7 +4,7 @@
 //! is missing or mistyped: the generic rules report that.
 use super::generic::{applies, diagnostic, join, join_key, plain_key, safe_key, select};
 use super::{BoxRecords, Check, NoRecords, Rule, is_study_id};
-use crate::derived::{Estimate, StudyState, contrast_key};
+use crate::derived::{Estimate, Selection, StudyState, contrast_key};
 use crate::diag::Diagnostic;
 use crate::inputs::{self, Found};
 use crate::power::required_clusters;
@@ -581,6 +581,46 @@ pub fn estimate_inputs(spec: &Value, h: usize, ctx: &CheckCtx) -> Lookup {
         .unwrap_or_else(|| Lookup::Missing("The hypothesis is not well formed.".into()))
 }
 
+/// What a condition param takes from the study it names.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Taken {
+    /// The study has not finished; the text says which way.
+    Pending(String),
+    /// The study cannot give a condition; the text says why.
+    Refused(String),
+    /// The condition the study selected, and the hash of the `selection` record it comes from.
+    Found { selected: String, record: String },
+}
+
+/// The condition that study `from` selected, from its `selection` record. The study must have
+/// finished.
+pub fn selected_by(ctx: &CheckCtx, from: &str) -> Taken {
+    let all = match ctx.records.study(from) {
+        Err(e) => {
+            return Taken::Refused(format!(
+                "The box cannot read the records of study {from}: {e}."
+            ));
+        }
+        Ok(all) => all,
+    };
+    match StudyState::of(all.clone()) {
+        StudyState::NotRegistered => Taken::Pending(waits(from, "not registered")),
+        StudyState::NotFinished => Taken::Pending(waits(from, "not finished")),
+        StudyState::Finished(_) => {
+            // The selection record precedes the analysis record, so it is not among the
+            // records `Finished` holds.
+            let found = all.into_iter().flatten().find_map(|r| {
+                let s = Selection::of(&r)?;
+                Some((s.selected, records::hash(&r)))
+            });
+            match found {
+                Some((selected, record)) => Taken::Found { selected, record },
+                None => Taken::Refused(format!("Study {from} recorded no selection.")),
+            }
+        }
+    }
+}
+
 /// A contrast a hypothesis stands for: the candidate it takes as the pick, and its key hash.
 struct Concrete<'a> {
     pick: Option<&'a str>,
@@ -594,7 +634,7 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
         return Some(Lookup::Missing("The hypothesis names no study.".into()));
     };
     let from = study_ref(spec, reference)?;
-    let contrasts = contrasts(spec, hyp)?;
+    let contrasts = contrasts(spec, hyp, ctx)?;
     let groups = groups_of(hyp)?;
     let records = match ctx.records.study(from).map(StudyState::of) {
         Err(e) => {
@@ -602,8 +642,10 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
                 "The box cannot read the records of study {from}: {e}."
             )));
         }
-        Ok(StudyState::NotRegistered) => return Some(pending(from, "not registered")),
-        Ok(StudyState::NotFinished) => return Some(pending(from, "not finished")),
+        Ok(StudyState::NotRegistered) => {
+            return Some(Lookup::Pending(waits(from, "not registered")));
+        }
+        Ok(StudyState::NotFinished) => return Some(Lookup::Pending(waits(from, "not finished"))),
         Ok(StudyState::Finished(records)) => records,
     };
     let estimates: Vec<(String, Estimate)> = records
@@ -673,8 +715,8 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
     Some(Lookup::Found(out))
 }
 
-fn pending(study: &str, state: &str) -> Lookup {
-    Lookup::Pending(format!("Waits on study {study}, which is {state}."))
+fn waits(study: &str, state: &str) -> String {
+    format!("Waits on study {study}, which is {state}.")
 }
 
 /// A group as a diagnostic names it: `stratum <name>`, or `the pooled group`.
@@ -715,14 +757,14 @@ fn groups_of(hyp: &Value) -> Option<Vec<&str>> {
 /// with its params: one, or with `selected` one per candidate of the selection stage. `None`
 /// when the reference, its outcome, a weight, a term or a candidate is one that E-REF-001,
 /// `hypothesis-shape`, `condition-declared` or `param-shape` refuses.
-fn contrasts<'a>(spec: &'a Value, hyp: &'a Value) -> Option<Vec<Concrete<'a>>> {
+fn contrasts<'a>(spec: &'a Value, hyp: &'a Value, ctx: &CheckCtx) -> Option<Vec<Concrete<'a>>> {
     let id = hyp.get("outcome")?.as_str()?;
     let outcome = nodes(spec, "outcomes[*]")
         .into_iter()
         .find(|(_, o)| o.get("id").and_then(Value::as_str) == Some(id))
         .and_then(|(_, o)| serde_json::from_value::<Outcome>(o.clone()).ok())?;
     let reference = text(spec, "design.reference")?;
-    let reference = (reference.to_string(), params_of(spec, reference)?);
+    let reference = (reference.to_string(), params_of(spec, ctx, reference)?);
     let repeats = match val(spec, "design.repeats") {
         None => 1,
         Some(r) => r.as_u64()?,
@@ -761,7 +803,7 @@ fn contrasts<'a>(spec: &'a Value, hyp: &'a Value) -> Option<Vec<Concrete<'a>>> {
                 .iter()
                 .map(|&(k, w)| {
                     let c = if k == SELECTED { pick? } else { k };
-                    Some((c.to_string(), w, params_of(spec, c)?))
+                    Some((c.to_string(), w, params_of(spec, ctx, c)?))
                 })
                 .collect::<Option<Vec<_>>>()?;
             let key = contrast_key(&outcome, repeats, &reference, &concrete).1;
@@ -770,16 +812,27 @@ fn contrasts<'a>(spec: &'a Value, hyp: &'a Value) -> Option<Vec<Concrete<'a>>> {
         .collect()
 }
 
-/// The params of declared condition `id`: its `params` table, `{}` when it has none. `None`
-/// when no condition has the id, or a param is not a scalar.
-fn params_of(spec: &Value, id: &str) -> Option<Value> {
+/// The params of declared condition `id`: its `params` table with each reference replaced by the
+/// condition its study selected, `{}` when it has none. `None` when no condition has the id, a
+/// param is malformed, or a reference is pending or refused.
+fn params_of(spec: &Value, ctx: &CheckCtx, id: &str) -> Option<Value> {
     let (_, condition) = nodes(spec, "design.conditions[*]")
         .into_iter()
         .find(|(_, c)| c.get("id").and_then(Value::as_str) == Some(id))?;
-    match condition.get("params") {
-        None => Some(json!({})),
-        Some(p) => p.as_object()?.values().all(is_scalar).then(|| p.clone()),
-    }
+    let Some(params) = condition.get("params") else {
+        return Some(json!({}));
+    };
+    let taken = params.as_object()?.iter().map(|(k, v)| {
+        let value = match reference_of(v) {
+            Some(from) => match selected_by(ctx, from) {
+                Taken::Found { selected, .. } => json!(selected),
+                _ => return None,
+            },
+            None => is_scalar(v).then(|| v.clone())?,
+        };
+        Some((k.clone(), value))
+    });
+    Some(Value::Object(taken.collect::<Option<_>>()?))
 }
 
 /// E-CNF-003, at `<h>.estimates` of a hypothesis with a claim: absent, or no usable estimate
@@ -794,19 +847,50 @@ fn estimates_from_record(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
 /// W-REF-001, at `<h>.estimates` of a hypothesis with a claim: the study it names has not
 /// finished.
 fn reference_finished(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
-    looked_up(spec, ctx, pat, |l| match l {
-        Lookup::Pending(why) => Some(why),
-        _ => None,
-    })
+    if pat.ends_with(".estimates") {
+        return looked_up(spec, ctx, pat, |l| match l {
+            Lookup::Pending(why) => Some(why),
+            _ => None,
+        });
+    }
+    (references(spec, pat).into_iter())
+        .filter_map(|(path, from)| match selected_by(ctx, from) {
+            Taken::Pending(why) => Some(Hit {
+                path,
+                detail: Some(why),
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
-/// A hit with `pick`'s detail at each `<h>.estimates` of a hypothesis with a claim.
+/// The params of the tables `pat` selects that name another study, as (path, study): the key
+/// must be one a diagnostic can print, and the study is not this one.
+fn references<'a>(spec: &'a Value, pat: &str) -> Vec<(String, &'a str)> {
+    let own = text(spec, "study.id");
+    nodes(spec, pat.strip_suffix(".*").unwrap_or(pat))
+        .into_iter()
+        .filter_map(|(path, t)| Some((path, t.as_object()?)))
+        .flat_map(|(path, t)| {
+            (t.iter())
+                .filter(|(k, _)| safe_key(k))
+                .filter_map(move |(k, v)| Some((join(&path, k), reference_of(v)?)))
+        })
+        .filter(|(_, from)| is_study_id(from) && Some(*from) != own)
+        .collect()
+}
+
+/// A hit with `pick`'s detail at each `<h>.estimates` of a hypothesis with a claim, in a
+/// confirmatory study.
 fn looked_up(
     spec: &Value,
     ctx: &CheckCtx,
     pat: &str,
     pick: impl Fn(Lookup) -> Option<String>,
 ) -> Vec<Hit> {
+    if !confirmatory(spec) {
+        return vec![];
+    }
     children(spec, pat)
         .into_iter()
         .filter(|(_, h, _)| has_claim(h))
@@ -819,12 +903,37 @@ fn looked_up(
         .collect()
 }
 
-/// E-REF-002: a reference names this study, whose values do not exist until it runs.
-fn reference_not_self(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+fn confirmatory(spec: &Value) -> bool {
+    text(spec, "study.mode") == Some("confirmatory")
+}
+
+/// E-REF-002. At `<h>.estimates.from` of a confirmatory study: a reference names this study,
+/// whose values do not exist until it runs. At a param's `.from`: the same, or the study it names
+/// has finished and holds no selection.
+fn reference_not_self(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     let own = text(spec, "study.id");
-    flag(spec, pat, |v| {
-        v.as_str().is_some_and(|from| Some(from) == own)
-    })
+    let names_self = |v: &Value| v.as_str().is_some_and(|from| Some(from) == own);
+    if pat.ends_with(".estimates.from") {
+        return if confirmatory(spec) {
+            flag(spec, pat, names_self)
+        } else {
+            vec![]
+        };
+    }
+    let table = pat.strip_suffix(".from").unwrap_or(pat);
+    let mut hits = flag(spec, pat, names_self);
+    hits.extend(
+        references(spec, table)
+            .into_iter()
+            .filter_map(|(path, from)| match selected_by(ctx, from) {
+                Taken::Refused(why) => Some(Hit {
+                    path: join(&path, "from"),
+                    detail: Some(why),
+                }),
+                _ => None,
+            }),
+    );
+    hits
 }
 
 /// At `inputs`: no confirmation input. At `inputs[*].<field>`: a confirmation input holds a
@@ -1022,8 +1131,32 @@ fn is_scalar(v: &Value) -> bool {
     v.is_string() || v.is_number()
 }
 
+/// The study a param names: `{ from = "<study id>" }`, and nothing else in the table.
+fn reference_of(v: &Value) -> Option<&str> {
+    let m = v.as_object()?;
+    (m.len() == 1).then(|| m.get("from")?.as_str())?
+}
+
+/// A param is a scalar, or a reference to a study. A reference needs a key a diagnostic can print:
+/// `register` freezes it under that key.
 fn param_shape(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
-    flag(spec, pat, |v| !is_scalar(v))
+    let tables = nodes(spec, pat.strip_suffix(".*").unwrap_or(pat));
+    tables
+        .into_iter()
+        .filter_map(|(path, t)| Some((path, t.as_object()?)))
+        .flat_map(|(path, t)| {
+            t.iter()
+                .filter(|(k, v)| {
+                    if v.is_object() {
+                        !(reference_of(v).is_some() && safe_key(k))
+                    } else {
+                        !is_scalar(v)
+                    }
+                })
+                .map(|(k, _)| hit(join_key(&path, k)))
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 // ---- hypotheses ----

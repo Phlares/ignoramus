@@ -8,7 +8,7 @@ An id, a stratum or a study reference is not ASCII letters and digits joined by 
 
 ## Fix
 
-Use ASCII lowercase letters and digits, joined by single hyphens, for example my-study. A hypothesis id may also use capital letters, for example E1 or P1a. A stratum may be empty where the design or an input names none, but not in the strata a hypothesis lists. estimates.from names a study id.
+Use ASCII lowercase letters and digits, joined by single hyphens, for example my-study. A hypothesis id may also use capital letters, for example E1 or P1a. A stratum may be empty where the design or an input names none, but not in the strata a hypothesis lists. estimates.from and a param's from name a study id.
 
 ## Why
 
@@ -28,3 +28,4 @@ Ids and strata become file names, seed inputs and record keys, and are printed i
 - `inputs[*].stratum` (format)
 - `question.hypotheses[*].strata[*]` (format)
 - `question.hypotheses[*].estimates.from` (format)
+- `design.conditions[*].params.*.from` (format)

@@ -4,7 +4,7 @@ use ignorarium::cli::register;
 use ignorarium::derived;
 use ignorarium::home::Home;
 use ignorarium::rules::BoxRecords;
-use ignorarium::spec::model::{Direction, Outcome, Paired};
+use ignorarium::spec::model::{Direction, Outcome, Paired, SelectionRule};
 use ignorarium::{keys, records, spec};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -427,6 +427,30 @@ pub fn finished(estimates: Vec<serde_json::Value>) -> Vec<(&'static str, serde_j
     head.into_iter()
         .chain(estimates.into_iter().map(|e| ("estimate", e)))
         .collect()
+}
+
+/// `finished`, with the `selection` record the selection stage writes before the analysis:
+/// the pick was `selected`, over the one candidate `arm-a`.
+pub fn finished_selecting(
+    selected: &str,
+    estimates: Vec<serde_json::Value>,
+) -> Vec<(&'static str, serde_json::Value)> {
+    let selection = derived::Selection {
+        metric: "ppl-ratio".into(),
+        rule: SelectionRule::BestMean,
+        direction: Direction::Lower,
+        candidates: vec![derived::Candidate {
+            id: "arm-a".into(),
+            mean: -1.0,
+        }],
+        selected: selected.into(),
+        units: vec!["data/select.txt#0".into()],
+        complete_units: 1,
+        incomplete_units: 0,
+    };
+    let mut all = finished(estimates);
+    all.insert(1, ("selection", serde_json::to_value(selection).unwrap()));
+    all
 }
 
 /// `bodies` as the records of study `id`, in order, for a hand-built box.

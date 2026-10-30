@@ -16,7 +16,7 @@ use crate::planlog::store::{Leaf, LogError, PlanLog};
 use crate::prior::same_data;
 use crate::records::{self, RecordDraft, RecordError, VerifyError};
 use crate::schedule::{self, CONFIRMATION_STAGE, Row, SELECTION_STAGE, Schedule, ScheduleError};
-use crate::spec::model::{Mode, Role, SELECTED, Spec};
+use crate::spec::model::{Mode, Param, Role, SELECTED, Spec, param_path};
 use crate::store::Store;
 use crate::view::{self, ViewError};
 use crate::{analysis, canon, keys, spec, sys, values};
@@ -53,6 +53,9 @@ pub struct RunPlan {
     pub backend: Box<dyn Backend>,
     pub key: SigningKey,
     pub inputs: InputHashes,
+    /// Each condition's params as rows get them, by condition id: the spec's values, and for a
+    /// reference the condition `register` froze.
+    pub params: BTreeMap<String, Value>,
     /// The input view rows see: `<study>/in`, one link per input present.
     pub view: PathBuf,
     /// The scan of the view that `prepare` took before every file in it hashed to its digest.
@@ -297,6 +300,7 @@ pub fn prepare_with(
     };
     let machine = machine::load(&home.root).map_err(io)?;
     let inputs = held_inputs(&store, &key, &spec, &register)?;
+    let params = resolved_params(home, &key, &spec, &register)?;
     let present = present(&inputs);
     let view = view::build(&store, &dir, &present).map_err(view_error)?;
     let view_seen = view::verify(&view, &present).map_err(view_error)?;
@@ -313,6 +317,7 @@ pub fn prepare_with(
         backend,
         key,
         inputs,
+        params,
         view,
         view_seen: RefCell::new(view_seen),
         payload,
@@ -322,6 +327,43 @@ pub fn prepare_with(
         meter: Box::new(HostMeter::new(machine.rate_usd_per_hour)),
         heartbeat: HEARTBEAT,
     })
+}
+
+/// Each condition's params by condition id. A reference takes the value `register` froze for it,
+/// and every record a frozen value comes from must still be in the box.
+fn resolved_params(
+    home: &Home,
+    key: &SigningKey,
+    spec: &Spec,
+    register: &Register,
+) -> Result<BTreeMap<String, Value>, RunError> {
+    for hash in register.resolved.iter().flat_map(|r| &r.records) {
+        let found = records::find(home, &key.verifying_key(), hash)
+            .map_err(|e| RunError::Records(e.to_string()))?;
+        if found.is_none() {
+            return Err(RunError::Records(format!("frozen record {hash} is gone")));
+        }
+    }
+    let mut out = BTreeMap::new();
+    for (i, c) in spec.design.conditions.iter().enumerate() {
+        let mut params = serde_json::Map::new();
+        for (k, p) in &c.params {
+            let value = match p {
+                Param::Value(s) => serde_json::to_value(s).map_err(io)?,
+                Param::Ref(_) => {
+                    let path = param_path(i, k);
+                    let frozen = register.resolved.iter().find(|r| r.path == path);
+                    frozen
+                        .ok_or_else(|| RunError::Records(format!("no frozen value for {path}")))?
+                        .value
+                        .clone()
+                }
+            };
+            params.insert(k.clone(), value);
+        }
+        out.insert(c.id.clone(), Value::Object(params));
+    }
+    Ok(out)
 }
 
 /// Where rows run: the root folder (`None` is the host's) and its name.
@@ -1421,12 +1463,10 @@ fn unrecorded(
 }
 
 /// The canonical JSON of the params of `condition`; `{}` when it has none.
-fn params_json(spec: &Spec, condition: &str) -> Result<String, RunError> {
-    let params = (spec.design.conditions.iter())
-        .find(|c| c.id == condition)
-        .map(|c| c.params.clone())
-        .unwrap_or_default();
-    String::from_utf8(canon::canonical_of(&params).map_err(io)?).map_err(io)
+fn params_json(plan: &RunPlan, condition: &str) -> Result<String, RunError> {
+    let empty = Value::Object(Default::default());
+    let params = plan.params.get(condition).unwrap_or(&empty);
+    String::from_utf8(canon::canonical_of(params).map_err(io)?).map_err(io)
 }
 
 /// The job for one attempt of `row`, running `condition`, with a fresh output dir. An old one
@@ -1462,10 +1502,7 @@ fn job_for(plan: &RunPlan, row: &Row, condition: &str, dir: &Path) -> Result<Row
             ("PATH".into(), PATH_ENV.into()),
             ("IGNORARIUM_SEED".into(), row.seed_hex.clone()),
             ("IGNORARIUM_ROW".into(), row.index.to_string()),
-            (
-                "IGNORARIUM_PARAMS".into(),
-                params_json(&plan.spec, condition)?,
-            ),
+            ("IGNORARIUM_PARAMS".into(), params_json(plan, condition)?),
         ],
         input_dir: plan.view.clone(),
         output_dir: out,

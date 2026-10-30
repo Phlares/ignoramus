@@ -362,7 +362,8 @@ fn fat_templates() -> Vec<Value> {
                 { "id": "t2", "metric": "ppl-ratio", "threshold_e": 1.0 },
             ]);
             s["outcomes"].as_array_mut().unwrap().push(second);
-            s["design"]["conditions"][1]["params"] = json!({ "bits": 4, "mode": "fast" });
+            s["design"]["conditions"][1]["params"] =
+                json!({ "bits": 4, "mode": "fast", "chosen": { "from": "chooser" } });
             s["design"]["selection"] =
                 json!({ "metric": "ppl-ratio", "conditions": ["a", "b"], "rule": "best-mean" });
             s["scope"]["end_of_run"]["follow_on"] = json!([

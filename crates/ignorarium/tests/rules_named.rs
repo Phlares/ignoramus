@@ -479,12 +479,32 @@ fn faults() -> Vec<Fault> {
             vec![("/design/conditions/2/params/bits", j(json!([4])))],
             vec![("E-TYP-001", "design.conditions[2].params.bits")],
         ),
+        // A reference to a study is a param too: pending while the study is not in the box.
         f(
             vec![(
                 "/design/conditions/2/params/bits",
                 j(json!({ "from": "x" })),
             )],
+            vec![("W-REF-001", "design.conditions[2].params.bits")],
+        ),
+        f(
+            vec![(
+                "/design/conditions/2/params/bits",
+                j(json!({ "from": "x", "to": "y" })),
+            )],
             vec![("E-TYP-001", "design.conditions[2].params.bits")],
+        ),
+        f(
+            vec![("/design/conditions/2/params/bits", j(json!({ "from": 3 })))],
+            vec![("E-TYP-001", "design.conditions[2].params.bits")],
+        ),
+        // A reference is frozen under its key, so the key must be one a diagnostic can print.
+        f(
+            vec![(
+                "/design/conditions/2/params/Pasted Key",
+                j(json!({ "from": "x" })),
+            )],
+            vec![("E-TYP-001", "design.conditions[2].params.<key>")],
         ),
         f(
             vec![("/design/conditions/2/params/bits", j(json!(true)))],
@@ -1296,7 +1316,10 @@ fn a_reference_to_itself_is_refused() {
         codes_paths(&d),
         [("E-REF-002", "question.hypotheses[0].estimates.from")]
     );
-    assert_eq!(d[0].problem, "A reference names this study.");
+    assert_eq!(
+        d[0].problem,
+        "A reference names this study, or a study that recorded no selection."
+    );
     // In a study with another id, the same reference names a study that has not run.
     let mut s = edited(&[hyp("estimates", j(json!({ "from": "my-study" })))]);
     s["study"]["id"] = json!("other-study");
@@ -2753,4 +2776,147 @@ fn the_template_selection_example_passes_once_uncommented() {
         assert!(errors.is_empty(), "{t}: {errors:?}");
         assert!(v["design"]["selection"].is_object(), "{t}");
     }
+}
+
+// ---- conditions taken from an earlier study ----
+
+const BITS: &str = "/design/conditions/2/params/bits";
+
+/// `ok()` with arm-b's `bits` taken from study `chooser`, checked against `b`.
+fn param_diags(mode: &str, b: common::Studies) -> Vec<Diagnostic> {
+    let dir = study_dir();
+    let spec = edited(&[
+        ("/study/mode", j(json!(mode))),
+        (BITS, j(json!({ "from": "chooser" }))),
+    ]);
+    rules::check_named(&spec, v0(), &with_box(dir.path(), b))
+        .into_iter()
+        .filter(|d| d.path.contains(".params."))
+        .collect()
+}
+
+fn chooser(records: &[(&'static str, Value)]) -> common::Studies {
+    common::Studies(vec![(
+        "chooser",
+        Ok(common::records_for("chooser", records)),
+    )])
+}
+
+#[test]
+fn a_param_from_an_unfinished_study_is_pending() {
+    let finished = common::finished_selecting("arm-a", vec![common::arm_a()]);
+    // Registered with no analysis record; the analysis record promises an estimate not there.
+    let unfinished = || {
+        [
+            (common::Studies(vec![]), "not registered"),
+            (chooser(&finished[..1]), "not finished"),
+            (chooser(&finished[..2]), "not finished"),
+            (chooser(&finished[..3]), "not finished"),
+        ]
+    };
+    for mode in ["confirmatory", "exploratory"] {
+        for (b, which) in unfinished() {
+            let d = param_diags(mode, b);
+            assert_eq!(
+                codes_paths(&d),
+                [("W-REF-001", "design.conditions[2].params.bits")],
+                "{mode} {which}"
+            );
+            assert_eq!(d[0].severity, Severity::Warning);
+            assert_eq!(
+                d[0].problem,
+                format!(
+                    "A value waits on a study that has not finished. Waits on study chooser, which is {which}."
+                )
+            );
+        }
+        // Finished with a selection: nothing waits, and nothing is refused.
+        assert!(param_diags(mode, chooser(&finished)).is_empty(), "{mode}");
+    }
+}
+
+#[test]
+fn a_param_from_a_study_without_selection_is_refused() {
+    let none = common::finished(vec![common::arm_a()]);
+    let path = [("E-REF-002", "design.conditions[2].params.bits.from")];
+    for mode in ["confirmatory", "exploratory"] {
+        let d = param_diags(mode, chooser(&none));
+        assert_eq!(codes_paths(&d), path, "{mode}");
+        assert_eq!(d[0].severity, Severity::Error);
+        assert_eq!(
+            d[0].problem,
+            "A reference names this study, or a study that recorded no selection. Study chooser recorded no selection."
+        );
+    }
+    // A log the box cannot read refuses too.
+    let broken = common::Studies(vec![("chooser", Err("bad signature".into()))]);
+    let d = param_diags("confirmatory", broken);
+    assert_eq!(codes_paths(&d), path);
+    assert!(
+        d[0].problem
+            .ends_with("The box cannot read the records of study chooser: bad signature."),
+        "{}",
+        d[0].problem
+    );
+    // A study cannot take a condition from itself.
+    let dir = study_dir();
+    let own = edited(&[(BITS, j(json!({ "from": "my-study" })))]);
+    let d = rules::check_named(&own, v0(), &ctx(dir.path()));
+    let own: Vec<_> = d.iter().filter(|d| d.path.contains(".params.")).collect();
+    assert_eq!(own.len(), 1);
+    assert_eq!((own[0].code.as_str(), own[0].path.as_str()), path[0],);
+    assert_eq!(
+        own[0].problem,
+        "A reference names this study, or a study that recorded no selection."
+    );
+}
+
+#[test]
+fn estimate_keys_match_across_studies_with_the_same_resolved_params() {
+    // arm-b takes its bits from the condition `chooser` selected. The pilot measured arm-b with
+    // bits = "arm-a".
+    let measured = |bits: &str| {
+        vec![common::estimate(
+            &[("arm-b", 1.0, json!({ "bits": bits }))],
+            "",
+            4.0,
+            Some(0.0),
+        )]
+    };
+    let edits = unstaged(vec![
+        (BITS, j(json!({ "from": "chooser" }))),
+        ("/design/confirmation/conditions", j(json!(["arm-b"]))),
+        hyp("contrast", j(json!({ "arm-b": 1.0 }))),
+    ]);
+    let boxed = |selected: &str, bits: &str| {
+        common::Studies(vec![
+            (
+                "pilot",
+                Ok(common::records_for(
+                    "pilot",
+                    &common::finished(measured(bits)),
+                )),
+            ),
+            (
+                "chooser",
+                Ok(common::records_for(
+                    "chooser",
+                    &common::finished_selecting(selected, vec![]),
+                )),
+            ),
+        ])
+    };
+    // The same resolved params match; another selection is another contrast.
+    assert!(missing(&edits, boxed("arm-a", "arm-a")).is_empty());
+    assert_eq!(missing(&edits, boxed("arm-b", "arm-a")).len(), 1);
+    assert_eq!(missing(&edits, boxed("arm-a", "arm-b")).len(), 1);
+    // A reference left pending gives no key to look for: W-REF-001 reports it alone.
+    let waiting = common::Studies(vec![(
+        "pilot",
+        Ok(common::records_for(
+            "pilot",
+            &common::finished(measured("arm-a")),
+        )),
+    )]);
+    assert!(missing(&edits, waiting).is_empty());
 }

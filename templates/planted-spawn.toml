@@ -57,7 +57,7 @@ pick = "seeded"                 # seeded | first: which of a cluster's units the
 id = "exact"
 [[design.conditions]]
 id = "arm-a"
-# params = { bits = 4 }        # optional; the payload gets them as JSON in IGNORARIUM_PARAMS
+# params = { bits = 4 }        # optional; the payload gets them as JSON in IGNORARIUM_PARAMS; { from = "<study id>" } takes the condition that study selected
 # [[design.conditions]]        # a second candidate for the selection stage below
 # id = "arm-b"
 # [design.selection]           # optional: a stage that picks one candidate on the selection inputs first

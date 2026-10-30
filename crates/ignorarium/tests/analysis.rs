@@ -1,4 +1,4 @@
-use ignorarium::analysis::{declared_params, distinct_clusters, estimates, paired, select};
+use ignorarium::analysis::{distinct_clusters, estimates, paired, select};
 use ignorarium::derived::{Candidate, Estimate, Selection, contrast_key};
 use ignorarium::records::Record;
 use ignorarium::spec::model::{Direction, Role, SelectionRule, Spec};
@@ -545,21 +545,6 @@ fn the_key_carries_the_params_and_the_pick() {
     assert_eq!((e[0].key.clone(), e[0].key_hash.clone()), want);
     // Without the selection record a contrast on `selected` gives no estimate.
     assert!(estimates(&spec, &params, &p, &clusters, None).is_empty());
-}
-
-#[test]
-fn declared_params_are_the_specs_scalars_by_condition() {
-    let mut v = ignorarium::spec::load("../../templates/numeric-ablation.toml".as_ref())
-        .unwrap()
-        .value;
-    v["design"]["conditions"][1]["params"] = json!({ "bits": 4, "mode": "fast", "lr": 0.5 });
-    let got = declared_params(&Spec::from_value(&v).unwrap());
-    assert_eq!(got["exact"], json!({}));
-    assert_eq!(
-        got["arm-a"],
-        json!({ "bits": 4, "mode": "fast", "lr": 0.5 })
-    );
-    assert_eq!(got.len(), 2);
 }
 
 #[test]

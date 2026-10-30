@@ -139,7 +139,7 @@ impl StatisticSpec {
 }
 
 /// A value another study gives: `{ from = "<study id>" }`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Reference {
     pub from: String,
@@ -292,9 +292,16 @@ pub struct Condition {
     pub params: BTreeMap<String, Param>,
 }
 
+/// Where a condition's param is named in the plan: the path `register` freezes its value under.
+pub fn param_path(condition: usize, key: &str) -> String {
+    format!("design.conditions[{condition}].params.{key}")
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Param {
+    /// The condition the named study selected, frozen at register.
+    Ref(Reference),
     Value(Scalar),
 }
 

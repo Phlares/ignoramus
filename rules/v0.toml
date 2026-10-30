@@ -95,7 +95,7 @@ target = [
 code = "E-TYP-001"
 severity = "error"
 problem = "A field has the wrong type."
-instruction = "Use the type the template shows for this field. Each value in a condition's params is a string or a number."
+instruction = "Use the type the template shows for this field. Each value in a condition's params is a string or a number, or a table { from = \"<study id>\" } that takes the condition that study selected. A param that takes a value from a study has a key of 1 to 40 characters from a-z, 0-9, _ and -."
 why = "A wrong type changes what the value means, and later checks cannot read it."
 sources = ["https://toml.io/en/v1.0.0"]
 target = [
@@ -268,7 +268,7 @@ target = [
 code = "E-FMT-001"
 severity = "error"
 problem = "An id, a stratum or a study reference is not ASCII letters and digits joined by single hyphens."
-instruction = "Use ASCII lowercase letters and digits, joined by single hyphens, for example my-study. A hypothesis id may also use capital letters, for example E1 or P1a. A stratum may be empty where the design or an input names none, but not in the strata a hypothesis lists. estimates.from names a study id."
+instruction = "Use ASCII lowercase letters and digits, joined by single hyphens, for example my-study. A hypothesis id may also use capital letters, for example E1 or P1a. A stratum may be empty where the design or an input names none, but not in the strata a hypothesis lists. estimates.from and a param's from name a study id."
 why = "Ids and strata become file names, seed inputs and record keys, and are printed in diagnostics. Accents and look-alike letters would make two ids that look the same differ."
 sources = ["https://toml.io/en/v1.0.0"]
 target = [
@@ -280,6 +280,7 @@ target = [
   { path = "inputs[*].stratum", check = "format", pattern = "^([a-z0-9]+(-[a-z0-9]+)*)?$" },
   { path = "question.hypotheses[*].strata[*]", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
   { path = "question.hypotheses[*].estimates.from", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
+  { path = "design.conditions[*].params.*.from", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
 ]
 
 [[rule]]
@@ -394,13 +395,13 @@ target = [
 [[rule]]
 code = "E-REF-002"
 severity = "error"
-problem = "A reference names this study."
-instruction = "Set estimates.from to the id of another study: one that has run, or will run, before this one."
-why = "A value taken from a study exists only once that study has finished. This study's own values come from this run, so a plan cannot be sized by them."
+problem = "A reference names this study, or a study that recorded no selection."
+instruction = "Set estimates.from or a param's from to the id of another study: one that has run, or will run, before this one. A param takes the condition that study selected, so that study needs a selection stage."
+why = "A value taken from a study exists only once that study has finished. This study's own values come from this run, so a plan cannot be sized by them or take a condition from them. A study without a selection stage selects no condition."
 sources = []
-when = { mode = "confirmatory" }
 target = [
   { path = "question.hypotheses[*].estimates.from", check = "named:reference-not-self" },
+  { path = "design.conditions[*].params.*.from", check = "named:reference-not-self" },
 ]
 
 [[rule]]
@@ -410,9 +411,9 @@ problem = "A value waits on a study that has not finished."
 instruction = "Run the study it names to its end, then check again. Until then check exits 3 and register refuses the plan; nothing else needs to change."
 why = "A follow-on plan is written and checked before the study it builds on runs. Its values are read from that study's records once the study has written them all, so a value cannot change after the plan is registered. The box cannot read a study it has not run."
 sources = []
-when = { mode = "confirmatory" }
 target = [
   { path = "question.hypotheses[*].estimates", check = "named:reference-finished" },
+  { path = "design.conditions[*].params.*", check = "named:reference-finished" },
 ]
 
 [[rule]]

@@ -8,7 +8,7 @@ A field has the wrong type.
 
 ## Fix
 
-Use the type the template shows for this field. Each value in a condition's params is a string or a number.
+Use the type the template shows for this field. Each value in a condition's params is a string or a number, or a table { from = "<study id>" } that takes the condition that study selected. A param that takes a value from a study has a key of 1 to 40 characters from a-z, 0-9, _ and -.
 
 ## Why
 

@@ -158,13 +158,6 @@ pub fn select(spec: &Spec, rows: &[Record]) -> Result<Selection, String> {
     })
 }
 
-/// Each declared condition's params as a JSON table, by condition id: `{}` for none.
-pub fn declared_params(spec: &Spec) -> BTreeMap<String, Value> {
-    (spec.design.conditions.iter())
-        .map(|c| (c.id.clone(), json!(&c.params)))
-        .collect()
-}
-
 /// One estimate per hypothesis, per group: each stratum the hypothesis lists, then the pooled
 /// group `""` (alone when it lists none). A group holds the confirmation clusters of its
 /// stratum. A unit's value is the contrast over its paired values, and counts only when
@@ -322,7 +315,7 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
     let clusters = distinct_clusters(units::clusters(&plan.spec, &plan.spec_hash), &plan.inputs);
     let wanted = estimates(
         &plan.spec,
-        &declared_params(&plan.spec),
+        &plan.params,
         &paired(&plan.spec, &all),
         &clusters,
         selection.as_ref(),
