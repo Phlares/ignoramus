@@ -11,7 +11,6 @@ use crate::proto::{
     SERIAL_ROOTFS, SelfTest, ToHost, read_frame, seed_from_hex, write_frame,
 };
 use crate::sys::{kill_all_others, vsock_connect};
-use crate::tree::tree_hash;
 use payload::Ran;
 use rustix::io::Errno;
 use rustix::mount::MountFlags;
@@ -135,16 +134,16 @@ fn row(chan: &mut File, out_disk: &mut File, out_bytes: u64) -> io::Result<Repor
         kill_all_others()?;
         reap_all()?;
         let mut w = BufWriter::new(out_disk);
-        match pack::write(out, &mut w, out_bytes) {
-            Ok(_) => {}
+        let packed = match pack::write(out, &mut w, out_bytes) {
+            Ok(p) => p,
             // Over the limit, or an entry the pack does not carry: what the payload left.
             Err(e) if e.kind() == io::ErrorKind::InvalidData => {
                 return Ok((ran, Err(e.to_string())));
             }
             Err(e) => return Err(e),
-        }
+        };
         w.into_inner()?.sync_all()?;
-        Ok((ran, Ok(tree_hash(out)?)))
+        Ok((ran, Ok(packed.hash)))
     })
 }
 

@@ -1,6 +1,7 @@
 mod common;
 use common::{file, pack, packed, write_exec};
 use ignorarium_guest::host::{HostJob, Vm, VmError, VmOutcome, Watch, run_row, vmm_args};
+use ignorarium_guest::pack::Link;
 use ignorarium_guest::proto::{
     End, Job, MAX_FRAME, Report, SelfTest, ToHost, read_frame, write_frame,
 };
@@ -400,6 +401,7 @@ fn a_row_round_trip_through_a_fake_guest() {
     let o = res.unwrap();
     assert_eq!(o.output_hash, rig.src_hash());
     assert_eq!(tree_hash(&rig.out).unwrap(), rig.src_hash());
+    assert!(o.links.is_empty());
     assert_eq!(o.report.end, Some(End::Code(0)));
     assert!(o.timings.boot <= o.timings.total);
     assert!(o.timings.prepare <= o.timings.total);
@@ -1188,5 +1190,25 @@ fn a_stop_in_the_exit_grace_ends_the_vmm_at_once() {
         "{:?}",
         o.timings.stop
     );
+    rig.pid_gone();
+}
+
+#[test]
+fn output_links_come_back_as_data() {
+    let rig = Rig::sleeper();
+    symlink("/etc/passwd", rig.src.join("abs")).unwrap();
+    let h = good_guest(&rig);
+    let res = rig.run();
+    h.join().unwrap();
+    let o = res.unwrap();
+    let abs = Link {
+        path: b"abs".to_vec(),
+        target: b"/etc/passwd".to_vec(),
+    };
+    assert_eq!(o.links, [abs]);
+    // The host hashes the pack it read: its output folder holds no link to hash.
+    assert_eq!(o.output_hash, rig.src_hash());
+    let made = fs::symlink_metadata(rig.out.join("abs"));
+    assert_eq!(made.unwrap_err().kind(), ErrorKind::NotFound);
     rig.pid_gone();
 }

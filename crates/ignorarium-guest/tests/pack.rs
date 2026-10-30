@@ -1,7 +1,7 @@
 mod common;
 use common::{entry, file, link, pack, packed};
-use ignorarium_guest::pack::{ENTRY_MAX, out_caps, unpack, write};
-use ignorarium_guest::tree::tree_hash;
+use ignorarium_guest::pack::{ENTRY_MAX, Link, out_caps, unpack, write};
+use ignorarium_guest::tree::{link_row, tree_hash, tree_rows};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::ErrorKind;
@@ -10,10 +10,17 @@ use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::process::Command;
 
-fn round_trip(src: &std::path::Path) {
+/// Packs and unpacks `src`. Both sides hash `src`, and what unpack made, with the links it
+/// recorded, is `src`. Returns the folder unpack made.
+fn round_trip(src: &Path) -> tempfile::TempDir {
     let out = tempfile::tempdir().unwrap();
-    unpack(&mut packed(src).as_slice(), out.path(), 1 << 30).unwrap();
-    assert_eq!(tree_hash(out.path()).unwrap(), tree_hash(src).unwrap());
+    let u = unpack(&mut packed(src).as_slice(), out.path(), 1 << 30).unwrap();
+    assert_eq!(u.hash, tree_hash(src).unwrap());
+    let mut rows = tree_rows(out.path()).unwrap();
+    rows.extend(u.links.iter().map(|l| link_row(&l.path, &l.target)));
+    rows.sort();
+    assert_eq!(rows, tree_rows(src).unwrap());
+    out
 }
 
 #[test]
@@ -34,9 +41,7 @@ fn pack_round_trip_keeps_the_tree() {
             .unwrap()
             .success()
     );
-    round_trip(p);
-    let out = tempfile::tempdir().unwrap();
-    unpack(&mut packed(p).as_slice(), out.path(), 1 << 30).unwrap();
+    let out = round_trip(p);
     assert!(out.path().join("empty").is_dir());
 }
 
@@ -78,7 +83,7 @@ fn the_pack_lists_names_in_byte_order() {
 fn an_empty_dir_packs_to_magic_and_end() {
     let d = tempfile::tempdir().unwrap();
     let mut v = Vec::new();
-    assert_eq!(write(d.path(), &mut v, u64::MAX).unwrap(), 9);
+    assert_eq!(write(d.path(), &mut v, u64::MAX).unwrap().bytes, 9);
     assert_eq!(v, b"IGNPACK1e");
 }
 
@@ -143,52 +148,77 @@ fn many_empty_dirs_meet_the_same_limit_on_both_sides() {
     same_limit_on_both_sides(d.path(), 300);
 }
 
+/// Each link's path and target, in pack order: names in byte order, a folder before what it
+/// holds.
+const LINKS: [(&str, &str); 5] = [
+    ("deep", "a/../../.."),
+    ("gone", "nowhere"),
+    ("latest", "/tmp/x"),
+    ("sub/back", "../.."),
+    ("up", "../x"),
+];
+
 #[test]
-fn link_targets_must_be_relative_without_parent_steps() {
-    let refused: [(&[u8], &[u8]); 7] = [
-        (b"a", b"/etc"),
-        (b"a", b"../x"),
-        (b"a", b"../b"),
-        (b"d/a", b"../b"),
-        (b"d/a", b"../../x"),
-        (b"d/a", b"x/../y"),
-        // With `l -> .` this chain stays inside by a lexical count, yet climbs out when followed.
-        (b"d/m", b"../l/l/../.."),
-    ];
-    for (path, target) in refused {
-        let bytes = pack(&[entry(b'd', b"d"), link(b"l", b"."), link(path, target)]);
-        let out = tempfile::tempdir().unwrap();
-        let e = unpack(&mut bytes.as_slice(), out.path(), 1 << 20).unwrap_err();
-        assert_eq!(e.kind(), ErrorKind::InvalidData, "{e}");
-        let named = format!("{:?}", String::from_utf8_lossy(path));
-        assert!(e.to_string().contains(&named), "{e}");
-        assert!(fs::symlink_metadata(out.path().join(OsStr::from_bytes(path))).is_err());
+fn any_link_target_is_carried_as_data() {
+    let src = tempfile::tempdir().unwrap();
+    fs::write(src.path().join("a.txt"), "hi\n").unwrap();
+    fs::create_dir(src.path().join("sub")).unwrap();
+    for (path, target) in LINKS {
+        symlink(target, src.path().join(path)).unwrap();
     }
-    let ok = pack(&[
-        entry(b'd', b"d"),
-        link(b"l", b"."),
-        link(b"d/a", b"b"),
-        link(b"d/c", b"./b/c"),
-    ]);
+    let mut v = Vec::new();
+    let p = write(src.path(), &mut v, u64::MAX).unwrap();
     let out = tempfile::tempdir().unwrap();
-    unpack(&mut ok.as_slice(), out.path(), 1 << 20).unwrap();
-    for (path, target) in [("l", "."), ("d/a", "b"), ("d/c", "./b/c")] {
-        assert_eq!(
-            fs::read_link(out.path().join(path)).unwrap(),
-            Path::new(target)
-        );
+    let u = unpack(&mut v.as_slice(), out.path(), 1 << 20).unwrap();
+    let want: Vec<Link> = LINKS
+        .iter()
+        .map(|(path, target)| Link {
+            path: path.as_bytes().to_vec(),
+            target: target.as_bytes().to_vec(),
+        })
+        .collect();
+    assert_eq!(u.links, want);
+    for (path, _) in LINKS {
+        let made = fs::symlink_metadata(out.path().join(path));
+        assert_eq!(made.unwrap_err().kind(), ErrorKind::NotFound, "{path}");
     }
+    assert_eq!(fs::read(out.path().join("a.txt")).unwrap(), b"hi\n");
+    assert!(out.path().join("sub").is_dir());
+    let hash = tree_hash(src.path()).unwrap();
+    assert_eq!((&p.hash, &u.hash), (&hash, &hash));
 }
 
 #[test]
-fn write_refuses_a_link_that_unpack_would_refuse() {
-    for target in ["/etc", "../b", "x/../y"] {
-        let d = tempfile::tempdir().unwrap();
-        symlink(target, d.path().join("a")).unwrap();
-        let e = write(d.path(), &mut Vec::new(), u64::MAX).unwrap_err();
-        assert_eq!(e.kind(), ErrorKind::InvalidData, "{target}");
-        assert!(e.to_string().contains("\"a\""), "{e}");
+fn empty_nul_and_overlong_targets_are_still_refused() {
+    let long = [b't'; 4096];
+    let cases: [(&[u8], &str); 3] = [
+        (b"", "empty link target"),
+        (b"a\0b", "link target holds a NUL byte"),
+        (&long, "link target is too long"),
+    ];
+    for (target, why) in cases {
+        assert_eq!(
+            refusal(&pack(&[link(b"l", target)])),
+            format!("entry \"l\": {why}")
+        );
     }
+    // 4095 bytes and its NUL fill `PATH_MAX`: the longest target Linux makes.
+    let longest = pack(&[link(b"l", &[b't'; 4095])]);
+    let out = tempfile::tempdir().unwrap();
+    let u = unpack(&mut longest.as_slice(), out.path(), 1 << 20).unwrap();
+    assert_eq!(u.links[0].target, [b't'; 4095]);
+}
+
+#[test]
+fn a_child_under_a_link_is_still_refused() {
+    let under = pack(&[link(b"a", b"/x"), file(b"a/b", b"x")]);
+    assert_eq!(
+        refusal(&under),
+        "entry \"a/b\": parent is not an earlier directory"
+    );
+    // Nothing is made for the link, so only the path list stops a second entry at its path.
+    let again = pack(&[link(b"a", b"x"), file(b"a", b"y")]);
+    assert_eq!(refusal(&again), "entry \"a\": duplicate path");
 }
 
 #[test]

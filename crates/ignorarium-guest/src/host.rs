@@ -6,12 +6,12 @@
 use crate::agent::payload::exited;
 use crate::agent::steps::now_nanos;
 use crate::image::{ext4, size_mib};
-use crate::pack;
+use crate::pack::{self, Link, Unpacked};
 use crate::proto::{
     CONTROL_PORT, GUEST_CID, Job, MAX_FRAME, Report, SERIAL_IN, SERIAL_OUT, SERIAL_PAYLOAD,
     SERIAL_ROOTFS, ToHost, read_frame, write_frame,
 };
-use crate::tree::{tree_hash, walk};
+use crate::tree::walk;
 use rustix::io::Errno;
 use rustix::process::{Pid, Signal, kill_process_group};
 use std::ffi::OsString;
@@ -82,7 +82,10 @@ pub struct Timings {
 #[derive(Debug)]
 pub struct VmOutcome {
     pub report: Report,
+    /// The hash of the output pack as the host read it.
     pub output_hash: String,
+    /// The output links in pack order. The host records them and makes none.
+    pub links: Vec<Link>,
     pub timings: Timings,
 }
 
@@ -614,20 +617,20 @@ pub fn run_row(
     let stop = stopping.elapsed();
 
     let extracting = Instant::now();
-    let mut output_hash = String::new();
+    let mut unpacked = Unpacked::default();
     if report.end.is_some() && report.pack_refused.is_none() {
         let mut out = BufReader::new(File::open(work.join("out.img"))?);
-        pack::unpack(&mut out, &job.output_dir, vm.out_mib << 20).map_err(|e| match e.kind() {
+        let bad_pack = |e: io::Error| match e.kind() {
             io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof => {
                 guest_err(format!("bad output pack: {}", shown(&e.to_string())), work)
             }
             _ => VmError::Io(e),
-        })?;
-        output_hash = tree_hash(&job.output_dir)?;
-        if output_hash != report.output_hash {
+        };
+        unpacked = pack::unpack(&mut out, &job.output_dir, vm.out_mib << 20).map_err(bad_pack)?;
+        if unpacked.hash != report.output_hash {
             return Err(VmError::Mismatch {
                 guest: shown(&report.output_hash),
-                host: output_hash,
+                host: unpacked.hash,
             });
         }
     }
@@ -636,7 +639,8 @@ pub fn run_row(
     let payload = Duration::from_nanos(report.payload_wall_ns);
     Ok(VmOutcome {
         report,
-        output_hash,
+        output_hash: unpacked.hash,
+        links: unpacked.links,
         timings: Timings {
             prepare,
             boot,

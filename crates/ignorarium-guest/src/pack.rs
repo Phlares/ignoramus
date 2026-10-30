@@ -1,18 +1,20 @@
 //! Output pack: a strict byte stream for a directory tree. The guest writes it to a raw
-//! disk; the host reads it back without parsing any guest file system.
+//! disk; the host reads it back without parsing any guest file system. Both sides hash the
+//! entries as they pass, with the rows of `tree`. A link is data: its target bytes enter the
+//! hash, and the host records the link and never makes it.
 //!
 //! Format: `IGNPACK1`, then entries, then `e`. Each entry starts with a kind byte:
 //! `d` dir, `f` file, `l` link, `o` other. Every kind but `e` is followed by the path
 //! (u32 big-endian length, raw bytes, `/`-separated). `f` adds a u64 big-endian length
 //! and the bytes. `l` adds a u32 big-endian length and the target bytes.
-use crate::tree::{open_regular, walk};
+use crate::tree::{TreeRow, hash_rows, link_row, open_regular, row, walk};
 use rustix::fs::{CWD, FileType, Mode, mknodat};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::symlink;
 use std::path::Path;
 
 const MAGIC: &[u8; 8] = b"IGNPACK1";
@@ -75,42 +77,87 @@ impl<W: Write> Write for Charged<'_, W> {
     }
 }
 
-/// Writes `dir` as a pack and returns the number of bytes written. A pack that would cost
-/// more than `limit` is refused before any byte past the limit is written.
-pub fn write(dir: &Path, w: &mut impl Write, limit: u64) -> io::Result<u64> {
+/// Passes bytes on to `inner` and hashes the ones it took.
+struct Hashed<W> {
+    inner: W,
+    hash: Sha256,
+}
+
+impl<W: Write> Write for Hashed<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.hash.update(&buf[..n]);
+        Ok(n)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Copies at most `len` bytes from `r` to `w`. Returns how many it copied and their SHA-256,
+/// a file row's digest.
+fn copy_hashed(r: impl Read, w: impl Write, len: u64) -> io::Result<(u64, String)> {
+    let mut w = Hashed {
+        inner: w,
+        hash: Sha256::new(),
+    };
+    let n = io::copy(&mut r.take(len), &mut w)?;
+    Ok((n, hex::encode(w.hash.finalize())))
+}
+
+/// What `write` wrote: the stream's length, and the hash of the entries' rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Packed {
+    pub bytes: u64,
+    pub hash: String,
+}
+
+/// Writes `dir` as a pack. A file's row digest comes from the bytes as they are copied into
+/// the pack. A pack that would cost more than `limit` is refused before any byte past the
+/// limit is written.
+pub fn write(dir: &Path, w: &mut impl Write, limit: u64) -> io::Result<Packed> {
     let mut w = Charged {
         inner: w,
         budget: Budget::new(limit),
         n: 0,
     };
+    let mut rows: Vec<TreeRow> = Vec::new();
     w.write_all(MAGIC)?;
     walk(dir, &mut |rel, path, ty| {
         w.budget.charge(ENTRY_COST)?;
         if ty.is_dir() {
-            put_path(&mut w, b'd', rel)
-        } else if ty.is_symlink() {
+            return put_path(&mut w, b'd', rel);
+        }
+        rows.push(if ty.is_symlink() {
             let target = fs::read_link(path)?;
             let target = target.as_os_str().as_bytes();
             check_target(target).map_err(entry_error(rel))?;
             put_path(&mut w, b'l', rel)?;
-            put_bytes(&mut w, target)
+            put_bytes(&mut w, target)?;
+            link_row(rel, target)
         } else if ty.is_file()
             && let Some(f) = open_regular(path)?
         {
             let len = f.metadata()?.len();
             put_path(&mut w, b'f', rel)?;
             w.write_all(&len.to_be_bytes())?;
+            let (n, digest) = copy_hashed(f, &mut w, len)?;
             // A file that shrinks after the length is written is an error, not a short entry.
-            if io::copy(&mut f.take(len), &mut w)? != len {
+            if n != len {
                 return Err(io::ErrorKind::UnexpectedEof.into());
             }
-            Ok(())
+            row(rel, "file", digest)
         } else {
-            put_path(&mut w, b'o', rel)
-        }
+            put_path(&mut w, b'o', rel)?;
+            row(rel, "other", String::new())
+        });
+        Ok(())
     })?;
     w.write_all(b"e")?;
-    Ok(w.n)
+    Ok(Packed {
+        bytes: w.n,
+        hash: hash_rows(&rows)?,
+    })
 }
 
 /// A u32 big-endian length, then the bytes.
@@ -188,8 +235,9 @@ fn check_path(path: &[u8]) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// A link target must be relative and hold no `..` part. Then any chain of links resolves
-/// in or below the link's own directory, never above the output root.
+/// A link target is data: any bytes pass but none, and `MAX_PATH` bytes or more. That is the
+/// kernel limit, which no real link reaches: a target and its NUL fit in `PATH_MAX`. The name
+/// reader refuses a NUL.
 fn check_target(target: &[u8]) -> Result<(), &'static str> {
     if target.is_empty() {
         return Err("empty link target");
@@ -197,18 +245,28 @@ fn check_target(target: &[u8]) -> Result<(), &'static str> {
     if target.len() >= MAX_PATH {
         return Err("link target is too long");
     }
-    if target[0] == b'/' {
-        return Err("absolute link target");
-    }
-    if target.split(|&b| b == b'/').any(|part| part == b"..") {
-        return Err("link target holds a .. part");
-    }
     Ok(())
 }
 
-/// Unpacks a pack into the empty directory `dest`, charging `limit` as `write` does.
-/// Every entry is checked before anything is made for it; nothing is made outside `dest`.
-pub fn unpack(r: &mut impl Read, dest: &Path, limit: u64) -> io::Result<()> {
+/// A link the pack carried, as raw bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Link {
+    pub path: Vec<u8>,
+    pub target: Vec<u8>,
+}
+
+/// What `unpack` read: the hash of the entries' rows, and the links in pack order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Unpacked {
+    pub hash: String,
+    pub links: Vec<Link>,
+}
+
+/// Unpacks a pack into the empty directory `dest`, charging `limit` and hashing as `write`
+/// does, a file's digest from the bytes as they are copied out. Every entry is checked
+/// before anything is made for it; nothing is made outside `dest`. A link is recorded and
+/// never made, so nothing on the host can follow it.
+pub fn unpack(r: &mut impl Read, dest: &Path, limit: u64) -> io::Result<Unpacked> {
     if fs::read_dir(dest)?.next().is_some() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -226,11 +284,14 @@ pub fn unpack(r: &mut impl Read, dest: &Path, limit: u64) -> io::Result<()> {
     }
     // Each path so far, with its kind byte.
     let mut seen: HashMap<Vec<u8>, u8> = HashMap::new();
+    let mut rows: Vec<TreeRow> = Vec::new();
+    let mut links = Vec::new();
     loop {
         let mut kind = [0];
         r.exact(&mut kind)?;
         if kind[0] == b'e' {
-            return Ok(());
+            let hash = hash_rows(&rows)?;
+            return Ok(Unpacked { hash, links });
         }
         if !matches!(kind[0], b'd' | b'f' | b'l' | b'o') {
             return Err(bad(format!("unknown entry kind {:#04x}", kind[0])));
@@ -245,7 +306,7 @@ pub fn unpack(r: &mut impl Read, dest: &Path, limit: u64) -> io::Result<()> {
             return Err(entry("parent is not an earlier directory"));
         }
         let to = dest.join(OsStr::from_bytes(&path));
-        if seen.insert(path, kind[0]).is_some() {
+        if seen.insert(path.clone(), kind[0]).is_some() {
             return Err(entry("duplicate path"));
         }
         if to.as_os_str().len() >= MAX_PATH {
@@ -258,13 +319,15 @@ pub fn unpack(r: &mut impl Read, dest: &Path, limit: u64) -> io::Result<()> {
                 r.budget
                     .charge(len)
                     .map_err(|_| entry("file is past the limit"))?;
-                let mut f = fs::OpenOptions::new()
+                let f = fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
                     .open(&to)?;
-                if io::copy(&mut r.inner.by_ref().take(len), &mut f)? != len {
+                let (n, digest) = copy_hashed(r.inner.by_ref(), f, len)?;
+                if n != len {
                     return Err(entry("file is past the end of the pack"));
                 }
+                rows.push(row(&path, "file", digest));
             }
             b'l' => {
                 let target = r.name("link target").map_err(|e| match e.kind() {
@@ -272,10 +335,14 @@ pub fn unpack(r: &mut impl Read, dest: &Path, limit: u64) -> io::Result<()> {
                     _ => e,
                 })?;
                 check_target(&target).map_err(&entry)?;
-                symlink(OsStr::from_bytes(&target), &to)?;
+                rows.push(link_row(&path, &target));
+                links.push(Link { path, target });
             }
-            _ => mknodat(CWD, &to, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0)
-                .map_err(io::Error::from)?,
+            _ => {
+                mknodat(CWD, &to, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0)
+                    .map_err(io::Error::from)?;
+                rows.push(row(&path, "other", String::new()));
+            }
         }
     }
 }

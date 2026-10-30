@@ -1,6 +1,6 @@
 // Each test file uses a different part of this module.
 #![allow(dead_code)]
-use ignorarium_guest::pack;
+use ignorarium_guest::{pack, tree};
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -22,11 +22,12 @@ pub fn write_exec(path: &Path, text: &str) {
     assert!(child.wait().unwrap().success());
 }
 
-/// `dir` as a pack, by the crate's writer.
+/// `dir` as a pack, by the crate's writer, which counts the bytes and hashes `dir`.
 pub fn packed(dir: &Path) -> Vec<u8> {
     let mut v = Vec::new();
-    let n = pack::write(dir, &mut v, u64::MAX).unwrap();
-    assert_eq!(n, v.len() as u64);
+    let p = pack::write(dir, &mut v, u64::MAX).unwrap();
+    assert_eq!(p.bytes, v.len() as u64);
+    assert_eq!(p.hash, tree::tree_hash(dir).unwrap());
     v
 }
 

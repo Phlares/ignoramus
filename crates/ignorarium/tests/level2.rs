@@ -10,11 +10,13 @@ use ignorarium::store::Store;
 use ignorarium_guest::host::{Timings, VmError, VmOutcome};
 use ignorarium_guest::image::{KERNEL, VMM, sha256_file};
 use ignorarium_guest::proto::{self, End, Report};
+use ignorarium_guest::{pack, tree};
 use rustix::process::{Pid, getpgid, test_kill_process_group};
 use std::cell::{Cell, RefCell};
 use std::ffi::OsStr;
 use std::fs::{self, File, Permissions};
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -442,6 +444,7 @@ fn ran(end: Option<End>, selftest: proto::SelfTest) -> Result<VmOutcome, VmError
             pack_refused: None,
         },
         output_hash: "h".into(),
+        links: vec![],
         timings: Timings::default(),
     })
 }
@@ -673,6 +676,35 @@ fn rootfs_disk_is_built_once() {
     }
     assert!(rootfs_disk(&bad).is_err());
     assert_eq!(names(), ["bad", "root", "root.ext4"]);
+}
+
+/// Levels 0 and 1 hash an output folder with `output_hash`; level 2's guest and host hash the
+/// pack stream with the guest crate's rows. Without links, the four agree.
+#[test]
+fn the_output_hash_is_one_function_at_every_level() {
+    let d = TempDir::new().unwrap();
+    let src = d.path();
+    fs::write(src.join("a.txt"), "hi").unwrap();
+    fs::create_dir_all(src.join("sub")).unwrap();
+    fs::write(src.join("sub/b"), vec![7u8; 5000]).unwrap();
+    fs::create_dir(src.join("e")).unwrap();
+    let fifo = std::process::Command::new("mkfifo")
+        .arg(src.join("p"))
+        .status()
+        .unwrap();
+    assert!(fifo.success());
+    // The last two names both read `!bytes:ff`.
+    for name in [&b"x\xff"[..], b"!bytes:ff", b"\xff"] {
+        fs::write(src.join(OsStr::from_bytes(name)), name).unwrap();
+    }
+    let want = output_hash(src).unwrap();
+    assert_eq!(tree::tree_hash(src).unwrap(), want);
+    let mut stream = Vec::new();
+    let packed = pack::write(src, &mut stream, u64::MAX).unwrap();
+    let out = TempDir::new().unwrap();
+    let unpacked = pack::unpack(&mut stream.as_slice(), out.path(), u64::MAX).unwrap();
+    assert_eq!((&packed.hash, &unpacked.hash), (&want, &want));
+    assert_eq!(output_hash(out.path()).unwrap(), want);
 }
 
 /// Records each `started` call with the process group of the pid at that moment.
