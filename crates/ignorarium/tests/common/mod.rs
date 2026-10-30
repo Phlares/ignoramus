@@ -12,6 +12,16 @@ pub const VALUES: &str = "printf '{\"ppl\": 1.5}' > \"$IGNORARIUM_OUT/values.jso
 
 pub const PAYLOAD: &str = "#!/bin/sh\nprintf '%s %s %s' \"$2\" \"$4\" \"$6\" > \"$IGNORARIUM_OUT/result\"\nprintf '{\"ppl\": 1.5}' > \"$IGNORARIUM_OUT/values.json\"\n";
 
+/// The template text with its example claim, statistic and alpha share uncommented: below 0
+/// by the median, with the whole level.
+pub fn with_claim(t: String) -> String {
+    ["claim", "statistic", "alpha_share"]
+        .iter()
+        .fold(t, |t, k| {
+            t.replace(&format!("# {k} = "), &format!("{k} = "))
+        })
+}
+
 pub struct Lab {
     pub _dir: TempDir,
     pub home: Home,

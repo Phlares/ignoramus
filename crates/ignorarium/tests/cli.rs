@@ -234,6 +234,43 @@ fn review_has_all_sections_and_the_hash() {
 }
 
 #[test]
+fn review_lists_each_claim_with_its_strata_and_statistic() {
+    let second = "[[question.hypotheses]]
+id = \"P1\"
+statement = \"The spread per text.\"
+rival = \"none\"
+outcome = \"ppl-ratio\"
+contrast = { arm-a = 1.0, exact = 0.5 }
+
+[[outcomes]]";
+    let (_d, home, spec) = setup(|t| {
+        common::with_claim(t)
+            .replacen("statement = \"\"", "statement = \"The arm lowers it.\"", 1)
+            .replacen("rival = \"\"", "rival = \"Chance.\"", 1)
+            .replace("strata = []", "strata = [\"fiction\"]")
+            .replacen("\n[[outcomes]]", &format!("\n{second}"), 1)
+    });
+    // P1's contrast names the reference: review still prints the plan as written.
+    let a = bin(&home).arg("review").arg(&spec).assert().code(1);
+    let out = stdout(&a);
+    let lines = [
+        "- H1: The arm lowers it. (rival: Chance.); outcome: ppl-ratio; contrast: arm-a 1.0; \
+         strata: fiction; claim: below 0.0; statistic: quantile 0.5; alpha share: 1.0\n",
+        "- P1: The spread per text. (rival: none); outcome: ppl-ratio; contrast: arm-a 1.0, \
+         exact 0.5; strata: pooled; claim: none (descriptive)\n",
+    ];
+    let hypotheses = &out[out.find("Hypotheses:").expect(&out)..out.find("Outcomes:").unwrap()];
+    assert_eq!(
+        hypotheses,
+        format!("Hypotheses:\n\n{}{}\n", lines[0], lines[1])
+    );
+    assert!(
+        out.contains("E-HYP-001 at `question.hypotheses[1].contrast.exact`"),
+        "{out}"
+    );
+}
+
+#[test]
 fn review_of_a_failing_plan_lists_the_errors() {
     let (_d, home, spec) = setup(no_unit);
     let a = bin(&home).arg("review").arg(&spec).assert().code(1);
@@ -529,7 +566,7 @@ fn follow_on_specs_resolve_from_the_root() {
     let follow = |t: String| {
         t.replace(
             "follow_on = []",
-            "follow_on = [{ when = \"H1.pass\", spec = \"spec/next.toml\" }]",
+            "follow_on = [{ when = \"done\", spec = \"spec/next.toml\" }]",
         )
     };
     let (_d, home, spec) = rooted(follow);

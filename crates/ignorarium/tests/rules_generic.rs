@@ -370,6 +370,30 @@ fn fat_templates() -> Vec<Value> {
                 { "when": "H1.pass", "spec": "follow/a.toml" },
                 { "when": "H1.pass", "spec": "follow/b.toml" },
             ]);
+            // One hypothesis per claim shape, so every claim and statistic key has a node.
+            let h = &mut s["question"]["hypotheses"];
+            h[0]["contrast"] = json!({ "arm-a": 1.0, "selected": -1.0 });
+            h[0]["strata"] = json!(["fiction", "code"]);
+            h[0]["power_at"] = json!(0.5);
+            h[0]["estimates"] = json!({ "from": "pilot" });
+            h[0]["alpha_share"] = json!(0.5);
+            for (i, claim, stat) in [
+                (0, json!({ "below": 1.0 }), json!({ "mean": [-5.0, 5.0] })),
+                (1, json!({ "above": 0.0 }), json!({ "quantile": 0.5 })),
+                (
+                    2,
+                    json!({ "within": [-1.0, 1.0] }),
+                    json!({ "mean": [-5.0, 5.0] }),
+                ),
+            ] {
+                if i > 0 {
+                    let mut next = h[0].clone();
+                    next["id"] = json!(format!("H{}", i + 1));
+                    h.as_array_mut().unwrap().push(next);
+                }
+                h[i]["claim"] = claim;
+                h[i]["statistic"] = stat;
+            }
             s
         })
         .collect()
@@ -580,10 +604,16 @@ fn every_template_key_has_a_type_target() {
         .filter(|r| matches!(r.check, Check::Type(_)))
         .map(|r| r.path)
         .collect();
+    // A key under a `*` target, such as a contrast's condition id, is typed by that target.
+    let typed = |p: &str| {
+        types.contains(p)
+            || p.rsplit_once('.')
+                .is_some_and(|(parent, _)| types.contains(&format!("{parent}.*")))
+    };
     for t in ["numeric-ablation", "planted-spawn"] {
         let mut all = vec![];
         paths(&spec_at(&format!("../../templates/{t}.toml")), "", &mut all);
-        let missing: Vec<_> = all.iter().filter(|p| !types.contains(*p)).collect();
+        let missing: Vec<_> = all.iter().filter(|p| !typed(p)).collect();
         assert!(missing.is_empty(), "{t}: {missing:?}");
     }
 }
@@ -772,7 +802,7 @@ fn a_star_segment_selects_every_key_and_known_key_accepts_them() {
          {{ path = \"**\", check = \"known-key\" }},\n]\n"
     ));
     let s = json!({
-        "a": { "x": 1, "y": "two", "Pasted Secret": "three", "p.q": 4 },
+        "a": { "x": 1, "y": "two", "Pasted Secret": "three", "p.q": "four" },
         "b": { "t": { "deep": 1 }, "u": [1, "x"], "v": true },
         "c": 1,
     });
@@ -781,7 +811,8 @@ fn a_star_segment_selects_every_key_and_known_key_accepts_them() {
         .map(|d| d.path)
         .collect();
     // `a.*` types every key of `a`, naming an unsafe key `<key>`; `b.*` (any) checks no
-    // type and keeps known-key out of its values. A key with a dot is never a `*` key.
+    // type and keeps known-key out of its values. A key with a dot is never a `*` key: only
+    // known-key reports it, not the type rule.
     assert_eq!(got, ["a.<key>", "a.y", "a.<key>", "c"]);
 }
 
@@ -1332,5 +1363,107 @@ fn input_units_strata_and_the_pick_rule_are_checked_at_their_edges() {
     assert_eq!(
         at("/design/pick", json!(1)),
         one("E-TYP-001", "design.pick")
+    );
+}
+
+/// The errors of the template with its first hypothesis's `field` set to `v`.
+fn hypothesis_with(field: &str, v: Value) -> Vec<(String, String)> {
+    let mut s = template();
+    s["question"]["hypotheses"][0][field] = v;
+    rules::check_generic(&s, &v0())
+        .into_iter()
+        .filter(|d| !d.code.starts_with("W-"))
+        .map(|d| (d.code, d.path))
+        .collect()
+}
+
+fn at_hypothesis(code: &str, path: &str) -> Vec<(String, String)> {
+    vec![(code.to_string(), format!("question.hypotheses[0].{path}"))]
+}
+
+#[test]
+fn hypothesis_fields_are_typed_and_ids_and_strata_have_their_form() {
+    let (h, one) = (hypothesis_with, at_hypothesis);
+    for id in ["E1", "P1a", "h1-b2"] {
+        assert!(h("id", json!(id)).is_empty(), "{id}");
+    }
+    for id in ["E1.pass", "E 1", "", "E--1", "-E1", "\u{c9}1"] {
+        assert_eq!(h("id", json!(id)), one("E-FMT-001", "id"), "{id}");
+    }
+    assert!(h("strata", json!(["code", "short-fiction"])).is_empty());
+    for s in ["Code", "", "a b"] {
+        assert_eq!(
+            h("strata", json!(["code", s])),
+            one("E-FMT-001", "strata[1]"),
+            "{s}"
+        );
+    }
+    assert_eq!(h("strata", json!([3])), one("E-TYP-001", "strata[0]"));
+    assert_eq!(h("strata", json!("code")), one("E-TYP-001", "strata"));
+    assert_eq!(h("outcome", json!(1)), one("E-TYP-001", "outcome"));
+    assert!(h("contrast", json!({ "arm-a": 1, "arm-b": -0.5 })).is_empty());
+    assert_eq!(
+        h("contrast", json!({ "arm-a": "x" })),
+        one("E-TYP-001", "contrast.arm-a")
+    );
+    assert_eq!(h("contrast", json!([1])), one("E-TYP-001", "contrast"));
+    for (field, v) in [
+        ("claim", json!({ "below": 1 })),
+        ("claim", json!({ "above": -1.5 })),
+        ("claim", json!({ "within": [-1, 1] })),
+        ("statistic", json!({ "mean": [-5, 5] })),
+        ("statistic", json!({ "quantile": 0.5 })),
+        ("power_at", json!(1)),
+        ("alpha_share", json!(0.5)),
+        ("estimates", json!({ "from": "my-pilot" })),
+    ] {
+        assert!(h(field, v.clone()).is_empty(), "{field} = {v}");
+    }
+    assert_eq!(h("claim", json!(1)), one("E-TYP-001", "claim"));
+    assert_eq!(
+        h("claim", json!({ "below": "x" })),
+        one("E-TYP-001", "claim.below")
+    );
+    assert_eq!(
+        h("claim", json!({ "within": [1, "x"] })),
+        one("E-TYP-001", "claim.within[1]")
+    );
+    assert_eq!(
+        h("claim", json!({ "beloww": 1 })),
+        one("E-KEY-001", "claim.beloww")
+    );
+    assert_eq!(
+        h("statistic", json!({ "mean": 5 })),
+        one("E-TYP-001", "statistic.mean")
+    );
+    assert_eq!(
+        h("statistic", json!({ "quantile": "half" })),
+        one("E-TYP-001", "statistic.quantile")
+    );
+    assert_eq!(h("power_at", json!("x")), one("E-TYP-001", "power_at"));
+    assert_eq!(
+        h("alpha_share", json!(true)),
+        one("E-TYP-001", "alpha_share")
+    );
+    assert_eq!(
+        h("estimates", json!("my-pilot")),
+        one("E-TYP-001", "estimates")
+    );
+    assert_eq!(
+        h("estimates", json!({ "from": 3 })),
+        one("E-TYP-001", "estimates.from")
+    );
+    assert_eq!(
+        h("estimates", json!({ "from": "My-Pilot" })),
+        one("E-FMT-001", "estimates.from")
+    );
+}
+
+#[test]
+fn a_planted_record_hash_is_not_a_study_id() {
+    let planted = format!("record:{}", "0".repeat(64));
+    assert_eq!(
+        hypothesis_with("estimates", json!({ "from": planted })),
+        at_hypothesis("E-FMT-001", "estimates.from")
     );
 }

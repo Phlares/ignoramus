@@ -572,7 +572,8 @@ fn a_confirmatory_plan_registers_with_a_pending_timestamp() {
     let t = std::fs::read_to_string(&spec).unwrap();
     // The confirmation input gives 55 units, against 54 needed.
     let edited = {
-        t.replace("mode = \"exploratory\"", "mode = \"confirmatory\"")
+        common::with_claim(t)
+            .replace("mode = \"exploratory\"", "mode = \"confirmatory\"")
             .replace("label = \"signal\"", "label = \"confirmed\"")
             .replace("sesoi = 0.0", "sesoi = 1.0")
             .replace("value = 0.0", "value = 4.0")

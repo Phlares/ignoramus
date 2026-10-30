@@ -1,4 +1,6 @@
 //! Typed spec schema. Shape only: value checks live in the rules.
+use evidence::Tail;
+use evidence::claim::{Bound, Statistic};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -77,6 +79,70 @@ pub struct Hypothesis {
     pub id: String,
     pub statement: String,
     pub rival: String,
+    /// The outcome id whose paired values the contrast weighs.
+    pub outcome: String,
+    /// Condition id to weight: per unit, the weighted sum of the conditions' paired values.
+    /// `selected` names the selection stage's pick.
+    pub contrast: BTreeMap<String, f64>,
+    /// The strata the claim must hold in, each on its own clusters; empty: every confirmation
+    /// unit as one pooled group.
+    #[serde(default)]
+    pub strata: Vec<String>,
+    /// `None`: a descriptive hypothesis, which gives estimates and no verdict.
+    pub claim: Option<Claim>,
+    pub statistic: Option<StatisticSpec>,
+    /// The true value of the statistic where the test must have its power.
+    pub power_at: Option<f64>,
+    /// The study whose estimate records give the contrast's sd and icc.
+    pub estimates: Option<Reference>,
+    /// This hypothesis's share of the study's level.
+    pub alpha_share: Option<f64>,
+}
+
+/// A one-key table: `{ below = m }`, `{ above = m }` or `{ within = [a, b] }`.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Claim {
+    Below(f64),
+    Above(f64),
+    Within([f64; 2]),
+}
+
+impl Claim {
+    /// The one-sided bounds that must all hold: `within [a, b]` is above `a` and below `b`.
+    pub fn bounds(&self) -> Vec<Bound> {
+        let bound = |tail, margin| Bound { tail, margin };
+        match *self {
+            Claim::Below(m) => vec![bound(Tail::Lower, m)],
+            Claim::Above(m) => vec![bound(Tail::Upper, m)],
+            Claim::Within([a, b]) => vec![bound(Tail::Upper, a), bound(Tail::Lower, b)],
+        }
+    }
+}
+
+/// A one-key table: `{ mean = [lo, hi] }`, the range a cluster mean lies in, or
+/// `{ quantile = q }`.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StatisticSpec {
+    Mean([f64; 2]),
+    Quantile(f64),
+}
+
+impl StatisticSpec {
+    pub fn to_evidence(&self) -> Statistic {
+        match *self {
+            StatisticSpec::Mean([lo, hi]) => Statistic::Mean { lo, hi },
+            StatisticSpec::Quantile(q) => Statistic::Quantile(q),
+        }
+    }
+}
+
+/// A value another study gives: `{ from = "<study id>" }`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reference {
+    pub from: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -165,7 +231,6 @@ pub struct Design {
     pub reference: String,
     pub repeats: u32,
     pub row_seconds: f64,
-    pub test: TestKind,
     pub alpha: f64,
     pub power: f64,
     pub sesoi: f64,
@@ -219,13 +284,6 @@ pub enum Pick {
     Seeded,
     /// Indices 0, 1, 2, …
     First,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum TestKind {
-    PairedMean,
-    Descriptive,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

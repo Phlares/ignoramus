@@ -2,7 +2,7 @@
 //! `when` gates it like a generic rule. Each check gets the row's target pattern,
 //! selects its nodes with it, and reports only at those nodes. A check skips what
 //! is missing or mistyped: the generic rules report that.
-use super::generic::{applies, diagnostic, join, select};
+use super::generic::{applies, diagnostic, join, join_key, plain_key, select};
 use super::{BoxRecords, Check, NoRecords, Rule};
 use crate::derived::Estimate;
 use crate::diag::Diagnostic;
@@ -73,9 +73,12 @@ const NAMED: &[(&str, NamedFn)] = &[
     ("units-declared", units_declared),
     ("row-cap", row_cap),
     ("selection-stage", selection_stage),
+    ("condition-declared", condition_declared),
     ("param-shape", param_shape),
-    ("confirmatory-test-allowed", test_allowed),
-    ("reference-is-condition", reference_is_condition),
+    ("claim-required", claim_required),
+    ("hypothesis-shape", hypothesis_shape),
+    ("hypothesis-strata", hypothesis_strata),
+    ("alpha-shares", alpha_shares),
     ("budget-present", budget_present),
     ("route-valid", route_valid),
     ("follow-on-exists", follow_on_exists),
@@ -180,6 +183,26 @@ fn with_parent<'a>(spec: &'a Value, pattern: &str) -> Vec<(String, &'a Value, &'
         .into_iter()
         .filter_map(|(p, el, v)| Some((p, el, v?)))
         .collect()
+}
+
+/// For a pattern `<parent>.*`: each `*` key of each selected table, with its path. The key is
+/// read from the table, since the path names an unsafe key `<key>`.
+fn keys<'a>(spec: &'a Value, pattern: &str) -> Vec<(String, &'a str)> {
+    let parent = pattern.strip_suffix(".*").unwrap_or(pattern);
+    nodes(spec, parent)
+        .into_iter()
+        .filter_map(|(p, t)| Some((p, t.as_object()?)))
+        .flat_map(|(p, m)| {
+            m.keys()
+                .filter(|k| plain_key(k))
+                .map(move |k| (join_key(&p, k), k.as_str()))
+        })
+        .collect()
+}
+
+/// A hypothesis with a `claim`, well formed or not: E-HYP-003 judges its shape.
+fn has_claim(hypothesis: &Value) -> bool {
+    hypothesis.get("claim").is_some()
 }
 
 fn role(input: &Value) -> Option<&str> {
@@ -536,16 +559,14 @@ fn row_cap(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
     out
 }
 
-/// The stages, at each target:
+/// The stages, at each target (`condition-declared` checks the names the stages list):
 /// - `design.selection`: a stage, and no selection input.
 /// - `inputs[*].role`: a selection input, and no stage.
 /// - `design.selection.conditions`: fewer than two candidates.
-/// - `<stage>.conditions[*]`: the reference, or no declared condition. `selected` names the
-///   pick, in the confirmation stage of a plan with a selection stage only.
 /// - `design.selection.metric`: no outcome id.
 /// - `design.conditions[*].id`: a condition named `selected`.
 ///
-/// A mistyped stage counts as present; with no condition ids, `non-empty` reports that.
+/// A mistyped stage counts as present.
 fn selection_stage(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
     let staged = val(spec, "design.selection").is_some();
     let has_input = |inputs: &Vec<Value>| inputs.iter().any(|i| role(i) == Some("selection"));
@@ -565,22 +586,55 @@ fn selection_stage(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
             })
         }
         "design.conditions[*].id" => flag(spec, pat, |v| v.as_str() == Some(SELECTED)),
-        "design.selection.conditions[*]" | "design.confirmation.conditions[*]" => {
-            let pick = staged && pat.starts_with("design.confirmation");
-            let declared = texts(spec, "design.conditions[*].id");
-            let reference = text(spec, "design.reference");
-            flag(spec, pat, |v| {
-                v.as_str().is_some_and(|c| {
-                    Some(c) == reference
-                        || match c {
-                            SELECTED => !pick,
-                            _ => !declared.is_empty() && !declared.contains(&c),
-                        }
-                })
-            })
-        }
         _ => vec![],
     }
+}
+
+const CONTRAST_KEYS: &str = "question.hypotheses[*].contrast.*";
+
+/// A condition name its place may not use. The reference runs in every stage, so no stage
+/// list or contrast names it; `selected` names the selection stage's pick.
+/// - `design.reference`: a declared condition.
+/// - `design.selection.conditions[*]`: a declared condition.
+/// - `design.confirmation.conditions[*]`: a declared condition, or `selected` with a selection
+///   stage.
+/// - `question.hypotheses[*].contrast.*`, each key: a condition the confirmation stage lists,
+///   `selected` only with a selection stage. Each term needs that stage's paired values. An
+///   undeclared condition the stage lists is the stage list's fault, reported there.
+///
+/// With no declared condition ids, `non-empty` reports that; with no confirmation list, the
+/// generic rules do.
+fn condition_declared(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let staged = val(spec, "design.selection").is_some();
+    let usable: Vec<&str> = if pat == CONTRAST_KEYS {
+        if list(spec, "design.confirmation.conditions").is_none() {
+            return vec![];
+        }
+        let runs = texts(spec, "design.confirmation.conditions[*]");
+        runs.into_iter()
+            .filter(|c| *c != SELECTED || staged)
+            .collect()
+    } else {
+        let declared = texts(spec, "design.conditions[*].id");
+        if declared.is_empty() {
+            return vec![];
+        }
+        let pick = staged && pat == "design.confirmation.conditions[*]";
+        declared
+            .into_iter()
+            .chain(pick.then_some(SELECTED))
+            .collect()
+    };
+    let reference = text(spec, "design.reference").filter(|_| pat != "design.reference");
+    let bad = |c: &str| !usable.contains(&c) || Some(c) == reference;
+    if pat == CONTRAST_KEYS {
+        return keys(spec, pat)
+            .into_iter()
+            .filter(|(_, k)| bad(k))
+            .map(|(p, _)| hit(p))
+            .collect();
+    }
+    flag(spec, pat, |v| v.as_str().is_some_and(bad))
 }
 
 /// A param value is a string or a number.
@@ -588,18 +642,171 @@ fn param_shape(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
     flag(spec, pat, |v| !(v.is_string() || v.is_number()))
 }
 
-/// The reference names no listed condition. With no condition ids, `non-empty` reports that.
-fn reference_is_condition(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
-    let conditions = texts(spec, "design.conditions[*].id");
-    flag(spec, pat, |v| {
-        !conditions.is_empty() && v.as_str().is_some_and(|r| !conditions.contains(&r))
+// ---- hypotheses ----
+
+/// A hypothesis with no claim. Its rule's `when` limits it to confirmatory studies.
+fn claim_required(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    children(spec, pat)
+        .into_iter()
+        .filter(|(_, h, claim)| h.is_object() && claim.is_none())
+        .map(|(p, _, _)| hit(p))
+        .collect()
+}
+
+/// A value read by a shape rule: `None` when it is mistyped or holds an unknown key (a generic
+/// rule reports that), `Some(Err(()))` when it is malformed.
+type Shape<T> = Option<Result<T, ()>>;
+
+/// The one entry of a table whose keys are all in `allowed`.
+fn one_key<'a>(v: &'a Value, allowed: &[&str]) -> Shape<(&'a str, &'a Value)> {
+    let m = v.as_object()?;
+    if !m.keys().all(|k| allowed.contains(&k.as_str())) {
+        return None;
+    }
+    Some(match m.iter().next() {
+        Some((k, x)) if m.len() == 1 => Ok((k.as_str(), x)),
+        _ => Err(()),
     })
 }
 
-fn test_allowed(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
-    flag(spec, pat, |v| {
-        v.as_str().is_some_and(|t| t != "paired-mean")
+/// `[a, b]` with a < b.
+fn ordered_pair(v: &Value) -> Shape<(f64, f64)> {
+    let xs: Vec<f64> = v
+        .as_array()?
+        .iter()
+        .map(Value::as_f64)
+        .collect::<Option<_>>()?;
+    Some(match *xs.as_slice() {
+        [a, b] if a < b => Ok((a, b)),
+        _ => Err(()),
     })
+}
+
+/// The margins of a claim: `below m`, `above m` or `within [a, b]`.
+fn margins(claim: &Value) -> Shape<Vec<f64>> {
+    match one_key(claim, &["below", "above", "within"])? {
+        Ok(("within", v)) => Some(ordered_pair(v)?.map(|(a, b)| vec![a, b])),
+        Ok((_, v)) => Some(Ok(vec![v.as_f64()?])),
+        Err(()) => Some(Err(())),
+    }
+}
+
+/// The range a statistic declares for a cluster mean; `None` for a quantile.
+fn mean_range(statistic: &Value) -> Shape<Option<(f64, f64)>> {
+    match one_key(statistic, &["mean", "quantile"])? {
+        Ok(("mean", v)) => Some(ordered_pair(v)?.map(Some)),
+        Ok((_, q)) => Some(if open_unit(q.as_f64()?) {
+            Ok(None)
+        } else {
+            Err(())
+        }),
+        Err(()) => Some(Err(())),
+    }
+}
+
+/// Each hypothesis, at each target:
+/// - `<h>.outcome`: no listed outcome id.
+/// - `<h>.contrast`: an empty table. `<h>.contrast.*`: a weight of 0. A non-finite weight is
+///   the finite rule's.
+/// - `<h>.claim`: not one of `below m`, `above m` or `within [a, b]` with a < b; or a margin at
+///   or outside the statistic's mean range.
+/// - `<h>.statistic`: absent with a claim; or not one of `mean [lo, hi]` with lo < hi or
+///   `quantile q` with 0 < q < 1. A statistic without a claim is checked too.
+fn hypothesis_shape(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let at = |keep: &dyn Fn(&Value, Option<&Value>) -> bool| -> Vec<Hit> {
+        children(spec, pat)
+            .into_iter()
+            .filter(|(_, h, v)| keep(h, *v))
+            .map(|(p, _, _)| hit(p))
+            .collect()
+    };
+    match pat.rsplit_once('.').map_or(pat, |(_, leaf)| leaf) {
+        "outcome" if list(spec, "outcomes").is_some() => {
+            let outcomes = texts(spec, "outcomes[*].id");
+            flag(spec, pat, |v| {
+                v.as_str().is_some_and(|o| !outcomes.contains(&o))
+            })
+        }
+        "contrast" => flag(spec, pat, |v| v.as_object().is_some_and(|m| m.is_empty())),
+        "*" => flag(spec, pat, |v| v.as_f64() == Some(0.0)),
+        "claim" => at(&|h, claim| match claim.and_then(margins) {
+            Some(Err(())) => true,
+            Some(Ok(ms)) => match h.get("statistic").and_then(mean_range) {
+                Some(Ok(Some((lo, hi)))) => ms.iter().any(|&m| m <= lo || m >= hi),
+                _ => false,
+            },
+            None => false,
+        }),
+        "statistic" => at(&|h, statistic| match statistic {
+            None => has_claim(h),
+            Some(s) => matches!(mean_range(s), Some(Err(()))),
+        }),
+        _ => vec![],
+    }
+}
+
+/// A listed stratum that no confirmation input names.
+fn hypothesis_strata(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let Some(inputs) = list(spec, "inputs") else {
+        return vec![];
+    };
+    let held: Vec<&str> = inputs
+        .iter()
+        .filter(|i| role(i) == Some("confirmation"))
+        .filter_map(|i| i.get("stratum")?.as_str())
+        .collect();
+    flag(spec, pat, |v| {
+        v.as_str().is_some_and(|s| !held.contains(&s))
+    })
+}
+
+fn share_in_range(x: f64) -> bool {
+    x > 0.0 && x <= 1.0
+}
+
+/// The split of a confirmatory study's level, over the hypotheses with a claim (E-CNF-006
+/// reports the others):
+/// - `<h>.alpha_share`: absent, or outside (0, 1].
+/// - `question.hypotheses`: every share is in (0, 1], and they do not sum to 1. The sum may
+///   miss 1 by 1e-9 for rounding: 0.7 + 0.2 + 0.1 is 0.9999999999999999.
+fn alpha_shares(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    if pat.ends_with(".alpha_share") {
+        return children(spec, pat)
+            .into_iter()
+            .filter(|(_, h, share)| {
+                has_claim(h) && share.is_none_or(|s| s.as_f64().is_some_and(|x| !share_in_range(x)))
+            })
+            .map(|(p, _, _)| hit(p))
+            .collect();
+    }
+    let mut out = vec![];
+    for (path, hypotheses) in nodes(spec, pat) {
+        let Some(hypotheses) = hypotheses.as_array() else {
+            continue;
+        };
+        let shares: Option<Vec<f64>> = hypotheses
+            .iter()
+            .filter(|h| has_claim(h))
+            .map(|h| {
+                h.get("alpha_share")?
+                    .as_f64()
+                    .filter(|x| share_in_range(*x))
+            })
+            .collect();
+        let Some(sum) = shares
+            .filter(|s| !s.is_empty())
+            .map(|s| s.iter().sum::<f64>())
+        else {
+            continue;
+        };
+        if (sum - 1.0).abs() > 1e-9 {
+            out.push(Hit {
+                path,
+                detail: Some(format!("The shares sum to {sum}.")),
+            });
+        }
+    }
+    out
 }
 
 // ---- scope ----
@@ -620,17 +827,25 @@ fn budget_present(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
     })
 }
 
-/// A `follow_on` array is empty under route follow-on, or a `when` is not
-/// `<hypothesis id>.pass` or `.fail`.
+/// The `when` that runs a follow-on whatever the result.
+const DONE: &str = "done";
+
+/// A `follow_on` array is empty under route follow-on, or a `when` is neither `done` nor
+/// `<id>.pass` or `<id>.fail` for a hypothesis with a claim.
 fn route_valid(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
-    let hypotheses = texts(spec, "question.hypotheses[*].id");
+    let claimed: Vec<&str> = nodes(spec, "question.hypotheses[*]")
+        .into_iter()
+        .filter(|(_, h)| has_claim(h))
+        .filter_map(|(_, h)| h.get("id")?.as_str())
+        .collect();
     let follow = text(spec, "scope.end_of_run.route") == Some("follow-on");
     let whens = pat.ends_with("[*].when");
     flag(spec, pat, |v| match v {
         Value::Array(a) => !whens && follow && a.is_empty(),
         Value::String(w) => {
             whens
-                && !matches!(w.rsplit_once('.'), Some((id, "pass" | "fail")) if hypotheses.contains(&id))
+                && w != DONE
+                && !matches!(w.rsplit_once('.'), Some((id, "pass" | "fail")) if claimed.contains(&id))
         }
         _ => false,
     })

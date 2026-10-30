@@ -26,6 +26,8 @@ target = [
   { path = "question.hypotheses[*].id", check = "required" },
   { path = "question.hypotheses[*].statement", check = "required" },
   { path = "question.hypotheses[*].rival", check = "required" },
+  { path = "question.hypotheses[*].outcome", check = "required" },
+  { path = "question.hypotheses[*].contrast", check = "required" },
   { path = "outcomes", check = "required" },
   { path = "outcomes[*].id", check = "required" },
   { path = "outcomes[*].measure", check = "required" },
@@ -48,7 +50,6 @@ target = [
   { path = "design.stratum", check = "required" },
   { path = "design.reference", check = "required" },
   { path = "design.row_seconds", check = "required" },
-  { path = "design.test", check = "required" },
   { path = "design.sesoi", check = "required" },
   { path = "design.icc", check = "required" },
   { path = "design.units_per_cluster", check = "required" },
@@ -118,6 +119,24 @@ target = [
   { path = "question.hypotheses[*].id", check = "type", kind = "string" },
   { path = "question.hypotheses[*].statement", check = "type", kind = "string" },
   { path = "question.hypotheses[*].rival", check = "type", kind = "string" },
+  { path = "question.hypotheses[*].outcome", check = "type", kind = "string" },
+  { path = "question.hypotheses[*].contrast", check = "type", kind = "table" },
+  { path = "question.hypotheses[*].contrast.*", check = "type", kind = "float" },
+  { path = "question.hypotheses[*].strata", check = "type", kind = "array" },
+  { path = "question.hypotheses[*].strata[*]", check = "type", kind = "string" },
+  { path = "question.hypotheses[*].claim", check = "type", kind = "table" },
+  { path = "question.hypotheses[*].claim.below", check = "type", kind = "float" },
+  { path = "question.hypotheses[*].claim.above", check = "type", kind = "float" },
+  { path = "question.hypotheses[*].claim.within", check = "type", kind = "array" },
+  { path = "question.hypotheses[*].claim.within[*]", check = "type", kind = "float" },
+  { path = "question.hypotheses[*].statistic", check = "type", kind = "table" },
+  { path = "question.hypotheses[*].statistic.mean", check = "type", kind = "array" },
+  { path = "question.hypotheses[*].statistic.mean[*]", check = "type", kind = "float" },
+  { path = "question.hypotheses[*].statistic.quantile", check = "type", kind = "float" },
+  { path = "question.hypotheses[*].power_at", check = "type", kind = "float" },
+  { path = "question.hypotheses[*].estimates", check = "type", kind = "table" },
+  { path = "question.hypotheses[*].estimates.from", check = "type", kind = "string" },
+  { path = "question.hypotheses[*].alpha_share", check = "type", kind = "float" },
   { path = "outcomes", check = "type", kind = "array" },
   { path = "outcomes[*]", check = "type", kind = "table" },
   { path = "outcomes[*].id", check = "type", kind = "string" },
@@ -146,7 +165,6 @@ target = [
   { path = "design.reference", check = "type", kind = "string" },
   { path = "design.repeats", check = "type", kind = "int" },
   { path = "design.row_seconds", check = "type", kind = "float" },
-  { path = "design.test", check = "type", kind = "string" },
   { path = "design.alpha", check = "type", kind = "float" },
   { path = "design.power", check = "type", kind = "float" },
   { path = "design.sesoi", check = "type", kind = "float" },
@@ -224,7 +242,6 @@ target = [
   { path = "study.label", check = "enum", values = ["signal", "confirmed", "replicated", "generalized"] },
   { path = "scope.stop_rule", check = "enum", values = ["budget-only", "e-process"] },
   { path = "scope.end_of_run.route", check = "enum", values = ["report", "follow-on", "share"] },
-  { path = "design.test", check = "enum", values = ["paired-mean", "descriptive"] },
   { path = "design.pick", check = "enum", values = ["seeded", "first"] },
   { path = "design.selection.rule", check = "enum", values = ["best-mean"] },
   { path = "outcomes[*].paired", check = "enum", values = ["difference", "percent"] },
@@ -262,16 +279,19 @@ target = [
 [[rule]]
 code = "E-FMT-001"
 severity = "error"
-problem = "An id is not ASCII kebab-case."
-instruction = "Use ASCII lowercase letters and digits, joined by single hyphens, for example my-study. A stratum may be empty when there are none."
+problem = "An id, a stratum or a study reference is not ASCII letters and digits joined by single hyphens."
+instruction = "Use ASCII lowercase letters and digits, joined by single hyphens, for example my-study. A hypothesis id may also use capital letters, for example E1 or P1a. A stratum may be empty where the design or an input names none, but not in the strata a hypothesis lists. estimates.from names a study id."
 why = "Ids and strata become file names, seed inputs and record keys, and are printed in diagnostics. Accents and look-alike letters would make two ids that look the same differ."
 sources = ["https://toml.io/en/v1.0.0"]
 target = [
   { path = "study.id", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
+  { path = "question.hypotheses[*].id", check = "format", pattern = "^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$" },
   { path = "design.conditions[*].id", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
   { path = "outcomes[*].id", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
   { path = "design.stratum", check = "format", pattern = "^([a-z0-9]+(-[a-z0-9]+)*)?$" },
   { path = "inputs[*].stratum", check = "format", pattern = "^([a-z0-9]+(-[a-z0-9]+)*)?$" },
+  { path = "question.hypotheses[*].strata[*]", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
+  { path = "question.hypotheses[*].estimates.from", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
 ]
 
 [[rule]]
@@ -391,7 +411,7 @@ why = "Every comparison is made against the reference condition. A reference tha
 sources = []
 target = [
   { path = "design.conditions", check = "non-empty" },
-  { path = "design.reference", check = "named:reference-is-condition" },
+  { path = "design.reference", check = "named:condition-declared" },
 ]
 
 [[rule]]
@@ -470,13 +490,13 @@ target = [
 [[rule]]
 code = "E-CNF-006"
 severity = "error"
-problem = "A confirmatory study uses a test the checker does not allow."
-instruction = "Set design.test to paired-mean."
-why = "v0 confirms only with the paired-mean test. Other tests have no power gate yet."
-sources = []
+problem = "A hypothesis of a confirmatory study has no claim."
+instruction = "Give the hypothesis a claim, { below = m }, { above = m } or { within = [a, b] }, and its statistic. Or make the study exploratory."
+why = "A confirmatory study tests each hypothesis against margins stated before the data come in. A hypothesis with no claim has nothing to test, so any reading of it would be chosen after the fact."
+sources = ["https://doi.org/10.1038/s41562-016-0021"]
 when = { mode = "confirmatory" }
 target = [
-  { path = "design.test", check = "named:confirmatory-test-allowed" },
+  { path = "question.hypotheses[*].claim", check = "named:claim-required" },
 ]
 
 [[rule]]
@@ -514,10 +534,60 @@ target = [
   { path = "design.selection", check = "named:selection-stage" },
   { path = "inputs[*].role", check = "named:selection-stage" },
   { path = "design.selection.conditions", check = "named:selection-stage" },
-  { path = "design.selection.conditions[*]", check = "named:selection-stage" },
+  { path = "design.selection.conditions[*]", check = "named:condition-declared" },
   { path = "design.selection.metric", check = "named:selection-stage" },
-  { path = "design.confirmation.conditions[*]", check = "named:selection-stage" },
+  { path = "design.confirmation.conditions[*]", check = "named:condition-declared" },
   { path = "design.conditions[*].id", check = "named:selection-stage" },
+]
+
+[[rule]]
+code = "E-HYP-001"
+severity = "error"
+problem = "A hypothesis names an outcome that is not listed, or its contrast is empty, has a weight of 0, or names a condition the confirmation stage does not run."
+instruction = "Set outcome to an id from outcomes. Give contrast one or more condition ids from design.confirmation.conditions, each with a weight other than 0, for example { selected = 1.0 } or { arm-a = 1.0, arm-b = -1.0 }. Name selected only with a selection stage, and never the reference."
+why = "The test reads the contrast's paired values in the confirmation stage. A condition that stage does not run, or the reference, which has no paired value, leaves every unit incomplete, and the claim fails after the budget is spent."
+sources = []
+target = [
+  { path = "question.hypotheses[*].outcome", check = "named:hypothesis-shape" },
+  { path = "question.hypotheses[*].contrast", check = "named:hypothesis-shape" },
+  { path = "question.hypotheses[*].contrast.*", check = "named:hypothesis-shape" },
+  { path = "question.hypotheses[*].contrast.*", check = "named:condition-declared" },
+]
+
+[[rule]]
+code = "E-HYP-002"
+severity = "error"
+problem = "A stratum a hypothesis lists has no confirmation input."
+instruction = "List only strata that confirmation inputs name in their stratum field, or add a confirmation input for the stratum. Leave strata empty to test all units as one group."
+why = "A claim holds only when it holds in every stratum it lists, each tested on its own clusters. A stratum with no confirmation input has no data, so the claim could never hold."
+sources = ["https://doi.org/10.1080/00401706.1982.10487790"]
+target = [
+  { path = "question.hypotheses[*].strata[*]", check = "named:hypothesis-strata" },
+]
+
+[[rule]]
+code = "E-HYP-003"
+severity = "error"
+problem = "A claim or a statistic is not well formed."
+instruction = "Write the claim as one of { below = m }, { above = m } or { within = [a, b] } with a below b. Give a claim one statistic: { mean = [lo, hi] } with lo below hi and every margin strictly between them, or { quantile = q } with q strictly between 0 and 1."
+why = "A claim is one or two one-sided bounds, and it holds when every bound holds. within [a, b] is two one-sided tests, above a and below b, so it needs no alpha correction. The test counts each cluster once: the mean of its units, which must lie in the declared range, or the share of its units on the claimed side. A margin at or outside the range can never be tested."
+sources = ["https://doi.org/10.1080/00401706.1982.10487790", "https://doi.org/10.1177/1948550617697177"]
+target = [
+  { path = "question.hypotheses[*].claim", check = "named:hypothesis-shape" },
+  { path = "question.hypotheses[*].statistic", check = "named:hypothesis-shape" },
+]
+
+[[rule]]
+code = "E-HYP-004"
+severity = "error"
+problem = "A confirmatory hypothesis has no alpha share above 0 and at most 1, or the shares do not sum to 1."
+instruction = "Give each hypothesis with a claim an alpha_share above 0 and at most 1, so that the shares of the study sum to 1. A study with one hypothesis sets alpha_share = 1.0."
+why = "The study's level is split between its claims. Shares that sum to more than 1 would let the study reject more often than its level allows, and shares that sum to less waste power."
+sources = []
+when = { mode = "confirmatory" }
+target = [
+  { path = "question.hypotheses[*].alpha_share", check = "named:alpha-shares" },
+  { path = "question.hypotheses", check = "named:alpha-shares" },
 ]
 
 [[rule]]
@@ -535,8 +605,8 @@ target = [
 code = "E-END-001"
 severity = "error"
 problem = "The end-of-run route is not valid."
-instruction = "For route follow-on, list at least one follow_on entry. Write each when as <hypothesis id>.pass or <hypothesis id>.fail, using an id from question.hypotheses."
-why = "A follow-on that names no hypothesis can never run. The route must say what happens, before the data come in."
+instruction = "For route follow-on, list at least one follow_on entry. Write each when as done, which runs the follow-on whatever the result, or as <hypothesis id>.pass or <hypothesis id>.fail, using a hypothesis that has a claim."
+why = "A follow-on whose condition can never be met never runs. A hypothesis with no claim has no pass or fail: a confirmatory claim passes on its test, an exploratory one on its point estimate. The route must say what happens, before the data come in."
 sources = []
 target = [
   { path = "scope.end_of_run.follow_on", check = "named:route-valid" },

@@ -14,6 +14,8 @@ negative_control = ""
 id = "H1"
 statement = ""
 rival = ""
+outcome = "ppl-ratio"
+contrast = { arm-a = 1.0 }
 
 [[outcomes]]
 id = "ppl-ratio"
@@ -32,7 +34,7 @@ wall_hours = 1.0
 money_usd = 0.0
 [scope.end_of_run]
 route = "report"                # report | follow-on | share
-follow_on = []                  # [{ when = "H1.pass", spec = "follow/next.toml" }]
+follow_on = []                  # [{ when = "done", spec = "follow/next.toml" }]
 
 [design]
 unit = "window"
@@ -41,7 +43,6 @@ stratum = "genre"               # optional; "" if none
 reference = "exact"             # condition id of the reference arm
 repeats = 1
 row_seconds = 60.0              # estimate per row, until a record gives one
-test = "sign-rule"            # paired-mean | descriptive (exploratory only)
 alpha = 0.005
 power = 0.8
 sesoi = 1.0                     # smallest effect of interest, in outcome units

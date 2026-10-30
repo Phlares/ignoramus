@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 use std::fmt;
 
+pub mod claim;
 pub mod elond;
 pub mod eprocess;
 pub mod rng;

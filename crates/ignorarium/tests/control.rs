@@ -470,7 +470,8 @@ fn control_signals_keep_the_last_request_and_a_stop_stays() {
 /// A confirmatory plan whose confirmation input gives 55 units, against 54 needed.
 fn confirmatory(source: String) -> impl Fn(String) -> String {
     move |t| {
-        t.replace("mode = \"exploratory\"", "mode = \"confirmatory\"")
+        common::with_claim(t)
+            .replace("mode = \"exploratory\"", "mode = \"confirmatory\"")
             .replace("label = \"signal\"", "label = \"confirmed\"")
             .replace("sesoi = 0.0", "sesoi = 1.0")
             .replace("value = 0.0", "value = 4.0")

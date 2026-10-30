@@ -8,11 +8,55 @@ use serde_json::Value;
 use std::path::Path;
 
 fn at(v: &Value, pointer: &str) -> String {
-    match v.pointer(pointer) {
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => other.to_string(),
-        None => "(missing)".into(),
+    v.pointer(pointer).map_or_else(|| "(missing)".into(), plain)
+}
+
+/// A value as plain text: a table as `key value` pairs, a list in brackets.
+fn plain(v: &Value) -> String {
+    let join = |parts: Vec<String>| parts.join(", ");
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Array(a) => format!("[{}]", join(a.iter().map(plain).collect())),
+        Value::Object(m) => join(m.iter().map(|(k, x)| format!("{k} {}", plain(x))).collect()),
+        other => other.to_string(),
     }
+}
+
+/// `<id>: <statement> (rival: <rival>)`, then what the hypothesis tests and how.
+fn hypothesis_line(h: &Value) -> String {
+    let strata = items(h, "/strata");
+    let strata = if strata.is_empty() {
+        "pooled".to_string()
+    } else {
+        strata.iter().map(plain).collect::<Vec<_>>().join(", ")
+    };
+    let mut parts = vec![
+        format!(
+            "{}: {} (rival: {})",
+            at(h, "/id"),
+            at(h, "/statement"),
+            at(h, "/rival")
+        ),
+        format!("outcome: {}", at(h, "/outcome")),
+        format!("contrast: {}", at(h, "/contrast")),
+        format!("strata: {strata}"),
+    ];
+    if h.get("claim").is_none() {
+        parts.push("claim: none (descriptive)".into());
+    }
+    let shown = [
+        ("claim", "claim"),
+        ("statistic", "statistic"),
+        ("power at", "power_at"),
+        ("estimates", "estimates"),
+        ("alpha share", "alpha_share"),
+    ];
+    parts.extend(
+        shown
+            .iter()
+            .filter_map(|(label, key)| Some(format!("{label}: {}", plain(h.get(*key)?)))),
+    );
+    parts.join("; ")
 }
 
 fn items<'a>(v: &'a Value, pointer: &str) -> &'a [Value] {
@@ -90,14 +134,7 @@ fn shown_root(root: &Path) -> String {
 fn page(a: &Assessed) -> String {
     let v = &withheld(&a.value);
     let est = a.estimate.as_ref();
-    let hypotheses = items(v, "/question/hypotheses").iter().map(|h| {
-        format!(
-            "{}: {} (rival: {})",
-            at(h, "/id"),
-            at(h, "/statement"),
-            at(h, "/rival")
-        )
-    });
+    let hypotheses = items(v, "/question/hypotheses").iter().map(hypothesis_line);
     let outcomes = items(v, "/outcomes").iter().map(|o| {
         format!(
             "{} ({}, {} is better)",

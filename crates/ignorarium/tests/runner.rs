@@ -24,7 +24,7 @@ fn conf_input(t: String) -> String {
 
 /// The template with a selection stage: `arm-a` and `arm-b` (each with params) on the 2 units
 /// of the selection input `data/select.txt`, then `selected` on the confirmation input. The
-/// schedule: rows 0 to 5 select, rows 6 to 11 confirm.
+/// schedule: rows 0 to 5 select, rows 6 to 11 confirm. The hypothesis tests the pick.
 fn staged(t: String) -> String {
     let stage = r#"id = "arm-a"
 params = { bits = 4, mode = "fast" }
@@ -56,6 +56,11 @@ creators = []
             1,
         )
         .replacen("[pins]", input, 1)
+        .replacen(
+            "contrast = { arm-a = 1.0 }",
+            "contrast = { selected = 1.0 }",
+            1,
+        )
 }
 
 /// Writes its params and its argv, and a value per condition: against the reference's 8,
@@ -1016,7 +1021,7 @@ fn late_confirmation_data_used_before_is_refused() {
 /// `staged` as a confirmatory plan: the confirmation input gives 55 units, against 54 needed.
 fn confirmatory_staged(source: String) -> impl Fn(String) -> String {
     move |t| {
-        staged(t)
+        common::with_claim(staged(t))
             .replace("mode = \"exploratory\"", "mode = \"confirmatory\"")
             .replace("label = \"signal\"", "label = \"confirmed\"")
             .replace("sesoi = 0.0", "sesoi = 1.0")

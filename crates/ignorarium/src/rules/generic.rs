@@ -154,6 +154,12 @@ pub(super) fn join_key(prefix: &str, key: &str) -> String {
     join(prefix, if safe_key(key) { key } else { "<key>" })
 }
 
+/// A key a path segment can name: one with `.` or `[` would read as a deeper path, so it is no
+/// `*` key, and known-key reports it.
+pub(super) fn plain_key(key: &str) -> bool {
+    !key.contains(['.', '['])
+}
+
 /// A key that is 1 to 40 of `a-z 0-9 _ -` is safe to print.
 pub fn safe_key(key: &str) -> bool {
     (1..=40).contains(&key.len())
@@ -164,7 +170,7 @@ pub fn safe_key(key: &str) -> bool {
 
 /// Nodes a path selects, as (concrete path, value). `None` marks a missing key.
 /// A missing or non-table parent selects nothing: its own rule reports it.
-/// `**` selects every value at any depth; a `*` segment selects every key of a table, by
+/// `**` selects every value at any depth; a `*` segment selects every plain key of a table, by
 /// `join_key`, since those keys come from the spec.
 pub(super) fn select<'a>(root: &'a Value, pattern: &str) -> Vec<(String, Option<&'a Value>)> {
     if pattern == "**" {
@@ -182,7 +188,8 @@ pub(super) fn select<'a>(root: &'a Value, pattern: &str) -> Vec<(String, Option<
         for (p, v) in cur {
             let Some(Value::Object(m)) = v else { continue };
             if seg == "*" {
-                next.extend(m.iter().map(|(k, c)| (join_key(&p, k), Some(c))));
+                let plain = m.iter().filter(|(k, _)| plain_key(k));
+                next.extend(plain.map(|(k, c)| (join_key(&p, k), Some(c))));
                 continue;
             }
             let child_path = join(&p, name);
@@ -237,8 +244,7 @@ fn unknown_keys(
         let found = [join(wild, k), join(wild, "*")]
             .into_iter()
             .find_map(|w| known.get(w.as_str()).copied().map(|kind| (w, kind)));
-        // A key with `.` or `[` would read as a deeper path.
-        let Some((w, kind)) = found.filter(|_| !k.contains(['.', '['])) else {
+        let Some((w, kind)) = found.filter(|_| plain_key(k)) else {
             out.push(p);
             continue;
         };

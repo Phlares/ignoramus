@@ -25,7 +25,6 @@ A value outside the set has no defined meaning in the checker or the run.
 - `study.label` (enum)
 - `scope.stop_rule` (enum)
 - `scope.end_of_run.route` (enum)
-- `design.test` (enum)
 - `design.pick` (enum)
 - `design.selection.rule` (enum)
 - `outcomes[*].paired` (enum)

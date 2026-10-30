@@ -1,3 +1,5 @@
+mod common;
+
 use ignorarium::canon::sha256_hex;
 use ignorarium::diag::{Diagnostic, Severity};
 use ignorarium::prior::{NoPriorUse, PriorError, PriorUse, normalized_sha256};
@@ -118,12 +120,54 @@ fn inputs(n: usize, units: u64) -> Value {
     Value::Array(all)
 }
 
+/// The base plan's one hypothesis: the pick's paired value is below 0 in stratum `fiction`, by
+/// the mean of each cluster, which lies in [-50, 50]. It takes the whole level.
+fn h1() -> Value {
+    json!({
+        "id": "H1", "statement": "", "rival": "", "outcome": "ppl-ratio",
+        "contrast": { "selected": 1.0 }, "strata": ["fiction"],
+        "claim": { "below": 0.0 }, "statistic": { "mean": [-50.0, 50.0] }, "alpha_share": 1.0
+    })
+}
+
+/// `h1()` as `id`, with no claim: a descriptive hypothesis.
+fn descriptive(id: &str) -> Value {
+    let mut h = h1();
+    h["id"] = json!(id);
+    for k in ["claim", "statistic", "alpha_share"] {
+        h.as_object_mut().unwrap().remove(k);
+    }
+    h
+}
+
+/// `h1()` as `H<i>` for each share, in order.
+fn shared(shares: &[f64]) -> Vec<Edit> {
+    let list: Vec<Value> = shares
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let mut h = h1();
+            h["id"] = json!(format!("H{}", i + 1));
+            h["alpha_share"] = json!(s);
+            h
+        })
+        .collect();
+    vec![("/question/hypotheses", j(json!(list)))]
+}
+
+/// Sets (or, with `None`, removes) a field of the first hypothesis.
+fn hyp(field: &str, v: Option<Value>) -> Edit {
+    let ptr = Box::leak(format!("/question/hypotheses/0/{field}").into_boxed_str());
+    (ptr, v)
+}
+
 /// A confirmatory plan that passes every named check: 11 confirmation inputs of 5 units,
 /// 55 confirmation units against 54 needed. A selection stage picks `arm-a` or `arm-b` on
-/// the selection input, and the confirmation stage runs the pick.
+/// the selection input, and the confirmation stage runs the pick, which `h1()` tests.
 fn ok() -> Value {
     let mut s = spec_at("../../templates/numeric-ablation.toml");
     let edits = [
+        ("/question/hypotheses", json!([h1()])),
         (
             "/design/conditions",
             json!([{ "id": "exact" }, { "id": "arm-a" }, { "id": "arm-b", "params": { "bits": 4 } }]),
@@ -192,14 +236,32 @@ fn power_edits(upc: u32, clusters: usize) -> Vec<Edit> {
     ]
 }
 
-/// No selection stage: the confirmation stage runs `arm-a`, and `extra` follows.
+/// No selection stage: the confirmation stage runs `arm-a`, the hypothesis tests it, and
+/// `extra` follows.
 fn unstaged(extra: Vec<Edit>) -> Vec<Edit> {
     let mut e = vec![
         ("/design/selection", None),
         ("/design/confirmation/conditions", j(json!(["arm-a"]))),
+        hyp("contrast", j(json!({ "arm-a": 1.0 }))),
     ];
     e.extend(extra);
     e
+}
+
+fn and(mut a: Vec<Edit>, b: Vec<Edit>) -> Vec<Edit> {
+    a.extend(b);
+    a
+}
+
+/// An exploratory plan with `h1()` and the descriptive `P1`, and `extra`.
+fn exploring(extra: Vec<Edit>) -> Vec<Edit> {
+    and(
+        vec![
+            ("/study/mode", j(json!("exploratory"))),
+            ("/question/hypotheses", j(json!([h1(), descriptive("P1")]))),
+        ],
+        extra,
+    )
 }
 
 /// Two clusters of 5 units, and one edit: small enough that the gate fires if it computes.
@@ -267,10 +329,14 @@ fn faults() -> Vec<Fault> {
             vec![("/design/variance/source", j(json!("stated")))],
             vec![("E-CNF-003", "design.variance.source")],
         ),
-        // No confirmation input also fails the power gate.
+        // No confirmation input also fails the power gate, and leaves the stratum with no data.
         f(
             vec![("/inputs", j(inputs(0, 5)))],
-            vec![("E-CNF-002", "inputs"), ("E-CNF-004", "inputs")],
+            vec![
+                ("E-CNF-002", "inputs"),
+                ("E-CNF-004", "inputs"),
+                ("E-HYP-002", "question.hypotheses[0].strata[0]"),
+            ],
         ),
         // No selection or confirmation input: the schedule would be empty, in every mode.
         f(
@@ -279,6 +345,7 @@ fn faults() -> Vec<Fault> {
                 ("E-CNF-002", "inputs"),
                 ("E-CNF-004", "inputs"),
                 ("E-UNT-001", "inputs"),
+                ("E-HYP-002", "question.hypotheses[0].strata[0]"),
             ],
         ),
         f(
@@ -286,7 +353,10 @@ fn faults() -> Vec<Fault> {
                 ("/study/mode", j(json!("exploratory"))),
                 ("/inputs", j(json!([inputs(0, 5)[0]]))),
             ]),
-            vec![("E-UNT-001", "inputs")],
+            vec![
+                ("E-UNT-001", "inputs"),
+                ("E-HYP-002", "question.hypotheses[0].strata[0]"),
+            ],
         ),
         // A selection or confirmation input declares its units; 12 inputs keep the power gate quiet.
         f(
@@ -373,13 +443,17 @@ fn faults() -> Vec<Fault> {
             vec![("/design/selection/metric", j(json!("nope")))],
             vec![("E-SEL-001", "design.selection.metric")],
         ),
-        // `selected` needs a stage; no condition may take its name.
+        // `selected` needs a stage, in the confirmation stage and in a contrast; no condition
+        // may take its name.
         f(
             vec![
                 ("/design/selection", None),
                 ("/inputs/1/role", j(json!("confirmation"))),
             ],
-            vec![("E-SEL-001", "design.confirmation.conditions[0]")],
+            vec![
+                ("E-SEL-001", "design.confirmation.conditions[0]"),
+                ("E-HYP-001", "question.hypotheses[0].contrast.selected"),
+            ],
         ),
         f(
             vec![(
@@ -439,9 +513,257 @@ fn faults() -> Vec<Fault> {
             ],
             vec![],
         ),
+        // A confirmatory hypothesis needs a claim; the rules that size and split a claim skip
+        // it, so the one fault gives one diagnostic.
         f(
-            vec![("/design/test", j(json!("descriptive")))],
-            vec![("E-CNF-006", "design.test")],
+            vec![hyp("claim", None)],
+            vec![("E-CNF-006", "question.hypotheses[0].claim")],
+        ),
+        // A hypothesis names a listed outcome, and a contrast with non-zero weights.
+        f(
+            vec![hyp("outcome", j(json!("nope")))],
+            vec![("E-HYP-001", "question.hypotheses[0].outcome")],
+        ),
+        f(
+            vec![hyp("contrast", j(json!({})))],
+            vec![("E-HYP-001", "question.hypotheses[0].contrast")],
+        ),
+        f(
+            vec![hyp("contrast", j(json!({ "selected": 0.0 })))],
+            vec![("E-HYP-001", "question.hypotheses[0].contrast.selected")],
+        ),
+        // Each term is a condition the confirmation stage runs: not an undeclared one, not a
+        // candidate only the selection stage runs, and not the reference, which has no paired
+        // value.
+        f(
+            vec![hyp(
+                "contrast",
+                j(json!({ "selected": 1.0, "arm-z": -1.0 })),
+            )],
+            vec![("E-HYP-001", "question.hypotheses[0].contrast.arm-z")],
+        ),
+        f(
+            vec![hyp(
+                "contrast",
+                j(json!({ "arm-a": 1.0, "selected": -1.0 })),
+            )],
+            vec![("E-HYP-001", "question.hypotheses[0].contrast.arm-a")],
+        ),
+        f(
+            vec![hyp("contrast", j(json!({ "exact": 1.0 })))],
+            vec![("E-HYP-001", "question.hypotheses[0].contrast.exact")],
+        ),
+        f(
+            vec![
+                (
+                    "/design/confirmation/conditions",
+                    j(json!(["arm-a", "selected"])),
+                ),
+                hyp("contrast", j(json!({ "arm-a": 1.0, "selected": -1.0 }))),
+            ],
+            vec![],
+        ),
+        // A key from the spec is printed only when safe; a key with a dot is known-key's alone.
+        f(
+            vec![hyp(
+                "contrast",
+                j(json!({ "selected": 1.0, "Pasted Key": 1.0 })),
+            )],
+            vec![("E-HYP-001", "question.hypotheses[0].contrast.<key>")],
+        ),
+        f(
+            vec![hyp("contrast", j(json!({ "selected": 1.0, "a.b": 0.0 })))],
+            vec![],
+        ),
+        // An undeclared condition that the stage lists is the stage's fault, reported once.
+        f(
+            vec![
+                (
+                    "/design/confirmation/conditions",
+                    j(json!(["selected", "arm-z"])),
+                ),
+                hyp("contrast", j(json!({ "selected": 1.0, "arm-z": -1.0 }))),
+            ],
+            vec![("E-SEL-001", "design.confirmation.conditions[1]")],
+        ),
+        // A mistyped weight is the type rule's.
+        f(
+            vec![hyp("contrast", j(json!({ "selected": "one" })))],
+            vec![],
+        ),
+        // Each listed stratum has a confirmation input; a selection input does not count.
+        f(
+            vec![hyp("strata", j(json!(["fiction", "code"])))],
+            vec![("E-HYP-002", "question.hypotheses[0].strata[1]")],
+        ),
+        f(
+            vec![
+                ("/inputs/1/stratum", j(json!("code"))),
+                hyp("strata", j(json!(["code"]))),
+            ],
+            vec![("E-HYP-002", "question.hypotheses[0].strata[0]")],
+        ),
+        f(vec![hyp("strata", j(json!([])))], vec![]),
+        f(vec![hyp("strata", None)], vec![]),
+        // A claim is one of below, above or within [a, b] with a < b.
+        f(
+            vec![hyp("claim", j(json!({ "below": 0.0, "above": -1.0 })))],
+            vec![("E-HYP-003", "question.hypotheses[0].claim")],
+        ),
+        f(
+            vec![hyp("claim", j(json!({})))],
+            vec![("E-HYP-003", "question.hypotheses[0].claim")],
+        ),
+        f(
+            vec![hyp("claim", j(json!({ "within": [2.0, 1.0] })))],
+            vec![("E-HYP-003", "question.hypotheses[0].claim")],
+        ),
+        f(
+            vec![hyp("claim", j(json!({ "within": [1.0, 1.0] })))],
+            vec![("E-HYP-003", "question.hypotheses[0].claim")],
+        ),
+        f(
+            vec![hyp("claim", j(json!({ "within": [1.0] })))],
+            vec![("E-HYP-003", "question.hypotheses[0].claim")],
+        ),
+        f(
+            vec![hyp("claim", j(json!({ "within": [-1.0, 1.0] })))],
+            vec![],
+        ),
+        f(vec![hyp("claim", j(json!({ "above": -1.0 })))], vec![]),
+        // A mean range is [lo, hi] with lo < hi, and every margin lies strictly inside it.
+        f(
+            vec![hyp("statistic", j(json!({ "mean": [5.0, 4.0] })))],
+            vec![("E-HYP-003", "question.hypotheses[0].statistic")],
+        ),
+        f(
+            vec![hyp("statistic", j(json!({ "mean": [5.0, 5.0] })))],
+            vec![("E-HYP-003", "question.hypotheses[0].statistic")],
+        ),
+        f(
+            vec![hyp("statistic", j(json!({ "mean": [-5.0, 0.0, 5.0] })))],
+            vec![("E-HYP-003", "question.hypotheses[0].statistic")],
+        ),
+        f(
+            vec![hyp("claim", j(json!({ "below": 50.0 })))],
+            vec![("E-HYP-003", "question.hypotheses[0].claim")],
+        ),
+        f(
+            vec![hyp("claim", j(json!({ "above": -50.0 })))],
+            vec![("E-HYP-003", "question.hypotheses[0].claim")],
+        ),
+        f(
+            vec![hyp("claim", j(json!({ "within": [-60.0, 0.0] })))],
+            vec![("E-HYP-003", "question.hypotheses[0].claim")],
+        ),
+        f(vec![hyp("claim", j(json!({ "below": 49.9 })))], vec![]),
+        // A bad range is reported once, not again as margins outside it.
+        f(
+            vec![
+                hyp("statistic", j(json!({ "mean": [5.0, 4.0] }))),
+                hyp("claim", j(json!({ "below": 100.0 }))),
+            ],
+            vec![("E-HYP-003", "question.hypotheses[0].statistic")],
+        ),
+        // A quantile lies strictly between 0 and 1, and takes any margin.
+        f(
+            vec![hyp("statistic", j(json!({ "quantile": 1.0 })))],
+            vec![("E-HYP-003", "question.hypotheses[0].statistic")],
+        ),
+        f(
+            vec![hyp("statistic", j(json!({ "quantile": 0.0 })))],
+            vec![("E-HYP-003", "question.hypotheses[0].statistic")],
+        ),
+        f(
+            vec![
+                hyp("statistic", j(json!({ "quantile": 0.9 }))),
+                hyp("claim", j(json!({ "below": 500.0 }))),
+            ],
+            vec![],
+        ),
+        f(
+            vec![hyp(
+                "statistic",
+                j(json!({ "quantile": 0.5, "mean": [0, 1] })),
+            )],
+            vec![("E-HYP-003", "question.hypotheses[0].statistic")],
+        ),
+        // A claim needs its statistic.
+        f(
+            vec![hyp("statistic", None)],
+            vec![("E-HYP-003", "question.hypotheses[0].statistic")],
+        ),
+        // Mistyped values and unknown keys are the generic rules'.
+        f(vec![hyp("claim", j(json!({ "below": "x" })))], vec![]),
+        f(vec![hyp("claim", j(json!({ "near": 100.0 })))], vec![]),
+        f(vec![hyp("statistic", j(json!({ "median": 2.0 })))], vec![]),
+        f(
+            vec![hyp("statistic", j(json!({ "mean": ["a", 1] })))],
+            vec![],
+        ),
+        f(vec![("/question/hypotheses", j(json!([1])))], vec![]),
+        // With no outcome list or no confirmation list, the generic rules report that.
+        f(
+            vec![("/outcomes", None)],
+            vec![
+                ("E-CNF-003", "design.variance.source"),
+                ("E-SEL-001", "design.selection.metric"),
+            ],
+        ),
+        f(vec![("/design/confirmation", None)], vec![]),
+        // Confirmatory shares lie in (0, 1] and sum to 1.
+        f(
+            vec![hyp("alpha_share", j(json!(0.0)))],
+            vec![("E-HYP-004", "question.hypotheses[0].alpha_share")],
+        ),
+        f(
+            vec![hyp("alpha_share", j(json!(1.5)))],
+            vec![("E-HYP-004", "question.hypotheses[0].alpha_share")],
+        ),
+        f(
+            vec![hyp("alpha_share", None)],
+            vec![("E-HYP-004", "question.hypotheses[0].alpha_share")],
+        ),
+        f(
+            shared(&[0.5, 0.4]),
+            vec![("E-HYP-004", "question.hypotheses")],
+        ),
+        f(
+            shared(&[0.5, 0.6]),
+            vec![("E-HYP-004", "question.hypotheses")],
+        ),
+        // 0.7 + 0.2 + 0.1 sums to 0.9999999999999999: 1 within rounding.
+        f(shared(&[0.7, 0.2, 0.1]), vec![]),
+        f(shared(&[0.5, 0.5]), vec![]),
+        // A share out of range is reported once, not again in the sum.
+        f(
+            shared(&[0.0, 1.0, 0.5]),
+            vec![("E-HYP-004", "question.hypotheses[0].alpha_share")],
+        ),
+        f(vec![hyp("alpha_share", j(json!("half")))], vec![]),
+        // A hypothesis with no claim takes no share, and a share it has does not count.
+        f(
+            vec![("/question/hypotheses", j(json!([h1(), descriptive("P1")])))],
+            vec![("E-CNF-006", "question.hypotheses[1].claim")],
+        ),
+        f(
+            vec![
+                ("/question/hypotheses", j(json!([h1(), descriptive("P1")]))),
+                ("/question/hypotheses/1/alpha_share", j(json!(0.5))),
+            ],
+            vec![("E-CNF-006", "question.hypotheses[1].claim")],
+        ),
+        // `.pass` and `.fail` need a hypothesis with a claim; a malformed claim is still one.
+        f(
+            exploring(route(one("P1.pass", "f.toml"))),
+            vec![("E-END-001", "scope.end_of_run.follow_on[0].when")],
+        ),
+        f(
+            and(
+                route(one("H1.pass", "f.toml")),
+                vec![hyp("claim", j(json!({})))],
+            ),
+            vec![("E-HYP-003", "question.hypotheses[0].claim")],
         ),
         f(
             vec![
@@ -723,6 +1045,10 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
         "E-UNT-002",
         "E-SEL-001",
         "E-TYP-001",
+        "E-HYP-001",
+        "E-HYP-002",
+        "E-HYP-003",
+        "E-HYP-004",
     ]
     .into_iter()
     .map(String::from)
@@ -834,14 +1160,95 @@ fn confirmatory_rules_do_not_fire_in_exploratory_mode() {
     let s = edited(&[
         ("/study/mode", j(json!("exploratory"))),
         ("/design/sesoi", j(json!(0.0))),
-        ("/design/test", j(json!("descriptive"))),
+        hyp("claim", None),
+        hyp("alpha_share", j(json!(0.0))),
+        hyp("strata", j(json!([]))),
         ("/design/variance/source", j(json!("stated"))),
         ("/inputs", j(inputs(0, 5))),
     ]);
     assert!(named(&s, dir.path()).is_empty());
+    assert!(named(&edited(&exploring(shared(&[0.5, 0.4]))), dir.path()).is_empty());
     // And E-LBL-001 does not fire in confirmatory mode.
     let s = edited(&[("/study/label", j(json!("confirmed")))]);
     assert!(named(&s, dir.path()).is_empty());
+}
+
+const WHEN: (&str, &str) = ("E-END-001", "scope.end_of_run.follow_on[0].when");
+
+#[test]
+fn done_routes_whatever_the_result() {
+    let dir = study_dir();
+    // `done` needs no claim: it holds in a confirmatory plan and beside a descriptive one.
+    for edits in [
+        route(one("done", "f.toml")),
+        exploring(route(one("done", "f.toml"))),
+        exploring(and(
+            vec![("/question/hypotheses", j(json!([descriptive("P1")])))],
+            route(one("done", "f.toml")),
+        )),
+    ] {
+        assert!(named(&edited(&edits), dir.path()).is_empty(), "{edits:?}");
+    }
+    // Only the bare word: `done` is no hypothesis id and takes no suffix.
+    for when in ["Done", "done.pass", "H1.done", "done "] {
+        let d = named(&edited(&route(one(when, "f.toml"))), dir.path());
+        assert_eq!(codes_paths(&d), [WHEN], "{when}");
+    }
+    let d = named(&edited(&route(one("H1.pass", "f.toml"))), dir.path());
+    assert!(d.is_empty());
+    assert_eq!(
+        v0().iter()
+            .find(|r| r.code == "E-END-001")
+            .unwrap()
+            .instruction,
+        "For route follow-on, list at least one follow_on entry. Write each when as done, which runs the follow-on whatever the result, or as <hypothesis id>.pass or <hypothesis id>.fail, using a hypothesis that has a claim."
+    );
+}
+
+#[test]
+fn an_exploratory_claim_may_route_on_pass() {
+    let dir = study_dir();
+    for when in ["H1.pass", "H1.fail"] {
+        let d = named(&edited(&exploring(route(one(when, "f.toml")))), dir.path());
+        assert!(d.is_empty(), "{when}: {d:?}");
+    }
+    // A descriptive hypothesis has no pass or fail.
+    for when in ["P1.pass", "P1.fail"] {
+        let d = named(&edited(&exploring(route(one(when, "f.toml")))), dir.path());
+        assert_eq!(codes_paths(&d), [WHEN], "{when}");
+    }
+}
+
+#[test]
+fn alpha_shares_that_miss_one_state_their_sum() {
+    let dir = study_dir();
+    let d = named(&edited(&shared(&[0.5, 0.4])), dir.path());
+    assert_eq!(
+        d[0].problem,
+        "A confirmatory hypothesis has no alpha share above 0 and at most 1, or the shares do not sum to 1. The shares sum to 0.9."
+    );
+    let d = named(&edited(&[hyp("alpha_share", j(json!(0.0)))]), dir.path());
+    assert_eq!(
+        d[0].problem,
+        "A confirmatory hypothesis has no alpha share above 0 and at most 1, or the shares do not sum to 1."
+    );
+}
+
+#[test]
+fn the_template_claim_example_passes_once_uncommented() {
+    let dir = study_dir();
+    for t in ["numeric-ablation", "planted-spawn"] {
+        let text = std::fs::read_to_string(format!("../../templates/{t}.toml")).unwrap();
+        let v = ignorarium::spec::parse(common::with_claim(text).as_bytes())
+            .unwrap()
+            .value;
+        let h = &v["question"]["hypotheses"][0];
+        assert!(h["claim"].is_object() && h["statistic"].is_object(), "{t}");
+        assert!(h["alpha_share"].is_number(), "{t}");
+        let (_, _, d) = rules::check_all(&v, v0(), &ctx(dir.path()));
+        let errors: Vec<_> = d.iter().filter(|x| x.severity == Severity::Error).collect();
+        assert!(errors.is_empty(), "{t}: {errors:?}");
+    }
 }
 
 fn junk() -> Vec<Value> {
@@ -1686,6 +2093,11 @@ fn the_template_selection_example_passes_once_uncommented() {
             &mut v,
             "/design/confirmation/conditions",
             j(json!(["selected"])),
+        );
+        set(
+            &mut v,
+            "/question/hypotheses/0/contrast",
+            j(json!({ "selected": 1.0 })),
         );
         let (_, _, d) = rules::check_all(&v, v0(), &ctx(dir.path()));
         let errors: Vec<_> = d.iter().filter(|x| x.severity == Severity::Error).collect();
