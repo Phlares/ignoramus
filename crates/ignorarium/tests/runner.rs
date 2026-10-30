@@ -278,7 +278,24 @@ fn a_payload_edited_mid_run_pauses_before_the_next_row() {
     let lab = lab();
     let edit = edits_in_row_0("printf '# edited\n' >> \"$0\"");
     common::with_payload(&lab, "edit-pay", &edit);
-    pauses_after_row_0(&lab, "edit-pay", "payload/run changed after the run began");
+    pauses_after_row_0(&lab, "edit-pay", "payload changed after the run began");
+}
+
+#[test]
+fn editing_a_helper_file_pauses_before_the_next_attempt() {
+    let lab = lab();
+    let edit = edits_in_row_0(
+        "printf '# edited
+' >> \"${0%/*}/helper.sh\"",
+    );
+    let dir = common::with_payload(&lab, "edit-helper", &edit);
+    std::fs::write(
+        dir.join("payload/helper.sh"),
+        "echo helper
+",
+    )
+    .unwrap();
+    pauses_after_row_0(&lab, "edit-helper", "payload changed after the run began");
 }
 
 #[test]
@@ -759,15 +776,31 @@ fn backend_max_filters_out_higher_levels() {
     assert!(matches!(err, RunError::NoBackend { need: 1, .. }), "{err}");
 }
 
+/// The folder hash of a payload folder holding only `run`.
+fn folder_hash_of_run_only() -> String {
+    let m = format!(
+        "[[\"run\",\"file\",\"{}\"]]",
+        sha256_hex(PAYLOAD.as_bytes())
+    );
+    sha256_hex(m.as_bytes())
+}
+
 #[test]
-fn a_matching_payload_pin_runs_with_or_without_the_prefix() {
-    let hash = sha256_hex(PAYLOAD.as_bytes());
+fn pins_payload_is_the_folder_hash() {
+    let hash = folder_hash_of_run_only();
     for (id, pin) in [("pin-a", format!("sha256:{hash}")), ("pin-b", hash.clone())] {
         let lab = lab();
         let set = move |t: String| t.replace("payload = \"\"", &format!("payload = \"{pin}\""));
         register_study(&lab, id, set, &[], PAYLOAD);
         assert_eq!(plan_of(&lab, id).payload_sha256, hash);
     }
+    // The hash of payload/run alone is no longer the pin.
+    let lab = lab();
+    let alone = sha256_hex(PAYLOAD.as_bytes());
+    let set = move |t: String| t.replace("payload = \"\"", &format!("payload = \"{alone}\""));
+    register_study(&lab, "pin-run", set, &[], PAYLOAD);
+    let err = err_of(&lab, "pin-run");
+    assert!(matches!(err, RunError::PayloadChanged), "{err}");
 }
 
 #[test]

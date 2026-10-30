@@ -1,7 +1,7 @@
 //! Backends run one schedule row in isolation and report what happened.
 pub mod level0;
 pub mod level1;
-mod output;
+pub(crate) mod output;
 pub mod rootfs;
 pub mod seccomp;
 pub mod selftest;

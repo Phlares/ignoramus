@@ -3,13 +3,13 @@
 use crate::backend::rootfs;
 use crate::backend::{self, Backend, Exit, Probe, RowJob, RowOutcome, Watch};
 use crate::budget::{Alerts, Cost, CostMeter, Decision, HostMeter, decide, dimension_name};
-use crate::canon::sha256_hex;
 use crate::control::{self, ControlError, ControlFile, RunLock, Signal, State};
 use crate::environ::{Builder, Built, Recipe};
 use crate::estimate::{apply_defaults, estimate, units};
 use crate::events::{self, Event};
 use crate::home::Home;
 use crate::machine::{self, Machine};
+use crate::payload::{self, PayloadError};
 use crate::planlog::store::{Leaf, LogError, PlanLog};
 use crate::prior::file_hashes;
 use crate::records::{self, RecordDraft, RecordError, VerifyError};
@@ -82,7 +82,7 @@ pub enum RunError {
     NotRegistered(String),
     /// The stored spec no longer hashes to the registered hash.
     SpecChanged,
-    /// The payload file differs from `pins.payload`.
+    /// The payload folder differs from `pins.payload`.
     PayloadChanged,
     NoPayload(String),
     /// `pins.environment` names an image that is not in the store.
@@ -346,12 +346,15 @@ pub fn environment(
     })
 }
 
-/// The payload's absolute path and SHA-256. A link at `payload` or `payload/run` is refused.
+/// The payload's absolute `run` path and the hash of its whole folder. A link anywhere in the
+/// folder is refused.
 fn read_payload(dir: &Path) -> Result<(PathBuf, String), RunError> {
-    no_links(dir, &["payload", "run"])?;
+    let hash = payload::tree_hash(&dir.join("payload")).map_err(|e| match e {
+        PayloadError::Unsafe(p) => RunError::Unsafe(p),
+        e => RunError::NoPayload(e.to_string()),
+    })?;
     let path = std::path::absolute(dir.join(PAYLOAD)).map_err(io)?;
-    let bytes = std::fs::read(&path).map_err(|e| RunError::NoPayload(e.to_string()))?;
-    Ok((path, sha256_hex(&bytes)))
+    Ok((path, hash))
 }
 
 fn input_hashes(dir: &Path, spec: &Spec) -> InputHashes {
@@ -369,7 +372,7 @@ fn input_hashes(dir: &Path, spec: &Spec) -> InputHashes {
 fn stale(plan: &RunPlan, dir: &Path) -> Option<String> {
     let mut changed = Vec::new();
     if !read_payload(dir).is_ok_and(|(_, h)| h == plan.payload_sha256) {
-        changed.push(PAYLOAD);
+        changed.push("payload");
     }
     for ((path, then), (_, now)) in plan.inputs.iter().zip(input_hashes(dir, &plan.spec)) {
         if *then != now {

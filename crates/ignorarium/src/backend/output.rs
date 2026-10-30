@@ -1,4 +1,4 @@
-//! The hash of a row's output folder, the same at every isolation level.
+//! The hash of a folder, the same at every isolation level: a row's output and the payload.
 use crate::canon::{sha256_hex, to_canonical};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -9,18 +9,39 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-/// Hash of the sorted `[relpath, kind, digest]` rows under `dir`.
-/// Links are recorded, never followed. A symlinked `dir` is refused.
-pub fn output_hash(dir: &Path) -> io::Result<String> {
+/// One entry of a folder: a path below it, `file`, `link` or `other`, and a file's SHA-256.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TreeRow {
+    pub path: String,
+    pub kind: &'static str,
+    pub digest: String,
+}
+
+/// The sorted rows under `dir`. Links are recorded, never followed. A symlinked `dir` is refused.
+pub fn tree_rows(dir: &Path) -> io::Result<Vec<TreeRow>> {
     if fs::symlink_metadata(dir)?.file_type().is_symlink() {
         return Err(io::Error::other("output dir is a symbolic link"));
     }
-    let mut rows: Vec<(String, &'static str, String)> = Vec::new();
+    let mut rows = Vec::new();
     walk(dir, "", &mut rows)?;
     rows.sort();
-    let v = Value::Array(rows.into_iter().map(|(p, k, d)| json!([p, k, d])).collect());
+    Ok(rows)
+}
+
+/// Hash of the canonical `[relpath, kind, digest]` rows.
+pub fn hash_rows(rows: &[TreeRow]) -> io::Result<String> {
+    let v = Value::Array(
+        rows.iter()
+            .map(|r| json!([r.path, r.kind, r.digest]))
+            .collect(),
+    );
     let bytes = to_canonical(&v).map_err(io::Error::other)?;
     Ok(sha256_hex(&bytes))
+}
+
+/// Hash of the sorted rows under `dir`.
+pub fn output_hash(dir: &Path) -> io::Result<String> {
+    hash_rows(&tree_rows(dir)?)
 }
 
 /// A name as text; bytes that are not UTF-8 become `!bytes:<hex>`.
@@ -31,26 +52,27 @@ fn name_of(n: &OsStr) -> String {
     }
 }
 
-fn walk(
-    dir: &Path,
-    prefix: &str,
-    rows: &mut Vec<(String, &'static str, String)>,
-) -> io::Result<()> {
+fn walk(dir: &Path, prefix: &str, rows: &mut Vec<TreeRow>) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
-        let rel = format!("{prefix}{}", name_of(&entry.file_name()));
+        let path = format!("{prefix}{}", name_of(&entry.file_name()));
+        let row = |kind, digest| TreeRow {
+            path: path.clone(),
+            kind,
+            digest,
+        };
         let ft = entry.file_type()?;
         if ft.is_dir() {
-            walk(&entry.path(), &format!("{rel}/"), rows)?;
+            walk(&entry.path(), &format!("{path}/"), rows)?;
         } else if ft.is_symlink() {
-            rows.push((rel, "link", String::new()));
+            rows.push(row("link", String::new()));
         } else if ft.is_file() {
             rows.push(match file_digest(&entry.path())? {
-                Some(d) => (rel, "file", d),
-                None => (rel, "other", String::new()),
+                Some(d) => row("file", d),
+                None => row("other", String::new()),
             });
         } else {
-            rows.push((rel, "other", String::new()));
+            rows.push(row("other", String::new()));
         }
     }
     Ok(())
