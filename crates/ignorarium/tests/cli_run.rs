@@ -1,7 +1,8 @@
-//! The run verbs, driven through the real binary at isolation level 0.
+//! The run verbs, driven through the real binary. The test machine file reaches level 1,
+//! so rows run in bubblewrap.
 mod common;
 use assert_cmd::Command;
-use common::{Lab, kind_of, lab, plain, register_study, with_payload};
+use common::{Lab, kind_of, lab, no_level1, plain, register_study, with_payload};
 use ignorarium::cli::status::blind_order;
 use ignorarium::control::{ControlFile, RunLock, Signal, State};
 use ignorarium::keys;
@@ -35,18 +36,56 @@ fn probe_writes_machine_toml_and_prints_the_level() {
         "max_level = 0\nrate_usd_per_hour = 2.5\n",
     )
     .unwrap();
+    // Level 1 where bubblewrap can run here, else level 0.
+    let want = u8::from(no_level1().is_none());
     let a = bin(&lab).arg("probe").assert().code(0);
     let out = text(&a);
-    assert!(out.contains("max level: 0"), "{out}");
+    assert!(out.contains(&format!("max level: {want}")), "{out}");
     assert!(out.contains("/dev/kvm"), "{out}");
+    assert!(out.contains("level 0 (process): available\n"), "{out}");
+    if want == 1 {
+        assert!(out.contains("): available\n"), "{out}");
+        assert!(out.contains("level 1 (bubblewrap 0."), "{out}");
+    }
     let m = ignorarium::machine::load(&lab.home.root).unwrap();
-    assert_eq!(m.max_level, 0);
+    assert_eq!(m.max_level, want);
     assert_eq!(m.rate_usd_per_hour, 2.5);
     let events = common::events_of(&lab.home.root);
     let probe = common::named(&events, "probe");
     assert_eq!(probe.len(), 1);
-    assert_eq!(probe[0]["attrs"]["max_level"], 0);
+    assert_eq!(probe[0]["attrs"]["max_level"], want);
     assert!(probe[0]["attrs"]["kvm"].is_boolean());
+}
+
+#[test]
+fn probe_names_the_reason_each_backend_is_unavailable() {
+    let lab = lab();
+    let dir = tempfile::tempdir().unwrap();
+    // No bwrap on PATH: the reason is the one the backend gives, verbatim.
+    let a = bin(&lab)
+        .env("PATH", dir.path())
+        .arg("probe")
+        .assert()
+        .code(0);
+    let out = text(&a);
+    assert!(out.contains("level 0 (process): available\n"), "{out}");
+    assert!(
+        out.contains("level 1 (bubblewrap unknown): unavailable: cannot run bwrap: "),
+        "{out}"
+    );
+    assert!(out.contains("max level: 0\n"), "{out}");
+    // A bwrap older than the floor.
+    let old = dir.path().join("bwrap");
+    common::write_exec(&old, "#!/bin/sh\necho 'bubblewrap 0.7.0'\n");
+    let a = bin(&lab)
+        .env("PATH", dir.path())
+        .arg("probe")
+        .assert()
+        .code(0);
+    let out = text(&a);
+    let want = "level 1 (bubblewrap 0.7.0): unavailable: bubblewrap 0.7.0 is older than 0.8, \
+                which level 1 needs for --disable-userns\n";
+    assert!(out.contains(want), "{out}");
 }
 
 #[test]
@@ -737,6 +776,7 @@ fn status_json_has_every_field() {
         "cost_rate_usd_per_hour",
         "voided",
         "retried",
+        "unknown_cpu",
         "triggers",
         "blind",
         "conditions",
@@ -751,6 +791,7 @@ fn status_json_has_every_field() {
     assert_eq!(s["budget"]["cpu_hours"], 1.0);
     assert_eq!(s["voided"], 0);
     assert_eq!(s["retried"], 0);
+    assert_eq!(s["unknown_cpu"], 0);
     assert_eq!(s["triggers"], serde_json::json!([]));
     assert_eq!(s["blind"], false);
     let conds = s["conditions"].as_array().unwrap();
@@ -771,6 +812,7 @@ fn status_json_has_every_field() {
         "budget:",
         "voided: 0",
         "retried: 0",
+        "rows with unknown cpu: 0",
         "triggers: none",
         "arm-a:",
     ] {

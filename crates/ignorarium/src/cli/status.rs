@@ -134,6 +134,7 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
         "cost_rate_usd_per_hour": (hours > 0.0).then(|| money / hours),
         "voided": p.voided,
         "retried": p.retried,
+        "unknown_cpu": p.unknown_cpu,
         "triggers": [],
         "blind": blind,
         "conditions": conditions,
@@ -199,6 +200,7 @@ fn render(r: &Value) -> String {
     ));
     let blind = if r["blind"] == true { "yes" } else { "no" };
     s.push_str(&format!("blind: {blind}\n"));
+    s.push_str(&format!("rows with unknown cpu: {}\n", r["unknown_cpu"]));
     let triggers = r["triggers"].as_array().map_or(&[][..], Vec::as_slice);
     if triggers.is_empty() {
         s.push_str("triggers: none\n");

@@ -1,3 +1,5 @@
+mod common;
+
 use ed25519_dalek::{Signer, SigningKey};
 use ignorarium::canon::{sha256_hex, to_canonical};
 use ignorarium::events::{self, Event};
@@ -546,6 +548,12 @@ fn tail_reader_reads_a_bounded_number_of_bytes() {
 #[test]
 fn refuse_mount_cases() {
     use ignorarium::home::refuse_mount;
+    // A relative path resolves against the working folder, so the child runs from `/`.
+    const NAME: &str = "refuse_mount_cases";
+    if !common::is_child(NAME) {
+        assert!(common::in_child(NAME, Path::new("/"), &[]));
+        return;
+    }
     let wsl = "5.15.0-microsoft-standard-WSL2";
     let plain = "6.1.0-generic";
     assert!(refuse_mount(wsl, Path::new("/mnt/c/x")));

@@ -1,5 +1,7 @@
-use ignorarium::backend::level0::{Level0, output_hash};
-use ignorarium::backend::{Backend, Exit, Probe, RowJob};
+mod common;
+use ignorarium::backend::level0::Level0;
+use ignorarium::backend::level1;
+use ignorarium::backend::{Backend, Exit, Probe, RowJob, Watch, output_hash};
 use ignorarium::sys;
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
@@ -8,6 +10,7 @@ use std::time::Duration;
 fn job(dir: &std::path::Path, script: &str, timeout: Duration) -> RowJob {
     let out = dir.join("out");
     std::fs::create_dir_all(&out).unwrap();
+    std::fs::create_dir_all(dir.join("in")).unwrap();
     RowJob {
         argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
         env: vec![("OUT".into(), out.to_string_lossy().into())],
@@ -40,7 +43,7 @@ fn level0_runs_hashes_output_and_times_the_row() {
         )
         .unwrap();
     assert_eq!(o.exit, Exit::Ok);
-    assert!(o.selftest_ok);
+    assert_eq!(o.selftest, None);
     assert!(o.wall_seconds > 0.0 && o.wall_seconds < 30.0);
     assert!(o.cpu_seconds >= 0.0 && o.cpu_seconds < 30.0);
     let manifest = format!("[[\"result\",\"file\",\"{}\"]]", sha(b"42"));
@@ -71,9 +74,17 @@ fn level0_clears_the_environment() {
         .unwrap();
     assert_eq!(o.exit, Exit::Ok);
     let seen = std::fs::read_to_string(d.path().join("out/env")).unwrap();
+    // The backend adds the two path variables; nothing else leaks in.
+    let mut lines: Vec<&str> = seen.lines().collect();
+    lines.sort();
+    let dir = d.path().display();
     assert_eq!(
-        seen,
-        format!("OUT={}/out{}", d.path().display(), char::from(10))
+        lines,
+        vec![
+            format!("IGNORARIUM_IN={dir}/in"),
+            format!("IGNORARIUM_OUT={dir}/out"),
+            format!("OUT={dir}/out"),
+        ]
     );
 }
 
@@ -210,6 +221,21 @@ fn a_fifo_in_the_output_is_kind_other_and_does_not_block() {
     assert!(st.success());
     let m = "[[\"p\",\"other\",\"\"]]";
     assert_eq!(output_hash(d.path()).unwrap(), sha(m.as_bytes()));
+}
+
+#[test]
+fn an_unreadable_output_file_is_an_error_not_kind_other() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("locked");
+    std::fs::write(&f, b"x").unwrap();
+    std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::File::open(&f).is_ok() {
+        println!("skip unreadable output: this user reads a mode-000 file (root)");
+        return;
+    }
+    let err = output_hash(d.path()).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
 }
 
 #[test]
@@ -369,4 +395,74 @@ fn waits_on_a_process_that_is_not_a_child_fail_at_once() {
 fn killing_a_group_that_does_not_exist_is_fine() {
     // Above the kernel's largest process id, so no group has it.
     assert!(sys::kill_group(i32::MAX as u32).is_ok());
+}
+
+/// Records each `started` call with the process group of the pid at that moment.
+#[derive(Default)]
+struct Leaders(std::cell::RefCell<Vec<(u32, u32)>>);
+
+impl Watch for Leaders {
+    fn tick(&self) -> bool {
+        true
+    }
+    fn started(&self, pid: u32) {
+        let pid_t = rustix::process::Pid::from_raw(pid as i32).unwrap();
+        let group = rustix::process::getpgid(Some(pid_t)).unwrap();
+        self.0
+            .borrow_mut()
+            .push((pid, group.as_raw_nonzero().get() as u32));
+    }
+}
+
+#[test]
+fn every_registered_backend_reports_each_sandbox_start_as_a_leader() {
+    // The test binary cannot stand in for the box in the self-test sandbox.
+    let bwrap = level1::Level1::new().bwrap;
+    let box_exe = env!("CARGO_BIN_EXE_ignorarium");
+    for b in ignorarium::backend::registered() {
+        let level = b.level();
+        let b: Box<dyn Backend> = if level == 1 {
+            Box::new(level1::Level1::with(bwrap.clone(), box_exe.into()))
+        } else {
+            b
+        };
+        if level == 1 && common::skip_level1() {
+            continue;
+        }
+        assert_eq!(b.probe(), Probe::Available, "level {level}");
+        let d = tempfile::tempdir().unwrap();
+        let watch = Leaders::default();
+        let o = b
+            .run_row(&job(d.path(), "sleep 0.2", Duration::from_secs(30)), &watch)
+            .unwrap();
+        assert_eq!(o.exit, Exit::Ok);
+        // Level 1 starts the self-test sandbox, then the row's.
+        let seen = watch.0.borrow();
+        assert_eq!(seen.len(), 1 + usize::from(level == 1), "level {level}");
+        for (pid, group) in seen.iter() {
+            assert_eq!(group, pid);
+        }
+    }
+}
+
+#[test]
+fn level0_payload_sees_its_host_paths() {
+    let d = tempfile::tempdir().unwrap();
+    let j = job(
+        d.path(),
+        "printf '%s|%s' \"$IGNORARIUM_IN\" \"$IGNORARIUM_OUT\" > \"$OUT/paths\"",
+        Duration::from_secs(30),
+    );
+    let o = Level0.run_row(&j, &|| true).unwrap();
+    assert_eq!(o.exit, Exit::Ok);
+    let seen = std::fs::read_to_string(j.output_dir.join("paths")).unwrap();
+    assert_eq!(
+        seen,
+        format!("{}|{}", j.input_dir.display(), j.output_dir.display())
+    );
+}
+
+#[test]
+fn level0_names_its_launcher() {
+    assert_eq!(Level0.launcher(), "process");
 }

@@ -145,6 +145,62 @@ pub fn in_child(name: &str, cwd: &Path, envs: &[(&str, &std::ffi::OsStr)]) -> bo
     out.status.success() && String::from_utf8_lossy(&out.stdout).contains(" 1 passed")
 }
 
+/// `/proc/<pid>/stat` state letter, or `None` once the process is reaped.
+pub fn proc_state(pid: u64) -> Option<char> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?.1.trim_start().chars().next()
+}
+
+/// Wait until the box's row file names row `row` and that row has written `started` to its
+/// output, then return the file.
+pub fn wait_for_row_file(dir: &Path, row: u64) -> serde_json::Value {
+    let t = std::time::Instant::now();
+    loop {
+        let file = std::fs::read(dir.join("run/row.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+        if let Some(f) = file.filter(|f| f["row"] == row)
+            && dir.join(format!("run/rows/{row}/out/started")).exists()
+        {
+            return f;
+        }
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(20),
+            "row {row} never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+const BOX_HOME: &str = "IGNORARIUM_TEST_BOX_HOME";
+const BOX_STUDY: &str = "IGNORARIUM_TEST_BOX_STUDY";
+
+/// Inside the child box that `kill_box_at` starts: its home and the study it runs.
+pub fn boxed_study() -> Option<(Home, String)> {
+    let root = std::env::var_os(BOX_HOME)?;
+    let id = std::env::var(BOX_STUDY).ok()?;
+    Some((Home::open_at(Path::new(&root)).unwrap(), id))
+}
+
+/// Run study `id` in a child box, this binary's test `child`, kill the box with SIGKILL once
+/// row `row` runs, and return the row file it left.
+pub fn kill_box_at(lab: &Lab, child: &str, id: &str, row: u64) -> serde_json::Value {
+    use std::process::Stdio;
+    let mut boxed = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", child, "--nocapture"])
+        .env(BOX_HOME, &lab.home.root)
+        .env(BOX_STUDY, id)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let file = wait_for_row_file(&lab.home.study_dir(id), row);
+    boxed.kill().unwrap();
+    boxed.wait().unwrap();
+    file
+}
+
 /// Write an executable file without this process holding a write descriptor to it.
 /// A thread that forks while such a descriptor is open hands it to its child, and an
 /// `exec` of the file then fails with ETXTBSY. A child process writes the file instead.
@@ -163,4 +219,82 @@ pub fn write_exec(path: &Path, text: &str) {
         .write_all(text.as_bytes())
         .unwrap();
     assert!(child.wait().unwrap().success(), "cannot write {path:?}");
+}
+
+/// Set to `1` (CI does) to make every level 1 skip a failure.
+pub const REQUIRE_LEVEL1: &str = "IGNORARIUM_REQUIRE_LEVEL1";
+
+/// True, once the reason is printed, when this host cannot run level 1, so the test
+/// returns early. With `REQUIRE_LEVEL1=1` such a host fails the test instead.
+pub fn skip_level1() -> bool {
+    let Some(why) = no_level1() else {
+        return false;
+    };
+    let required = std::env::var_os(REQUIRE_LEVEL1).is_some_and(|v| v == "1");
+    assert!(!required, "level 1 is required here, but: {why}");
+    println!("skip level1: {why}");
+    true
+}
+
+/// Where binfmt_misc handlers are registered.
+pub const BINFMT: &str = "/proc/sys/fs/binfmt_misc";
+
+/// `None` when this host has no WSL interop handler. Otherwise whether level 1 refuses the
+/// host: a `WSLInterop` handler is enabled with the `F` flag, or cannot be read.
+pub fn interop_refused() -> Option<bool> {
+    let names: Vec<String> = std::fs::read_dir(BINFMT)
+        .ok()?
+        .filter_map(|e| Some(e.ok()?.file_name().to_string_lossy().into_owned()))
+        .filter(|n| n.starts_with("WSLInterop"))
+        .collect();
+    let refused = |name: &String| match std::fs::read_to_string(Path::new(BINFMT).join(name)) {
+        Ok(t) => {
+            let flags = t.lines().find_map(|l| l.strip_prefix("flags:"));
+            t.lines().next() == Some("enabled") && flags.is_some_and(|f| f.contains('F'))
+        }
+        Err(_) => true,
+    };
+    (!names.is_empty()).then(|| names.iter().any(refused))
+}
+
+/// Why bubblewrap cannot run a level 1 sandbox on this host, or `None` when it can.
+/// Found by calling `bwrap` directly, never through the box's code, so a fault in that
+/// code fails the level 1 tests instead of skipping them. A WSL interop handler that level 1
+/// refuses (see `interop_refused`) makes the host one without level 1, as the probe does.
+pub fn no_level1() -> Option<String> {
+    if interop_refused() == Some(true) {
+        return Some(format!(
+            "a WSL interop handler in {BINFMT} has the F flag or cannot be read"
+        ));
+    }
+    let run = |args: &[&str]| std::process::Command::new("bwrap").args(args).output();
+    let version = match run(&["--version"]) {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        Err(e) => return Some(format!("cannot run bwrap: {e}")),
+    };
+    let number = |p: Option<&str>| p?.parse::<u32>().ok();
+    let mut parts = version.strip_prefix("bubblewrap ").unwrap_or("").split('.');
+    match (number(parts.next()), number(parts.next())) {
+        (Some(major), Some(minor)) if (major, minor) >= (0, 8) => {}
+        _ => return Some(format!("{version:?} is not bubblewrap 0.8 or later")),
+    }
+    let namespaces = [
+        "--unshare-user",
+        "--unshare-ipc",
+        "--unshare-pid",
+        "--unshare-net",
+        "--unshare-uts",
+        "--unshare-cgroup",
+        "--disable-userns",
+        "--ro-bind",
+        "/",
+        "/",
+        "--",
+        "/bin/true",
+    ];
+    match run(&namespaces) {
+        Ok(o) if o.status.success() => None,
+        Ok(o) => Some(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+        Err(e) => Some(format!("cannot run bwrap: {e}")),
+    }
 }

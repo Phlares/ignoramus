@@ -1,8 +1,8 @@
 mod common;
 
 use common::{
-    Lab, PAYLOAD, events_of, indices, kind_of, lab, lines_of, named, plain, register_study,
-    rows_of, with_payload,
+    Lab, PAYLOAD, boxed_study, events_of, indices, kill_box_at, kind_of, lab, lines_of, named,
+    plain, proc_state, register_study, rows_of, with_payload,
 };
 use ignorarium::backend::level0::Level0;
 use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome, Watch};
@@ -17,8 +17,7 @@ use serde_json::{Value, json};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::rc::Rc;
 use std::sync::{Arc, Barrier};
 use std::thread::{self, JoinHandle};
@@ -74,12 +73,6 @@ fn send_stop(home: &Home, id: &str, why: &str) -> Option<Record> {
     try_stop(home, id, why).unwrap()
 }
 
-/// `/proc/<pid>/stat` state letter, or `None` once the process is reaped.
-fn proc_state(pid: u64) -> Option<char> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    stat.rsplit_once(')')?.1.trim_start().chars().next()
-}
-
 /// The row file a box keeps while row `row` runs, as a dead box leaves it.
 fn leave_row_file(lab: &Lab, id: &str, row: u64, pid: u32, start: u64) {
     let run = lab.home.study_dir(id).join("run");
@@ -87,26 +80,6 @@ fn leave_row_file(lab: &Lab, id: &str, row: u64, pid: u32, start: u64) {
     let file = json!({"row": row, "span": "0123456789abcdef", "pid": pid, "pgid": pid,
                       "start": start});
     std::fs::write(run.join("row.json"), file.to_string()).unwrap();
-}
-
-/// Wait until the box's row file names row `row`, then return it.
-fn wait_for_row_file(dir: &Path, row: u64) -> Value {
-    let t = Instant::now();
-    loop {
-        let file = std::fs::read(dir.join("run/row.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
-        if let Some(f) = file.filter(|f| f["row"] == row)
-            && dir.join(format!("run/rows/{row}/out/started")).exists()
-        {
-            return f;
-        }
-        assert!(
-            t.elapsed() < Duration::from_secs(20),
-            "row {row} never started"
-        );
-        thread::sleep(Duration::from_millis(5));
-    }
 }
 
 /// On another thread, as another process would: wait until row `row` writes `started`, then act.
@@ -616,6 +589,9 @@ struct Peek {
 }
 
 impl Backend for Peek {
+    fn launcher(&self) -> String {
+        "process".into()
+    }
     fn level(&self) -> u8 {
         0
     }
@@ -654,6 +630,9 @@ struct StopThenFail {
 }
 
 impl Backend for StopThenFail {
+    fn launcher(&self) -> String {
+        "process".into()
+    }
     fn level(&self) -> u8 {
         0
     }
@@ -672,7 +651,8 @@ impl Backend for StopThenFail {
             cpu_seconds: 0.0,
             wall_seconds: 0.0,
             output_hash: String::new(),
-            selftest_ok: false,
+            selftest: None,
+            cpu_unknown: None,
         })
     }
 }
@@ -699,6 +679,9 @@ struct LateStop {
 }
 
 impl Backend for LateStop {
+    fn launcher(&self) -> String {
+        "process".into()
+    }
     fn level(&self) -> u8 {
         0
     }
@@ -783,6 +766,9 @@ struct StopThenBreakEvents {
 }
 
 impl Backend for StopThenBreakEvents {
+    fn launcher(&self) -> String {
+        "process".into()
+    }
     fn level(&self) -> u8 {
         0
     }
@@ -822,31 +808,16 @@ fn a_run_that_errors_after_a_stop_still_leaves_the_stop_trace() {
 /// Runs only as the child of the dead-box tests: the box that gets killed mid-row.
 #[test]
 fn dead_box_child() {
-    let (Some(root), Some(id)) = (
-        std::env::var_os("CONTROL_BOX_HOME"),
-        std::env::var("CONTROL_BOX_STUDY").ok(),
-    ) else {
+    let Some((home, id)) = boxed_study() else {
         return;
     };
-    let home = Home::open_at(Path::new(&root)).unwrap();
     let plan = prepare_with(&home, &id, vec![Box::new(Level0)]).unwrap();
     let _ = runner::run(&plan);
 }
 
 /// Run study `id` in a child box, kill the box once row `row` runs, and return its row file.
 fn kill_the_box_at(lab: &Lab, id: &str, row: u64) -> Value {
-    let mut boxed = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "dead_box_child", "--nocapture"])
-        .env("CONTROL_BOX_HOME", &lab.home.root)
-        .env("CONTROL_BOX_STUDY", id)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let file = wait_for_row_file(&lab.home.study_dir(id), row);
-    boxed.kill().unwrap();
-    boxed.wait().unwrap();
+    let file = kill_box_at(lab, "dead_box_child", id, row);
     // The row's group outlives its box.
     let pid = file["pid"].as_u64().unwrap();
     assert!(
@@ -950,6 +921,9 @@ struct NoRowFile {
 }
 
 impl Backend for NoRowFile {
+    fn launcher(&self) -> String {
+        "process".into()
+    }
     fn level(&self) -> u8 {
         0
     }
@@ -1022,6 +996,9 @@ struct StopThenBlind {
 }
 
 impl Backend for StopThenBlind {
+    fn launcher(&self) -> String {
+        "process".into()
+    }
     fn level(&self) -> u8 {
         0
     }
@@ -1039,7 +1016,8 @@ impl Backend for StopThenBlind {
             cpu_seconds: 0.0,
             wall_seconds: 0.0,
             output_hash: String::new(),
-            selftest_ok: true,
+            selftest: None,
+            cpu_unknown: None,
         })
     }
 }
@@ -1099,6 +1077,9 @@ struct PauseThenLook {
 }
 
 impl Backend for PauseThenLook {
+    fn launcher(&self) -> String {
+        "process".into()
+    }
     fn level(&self) -> u8 {
         0
     }
