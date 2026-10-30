@@ -2431,17 +2431,29 @@ fn stream_of(lab: &Lab, log: LogName) -> Vec<(String, serde_json::Value)> {
     .collect()
 }
 
-/// The confirmatory study `id`, its spec edited by `edit` after `one_unit_each`, registered in
-/// a box whose `my-pilot` gives the sd and icc, then run to the end with `payload` on `backend`.
+/// The confirmatory study `id` of `repeats` repeats, its spec edited by `edit` after
+/// `one_unit_each`, registered in a box whose `my-pilot` gives the sd and icc, then run to the
+/// end with `payload` on `backend`.
 fn tested(
     lab: &Lab,
     id: &str,
+    repeats: u32,
     edit: impl Fn(String) -> String,
     payload: &str,
     backend: Box<dyn Backend>,
 ) -> RunPlan {
-    common::pilot(&lab.home, vec![common::arm_a()]);
-    register_study(lab, id, |t| edit(one_unit_each(t)), &[], payload);
+    // The pilot's estimate of the contrast, keyed by the repeats.
+    let mut pilot = common::arm_a();
+    let terms = [("arm-a".to_string(), 1.0, serde_json::json!({}))];
+    let reference = ("exact".to_string(), serde_json::json!({}));
+    let (key, hash) = contrast_key(&common::ppl_ratio(), repeats.into(), &reference, &terms);
+    (pilot["key"], pilot["key_hash"]) = (key, serde_json::json!(hash));
+    common::pilot(&lab.home, vec![pilot]);
+    let edit = |t: String| {
+        let t = one_unit_each(t).replace("repeats = 1\n", &format!("repeats = {repeats}\n"));
+        edit(t)
+    };
+    register_study(lab, id, edit, &[], payload);
     let mut plan = plan_of(lab, id);
     plan.backend = backend;
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
@@ -2471,7 +2483,7 @@ fn a_planted_effect_passes_and_closes_a_discovery() {
     let lab = lab();
     // Every unit pairs to -25 %, below the margin 0: each of the 15 clusters scores 1, and the
     // 14 bets of 1/2 give 1.5^14 = 292, past 1 / 0.005.
-    tested(&lab, "planted", |t| t, &arm_a_at(6), Box::new(Level0));
+    tested(&lab, "planted", 1, |t| t, &arm_a_at(6), Box::new(Level0));
     let v = verdict_of(&lab, "planted");
     let level = level_of(&lab, "planted");
     let e = v.e_value.unwrap();
@@ -2508,7 +2520,7 @@ fn a_null_study_fails_and_closes_without_a_discovery() {
     // Every unit pairs to +25 %: no cluster lies below the margin, and the test never bets.
     // The study registers into the test log, and its slot closes there.
     let test_log = |t: String| t.replace("test_log = false", "test_log = true");
-    tested(&lab, "null", test_log, &arm_a_at(10), Box::new(Level0));
+    tested(&lab, "null", 1, test_log, &arm_a_at(10), Box::new(Level0));
     let v = verdict_of(&lab, "null");
     assert_eq!(
         (v.verdict.as_str(), v.e_value, v.reason),
@@ -2525,7 +2537,7 @@ fn a_void_row_in_scope_fails_the_claim() {
     let lab = lab();
     // The planted effect, with row 0 void: its unit has no paired value.
     let (b, _) = fake(vec![Exit::Payload(1)]);
-    tested(&lab, "void", |t| t, &arm_a_at(6), Box::new(b));
+    tested(&lab, "void", 1, |t| t, &arm_a_at(6), Box::new(b));
     assert_eq!(rows_of(&lab, "void")[0].body["exit"], "payload:1");
     let v = verdict_of(&lab, "void");
     assert_eq!(
@@ -2541,12 +2553,30 @@ fn a_void_row_in_scope_fails_the_claim() {
     let stream = stream_of(&lab, LogName::Plan);
     assert_eq!(stream.last(), Some(&close_of("void", 0.0, false)));
     assert!(finished(&lab, "void"));
+
+    // Two repeats: row 0, the first unit's reference row of repeat 0, is void. Its repeat 1
+    // still pairs, so the unit has a value, and it is still incomplete.
+    let lab = common::lab();
+    let (b, _) = fake(vec![Exit::Payload(1)]);
+    let plan = tested(&lab, "void2", 2, |t| t, &arm_a_at(6), Box::new(b));
+    let row0 = &plan.schedule.rows[0];
+    assert_eq!((row0.condition.as_str(), row0.repeat), ("exact", 0));
+    assert_eq!(rows_of(&lab, "void2")[0].body["exit"], "payload:1");
+    let v = verdict_of(&lab, "void2");
+    assert_eq!(
+        (v.verdict.as_str(), v.e_value, v.incomplete_units),
+        ("fail", Some(0.0), 1)
+    );
+    assert_eq!(v.reason.as_deref(), Some("incomplete units in scope: 1"));
+    assert_eq!(v.bounds[0].clusters, 15);
+    let stream = stream_of(&lab, LogName::Plan);
+    assert_eq!(stream.last(), Some(&close_of("void2", 0.0, false)));
 }
 
 #[test]
 fn verdicts_and_the_close_are_written_once() {
     let lab = lab();
-    let plan = tested(&lab, "once", |t| t, &arm_a_at(6), Box::new(Level0));
+    let plan = tested(&lab, "once", 1, |t| t, &arm_a_at(6), Box::new(Level0));
     let dir = lab.home.study_dir("once");
     let stream = Log::of(&lab.home, LogName::Plan).path().to_path_buf();
     let kinds = ["analysis", "estimate", "verdict"];
@@ -2584,18 +2614,21 @@ fn verdicts_and_the_close_are_written_once() {
         assert_eq!(stream_of(&lab, LogName::Plan), closed, "kept {kept}");
         assert!(finished(&lab, "once"), "kept {kept}");
     }
-    // Another box version wrote every record but the close: it is refused, and the slot stays
-    // open for that box.
+    // Another box version wrote every record but the close, and its verdict holds an e-value
+    // of 250: the rerun adds no record and closes the slot with the e-value the signed
+    // verdicts give, not one of its own.
     keep_records(&dir, n - 3);
     let mut old = all[n - 3].body.clone();
     old["box_version"] = serde_json::json!("0.0.0");
     append_record(&lab, "once", "analysis", old);
     append_record(&lab, "once", "estimate", all[n - 2].body.clone());
-    append_record(&lab, "once", "verdict", all[n - 1].body.clone());
+    let mut verdict = all[n - 1].body.clone();
+    verdict["e_value"] = serde_json::json!(250.0);
+    append_record(&lab, "once", "verdict", verdict);
     keep_lines(&stream, 2);
-    match run(&plan) {
-        Err(RunError::Records(why)) => assert!(why.contains("0.0.0"), "{why}"),
-        other => panic!("{other:?}"),
-    }
-    assert_eq!(stream_of(&lab, LogName::Plan).len(), 2);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(common::records_of(&lab, "once").len(), n);
+    let stream = stream_of(&lab, LogName::Plan);
+    assert_eq!(stream.last(), Some(&close_of("once", 250.0, true)));
+    assert!(finished(&lab, "once"));
 }

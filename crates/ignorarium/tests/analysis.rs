@@ -1,11 +1,16 @@
-use evidence::Tail;
 use evidence::claim::{Bound, Statistic, e_value, order};
 use evidence::rng::Rng;
-use ignorarium::analysis::{Paired, distinct_clusters, estimates, paired, select, verdicts};
+use evidence::{Tail, tree};
+use ignorarium::analysis::{
+    Paired, distinct_clusters, estimates, paired, select, study_e_value, verdicts,
+};
 use ignorarium::derived::{BoundResult, Candidate, Estimate, Selection, Verdict, contrast_key};
+use ignorarium::home::Home;
+use ignorarium::keys;
 use ignorarium::records::Record;
 use ignorarium::seed::seed;
 use ignorarium::spec::model::{Direction, Role, SelectionRule, Spec};
+use ignorarium::stream::{Log, LogName};
 use ignorarium::units::Cluster;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -621,6 +626,11 @@ const LEVEL: f64 = 0.005;
 /// The template's one hypothesis, difference-paired against `base`, in a study of `mode`: it
 /// holds `strata` to `claim` by `statistic`, with the whole level.
 fn claimed(mode: &str, strata: &[&str], claim: Value, statistic: Value) -> Spec {
+    Spec::from_value(&claimed_value(mode, strata, claim, statistic)).unwrap()
+}
+
+/// `claimed`, as the spec's value.
+fn claimed_value(mode: &str, strata: &[&str], claim: Value, statistic: Value) -> Value {
     let mut v = ignorarium::spec::load("../../templates/numeric-ablation.toml".as_ref())
         .unwrap()
         .value;
@@ -632,12 +642,16 @@ fn claimed(mode: &str, strata: &[&str], claim: Value, statistic: Value) -> Spec 
     h["claim"] = claim;
     h["statistic"] = statistic;
     h["alpha_share"] = json!(1.0);
-    Spec::from_value(&v).unwrap()
+    v
 }
 
 /// A claim below 0 on the mean, in the range [-1, 1].
 fn below_zero(mode: &str, strata: &[&str]) -> Spec {
-    claimed(
+    Spec::from_value(&below_zero_value(mode, strata)).unwrap()
+}
+
+fn below_zero_value(mode: &str, strata: &[&str]) -> Value {
+    claimed_value(
         mode,
         strata,
         json!({ "below": 0.0 }),
@@ -668,6 +682,18 @@ fn data(spec: &Spec, groups: &[Group]) -> (Paired, Vec<Cluster>) {
         clusters.push(cluster(path, stratum, xs.len() as u32));
     }
     (paired(spec, &rows), clusters)
+}
+
+/// The verdicts, and the study's e-value merged from them.
+fn decided(
+    spec: &Spec,
+    p: &Paired,
+    clusters: &[Cluster],
+    level: Option<f64>,
+) -> (Vec<Verdict>, Option<f64>) {
+    let vs = verdicts(spec, p, clusters, &HASH, level);
+    let e = study_e_value(spec, &vs, level);
+    (vs, e)
 }
 
 /// The order the test of hypothesis `id` takes the `n` clusters of `stratum` in.
@@ -729,7 +755,7 @@ fn a_confirmatory_claim_tests_each_bound_on_one_observation_per_cluster_in_a_see
     assert!(1.01 < below && below < above, "{below} {above}");
     // It passes at a level whose threshold 1 / level the e-value reaches, and fails just above.
     for (level, verdict) in [(1.01 / below, "pass"), (0.99 / below, "fail")] {
-        let (vs, study) = verdicts(&spec, &p, &clusters, &HASH, Some(level));
+        let (vs, study) = decided(&spec, &p, &clusters, Some(level));
         let want = Verdict {
             hypothesis: "H1".into(),
             verdict: verdict.into(),
@@ -755,7 +781,7 @@ fn every_stratum_must_hold() {
     let mut groups = same("c", "code", 15, -1.0);
     groups.extend(same("a", "article", 15, 1.0));
     let (p, clusters) = data(&spec, &groups);
-    let (vs, study) = verdicts(&spec, &p, &clusters, &HASH, Some(LEVEL));
+    let (vs, study) = decided(&spec, &p, &clusters, Some(LEVEL));
     // The code stratum alone passes; in the article stratum every cluster lies above 0, and
     // the test never bets.
     assert!(strong(15) >= 1.0 / LEVEL);
@@ -774,7 +800,7 @@ fn every_stratum_must_hold() {
     // With the article clusters below 0 too, it passes.
     let groups = [same("c", "code", 15, -1.0), same("a", "article", 15, -1.0)].concat();
     let (p, clusters) = data(&spec, &groups);
-    let (vs, _) = verdicts(&spec, &p, &clusters, &HASH, Some(LEVEL));
+    let (vs, _) = decided(&spec, &p, &clusters, Some(LEVEL));
     assert_eq!(
         (vs[0].verdict.as_str(), vs[0].e_value),
         ("pass", Some(strong(15)))
@@ -796,7 +822,7 @@ fn an_out_of_range_cluster_mean_is_clipped_into_the_claim() {
         .map(|i| group(&format!("c{i}"), "", &[-5.0; 3]))
         .collect();
     let (p, clusters) = data(&spec, &groups);
-    let (vs, _) = verdicts(&spec, &p, &clusters, &HASH, Some(LEVEL));
+    let (vs, _) = decided(&spec, &p, &clusters, Some(LEVEL));
     let stat = Statistic::Mean { lo: -0.1, hi: 0.1 };
     let want = e_value(&stat, &BELOW_ZERO, &[-0.1; 15]).unwrap();
     assert!(want >= 1.0 / LEVEL);
@@ -818,9 +844,8 @@ fn only_an_incomplete_unit_in_scope_fails_the_claim() {
     // is in the scope of a claim on code.
     clusters[15].picked.push(1);
     clusters[16].picked.push(1);
-    let judge = |spec: &Spec, clusters: &[Cluster]| {
-        verdicts(spec, &p, clusters, &HASH, Some(LEVEL)).0.remove(0)
-    };
+    let judge =
+        |spec: &Spec, clusters: &[Cluster]| decided(spec, &p, clusters, Some(LEVEL)).0.remove(0);
     let v = judge(&spec, &clusters);
     assert_eq!((v.verdict.as_str(), v.e_value), ("pass", Some(strong(15))));
     assert_eq!((v.incomplete_units, v.reason), (0, None));
@@ -837,6 +862,57 @@ fn only_an_incomplete_unit_in_scope_fails_the_claim() {
     assert_eq!(v.reason.as_deref(), Some("incomplete units in scope: 1"));
     // The bound reports the test on the complete units, which alone would pass.
     assert_eq!(v.bounds, [bound("code", "below", 0.0, 15, strong(15))]);
+
+    // With two repeats, a unit is complete only when each term pairs in both. Rows of c0#0
+    // in `all`: repeat 0 reference and arm-a (0, 1), repeat 1 reference and arm-a (2, 3).
+    let mut twice = below_zero("confirmatory", &[]);
+    twice.design.repeats = 2;
+    let clusters: Vec<Cluster> = (0..15).map(|i| cluster(&format!("c{i}"), "", 1)).collect();
+    let all: Vec<Record> = (0..15)
+        .flat_map(|i| {
+            let u = format!("c{i}#0");
+            (0..2).flat_map(move |r| [ok(&u, "base", r, 10.0), ok(&u, "arm-a", r, 9.0)])
+        })
+        .collect();
+    let judge = |rows: &[Record]| decided(&twice, &paired(&twice, rows), &clusters, Some(LEVEL));
+    let (vs, _) = judge(&all);
+    assert_eq!(
+        (vs[0].verdict.as_str(), vs[0].incomplete_units),
+        ("pass", 0)
+    );
+    // A void arm-a row, or a void reference row, in one repeat: the other repeat still pairs,
+    // and the unit is still incomplete.
+    for gone in [3, 2] {
+        let mut rows = all.clone();
+        rows.remove(gone);
+        let (vs, study) = judge(&rows);
+        let v = &vs[0];
+        assert_eq!(
+            (v.verdict.as_str(), v.e_value, v.incomplete_units, study),
+            ("fail", Some(0.0), 1, Some(0.0)),
+            "row {gone}"
+        );
+        assert_eq!(v.reason.as_deref(), Some("incomplete units in scope: 1"));
+    }
+    // A contrast of two terms: one short in one repeat is enough, the other being whole.
+    let mut two = twice.clone();
+    two.question.hypotheses[0].contrast = [("arm-a".into(), 1.0), ("arm-b".into(), -1.0)].into();
+    let arm_b = (0..15).flat_map(|i| (0..2).map(move |r| ok(&format!("c{i}#0"), "arm-b", r, 10.0)));
+    let mut rows: Vec<Record> = all.iter().cloned().chain(arm_b).collect();
+    let judge = |rows: &[Record]| decided(&two, &paired(&two, rows), &clusters, Some(LEVEL));
+    assert_eq!(judge(&rows).0[0].incomplete_units, 0);
+    // The last row of c0#0's: arm-b, repeat 1.
+    let at = rows.len() - 29;
+    assert_eq!(
+        (
+            rows[at].body["unit"].clone(),
+            rows[at].body["repeat"].clone()
+        ),
+        (json!("c0#0"), json!(1))
+    );
+    rows.remove(at);
+    let (vs, _) = judge(&rows);
+    assert_eq!((vs[0].e_value, vs[0].incomplete_units), (Some(0.0), 1));
 }
 
 #[test]
@@ -855,7 +931,7 @@ fn an_exploratory_quantile_claim_passes_on_its_point_estimate() {
             .collect();
         let (p, mut clusters) = data(&spec, &[group("m", "", &xs)]);
         clusters[0].picked.extend([48, 49]);
-        verdicts(&spec, &p, &clusters, &HASH, Some(LEVEL))
+        decided(&spec, &p, &clusters, Some(LEVEL))
     };
     let (vs, study) = judge(44);
     let want = Verdict {
@@ -884,7 +960,7 @@ fn a_descriptive_hypothesis_gets_verdict_none() {
     let spec = one_hypothesis(&[]);
     let (p, mut clusters) = data(&spec, &[group("c", "", &[1.0, 2.0])]);
     clusters[0].picked.push(2);
-    let (vs, study) = verdicts(&spec, &p, &clusters, &HASH, None);
+    let (vs, study) = decided(&spec, &p, &clusters, None);
     assert_eq!(study, None);
     let body = serde_json::to_value(&vs).unwrap();
     assert_eq!(
@@ -910,7 +986,7 @@ fn a_descriptive_hypothesis_gets_verdict_none() {
     // A confirmatory study with no claim to test still closes its slot: with e-value 0.
     let mut confirmatory = spec.clone();
     confirmatory.study.mode = ignorarium::spec::model::Mode::Confirmatory;
-    let (vs, study) = verdicts(&confirmatory, &p, &clusters, &HASH, Some(LEVEL));
+    let (vs, study) = decided(&confirmatory, &p, &clusters, Some(LEVEL));
     assert_eq!((vs[0].verdict.as_str(), study), ("none", Some(0.0)));
 }
 
@@ -938,7 +1014,7 @@ fn the_level_splits_by_alpha_share() {
     let spec = Spec::from_value(&v).unwrap();
     let groups = [same("c", "code", 15, -1.0), same("a", "article", 16, -1.0)].concat();
     let (p, clusters) = data(&spec, &groups);
-    let (vs, study) = verdicts(&spec, &p, &clusters, &HASH, Some(LEVEL));
+    let (vs, study) = decided(&spec, &p, &clusters, Some(LEVEL));
     let (e1, e3) = (strong(15), strong(16));
     // H1 needs 1 / 0.00375 = 267 and has 292; H3 needs 1 / 0.00125 = 800 and has 438, which
     // the whole level (200) would pass.
@@ -971,7 +1047,7 @@ fn the_level_splits_by_alpha_share() {
         .unwrap()
         .remove("alpha_share");
     let spec = Spec::from_value(&v).unwrap();
-    let (vs, study) = verdicts(&spec, &p, &clusters, &HASH, Some(LEVEL));
+    let (vs, study) = decided(&spec, &p, &clusters, Some(LEVEL));
     let why = "the study's level does not split over its claims: invalid parameter: weights";
     for i in [0, 2] {
         assert_eq!(
@@ -997,7 +1073,7 @@ fn a_claim_the_test_cannot_take_fails_closed() {
     }
     for (spec, why, tested) in cases {
         let (p, clusters) = data(&spec, &same("c", "", 15, -1.0));
-        let (vs, _) = verdicts(&spec, &p, &clusters, &HASH, Some(LEVEL));
+        let (vs, _) = decided(&spec, &p, &clusters, Some(LEVEL));
         let v = &vs[0];
         assert_eq!(v.verdict, "fail", "{why}");
         assert_eq!(
@@ -1020,7 +1096,7 @@ fn an_e_value_too_large_for_a_float_is_kept_finite() {
         e_value(&MEAN, &BELOW_ZERO, &[-1.0; 1800]).unwrap(),
         f64::INFINITY
     );
-    let (vs, study) = verdicts(&spec, &p, &clusters, &HASH, Some(LEVEL));
+    let (vs, study) = decided(&spec, &p, &clusters, Some(LEVEL));
     assert_eq!(
         (vs[0].verdict.as_str(), vs[0].e_value, study),
         ("pass", Some(f64::MAX), Some(f64::MAX))
@@ -1030,4 +1106,36 @@ fn an_e_value_too_large_for_a_float_is_kept_finite() {
         serde_json::to_value(&vs[0]).unwrap()["e_value"],
         json!(f64::MAX)
     );
+
+    // Five claims at the largest float, with shares whose float sum is 1: their weighted mean
+    // overflows, so the study's e-value is clamped once more, and the stream takes it.
+    let shares = [0.1, 0.12, 0.48, 0.25, 0.05];
+    assert_eq!(shares.iter().sum::<f64>(), 1.0);
+    let merged = tree::decide(LEVEL, &shares, &[Some(f64::MAX); 5]).unwrap();
+    assert_eq!(merged.e_value, f64::INFINITY);
+    let mut v = below_zero_value("confirmatory", &[]);
+    let h = v["question"]["hypotheses"][0].clone();
+    let five: Vec<Value> = (shares.iter().enumerate())
+        .map(|(i, s)| {
+            let mut h = h.clone();
+            h["id"] = json!(format!("H{i}"));
+            h["alpha_share"] = json!(s);
+            h
+        })
+        .collect();
+    v["question"]["hypotheses"] = json!(five);
+    let five = Spec::from_value(&v).unwrap();
+    let (vs, study) = decided(&five, &p, &clusters, Some(LEVEL));
+    assert!(
+        vs.iter()
+            .all(|v| v.verdict == "pass" && v.e_value == Some(f64::MAX))
+    );
+    assert_eq!(study, Some(f64::MAX));
+    let dir = tempfile::TempDir::new().unwrap();
+    let home = Home::open_at(dir.path()).unwrap();
+    let key = keys::load_or_create(&home).unwrap();
+    let log = Log::of(&home, LogName::Plan);
+    let slot = log.open(&key, "s", 0.0).unwrap().slot;
+    // A discovery at the slot's level.
+    assert!(log.close(&key, "s", slot, f64::MAX).unwrap());
 }
