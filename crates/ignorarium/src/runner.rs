@@ -990,6 +990,7 @@ fn attempt_row(
 ) -> Result<(String, Option<Halt>), RunError> {
     let mut attempts = 0u32;
     let mut unknown = false;
+    let mut bound;
     let span = watch.row.borrow().1.clone();
     // An attempt's events come after its record, so a failed event write cannot lose the
     // attempt's spend.
@@ -1007,17 +1008,16 @@ fn attempt_row(
                 output_hash: String::new(),
                 selftest: None,
                 cpu_unknown: None,
+                ended: false,
             });
-        // A meter that cannot read is charged the row estimate, as the fail-safe rule says,
-        // and the run pauses once the row is recorded.
-        if o.cpu_unknown.is_some() {
-            o.cpu_seconds = o.cpu_seconds.max(books.per_row.cpu_seconds);
-            unknown = true;
-        }
+        // A row the box ended, or whose meter cannot read, is charged a bound. A meter that
+        // cannot read also pauses the run once the row is recorded.
+        (o.cpu_seconds, bound) = charge(&o, plan.backend.cpus(), books.per_row.cpu_seconds);
+        unknown |= o.cpu_unknown.is_some();
         control::row_ended(&plan.home, &plan.study_id);
         // A row ended early is not data: its spend is recorded, and the run ends.
         if let Some(h) = watch.ended.borrow_mut().take() {
-            unrecorded(plan, log, row, books, &o, &h.reason())?;
+            unrecorded(plan, log, row, books, &o, bound, &h.reason())?;
             watch.keep(noted(&o));
             return Ok((h.exit().into(), Some(h)));
         }
@@ -1038,6 +1038,7 @@ fn attempt_row(
             row,
             books,
             &o,
+            bound,
             &format!("infrastructure fault: {why}"),
         )?;
         watch.keep(noted(&o));
@@ -1098,6 +1099,9 @@ fn attempt_row(
     if let Some(why) = &outcome.cpu_unknown {
         body["cpu_unknown"] = json!(why);
     }
+    if bound {
+        body["cpu_bound"] = json!(true);
+    }
     records::append(
         log,
         &plan.key,
@@ -1118,6 +1122,20 @@ fn attempt_row(
         _ => unknown.then(|| unknown_cpu(row)),
     };
     Ok((exit, halt))
+}
+
+/// The CPU seconds to charge for an attempt, and whether that figure is a bound. A row the
+/// box ended, or whose CPU count is unknown, may have used more than was measured: it is
+/// charged the CPU it could have used, wall time times the CPUs it may use. An unknown
+/// count is also charged at least the row estimate.
+pub fn charge(o: &RowOutcome, cpus: u32, estimate_cpu: f64) -> (f64, bool) {
+    let unknown = o.cpu_unknown.is_some();
+    if !(o.ended || unknown) {
+        return (o.cpu_seconds, false);
+    }
+    let floor = if unknown { estimate_cpu } else { 0.0 };
+    let could_use = o.wall_seconds * f64::from(cpus);
+    (o.cpu_seconds.max(could_use).max(floor), true)
 }
 
 /// The pause for a row whose CPU count the backend could not read.
@@ -1167,12 +1185,16 @@ fn unrecorded(
     row: &Row,
     books: &mut Books,
     o: &RowOutcome,
+    bound: bool,
     reason: &str,
 ) -> Result<(), RunError> {
     let mut body =
         json!({ "cpu_seconds": o.cpu_seconds, "wall_seconds": o.wall_seconds, "reason": reason });
     if let Some(why) = &o.cpu_unknown {
         body["cpu_unknown"] = json!(why);
+    }
+    if bound {
+        body["cpu_bound"] = json!(true);
     }
     records::append(
         log,

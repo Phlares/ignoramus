@@ -466,3 +466,52 @@ fn level0_payload_sees_its_host_paths() {
 fn level0_names_its_launcher() {
     assert_eq!(Level0.launcher(), "process");
 }
+
+#[test]
+fn supervise_marks_a_timed_out_row_ended() {
+    let d = tempfile::tempdir().unwrap();
+    let j = job(d.path(), "sleep 30", Duration::from_millis(300));
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.args(["-c", "sleep 30"]);
+    let s = ignorarium::backend::supervise(cmd, &j, std::time::Instant::now(), &|| true);
+    assert_eq!(s.exit, Exit::Payload(124));
+    assert!(s.ended);
+    let o = Level0.run_row(&j, &|| true).unwrap();
+    assert_eq!(o.exit, Exit::Payload(124));
+    assert!(o.ended);
+}
+
+#[test]
+fn a_payload_that_exits_124_is_not_ended() {
+    let d = tempfile::tempdir().unwrap();
+    let o = Level0
+        .run_row(&job(d.path(), "exit 124", Duration::from_secs(30)), &|| {
+            true
+        })
+        .unwrap();
+    assert_eq!(o.exit, Exit::Payload(124));
+    assert!(!o.ended);
+}
+
+#[test]
+fn a_row_the_watch_stops_is_ended_and_one_that_finishes_is_not() {
+    let d = tempfile::tempdir().unwrap();
+    let o = Level0
+        .run_row(&job(d.path(), "sleep 30", Duration::from_secs(30)), &|| {
+            false
+        })
+        .unwrap();
+    assert_eq!(o.exit, Exit::Stopped);
+    assert!(o.ended);
+    let o = Level0
+        .run_row(&job(d.path(), "exit 0", Duration::from_secs(30)), &|| true)
+        .unwrap();
+    assert!(!o.ended);
+}
+
+#[test]
+fn levels_0_and_1_report_the_host_cpu_count() {
+    let n = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
+    assert_eq!(Level0.cpus(), n);
+    assert_eq!(level1::Level1::new().cpus(), n);
+}

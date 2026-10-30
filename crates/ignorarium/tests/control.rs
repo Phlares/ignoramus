@@ -592,6 +592,9 @@ struct Peek {
 }
 
 impl Backend for Peek {
+    fn cpus(&self) -> u32 {
+        1
+    }
     fn launcher(&self) -> String {
         "process".into()
     }
@@ -633,6 +636,9 @@ struct StopThenFail {
 }
 
 impl Backend for StopThenFail {
+    fn cpus(&self) -> u32 {
+        1
+    }
     fn launcher(&self) -> String {
         "process".into()
     }
@@ -656,6 +662,7 @@ impl Backend for StopThenFail {
             output_hash: String::new(),
             selftest: None,
             cpu_unknown: None,
+            ended: false,
         })
     }
 }
@@ -682,6 +689,9 @@ struct LateStop {
 }
 
 impl Backend for LateStop {
+    fn cpus(&self) -> u32 {
+        1
+    }
     fn launcher(&self) -> String {
         "process".into()
     }
@@ -769,6 +779,9 @@ struct StopThenBreakEvents {
 }
 
 impl Backend for StopThenBreakEvents {
+    fn cpus(&self) -> u32 {
+        1
+    }
     fn launcher(&self) -> String {
         "process".into()
     }
@@ -924,6 +937,9 @@ struct NoRowFile {
 }
 
 impl Backend for NoRowFile {
+    fn cpus(&self) -> u32 {
+        1
+    }
     fn launcher(&self) -> String {
         "process".into()
     }
@@ -999,6 +1015,9 @@ struct StopThenBlind {
 }
 
 impl Backend for StopThenBlind {
+    fn cpus(&self) -> u32 {
+        1
+    }
     fn launcher(&self) -> String {
         "process".into()
     }
@@ -1021,6 +1040,7 @@ impl Backend for StopThenBlind {
             output_hash: String::new(),
             selftest: None,
             cpu_unknown: None,
+            ended: false,
         })
     }
 }
@@ -1080,6 +1100,9 @@ struct PauseThenLook {
 }
 
 impl Backend for PauseThenLook {
+    fn cpus(&self) -> u32 {
+        1
+    }
     fn launcher(&self) -> String {
         "process".into()
     }

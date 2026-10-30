@@ -33,6 +33,9 @@ struct Fake {
 }
 
 impl Backend for Fake {
+    fn cpus(&self) -> u32 {
+        1
+    }
     fn launcher(&self) -> String {
         "process".into()
     }
@@ -371,6 +374,9 @@ struct SignalAfterRow0 {
 }
 
 impl Backend for SignalAfterRow0 {
+    fn cpus(&self) -> u32 {
+        1
+    }
     fn launcher(&self) -> String {
         "process".into()
     }
@@ -1370,4 +1376,130 @@ fn a_resumed_run_writes_run_resume_and_no_second_run_start() {
     assert_eq!(resumes.len(), 1);
     assert_eq!(resumes[0]["attrs"]["isolation"], 0);
     assert_eq!(resumes[0]["attrs"]["launcher"], "process");
+}
+
+fn outcome(cpu: f64, wall: f64, ended: bool, unknown: bool) -> RowOutcome {
+    RowOutcome {
+        exit: Exit::Ok,
+        cpu_seconds: cpu,
+        wall_seconds: wall,
+        output_hash: String::new(),
+        selftest: None,
+        cpu_unknown: unknown.then(|| "unreadable".to_string()),
+        ended,
+    }
+}
+
+#[test]
+fn charge_takes_the_bound_only_for_ended_or_unknown_rows() {
+    use ignorarium::runner::charge;
+    assert_eq!(
+        charge(&outcome(2.0, 10.0, true, false), 8, 100.0),
+        (80.0, true)
+    );
+    // The row estimate floors only an unknown count.
+    assert_eq!(
+        charge(&outcome(2.0, 10.0, true, false), 1, 100.0),
+        (10.0, true)
+    );
+    assert_eq!(
+        charge(&outcome(2.0, 10.0, false, true), 8, 100.0),
+        (100.0, true)
+    );
+    assert_eq!(
+        charge(&outcome(2.0, 10.0, false, true), 8, 50.0),
+        (80.0, true)
+    );
+    // Measured CPU above the bound stays.
+    assert_eq!(
+        charge(&outcome(90.0, 10.0, true, false), 8, 0.0),
+        (90.0, true)
+    );
+    assert_eq!(
+        charge(&outcome(2.0, 10.0, false, false), 8, 100.0),
+        (2.0, false)
+    );
+}
+
+#[test]
+fn a_stopped_row_is_charged_wall_times_cpus() {
+    const BUSY: &str = "#!/bin/sh\n\
+        for i in 1 2 3 4; do (while :; do :; done) & done\n\
+        echo started > \"$IGNORARIUM_OUT/started\"\n\
+        sleep 30\n";
+    let lab = lab();
+    let dir = common::with_payload(&lab, "busy-stop", BUSY);
+    let plan = plan_of(&lab, "busy-stop");
+    let marker = dir.join("run/rows/0/out/started");
+    let control = ignorarium::control::ControlFile::of(&lab.home, "busy-stop");
+    let other = std::thread::spawn(move || {
+        let t = std::time::Instant::now();
+        while !marker.exists() {
+            assert!(t.elapsed().as_secs() < 20, "row 0 never started");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        control.request_stop("manual").unwrap();
+    });
+    assert_eq!(run(&plan).unwrap(), RunStatus::Stopped("manual".into()));
+    other.join().unwrap();
+    let spends = kind_of(&lab, "busy-stop", "spend");
+    assert_eq!(spends.len(), 1);
+    let wall = spends[0].body["wall_seconds"].as_f64().unwrap();
+    let cpu = spends[0].body["cpu_seconds"].as_f64().unwrap();
+    assert_eq!(spends[0].body["cpu_bound"], true);
+    assert!(wall >= 1.0, "{wall}");
+    assert!(cpu >= wall * f64::from(Level0.cpus()), "{cpu} {wall}");
+}
+
+#[test]
+fn a_row_that_runs_to_its_end_has_no_bound() {
+    let lab = lab();
+    plain(&lab, "no-bound");
+    let plan = plan_of(&lab, "no-bound");
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    for r in rows_of(&lab, "no-bound") {
+        assert!(r.body.get("cpu_bound").is_none());
+    }
+}
+
+#[test]
+fn a_timed_out_row_record_carries_the_bound() {
+    let lab = lab();
+    plain(&lab, "wall-out");
+    let mut plan = plan_of(&lab, "wall-out");
+    let (b, _) = fake(vec![]);
+    plan.backend = Box::new(Ended(b));
+    assert!(matches!(
+        run(&plan).unwrap(),
+        RunStatus::Done | RunStatus::Paused(_)
+    ));
+    let rows = rows_of(&lab, "wall-out");
+    assert_eq!(rows[0].body["cpu_bound"], true);
+    assert_eq!(rows[0].body["cpu_seconds"].as_f64().unwrap(), 40.0);
+}
+
+/// Marks every row the box ended after 8 CPUs' worth of wall time.
+struct Ended(Fake);
+impl Backend for Ended {
+    fn cpus(&self) -> u32 {
+        8
+    }
+    fn launcher(&self) -> String {
+        self.0.launcher()
+    }
+    fn level(&self) -> u8 {
+        0
+    }
+    fn probe(&self) -> Probe {
+        Probe::Available
+    }
+    fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> std::io::Result<RowOutcome> {
+        let mut o = self.0.run_row(job, watch)?;
+        o.exit = Exit::Payload(124);
+        o.ended = true;
+        o.wall_seconds = 5.0;
+        o.cpu_seconds = 1.0;
+        Ok(o)
+    }
 }

@@ -908,10 +908,14 @@ fn an_unknown_cpu_row_is_charged_the_estimate_warned_about_and_pauses_the_run() 
     let rows = rows_of(&lab, "unk");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].body["cpu_unknown"], UNKNOWN);
-    // The row is charged the estimate, not the near-zero it measured.
+    // The row is charged the larger of the estimate and the CPU it could have used, not the
+    // near-zero it measured, and the record marks the figure as a bound.
     let est = per_row_cpu(&lab, "unk");
     assert!(est > 1.0, "{est}");
+    let wall = rows[0].body["wall_seconds"].as_f64().unwrap();
+    let est = est.max(wall * f64::from(Level0.cpus()));
     assert_eq!(rows[0].body["cpu_seconds"].as_f64().unwrap(), est);
+    assert_eq!(rows[0].body["cpu_bound"], true);
     // The warn event names the row.
     let events = common::events_of(&dir);
     let warns = common::named(&events, "row.cpu_unknown");
@@ -952,13 +956,14 @@ fn an_unknown_cpu_attempt_that_is_retried_leaves_a_spend_record_and_still_pauses
     let spends = common::kind_of(&lab, "unk2", "spend");
     assert_eq!(spends.len(), 1);
     assert_eq!(spends[0].body["cpu_unknown"], UNKNOWN);
-    assert_eq!(
-        spends[0].body["cpu_seconds"].as_f64().unwrap(),
-        per_row_cpu(&lab, "unk2")
-    );
+    let wall = spends[0].body["wall_seconds"].as_f64().unwrap();
+    let charged = per_row_cpu(&lab, "unk2").max(wall * f64::from(Level0.cpus()));
+    assert_eq!(spends[0].body["cpu_seconds"].as_f64().unwrap(), charged);
+    assert_eq!(spends[0].body["cpu_bound"], true);
     let rows = rows_of(&lab, "unk2");
     assert_eq!(rows.len(), 1);
     assert!(rows[0].body.get("cpu_unknown").is_none());
+    assert!(rows[0].body.get("cpu_bound").is_none());
     assert_eq!(rows[0].body["attempts"], 2);
     // One warning, for the first attempt.
     let events = common::events_of(&dir);
@@ -969,7 +974,7 @@ fn an_unknown_cpu_attempt_that_is_retried_leaves_a_spend_record_and_still_pauses
     assert_eq!(warns[0]["attrs"]["reason"], UNKNOWN);
     assert_eq!(
         warns[0]["attrs"]["charged_cpu_seconds"].as_f64().unwrap(),
-        per_row_cpu(&lab, "unk2")
+        charged
     );
 }
 
@@ -990,6 +995,9 @@ impl Backend for BreakEvents {
     }
     fn probe(&self) -> Probe {
         Probe::Available
+    }
+    fn cpus(&self) -> u32 {
+        1
     }
     fn launcher(&self) -> String {
         "stub".into()
@@ -1015,6 +1023,7 @@ impl Backend for BreakEvents {
             output_hash: output_hash(&job.output_dir)?,
             selftest: self.selftest.then_some(passed),
             cpu_unknown: self.unknown.then(|| UNKNOWN.into()),
+            ended: false,
         })
     }
 }
@@ -1128,6 +1137,9 @@ impl Backend for BreakAtRetry {
         }
         Probe::Available
     }
+    fn cpus(&self) -> u32 {
+        1
+    }
     fn launcher(&self) -> String {
         "stub".into()
     }
@@ -1140,6 +1152,7 @@ impl Backend for BreakAtRetry {
             output_hash: output_hash(&job.output_dir)?,
             selftest: None,
             cpu_unknown: Some(UNKNOWN.into()),
+            ended: false,
         })
     }
 }
@@ -1351,4 +1364,48 @@ fn seccomp_program_is_a_whole_number_of_filters() {
     const ERRNO_EPERM: u32 = 0x0005_0000 | libc::EPERM as u32;
     const ALLOW: u32 = 0x7fff_0000;
     assert_eq!(returns, [ERRNO_EPERM, ALLOW, KILL_PROCESS]);
+}
+
+/// Says stop once the row's own group runs: the second group the backend starts, after the
+/// self-test's.
+struct StopInRow(Cell<u32>);
+impl Watch for StopInRow {
+    fn tick(&self) -> bool {
+        self.0.get() < 2
+    }
+    fn started(&self, _pid: u32) {
+        self.0.set(self.0.get() + 1);
+    }
+}
+
+#[test]
+fn a_stopped_level1_row_is_ended() {
+    let Some(b) = ready() else { return };
+    let (_w, job) = row("sleep 30", LONG);
+    let o = b.run_row(&job, &StopInRow(Cell::new(0))).unwrap();
+    assert_eq!(o.exit, Exit::Stopped);
+    assert!(o.selftest.is_some());
+    assert!(o.ended);
+    // A stop during the self-test ends the row too.
+    let o = b.run_row(&job, &|| false).unwrap();
+    assert_eq!(o.exit, Exit::Stopped);
+    assert!(o.ended);
+}
+
+#[test]
+fn a_level1_row_that_finishes_or_exits_124_is_not_ended() {
+    let Some(b) = ready() else { return };
+    let (_w, job) = row("exit 124", LONG);
+    let o = b.run_row(&job, &|| true).unwrap();
+    assert_eq!(o.exit, Exit::Payload(124));
+    assert!(!o.ended);
+}
+
+#[test]
+fn a_timed_out_level1_row_is_ended() {
+    let Some(b) = ready() else { return };
+    let (_w, job) = row("sleep 30", Duration::from_secs(3));
+    let o = b.run_row(&job, &|| true).unwrap();
+    assert_eq!(o.exit, Exit::Payload(124));
+    assert!(o.ended);
 }

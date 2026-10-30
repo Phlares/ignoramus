@@ -506,6 +506,9 @@ impl Backend for Stub {
     fn probe(&self) -> Probe {
         Probe::Available
     }
+    fn cpus(&self) -> u32 {
+        1
+    }
     fn launcher(&self) -> String {
         "stub".into()
     }

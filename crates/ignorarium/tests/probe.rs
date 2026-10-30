@@ -10,6 +10,9 @@ fn probe(home: &std::path::Path, b: &[Box<dyn Backend>]) -> Result<Machine, mach
 
 struct Fake(u8, bool);
 impl Backend for Fake {
+    fn cpus(&self) -> u32 {
+        1
+    }
     fn launcher(&self) -> String {
         "process".into()
     }
@@ -31,6 +34,7 @@ impl Backend for Fake {
             output_hash: String::new(),
             selftest: None,
             cpu_unknown: None,
+            ended: false,
         })
     }
 }
