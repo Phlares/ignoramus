@@ -305,6 +305,49 @@ fn network_is_off_inside() {
     assert!(o.wall_seconds < 5.0, "{}", o.wall_seconds);
 }
 
+/// WSL runs Windows programs through this binfmt_misc handler. Its interpreter, `/init`, is
+/// looked up in the root of the process that starts the program.
+const WSL_INTEROP: &str = "/proc/sys/fs/binfmt_misc/WSLInterop";
+const WHOAMI: &str = "/mnt/c/Windows/System32/whoami.exe";
+
+#[test]
+fn a_windows_program_in_the_input_cannot_run_in_the_sandbox() {
+    if !Path::new(WSL_INTEROP).exists() {
+        println!("skip wsl: {WSL_INTEROP} is absent, so this is not WSL with interop");
+        return;
+    }
+    let Some(b) = ready() else { return };
+    let (_d, job) = row(
+        "who=$(/in/whoami.exe) || exit $?\nprintf '%s' \"$who\" > /out/who",
+        LONG,
+    );
+    let exe = job.input_dir.join("whoami.exe");
+    if let Err(e) = std::fs::copy(WHOAMI, &exe) {
+        println!("skip wsl: cannot copy {WHOAMI}: {e}");
+        return;
+    }
+    // The control: outside the sandbox, interop runs the same copy.
+    let host = std::process::Command::new(&exe)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    if !host.as_ref().is_ok_and(|s| s.success()) {
+        println!(
+            "skip wsl: interop does not run {} here: {host:?}",
+            exe.display()
+        );
+        return;
+    }
+    let o = b.run_row(&job, &|| true).unwrap();
+    // The handler's interpreter is not in the sandbox, so the shell finds nothing to run.
+    assert_eq!(o.exit, Exit::Payload(127));
+    assert!(
+        tree(&job.output_dir).is_empty(),
+        "{:?}",
+        tree(&job.output_dir)
+    );
+}
+
 #[test]
 fn no_new_privileges_and_no_capabilities() {
     let Some(b) = ready() else { return };
