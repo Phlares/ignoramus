@@ -14,10 +14,10 @@ use crate::schedule::ROW_CAP;
 use crate::seed::seed;
 use crate::spec::model::{Claim, Outcome, SELECTED, StatisticSpec};
 use crate::store::Store;
-use evidence::Tail;
 use evidence::claim::{Bound, Statistic};
-use evidence::power::{Plan, Stratum, clusters_needed, simulate};
+use evidence::power::{Plan, Stratum, WORK, clusters_needed, mean_sd, simulate};
 use evidence::rng::Rng;
+use evidence::{Error, Tail};
 use serde_json::{Value, json};
 use std::path::{Component, Path, PathBuf};
 
@@ -372,7 +372,7 @@ fn open_unit(x: f64) -> bool {
 /// Replicates of each power simulation.
 const REPS: u32 = 4000;
 /// The most clusters per stratum the search for the count that would pass tries.
-const CAP: u32 = 1024;
+pub const CAP: u32 = 1024;
 
 /// E-CNF-002, at each hypothesis with a claim that E-CNF-001, E-HYP-003 and E-HYP-004 accept
 /// and whose estimates are found: `gate` must find the power the claim needs. An absent alpha
@@ -434,7 +434,7 @@ pub struct Power {
     /// stratum as `shown` prints it, `""` for the pooled group.
     pub clusters: Vec<(String, usize)>,
     /// When the power falls short: the smallest common count of clusters per group that
-    /// reaches the target, at most 1,024.
+    /// reaches the target, or `None` when 1,024 do not. `None` too when the power reaches it.
     pub needed: Option<u32>,
 }
 
@@ -456,10 +456,12 @@ impl Power {
             _ => groups.concat(),
         };
         let target = decimals(self.target);
+        let pooled = matches!(self.clusters.as_slice(), [(stratum, _)] if stratum.is_empty());
+        let per = if pooled { "clusters" } else { "per stratum" };
         let then = match (self.power >= self.target, self.needed) {
             (true, _) => format!("the target is {target}"),
-            (false, Some(n)) => format!("about {n} per stratum reach {target}"),
-            (false, None) => format!("{CAP} per stratum do not reach {target}"),
+            (false, Some(n)) => format!("about {n} {per} reach {target}"),
+            (false, None) => format!("{CAP} {per} do not reach {target}"),
         };
         // Truncated, so a power just short of the target never prints as the target; the
         // 1e-9 absorbs the rounding of k / REPS.
@@ -568,9 +570,11 @@ fn gate(spec: &Value, ctx: &CheckCtx, h: &Value, design: (f64, f64, u64)) -> Opt
         return None;
     };
     let level = alpha * sized.share;
-    let groups: Vec<(StratumInput, Vec<u64>)> = (groups.into_iter())
+    let groups: Vec<(StratumInput, Vec<u32>)> = (groups.into_iter())
         .map(|g| {
-            let sizes = cluster_sizes(spec, ctx, &g.stratum, per);
+            let sizes = (cluster_sizes(spec, ctx, &g.stratum, per).into_iter())
+                .map(|u| u32::try_from(u).unwrap_or(u32::MAX))
+                .collect();
             (g, sizes)
         })
         .collect();
@@ -579,8 +583,7 @@ fn gate(spec: &Value, ctx: &CheckCtx, h: &Value, design: (f64, f64, u64)) -> Opt
             .filter(|(_, sizes)| !sizes.is_empty())
             .filter_map(|(g, sizes)| {
                 let have = sizes.len() as u64;
-                let m = have as f64 / sizes.iter().map(|&u| 1.0 / u as f64).sum::<f64>();
-                let sd = g.sd * (g.icc + (1.0 - g.icc) / m).sqrt();
+                let sd = mean_sd(g.sd, g.icc, sizes);
                 let need = (sized.bounds.iter())
                     .map(|b| required_clusters(level, target, sd, (b.margin - sized.at).abs()))
                     .max()
@@ -597,9 +600,7 @@ fn gate(spec: &Value, ctx: &CheckCtx, h: &Value, design: (f64, f64, u64)) -> Opt
     }
     let strata = (groups.iter())
         .map(|(g, sizes)| Stratum {
-            sizes: (sizes.iter())
-                .map(|&u| u32::try_from(u).unwrap_or(u32::MAX))
-                .collect(),
+            sizes: sizes.clone(),
             sd: g.sd,
             icc: g.icc,
             unit_mean: match sized.stat {
@@ -625,6 +626,10 @@ fn gate(spec: &Value, ctx: &CheckCtx, h: &Value, design: (f64, f64, u64)) -> Opt
         Ok((power, needed))
     });
     Some(match found {
+        Err(Error::Parameter("work")) => Gate::Fault(format!(
+            "it would draw more than {} million values",
+            WORK / 1_000_000
+        )),
         Err(e) => Gate::Fault(e.to_string()),
         Ok((power, needed)) => Gate::Simulated(Power {
             hypothesis: shown_id(id).to_string(),

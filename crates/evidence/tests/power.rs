@@ -1,5 +1,5 @@
 use evidence::claim::{Bound, Statistic};
-use evidence::power::{Plan, Stratum, clusters_needed, simulate};
+use evidence::power::{Plan, Stratum, WORK, clusters_needed, mean_sd, simulate, work};
 use evidence::rng::Rng;
 use evidence::{Error, Tail};
 
@@ -50,7 +50,7 @@ fn power_rises_with_clusters_and_falls_with_icc() {
     let more = power(&plan(vec![stratum(24, 0.0)]));
     let clustered = power(&plan(vec![stratum(24, 0.5)]));
     assert!(0.1 < few && few + 0.2 < more && more < 0.99, "{few} {more}");
-    assert!(clustered + 0.2 < more, "{clustered} {more}");
+    assert!(clustered + 0.1 < more, "{clustered} {more}");
 }
 
 #[test]
@@ -78,22 +78,39 @@ fn every_stratum_and_every_bound_must_pass() {
 #[test]
 fn the_cluster_mean_has_the_variance_of_its_own_size() {
     // With icc 0, a cluster of 16 units with unit sd 2 has the mean sd of a cluster of 4
-    // with unit sd 1, so the two powers agree up to Monte Carlo error; one cluster of 64
-    // and 23 of 1 do not, though their mean size is about 3.6.
-    let of = |sizes: Vec<u32>, sd: f64| {
+    // with unit sd 1, so one seed draws the same cluster means and the same power; one
+    // cluster of 64 and 23 of 1 do not, though their mean size is about 3.6.
+    let of = |sizes: Vec<u32>, sd: f64, icc: f64| {
         power(&plan(vec![Stratum {
             sizes,
             sd,
-            icc: 0.0,
+            icc,
             unit_mean: -1.0,
         }]))
     };
-    let small = of(vec![4; 24], 1.0);
-    let large = of(vec![16; 24], 2.0);
-    assert!((small - large).abs() < 0.04, "{small} {large}");
+    let small = of(vec![4; 24], 1.0, 0.0);
+    assert_eq!(small.to_bits(), of(vec![16; 24], 2.0, 0.0).to_bits());
     let mut mixed = vec![1; 23];
     mixed.push(64);
-    assert!(of(mixed, 1.0) + 0.2 < small);
+    assert!(of(mixed, 1.0, 0.0) + 0.2 < small);
+    // sd^2 (icc + (1 - icc) / m): icc 0.5, sd 1 and 4 units give 0.625, as icc 0, sd
+    // sqrt(0.625) and 1 unit do.
+    let clustered = of(vec![4; 24], 1.0, 0.5);
+    assert_eq!(
+        clustered.to_bits(),
+        of(vec![1; 24], 0.625f64.sqrt(), 0.0).to_bits()
+    );
+    assert!(clustered + 0.1 < small, "{clustered} {small}");
+}
+
+#[test]
+fn mean_sd_averages_the_variance_of_each_cluster_mean() {
+    let close = |a: f64, b: f64| assert!((a - b).abs() < 1e-12, "{a} != {b}");
+    close(mean_sd(1.0, 0.5, &[4]), 0.625f64.sqrt());
+    close(mean_sd(2.0, 0.0, &[16]), 0.5);
+    close(mean_sd(3.0, 1.0, &[1, 100]), 3.0);
+    // Over clusters of 1 and 4 units: sd^2 (0.2 + 0.8 (1 + 1/4) / 2) = 4 x 0.7.
+    close(mean_sd(2.0, 0.2, &[1, 4]), 2.8f64.sqrt());
 }
 
 #[test]
@@ -130,12 +147,12 @@ fn the_simulation_is_fixed_by_its_seed() {
     assert_ne!(a, other);
 }
 
-/// `p` with `n` clusters of `size` in each stratum.
-fn trial(p: &Plan, n: usize, size: u32) -> Plan {
+/// `p` with `n` clusters in each stratum: its declared sizes, repeated in order.
+fn trial(p: &Plan, n: usize) -> Plan {
     Plan {
         strata: (p.strata.iter())
             .map(|s| Stratum {
-                sizes: vec![size; n],
+                sizes: s.sizes.iter().copied().cycle().take(n).collect(),
                 ..s.clone()
             })
             .collect(),
@@ -148,7 +165,7 @@ fn clusters_needed_is_the_smallest_passing_count() {
     let p = plan(vec![stratum(3, 0.0), stratum(5, 0.0)]);
     let n = clusters_needed(&p, 0.8, REPS, SEED, 1024).unwrap().unwrap();
     assert!((20..60).contains(&n), "{n}");
-    let at = |k: u32| power(&trial(&p, k as usize, 4));
+    let at = |k: u32| power(&trial(&p, k as usize));
     assert!(at(n) >= 0.8, "{n}: {}", at(n));
     assert!(at(n - 1) < 0.8, "{n}: {}", at(n - 1));
     // The search ends at the cap.
@@ -161,22 +178,76 @@ fn clusters_needed_is_the_smallest_passing_count() {
 }
 
 #[test]
-fn new_clusters_take_the_harmonic_mean_size_rounded_half_up() {
-    let needed = |sizes: Vec<u32>| {
-        let p = plan(vec![Stratum {
+fn new_clusters_repeat_the_declared_sizes() {
+    // 15 clusters of 1 unit, then 15 of 16, 0.5 below the margin at level 0.005. New clusters
+    // repeat the declared sizes in order, so the trial at the present 30 is the present plan.
+    let p = Plan {
+        strata: vec![Stratum {
+            sizes: [vec![1; 15], vec![16; 15]].concat(),
+            sd: 1.0,
+            icc: 0.0,
+            unit_mean: -0.5,
+        }],
+        level: 0.005,
+        ..plan(vec![])
+    };
+    let n = clusters_needed(&p, 0.8, REPS, SEED, 1024).unwrap().unwrap();
+    let at = |k: u32| power(&trial(&p, k as usize));
+    assert!(power(&p) < 0.8 && n > 30, "{n}");
+    assert!(at(n) >= 0.8, "{n}: {}", at(n));
+    assert!(at(n - 1) < 0.8, "{n}: {}", at(n - 1));
+    // Sizes that repeat to the same clusters give the same count.
+    let twice = Plan {
+        strata: vec![Stratum {
+            sizes: [vec![1; 15], vec![16; 15], vec![1; 15], vec![16; 15]].concat(),
+            ..p.strata[0].clone()
+        }],
+        ..p.clone()
+    };
+    assert_eq!(clusters_needed(&twice, 0.8, REPS, SEED, 1024), Ok(Some(n)));
+}
+
+#[test]
+fn a_plan_over_the_work_budget_is_refused() {
+    // A mean draws one value per cluster; a quantile one per cluster and one per unit.
+    let median = |sizes: Vec<u32>| Plan {
+        stat: Statistic::Quantile(0.5),
+        strata: vec![Stratum {
             sizes,
             ..stratum(0, 0.0)
-        }]);
-        clusters_needed(&p, 0.8, REPS, SEED, 1024).unwrap()
+        }],
+        ..plan(vec![])
     };
-    // The harmonic mean of [1, 2, 2] is 3 / 2 = 1.5, which rounds up to 2; of [1, 1, 2], 1.2,
-    // which rounds to 1. [3, 6] has the harmonic mean of [4, 4, 4], and arithmetic mean 4.5.
-    let two = needed(vec![2]);
-    assert_eq!(needed(vec![1, 2, 2]), two);
-    assert_eq!(needed(vec![2, 2, 2, 2, 2]), two);
-    assert_ne!(needed(vec![1]), two);
-    assert_ne!(needed(vec![1, 1, 2]), two);
-    assert_eq!(needed(vec![4, 4, 4]), needed(vec![3, 6]));
+    assert_eq!(work(&plan(vec![stratum(24, 0.0)]), REPS), 24 * 2000);
+    assert_eq!(work(&median(vec![4; 24]), REPS), 24 * 5 * 2000);
+    assert_eq!(WORK, 100_000_000);
+    // 30 clusters of 1,000,000 units are refused before any draw.
+    let big = median(vec![1_000_000; 30]);
+    let mut rng = Rng::from_seed(SEED);
+    assert_eq!(
+        simulate(&big, REPS, &mut rng),
+        Err(Error::Parameter("work"))
+    );
+    assert_eq!(
+        clusters_needed(&big, 0.8, REPS, SEED, 1024),
+        Err(Error::Parameter("work"))
+    );
+    // At the budget a plan runs; one value more, it does not.
+    let edge = median(vec![99]);
+    assert_eq!(work(&edge, 1_000_000), WORK);
+    assert!(simulate(&edge, 1_000_000, &mut rng).is_ok());
+    assert_eq!(
+        simulate(&median(vec![100]), 1_000_000, &mut rng),
+        Err(Error::Parameter("work"))
+    );
+    // The search counts every trial: 1 cluster of 20,000 units draws 40 million values, and
+    // 2 clusters 80 million, each within the budget but 120 million in all.
+    let wide = median(vec![19_999]);
+    assert_eq!(clusters_needed(&wide, 0.8, REPS, SEED, 1), Ok(None));
+    assert_eq!(
+        clusters_needed(&wide, 0.8, REPS, SEED, 2),
+        Err(Error::Parameter("work"))
+    );
 }
 
 #[test]

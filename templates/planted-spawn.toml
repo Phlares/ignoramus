@@ -18,7 +18,7 @@ outcome = "ppl-ratio"           # the outcome id the hypothesis is about
 contrast = { arm-a = 1.0 }      # condition id -> weight, over values paired with the reference; "selected" is the pick
 strata = []                     # strata it must hold in, each with confirmation inputs; [] = all units as one group
 # claim = { below = 0.0 }       # { below = m } | { above = m } | { within = [a, b] }; none = descriptive
-# statistic = { quantile = 0.5 }  # per cluster: { mean = [lo, hi] } (the range of a cluster mean) | { quantile = q }; required with a claim
+# statistic = { quantile = 0.5 }  # per cluster: { mean = [lo, hi] } (each unit is clipped to it) | { quantile = q }; required with a claim
 # power_at = -1.0               # confirmatory: the true value of the statistic where the test must have its power
 # estimates = { from = "my-pilot" }  # confirmatory: the finished study in this box whose estimates give the sd and icc
 # alpha_share = 1.0             # confirmatory: share of the study's level; the shares sum to 1

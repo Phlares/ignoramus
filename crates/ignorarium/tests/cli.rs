@@ -1366,10 +1366,14 @@ fn the_gate_gives_the_same_verdict_on_every_check() {
     let first = power(1);
     assert_eq!(
         first,
-        json!([{ "hypothesis": "H1", "power": 0.3565, "clusters": { "": 15 }, "needed": 21 }])
+        json!([{
+            "hypothesis": "H1", "power": 0.3565, "target": 0.8, "clusters": { "": 15 },
+            "needed": 21
+        }])
     );
     assert_eq!(power(1), first);
-    let sentence = "Simulated power 0.35 with 15 clusters in the pooled group; about 21 per stratum reach 0.80.";
+    let sentence =
+        "Simulated power 0.35 with 15 clusters in the pooled group; about 21 clusters reach 0.80.";
     assert!(check_out(&home, &spec, 1).contains(sentence));
     let page = stdout(&bin(&home).arg("review").arg(&spec).assert().code(1));
     assert!(
@@ -1399,7 +1403,10 @@ fn the_gate_gives_the_same_verdict_on_every_check() {
     .unwrap();
     assert_eq!(
         power(0),
-        json!([{ "hypothesis": "H1", "power": 1.0, "clusters": { "": 15 }, "needed": null }])
+        json!([{
+            "hypothesis": "H1", "power": 1.0, "target": 0.8, "clusters": { "": 15 },
+            "needed": null
+        }])
     );
     let page = stdout(&bin(&home).arg("review").arg(&spec).assert().code(0));
     assert!(
@@ -1408,6 +1415,16 @@ fn the_gate_gives_the_same_verdict_on_every_check() {
 "
         ),
         "{page}"
+    );
+    // Sized just below the margin, half the units lie on each side, and 1,024 clusters do
+    // not reach the target: `needed` says so, apart from the null of a plan that passes.
+    let edge = |t: String| common::confirmatory(t).replace("power_at = -20.0", "power_at = -0.01");
+    std::fs::write(&spec, edge(std::fs::read_to_string(TEMPLATE).unwrap())).unwrap();
+    let beyond = power(1);
+    assert_eq!(beyond[0]["needed"], ">1024", "{beyond}");
+    assert!(
+        check_out(&home, &spec, 1).contains("; 1024 clusters do not reach 0.80."),
+        "{beyond}"
     );
 }
 

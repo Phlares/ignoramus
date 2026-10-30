@@ -9,8 +9,8 @@ mod generic;
 mod named;
 pub use generic::{check_generic, safe_key};
 pub use named::{
-    CheckCtx, Lookup, Power, StratumInput, Taken, check_named, estimate_inputs, input_path, power,
-    read_regular, selected_by,
+    CAP, CheckCtx, Lookup, Power, StratumInput, Taken, check_named, estimate_inputs, input_path,
+    power, read_regular, selected_by,
 };
 
 /// The records of a box, by study. An `Err` is a log that cannot be read or trusted.

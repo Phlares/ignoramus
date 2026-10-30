@@ -19,7 +19,8 @@ pub struct Bound {
 /// What each cluster gives the test.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Statistic {
-    /// The mean of the cluster's units, declared to lie in `[lo, hi]`.
+    /// The mean of the cluster's units, each first clipped to `[lo, hi]`, so the mean lies in
+    /// the range too.
     Mean { lo: f64, hi: f64 },
     /// The share of the cluster's units on the claimed side of the margin; for the quantile
     /// `q` (0.5 is the median).
@@ -59,17 +60,30 @@ fn test(stat: &Statistic, bound: &Bound) -> Result<(EProcess, f64, Tail), Error>
     Ok((EProcess::new(score, tail, f64::INFINITY)?, point, tail))
 }
 
-fn mean(xs: &[f64]) -> f64 {
-    xs.iter().sum::<f64>() / xs.len() as f64
+fn mean(xs: impl ExactSizeIterator<Item = f64>) -> f64 {
+    let n = xs.len() as f64;
+    xs.sum::<f64>() / n
 }
 
-/// What one cluster gives the test of `bound`: the mean of its units, or the share of them on
-/// the claimed side (at or below the margin for `Lower`, at or above it for `Upper`). A cluster
-/// with no unit gives NaN, which the test scores as e-value 0.
+/// `x` moved to the nearer end of `[lo, hi]` when it lies outside; NaN stays NaN.
+fn clip(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo {
+        lo
+    } else if x > hi {
+        hi
+    } else {
+        x
+    }
+}
+
+/// What one cluster gives the test of `bound`: the mean of its units, each clipped to the
+/// declared range first, or the share of them on the claimed side (at or below the margin for
+/// `Lower`, at or above it for `Upper`). A cluster with no unit, or with a NaN unit in a mean,
+/// gives NaN, which the test scores as e-value 0.
 pub fn observation(stat: &Statistic, bound: &Bound, units: &[f64]) -> Result<f64, Error> {
     let side = claimed_side(bound)?;
-    Ok(match stat {
-        Statistic::Mean { .. } => mean(units),
+    Ok(match *stat {
+        Statistic::Mean { lo, hi } => mean(units.iter().map(|&x| clip(x, lo, hi))),
         Statistic::Quantile(_) => {
             let on = units.iter().filter(|&&x| on_side(x, bound.margin, side));
             on.count() as f64 / units.len() as f64
@@ -91,7 +105,7 @@ pub fn e_value(stat: &Statistic, bound: &Bound, obs: &[f64]) -> Result<f64, Erro
 /// on, at the value it tests, or past it. An exploratory claim routes on this.
 pub fn holds(stat: &Statistic, bound: &Bound, obs: &[f64]) -> Result<bool, Error> {
     let (_, point, tail) = test(stat, bound)?;
-    Ok(on_side(mean(obs), point, tail))
+    Ok(on_side(mean(obs.iter().copied()), point, tail))
 }
 
 /// A seeded order of `0..n`: `Rng::sample`'s forward Fisher-Yates shuffle of all n.

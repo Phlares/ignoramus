@@ -3,7 +3,8 @@ use evidence::rng::Rng;
 use evidence::sim::Estimate;
 use evidence::{Error, Tail};
 
-const LEVEL: f64 = 0.05;
+/// The level a box study runs at, and a looser one.
+const LEVELS: [f64; 2] = [0.05, 0.005];
 const REPS: usize = 20_000;
 
 fn below(margin: f64) -> Bound {
@@ -31,47 +32,63 @@ fn rng(family: u8) -> Rng {
     Rng::from_seed(s)
 }
 
-/// The share of `REPS` replicates of `n` observations from `draw` whose test of `bound`
-/// reaches 1 / LEVEL, with its Wilson upper end.
-fn rejections(
+/// Checks the test of `bound` on a null at its margin, over `REPS` replicates of `n`
+/// observations from `draw`. First, `n` copies of `best`, the observation that argues most
+/// for the claim, reach 1 / 0.005, so the null can reject at either level. Then the share of
+/// replicates that reach 1 / level has a Wilson upper end at most the level, at each level;
+/// and the e-values, a martingale at the margin, have a mean within 4 standard errors of 1.
+fn holds_at_the_margin(
     stat: Statistic,
     bound: Bound,
     n: usize,
+    best: f64,
     rng: &mut Rng,
     mut draw: impl FnMut(&mut Rng) -> f64,
-) -> Estimate {
-    let mut hits = 0.0;
-    for _ in 0..REPS {
-        let obs: Vec<f64> = (0..n).map(|_| draw(rng)).collect();
-        hits += f64::from(u8::from(
-            e_value(&stat, &bound, &obs).unwrap() >= 1.0 / LEVEL,
-        ));
+) {
+    let strongest = e_value(&stat, &bound, &vec![best; n]).unwrap();
+    assert!(strongest >= 1.0 / 0.005, "{bound:?}: at most {strongest}");
+    let es: Vec<f64> = (0..REPS)
+        .map(|_| {
+            let obs: Vec<f64> = (0..n).map(|_| draw(rng)).collect();
+            e_value(&stat, &bound, &obs).unwrap()
+        })
+        .collect();
+    for level in LEVELS {
+        let hits = es.iter().filter(|&&e| e >= 1.0 / level).count();
+        let rate = Estimate::of(hits as f64, REPS);
+        assert!(rate.holds(level), "{bound:?} at {level}: {rate:?}");
     }
-    Estimate::of(hits, REPS)
+    let mean = es.iter().sum::<f64>() / REPS as f64;
+    let var = es.iter().map(|e| (e - mean).powi(2)).sum::<f64>() / (REPS - 1) as f64;
+    let se = (var / REPS as f64).sqrt();
+    assert!(
+        (mean - 1.0).abs() <= 4.0 * se,
+        "{bound:?}: mean e {mean}, se {se}"
+    );
 }
 
 #[test]
 fn a_null_at_the_margin_rejects_at_most_alpha() {
-    // Uniform cluster means on (0, 1]: the mean is the margin, the worst case of each null.
+    // Uniform cluster means on (0, 1], and the two ends of the range with chance 1/2 each,
+    // the null with the most variance: the mean is the margin, the worst case of each null.
     let stat = Statistic::Mean { lo: 0.0, hi: 1.0 };
     let mut r = rng(1);
-    for bound in [below(0.5), above(0.5)] {
-        let e = rejections(stat, bound, 30, &mut r, Rng::uniform);
-        assert!(e.holds(LEVEL), "{bound:?}: {e:?}");
+    let ends = |r: &mut Rng| f64::from(u8::from(r.uniform() <= 0.5));
+    for (bound, best) in [(below(0.5), 0.0), (above(0.5), 1.0)] {
+        holds_at_the_margin(stat, bound, 30, best, &mut r, Rng::uniform);
+        holds_at_the_margin(stat, bound, 30, best, &mut r, ends);
     }
 }
 
 #[test]
 fn a_skewed_null_still_holds_alpha() {
-    // An exponential shifted down by 1 and clipped at 9: values in [-1, 9], skewed right,
-    // with mean -e^-10. The test assumes no symmetry, only the declared range.
-    let stat = Statistic::Mean { lo: -1.0, hi: 9.0 };
-    let margin = -(-10.0f64).exp();
-    let skewed = |r: &mut Rng| (-r.uniform().ln()).min(10.0) - 1.0;
+    // 1 with chance 0.2, else 0: skewed, with mean 0.2 at the margin. The test assumes no
+    // symmetry, only the declared range. 60 observations let either claim reach 1/0.005.
+    let stat = Statistic::Mean { lo: 0.0, hi: 1.0 };
+    let skewed = |r: &mut Rng| f64::from(u8::from(r.uniform() <= 0.2));
     let mut r = rng(2);
-    for bound in [below(margin), above(margin)] {
-        let e = rejections(stat, bound, 30, &mut r, skewed);
-        assert!(e.holds(LEVEL), "{bound:?}: {e:?}");
+    for (bound, best) in [(below(0.2), 0.0), (above(0.2), 1.0)] {
+        holds_at_the_margin(stat, bound, 60, best, &mut r, skewed);
     }
 }
 
@@ -79,6 +96,8 @@ fn a_skewed_null_still_holds_alpha() {
 fn the_quantile_test_holds_alpha_at_q() {
     // Four uniform units per cluster: a unit lies at or below q with chance q, and at or
     // above q with chance 1 - q, so the margin q is the q-quantile and each null is tight.
+    // Below the 0.9-quantile a share of 1 scores only 1/9, so it takes 102 clusters to reach
+    // 1/0.005; the test runs 110.
     for q in [0.5, 0.9] {
         let stat = Statistic::Quantile(q);
         let mut r = rng(3);
@@ -87,9 +106,24 @@ fn the_quantile_test_holds_alpha_at_q() {
                 let units: Vec<f64> = (0..4).map(|_| r.uniform()).collect();
                 observation(&stat, &bound, &units).unwrap()
             };
-            let e = rejections(stat, bound, 30, &mut r, share);
-            assert!(e.holds(LEVEL), "q {q}, {bound:?}: {e:?}");
+            holds_at_the_margin(stat, bound, 110, 1.0, &mut r, share);
         }
+    }
+}
+
+#[test]
+fn clipped_units_hold_alpha_at_the_clipped_mean() {
+    // Units uniform on [-0.5, 1.5], clipped to the range [0, 1]: a quarter become 0, a
+    // quarter 1, and the clipped mean is 0.5. Every cluster mean lies in the range, so no
+    // cluster gives e-value 0, and the clipped mean is what the test holds at its margin.
+    let stat = Statistic::Mean { lo: 0.0, hi: 1.0 };
+    let mut r = rng(4);
+    for (bound, best) in [(below(0.5), 0.0), (above(0.5), 1.0)] {
+        let cluster = |r: &mut Rng| {
+            let units: Vec<f64> = (0..4).map(|_| 2.0 * r.uniform() - 0.5).collect();
+            observation(&stat, &bound, &units).unwrap()
+        };
+        holds_at_the_margin(stat, bound, 30, best, &mut r, cluster);
     }
 }
 
@@ -181,6 +215,17 @@ fn observation_is_the_mean_or_the_share_on_the_claimed_side() {
     let mean = Statistic::Mean { lo: 0.0, hi: 10.0 };
     for bound in [below(5.0), above(5.0)] {
         close(observation(&mean, &bound, &units).unwrap(), 3.0);
+        // Each unit is first clipped to the declared range, the ends included.
+        close(
+            observation(&mean, &bound, &[-5.0, 20.0, 4.0]).unwrap(),
+            14.0 / 3.0,
+        );
+        close(observation(&mean, &bound, &[0.0, 10.0]).unwrap(), 5.0);
+        assert!(
+            observation(&mean, &bound, &[f64::NAN, 1.0])
+                .unwrap()
+                .is_nan()
+        );
     }
     // The margin itself is on the claimed side of both bounds.
     let q = Statistic::Quantile(0.5);

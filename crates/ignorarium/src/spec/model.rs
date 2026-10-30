@@ -120,8 +120,8 @@ impl Claim {
     }
 }
 
-/// A one-key table: `{ mean = [lo, hi] }`, the range a cluster mean lies in, or
-/// `{ quantile = q }`.
+/// A one-key table: `{ mean = [lo, hi] }`, the range each unit is clipped to before a cluster
+/// mean is taken, or `{ quantile = q }`.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StatisticSpec {

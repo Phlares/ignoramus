@@ -2,6 +2,7 @@
 //! a normal model of clustered units and runs the test of [`crate::claim`] on them. The claim
 //! passes a replicate only when every bound in every stratum reaches 1 / level
 //! (intersection-union, each test at the full level), so the power is that of the joint event.
+//! A call draws at most [`WORK`] values, so a check that sizes a study ends in seconds.
 use crate::Error;
 use crate::claim::{Bound, Statistic, e_value, observation, order};
 use crate::rng::Rng;
@@ -24,6 +25,29 @@ pub struct Plan {
     pub strata: Vec<Stratum>,
     /// The level of each bound's test.
     pub level: f64,
+}
+
+/// The most values one call of [`simulate`] or [`clusters_needed`] may draw.
+pub const WORK: u64 = 100_000_000;
+
+/// The values `reps` replicates of `plan` draw: for a mean one per cluster, for a quantile one
+/// per cluster and one per unit.
+pub fn work(plan: &Plan, reps: u32) -> u64 {
+    let per_cluster = |m: u32| match plan.stat {
+        Statistic::Mean { .. } => 1,
+        Statistic::Quantile(_) => 1 + u64::from(m),
+    };
+    (plan.strata.iter().flat_map(|s| &s.sizes))
+        .fold(0u64, |sum, &m| sum.saturating_add(per_cluster(m)))
+        .saturating_mul(u64::from(reps))
+}
+
+/// The sd of a cluster mean under the unit model, sd sqrt(icc + (1 - icc) / m), as the root
+/// of its variance averaged over clusters of `sizes`. The mean of k cluster means has that
+/// variance over k, so for several sizes this is the sd at their harmonic mean.
+pub fn mean_sd(sd: f64, icc: f64, sizes: &[u32]) -> f64 {
+    let inverse = sizes.iter().map(|&m| 1.0 / f64::from(m)).sum::<f64>() / sizes.len() as f64;
+    sd * (icc + (1.0 - icc) * inverse).sqrt()
 }
 
 fn validate(plan: &Plan, reps: u32) -> Result<(), Error> {
@@ -57,8 +81,12 @@ fn validate(plan: &Plan, reps: u32) -> Result<(), Error> {
 }
 
 /// The share of `reps` replicates in which every bound in every stratum reaches 1 / level.
+/// `Error::Parameter("work")` when they would draw more than [`WORK`] values.
 pub fn simulate(plan: &Plan, reps: u32, rng: &mut Rng) -> Result<f64, Error> {
     validate(plan, reps)?;
+    if work(plan, reps) > WORK {
+        return Err(Error::Parameter("work"));
+    }
     Ok(share(run(plan, reps, rng, |_, _| false)?, reps))
 }
 
@@ -113,14 +141,15 @@ fn stratum_passes(plan: &Plan, s: &Stratum, rng: &mut Rng) -> Result<bool, Error
 }
 
 /// The values one cluster of `m` units gives `observation`. A mean's observation is the mean
-/// of the units, which under the unit model is normal with variance sd^2 (icc + (1 - icc) /
-/// m): one draw stands for the m units. A quantile's observation needs every unit.
+/// of the units, which under the unit model is normal with sd `mean_sd`: one draw stands for
+/// the m units, and `observation` clips it to the range as it clips each unit of a real
+/// cluster. The two agree while the units stay inside the range. A quantile's observation
+/// needs every unit.
 fn draw(stat: &Statistic, s: &Stratum, m: u32, rng: &mut Rng, out: &mut Vec<f64>) {
     out.clear();
     match stat {
         Statistic::Mean { .. } => {
-            let sd = s.sd * (s.icc + (1.0 - s.icc) / f64::from(m)).sqrt();
-            out.push(s.unit_mean + sd * rng.normal());
+            out.push(s.unit_mean + mean_sd(s.sd, s.icc, &[m]) * rng.normal());
         }
         Statistic::Quantile(_) => {
             let shared = s.unit_mean + s.sd * s.icc.sqrt() * rng.normal();
@@ -130,18 +159,12 @@ fn draw(stat: &Statistic, s: &Stratum, m: u32, rng: &mut Rng, out: &mut Vec<f64>
     }
 }
 
-/// The harmonic mean h of `sizes`, rounded half up. The test weighs every cluster alike, and
-/// the mean of k cluster means has variance sd^2 (icc + (1 - icc) / h) / k, so new clusters of
-/// size h each carry what an average cluster of the stratum carries.
-fn mean_size(sizes: &[u32]) -> u32 {
-    let inverse: f64 = sizes.iter().map(|&m| 1.0 / f64::from(m)).sum();
-    (sizes.len() as f64 / inverse).round() as u32
-}
-
-/// The smallest common count of clusters per stratum, each of the stratum's mean size, whose
-/// simulated power reaches `target`; `None` when `cap` clusters do not. Every trial runs on the
-/// same seed. The search doubles from 1 until a count passes, then bisects between the last
-/// count that failed and the first that passed (no cluster always fails).
+/// The smallest common count n of clusters per stratum whose simulated power reaches `target`;
+/// `None` when `cap` clusters do not. A trial gives each stratum its declared sizes repeated in
+/// order up to n, so the trial at the present count is the present plan. Every trial runs on
+/// the same seed. The search doubles from 1 until a count passes, then bisects between the
+/// last count that failed and the first that passed (no cluster always fails).
+/// `Error::Parameter("work")` when the trials would draw more than [`WORK`] values in all.
 pub fn clusters_needed(
     plan: &Plan,
     target: f64,
@@ -150,11 +173,11 @@ pub fn clusters_needed(
     cap: u32,
 ) -> Result<Option<u32>, Error> {
     validate(plan, reps)?;
-    let sizes: Vec<u32> = plan.strata.iter().map(|s| mean_size(&s.sizes)).collect();
-    let passes = |n: u32| -> Result<bool, Error> {
-        let strata = (plan.strata.iter().zip(&sizes))
-            .map(|(s, &m)| Stratum {
-                sizes: vec![m; n as usize],
+    let mut spent = 0u64;
+    let mut passes = |n: u32| -> Result<bool, Error> {
+        let strata = (plan.strata.iter())
+            .map(|s| Stratum {
+                sizes: s.sizes.iter().copied().cycle().take(n as usize).collect(),
                 ..s.clone()
             })
             .collect();
@@ -162,6 +185,10 @@ pub fn clusters_needed(
             strata,
             ..plan.clone()
         };
+        spent = spent.saturating_add(work(&trial, reps));
+        if spent > WORK {
+            return Err(Error::Parameter("work"));
+        }
         // `simulate(&trial, ..) >= target`, stopped once the replicates left cannot change it.
         let reached = |passed: u32| share(passed, reps) >= target;
         let passed = run(&trial, reps, &mut Rng::from_seed(seed), |passed, done| {

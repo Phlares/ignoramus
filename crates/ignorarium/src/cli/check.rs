@@ -206,7 +206,8 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
             key,
         }),
         store,
-        spec_hash: spec::hash_bytes(&raw.hash).unwrap_or_default(),
+        spec_hash: spec::hash_bytes(&raw.hash)
+            .ok_or_else(|| CliError::usage(format!("{shown}: the spec hash is malformed")))?,
     };
     let (value, filled, diags) = rules::check_all(&raw.value, rules::builtin(), &cc);
     let mut a = Assessed {
@@ -297,11 +298,18 @@ fn render_json(a: &Assessed) -> Result<String, CliError> {
             let clusters: serde_json::Map<String, Value> = (p.clusters.into_iter())
                 .map(|(stratum, n)| (stratum, json!(n)))
                 .collect();
+            // `null` when the power reaches the target; a count, or `>1024` beyond the cap.
+            let needed = match (p.power >= p.target, p.needed) {
+                (true, _) => Value::Null,
+                (false, Some(n)) => json!(n),
+                (false, None) => json!(format!(">{}", rules::CAP)),
+            };
             json!({
                 "hypothesis": p.hypothesis,
                 "power": p.power,
+                "target": p.target,
                 "clusters": clusters,
-                "needed": p.needed,
+                "needed": needed,
             })
         })
         .collect();

@@ -297,9 +297,9 @@ fn faults() -> Vec<Fault> {
             vec![hyp("power_at", j(json!(-50.1)))],
             vec![("E-CNF-001", "question.hypotheses[0].power_at")],
         ),
-        // At the end of the range E-CNF-001 accepts it; then half the cluster means fall
-        // outside the range, which gives e-value 0, and the gate refuses.
-        f(vec![hyp("power_at", j(json!(-50.0)))], vec![POWER]),
+        // At the end of the range E-CNF-001 accepts it; units below the range are clipped to
+        // its end, so no cluster mean falls outside it.
+        f(vec![hyp("power_at", j(json!(-50.0)))], vec![]),
         f(vec![hyp("power_at", j(json!("low")))], vec![]),
         // 9 clusters against the 22 the simulated test needs; 1 below the margin, 9 against
         // the z floor's 10.
@@ -2477,7 +2477,7 @@ fn the_gate_refuses_what_the_z_formula_passes() {
     assert_eq!(
         problems(&spec, dir.path()),
         [format!(
-            "{SIM}0.00 with 26 clusters in code and 26 in article; about 97 per stratum reach 0.80."
+            "{SIM}0.00 with 26 clusters in code and 26 in article; about 96 per stratum reach 0.80."
         )]
     );
     assert_eq!(
@@ -2487,7 +2487,7 @@ fn the_gate_refuses_what_the_z_formula_passes() {
             power: 0.0,
             target: 0.8,
             clusters: vec![("code".into(), 26), ("article".into(), 26)],
-            needed: Some(97),
+            needed: Some(96),
         }]
     );
 }
@@ -2496,8 +2496,7 @@ fn the_gate_refuses_what_the_z_formula_passes() {
 fn the_z_floor_fails_without_simulating() {
     // 1 below the margin with 1 unit per cluster a z-test needs 47 clusters. With 46 the gate
     // states the floor's numbers alone. With 47 it passes the floor and simulates the test,
-    // where at sd 2 a cluster mean falls outside [-5, 5] about 1 time in 44, and a cluster mean
-    // outside the range gives e-value 0: more clusters only lose power.
+    // which needs about twice as many.
     let dir = study_dir();
     let at = |n| problems(&edited(&and(near(), power_edits(1, n))), dir.path());
     assert_eq!(
@@ -2509,7 +2508,7 @@ fn the_z_floor_fails_without_simulating() {
     assert_eq!(
         at(47),
         [format!(
-            "{SIM}0.00 with 47 clusters in fiction; 1024 per stratum do not reach 0.80."
+            "{SIM}0.05 with 47 clusters in fiction; about 94 per stratum reach 0.80."
         )]
     );
 }
@@ -2529,6 +2528,24 @@ fn a_quantile_claim_is_simulated_without_a_floor() {
         median(power_edits(5, 14)),
         [format!(
             "{SIM}0.00 with 14 clusters in fiction; about 15 per stratum reach 0.80."
+        )]
+    );
+    // Just below the margin about half the units lie on each side, and 1,024 clusters per
+    // stratum do not reach the target.
+    assert_eq!(
+        median(and(
+            power_edits(1, 2),
+            vec![hyp("power_at", j(json!(-0.01)))]
+        )),
+        [format!(
+            "{SIM}0.00 with 2 clusters in fiction; 1024 per stratum do not reach 0.80."
+        )]
+    );
+    // Pooled, the count is of clusters.
+    assert_eq!(
+        median(and(power_edits(5, 14), vec![hyp("strata", j(json!([])))])),
+        [format!(
+            "{SIM}0.00 with 14 clusters in the pooled group; about 15 clusters reach 0.80."
         )]
     );
     // One cluster, and a target given to three decimals.
@@ -2577,6 +2594,24 @@ fn a_quantile_claim_is_simulated_without_a_floor() {
         [format!(
             "{SIM}0.00 with 2 clusters in fiction; about 42 per stratum reach 0.80."
         )]
+    );
+}
+
+#[test]
+fn a_quantile_claim_too_large_to_simulate_fails_closed() {
+    // A quantile draws every unit: 15 clusters of 1,000,000 units over 4,000 replicates are
+    // 6e10 values, above the simulation's budget. The row cap fires too.
+    let dir = study_dir();
+    let mut e = power_edits(1_000_000, 15);
+    e.push(hyp("statistic", j(json!({ "quantile": 0.5 }))));
+    let d = named(&edited(&e), dir.path());
+    assert_eq!(
+        codes_paths(&d),
+        [POWER, ("E-UNT-002", "design.units_per_cluster")]
+    );
+    assert_eq!(
+        d[0].problem,
+        "The confirmation sample is too small. Cannot simulate power: it would draw more than 100 million values."
     );
 }
 
