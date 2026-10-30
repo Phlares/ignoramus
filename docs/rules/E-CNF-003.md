@@ -8,7 +8,7 @@ A confirmatory hypothesis takes its sd and icc from no matching estimate of a fi
 
 ## Fix
 
-Set estimates = { from = "<study id>" } to a study in this box that measured this hypothesis's contrast: the same outcome, measure and paired rule, and the same conditions, weights and params. A contrast on selected needs an estimate for each candidate. The study needs an estimate in each stratum the hypothesis lists, or a pooled one, with an icc, which takes 2 or more clusters.
+Set estimates = { from = "<study id>" } to a study in this box that measured this hypothesis's contrast: the same outcome, measure and paired rule, the same reference condition with the same params, and the same conditions, weights and params. A contrast on selected needs an estimate for each candidate. The study needs an estimate in each stratum the hypothesis lists, or a pooled one, with an icc, which takes 2 or more clusters and more units than clusters. Estimates of one contrast in one stratum must agree.
 
 ## Why
 

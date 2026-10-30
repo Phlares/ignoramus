@@ -167,6 +167,9 @@ pub fn run(
         a.hash
     )
     .map_err(say)?;
+    for r in &resolved {
+        writeln!(output, "{}", taken(r)).map_err(say)?;
+    }
     write!(output, "{PROMPT} ").map_err(say)?;
     output.flush().map_err(say)?;
     let mut typed = String::new();
@@ -206,10 +209,13 @@ fn resolve(a: &Assessed) -> Result<Vec<Resolved>, CliError> {
             })
     };
     let pending = a.pending();
-    let waits: Vec<String> = claimed()
-        .filter(|(_, path, _)| pending.contains(&path.as_str()))
-        .map(|(_, _, study)| format!("register after {study} finishes"))
-        .collect();
+    let mut waits: Vec<String> = Vec::new();
+    for (_, path, study) in claimed() {
+        let wait = format!("register after {study} finishes");
+        if pending.contains(&path.as_str()) && !waits.contains(&wait) {
+            waits.push(wait);
+        }
+    }
     if !pending.is_empty() {
         return Err(CliError::refuse(format!(
             "{PENDING}: a value waits on a study that has not finished; {}. See docs/rules/{PENDING}.md",
@@ -247,6 +253,27 @@ fn resolve(a: &Assessed) -> Result<Vec<Resolved>, CliError> {
         });
     }
     Ok(out)
+}
+
+/// `takes <path> from <study>: stratum <name> sd <sd>, icc <icc>; …`, the values a person
+/// approves with the plan.
+fn taken(r: &Resolved) -> String {
+    let groups: Vec<String> = r
+        .value
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(stratum, v)| {
+            let group = if stratum.is_empty() {
+                "the pooled group".to_string()
+            } else {
+                format!("stratum {stratum}")
+            };
+            let num = |k: &str| v[k].as_f64().map_or("?".into(), |x| x.to_string());
+            format!("{group} sd {}, icc {}", num("sd"), num("icc"))
+        })
+        .collect();
+    format!("takes {} from {}: {}", r.path, r.study, groups.join("; "))
 }
 
 fn mode_of(a: &Assessed) -> &str {

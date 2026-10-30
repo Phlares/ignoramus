@@ -1421,18 +1421,85 @@ fn a_log_without_a_register_record_is_not_a_registered_study() {
 fn a_study_reference_never_names_a_path() {
     let (d, home, _) = setup(|t| t);
     let box_home = Home::open_at(&home).unwrap();
-    // A record log beside the studies folder, which `../outside` would reach.
-    let outside = home.join("outside");
-    std::fs::create_dir(&outside).unwrap();
-    std::fs::write(outside.join("records.jsonl"), "{}\n").unwrap();
+    // A record log where each of these ids would lead: beside the studies folder, in it, in a
+    // folder with a capital letter, and one folder down. Without a key, a log that is read
+    // is an error, so `Ok(None)` shows that none was read.
+    for (id, folder) in [
+        ("../outside", "outside"),
+        ("", "studies"),
+        ("My-Pilot", "studies/My-Pilot"),
+        ("a/b", "studies/a/b"),
+    ] {
+        std::fs::create_dir_all(home.join(folder)).unwrap();
+        std::fs::write(home.join(folder).join("records.jsonl"), "{}\n").unwrap();
+        let records = HomeRecords {
+            home: box_home.clone(),
+            key: Ok(None),
+        };
+        assert_eq!(records.study(id), Ok(None), "{id}");
+    }
+    // The same reader does read a study id's log.
+    std::fs::create_dir_all(home.join("studies/my-pilot")).unwrap();
+    std::fs::write(home.join("studies/my-pilot/records.jsonl"), "{}\n").unwrap();
     let records = HomeRecords {
         home: box_home,
         key: Ok(None),
     };
-    for id in ["../outside", "", "My-Pilot", "a/b"] {
-        assert_eq!(records.study(id), Ok(None), "{id}");
-    }
+    assert_eq!(
+        records.study("my-pilot"),
+        Err("the box key is missing".to_string())
+    );
     drop(d);
+}
+
+#[test]
+fn a_study_folder_that_cannot_be_read_is_an_error() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_d, home, _) = setup(|t| t);
+    let box_home = Home::open_at(&home).unwrap();
+    common::pilot(&box_home, vec![common::arm_a()]);
+    let folder = home.join("studies/my-pilot");
+    let mode = |m| std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(m)).unwrap();
+    mode(0o000);
+    if folder.join("records.jsonl").symlink_metadata().is_ok() {
+        mode(0o755);
+        println!("skip unreadable study folder: this user reads a mode-000 folder (root)");
+        return;
+    }
+    let key = keys::load(&box_home).unwrap().map(|k| k.verifying_key());
+    let got = HomeRecords {
+        home: box_home,
+        key: Ok(key),
+    }
+    .study("my-pilot");
+    mode(0o755);
+    // Not "not registered": the box cannot tell.
+    let e = got.unwrap_err();
+    assert!(e.contains("Permission denied"), "{e}");
+}
+
+#[test]
+fn a_log_that_holds_another_studys_records_is_an_error() {
+    let (_d, home, _) = setup(|t| t);
+    let box_home = Home::open_at(&home).unwrap();
+    // A finished study's log, copied under another study's name.
+    common::plant(&box_home, "first", &common::finished(vec![common::arm_a()]));
+    std::fs::create_dir_all(home.join("studies/my-pilot")).unwrap();
+    std::fs::copy(
+        home.join("studies/first/records.jsonl"),
+        home.join("studies/my-pilot/records.jsonl"),
+    )
+    .unwrap();
+    let key = keys::load(&box_home).unwrap().map(|k| k.verifying_key());
+    let records = HomeRecords {
+        home: box_home,
+        key: Ok(key),
+    };
+    assert_eq!(
+        records.study("my-pilot"),
+        Err("record 0 belongs to study first".to_string())
+    );
+    assert!(records.study("first").unwrap().is_some());
 }
 
 // ---- import ----

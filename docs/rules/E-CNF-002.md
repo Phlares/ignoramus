@@ -12,7 +12,7 @@ Add confirmation inputs to each group the detail names, until it has the cluster
 
 ## Why
 
-A test with too few clusters misses real effects and exaggerates the ones it finds. The test takes one value per cluster, so the gate counts the clusters of each stratum the claim lists, or of all confirmation inputs when it lists none. For a mean statistic it uses the hypothesis's share of design.alpha, design.power, the sd and icc from the study in estimates, the mean units a cluster gives, and the distance from power_at to each margin.
+A test with too few clusters misses real effects and exaggerates the ones it finds. The test takes one value per cluster, so the gate counts the clusters of each stratum the claim lists, or of all confirmation inputs when it lists none. For a mean statistic it uses the hypothesis's share of design.alpha, design.power, the sd and icc from the study in estimates, the harmonic mean of the units its clusters give, and the distance from power_at to each margin. The gate assumes the box estimates the statistic as the unweighted mean of the cluster means: one small cluster then weighs as much as a large one, which the harmonic mean accounts for.
 
 ## Sources
 

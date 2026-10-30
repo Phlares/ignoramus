@@ -57,7 +57,7 @@ fn a_rule_doc_has_the_rule_text_and_its_targets() {
          Severity: error\n\n\
          ## Problem\n\nAn outcome has no unit.\n\n\
          ## Fix\n\nGive every outcome a unit, for example ratio or seconds.\n\n\
-         ## Why\n\nAn effect size has no meaning without its unit. The smallest effect of interest is stated in this unit.\n\n\
+         ## Why\n\nAn effect size has no meaning without its unit. Margins and power_at are stated in this unit.\n\n\
          ## Sources\n\n- <https://doi.org/10.1136/bmj.e7586>\n\n\
          ## Applies to\n\n- `outcomes[*].unit` (non-empty)\n"
     );

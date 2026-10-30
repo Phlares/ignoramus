@@ -83,14 +83,18 @@ pub struct HomeRecords {
 
 impl BoxRecords for HomeRecords {
     /// A study is registered when its log holds a `register` record. An id that is not a
-    /// study id names no study, and no path is built from it.
+    /// study id names no study, and no path is built from it. Only a log that does not exist
+    /// means "not registered": any other fault, and a record of another study in the log,
+    /// is an error.
     fn study(&self, id: &str) -> Result<Option<Vec<records::Record>>, String> {
         if !rules::is_study_id(id) {
             return Ok(None);
         }
         let log = self.home.study_dir(id).join("records.jsonl");
-        if log.symlink_metadata().is_err() {
-            return Ok(None);
+        match log.symlink_metadata() {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.to_string()),
+            Ok(_) => {}
         }
         let key = match &self.key {
             Err(e) => return Err(e.clone()),
@@ -98,6 +102,9 @@ impl BoxRecords for HomeRecords {
             Ok(Some(key)) => key,
         };
         let all = records::read_all(&log, key).map_err(|e| e.to_string())?;
+        if let Some(r) = all.iter().find(|r| r.study != id) {
+            return Err(format!("record {} belongs to study {}", r.seq, r.study));
+        }
         let registered = all.iter().any(|r| Register::of(r).is_some());
         Ok(registered.then_some(all))
     }

@@ -381,8 +381,9 @@ fn faults() -> Vec<Fault> {
             vec![("/design/reference", j(json!("exakt")))],
             vec![("E-REF-001", "design.reference")],
         ),
-        // The reference may be any condition, here with exact as a candidate, whose estimate the
-        // pilot does not hold; an empty condition list is reported by non-empty alone.
+        // The reference may be any condition. The pilot's values are paired with exact, so with
+        // another reference none of its estimates is this contrast's. An empty condition list
+        // is reported by non-empty alone.
         f(
             vec![
                 ("/design/reference", j(json!("arm-a"))),
@@ -1347,8 +1348,11 @@ fn two_confirmation_inputs_with_the_same_data_count_once() {
 }
 
 #[test]
-fn the_power_gate_uses_the_mean_picked_units_per_cluster() {
-    // 11 clusters of 5 units; k of them hold 1 unit. The mean size sets the cluster sd.
+fn the_power_gate_uses_the_harmonic_mean_of_the_picked_units_per_cluster() {
+    // 11 clusters of 5 units; k of them hold 1 unit. The estimate is the unweighted mean of
+    // the cluster means, so a cluster mean has variance sd^2 (icc + (1 - icc) / m) on average
+    // over 1 / m: the harmonic mean size. 1 small cluster: 11 / (10 / 5 + 1) = 3.67 units, 13
+    // clusters needed; 2: 2.89 units, 17. The arithmetic mean, 4.6 and 4.3, would pass at 11.
     let dir = study_dir();
     let with_small = |k: usize| {
         let mut list = inputs(11, 5);
@@ -1356,18 +1360,124 @@ fn the_power_gate_uses_the_mean_picked_units_per_cluster() {
             list[2 + i]["units"] = json!(1);
         }
         named(&edited(&[("/inputs", j(list))]), dir.path())
+            .into_iter()
+            .map(|d| d.problem)
+            .collect::<Vec<_>>()
     };
-    assert!(with_small(2).is_empty());
-    assert_eq!(
-        with_small(3)[0].problem,
-        "The confirmation sample is too small. Stratum fiction has 11 of the 12 clusters the power gate needs."
-    );
+    assert!(with_small(0).is_empty());
+    let short = |need: u64| {
+        format!(
+            "The confirmation sample is too small. Stratum fiction has 11 of the {need} clusters the power gate needs."
+        )
+    };
+    assert_eq!(with_small(1), [short(13)]);
+    assert_eq!(with_small(2), [short(17)]);
     // An input with 0 units is no cluster: the range rule reports it.
     let mut list = inputs(10, 5);
     list[2]["units"] = json!(0);
     assert_eq!(
         named(&edited(&[("/inputs", j(list))]), dir.path())[0].problem,
         "The confirmation sample is too small. Stratum fiction has 9 of the 10 clusters the power gate needs."
+    );
+}
+
+#[test]
+fn an_estimate_written_before_the_analysis_record_is_not_read() {
+    // A stray estimate of arm-a with variance 1, then the analysis record and the one it
+    // promises, with variance 4. Read, the stray one would size the study too small.
+    let early = common::estimate(&[("arm-a", 1.0, json!({}))], "", 1.0, Some(0.0));
+    let finished = common::finished(vec![common::estimate(
+        &[("arm-a", 1.0, json!({}))],
+        "",
+        4.0,
+        Some(0.0),
+    )]);
+    let mut bodies = vec![finished[0].clone(), ("estimate", early)];
+    bodies.extend(finished[1..].iter().cloned());
+    let records = common::records_for("pilot", &bodies);
+    let h: Vec<String> = records.iter().map(records::hash).collect();
+    let dir = study_dir();
+    let b = common::Studies(vec![("pilot", Ok(records))]);
+    let pooled = edited(&unstaged(vec![hyp("strata", j(json!([])))]));
+    assert_eq!(
+        estimate_inputs(&pooled, 0, &with_box(dir.path(), b)),
+        Lookup::Found(vec![stratum("", 2.0, 0.0, &[&h[3]])])
+    );
+}
+
+#[test]
+fn two_estimates_of_one_contrast_must_agree() {
+    let a = |hypothesis: &str, var: f64, icc: f64| {
+        let mut e = common::estimate(&[("arm-a", 1.0, json!({}))], "", var, Some(icc));
+        e["hypothesis"] = json!(hypothesis);
+        e
+    };
+    let pooled = unstaged(vec![hyp("strata", j(json!([])))]);
+    // Two hypotheses of the pilot on one contrast: the same values, both records frozen.
+    let same = vec![a("H1", 4.0, 0.1), a("H2", 4.0, 0.1)];
+    let h = hashes(same.clone());
+    assert_eq!(
+        inputs_of(&pooled, same),
+        Lookup::Found(vec![stratum("", 2.0, 0.1, &[&h[2], &h[3]])])
+    );
+    // Other values for one key: no one estimate to take.
+    let detail = format!(
+        "{NO_MATCH} Study pilot holds 2 estimates of this contrast in the pooled group, with different variances or iccs."
+    );
+    for held in [
+        vec![a("H1", 4.0, 0.1), a("H2", 9.0, 0.1)],
+        vec![a("H1", 4.0, 0.1), a("H2", 4.0, 0.2)],
+    ] {
+        assert_eq!(
+            missing(&pooled, holding(held)),
+            [(ESTIMATES.to_string(), detail.clone())]
+        );
+    }
+}
+
+#[test]
+fn the_reference_is_part_of_the_contrast() {
+    // The plan's reference runs with other params than the pilot's: other paired values.
+    let params = ("/design/conditions/0/params", j(json!({ "bits": 16 })));
+    let pooled = unstaged(vec![hyp("strata", j(json!([]))), params.clone()]);
+    assert_eq!(
+        missing(&pooled, holding(pilot_estimates())),
+        [(
+            ESTIMATES.to_string(),
+            format!("{NO_MATCH} Study pilot has no estimate of this contrast in the pooled group.")
+        )]
+    );
+    let against = common::estimate_against(
+        ("exact", json!({ "bits": 16 })),
+        &[("arm-a", 1.0, json!({}))],
+        "",
+        4.0,
+        Some(0.0),
+    );
+    assert!(missing(&pooled, holding(vec![against])).is_empty());
+    let rule = v0().iter().find(|r| r.code == "E-CNF-003").unwrap();
+    assert!(
+        rule.instruction
+            .contains("the same reference condition with the same params"),
+        "{}",
+        rule.instruction
+    );
+}
+
+#[test]
+fn a_negative_icc_counts_as_zero() {
+    // An analysis of variance can estimate an icc below 0; the gate takes 0, the larger value.
+    let pooled = unstaged(vec![hyp("strata", j(json!([])))]);
+    let held = vec![common::estimate(
+        &[("arm-a", 1.0, json!({}))],
+        "",
+        4.0,
+        Some(-0.1),
+    )];
+    let h = hashes(held.clone());
+    assert_eq!(
+        inputs_of(&pooled, held),
+        Lookup::Found(vec![stratum("", 2.0, 0.0, &[&h[2]])])
     );
 }
 

@@ -150,8 +150,9 @@ fn a_contrast_key_is_canonical_json_sorted_by_condition() {
         ("b".to_string(), -1.0, json!({})),
         ("a".to_string(), 1.0, json!({ "bits": 4 })),
     ];
-    let (key, hash) = contrast_key(&ppl_ratio(), &terms);
-    let text = r#"{"contrast":[["a",1.0,{"bits":4}],["b",-1.0,{}]],"measure":"ppl","outcome":"ppl-ratio","paired":"percent"}"#;
+    let reference = ("ref".to_string(), json!({}));
+    let (key, hash) = contrast_key(&ppl_ratio(), &reference, &terms);
+    let text = r#"{"contrast":[["a",1.0,{"bits":4}],["b",-1.0,{}]],"measure":"ppl","outcome":"ppl-ratio","paired":"percent","reference":["ref",{}]}"#;
     assert_eq!(
         String::from_utf8(to_canonical(&key).unwrap()).unwrap(),
         text
@@ -159,15 +160,15 @@ fn a_contrast_key_is_canonical_json_sorted_by_condition() {
     assert_eq!(hash, sha256_hex(text.as_bytes()));
     assert_eq!(
         hash,
-        "5852a5a16c099e3dcf0750aaa3166c2461cda65e9ebabf622706ef647ec5fc48"
+        "99f75d6845c62b078f2e76f3e5937bf61cedc3f1b6a19860ccd1e1374c0c0810"
     );
     // The order the terms come in does not matter; each part of the key does.
     let reversed = [terms[1].clone(), terms[0].clone()];
-    assert_eq!(contrast_key(&ppl_ratio(), &reversed).1, hash);
+    assert_eq!(contrast_key(&ppl_ratio(), &reference, &reversed).1, hash);
     let other = |edit: &dyn Fn(&mut Outcome, &mut Terms)| {
         let (mut o, mut t) = (ppl_ratio(), terms.to_vec());
         edit(&mut o, &mut t);
-        contrast_key(&o, &t).1
+        contrast_key(&o, &reference, &t).1
     };
     let changed = [
         other(&|o, _| o.id = "ppl".into()),
@@ -183,6 +184,12 @@ fn a_contrast_key_is_canonical_json_sorted_by_condition() {
     for h in &changed {
         assert_ne!(*h, hash);
     }
+    // A paired value is taken against the reference: another reference, or its other
+    // params, is another contrast.
+    for other in [("exact", json!({})), ("ref", json!({ "bits": 16 }))] {
+        let reference = (other.0.to_string(), other.1);
+        assert_ne!(contrast_key(&ppl_ratio(), &reference, &terms).1, hash);
+    }
     // Unit, direction and registration do not change what the values are.
     assert_eq!(other(&|o, _| o.unit = "percent".into()), hash);
     assert_eq!(other(&|o, _| o.direction = Direction::Higher), hash);
@@ -192,9 +199,13 @@ fn a_contrast_key_is_canonical_json_sorted_by_condition() {
 #[test]
 fn a_contrast_key_orders_two_weights_of_one_condition() {
     let a = |w: f64| ("a".to_string(), w, json!({}));
-    let (key, hash) = contrast_key(&ppl_ratio(), &[a(1.0), a(-1.0)]);
+    let reference = ("ref".to_string(), json!({}));
+    let (key, hash) = contrast_key(&ppl_ratio(), &reference, &[a(1.0), a(-1.0)]);
     assert_eq!(key["contrast"], json!([["a", -1.0, {}], ["a", 1.0, {}]]));
-    assert_eq!(contrast_key(&ppl_ratio(), &[a(-1.0), a(1.0)]).1, hash);
+    assert_eq!(
+        contrast_key(&ppl_ratio(), &reference, &[a(-1.0), a(1.0)]).1,
+        hash
+    );
 }
 
 fn analysis_body() -> Value {
@@ -289,10 +300,12 @@ fn a_study_is_finished_once_every_record_its_analysis_promises_follows_it() {
         state(&[&register, &analysis, &e1, &other, &verdict]),
         StudyState::NotFinished
     );
-    let all = [&register, &analysis, &e1, &e2, &verdict];
+    // A finished study gives a reader only what follows its analysis record: an estimate
+    // written before it is not one the analysis promised.
+    let all = [&register, &e2, &analysis, &e1, &e2, &verdict];
     assert_eq!(
         state(&all),
-        StudyState::Finished(all.iter().map(|r| (*r).clone()).collect())
+        StudyState::Finished(vec![e1.clone(), e2.clone(), verdict.clone()])
     );
     // An analysis record that does not parse promises nothing a reader can trust.
     let torn = at(2, "analysis", json!({ "commit": "c" }));
@@ -304,6 +317,6 @@ fn a_study_is_finished_once_every_record_its_analysis_promises_follows_it() {
     let bare = [register.clone(), at(2, "analysis", nothing)];
     assert_eq!(
         StudyState::of(Some(bare.to_vec())),
-        StudyState::Finished(bare.to_vec())
+        StudyState::Finished(vec![])
     );
 }

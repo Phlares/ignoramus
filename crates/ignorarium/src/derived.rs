@@ -145,6 +145,8 @@ impl Analysis {
 pub enum StudyState {
     NotRegistered,
     NotFinished,
+    /// The records after the first analysis record: the ones it promised, and only those
+    /// count as the study's results.
     Finished(Vec<Record>),
 }
 
@@ -179,21 +181,27 @@ impl StudyState {
         {
             return StudyState::NotFinished;
         }
-        StudyState::Finished(records)
+        StudyState::Finished(after.to_vec())
     }
 }
 
-/// The key of a contrast's estimate: canonical `{"outcome", "measure", "paired", "contrast"}`
-/// with each term `[condition id, weight, params]`, sorted by id (then weight), and the
-/// SHA-256 hex of its canonical JSON. A follow-on study finds a finished study's estimate
-/// by this hash.
-pub fn contrast_key(outcome: &Outcome, terms: &[(String, f64, Value)]) -> (Value, String) {
+/// The key of a contrast's estimate: canonical `{"outcome", "measure", "paired",
+/// "reference", "contrast"}`, the reference as `[condition id, params]` (a paired value is
+/// taken against it) and each term as `[condition id, weight, params]`, sorted by id (then
+/// weight); and the SHA-256 hex of its canonical JSON. A follow-on study finds a finished
+/// study's estimate by this hash.
+pub fn contrast_key(
+    outcome: &Outcome,
+    reference: &(String, Value),
+    terms: &[(String, f64, Value)],
+) -> (Value, String) {
     let mut terms = terms.to_vec();
     terms.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
     let key = json!({
         "outcome": outcome.id,
         "measure": outcome.measure,
         "paired": outcome.paired,
+        "reference": [reference.0, reference.1],
         "contrast": terms
             .into_iter()
             .map(|(id, weight, params)| json!([id, weight, params]))

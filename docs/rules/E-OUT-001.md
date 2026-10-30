@@ -12,7 +12,7 @@ Give every outcome a unit, for example ratio or seconds.
 
 ## Why
 
-An effect size has no meaning without its unit. The smallest effect of interest is stated in this unit.
+An effect size has no meaning without its unit. Margins and power_at are stated in this unit.
 
 ## Sources
 

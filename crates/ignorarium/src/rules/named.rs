@@ -365,10 +365,11 @@ fn open_unit(x: f64) -> bool {
 /// E-CNF-002, at each hypothesis with a mean claim that E-CNF-001 and E-HYP-004 accept and
 /// whose estimates are found: in each group it is tested in, the clusters must reach the
 /// one-sided z count for every bound, at level `design.alpha` x `alpha_share` and power
-/// `design.power`. A cluster mean has sd `sd x sqrt(icc + (1 - icc) / m)`, m the mean units a
-/// cluster of the group gives. An absent alpha or power cannot be computed, so it fails
-/// closed; a mistyped or out-of-range one, or a units per cluster below 1, is the generic
-/// rules'. Quantile claims are not sized here.
+/// `design.power`. The box estimates the statistic as the unweighted mean of the cluster
+/// means, so a cluster mean has sd `sd x sqrt(icc + (1 - icc) / m)` on average, m the
+/// harmonic mean of the units the group's clusters give. An absent alpha or power cannot be
+/// computed, so it fails closed; a mistyped or out-of-range one, or a units per cluster below
+/// 1, is the generic rules'. Quantile claims are not sized here.
 fn power_met(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     let fields = ["alpha", "power"].map(|f| (f, val(spec, &format!("design.{f}"))));
     if fields
@@ -417,7 +418,7 @@ fn power_met(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
                 continue;
             }
             let have = sizes.len() as u64;
-            let m = sizes.iter().sum::<u64>() as f64 / have as f64;
+            let m = have as f64 / sizes.iter().map(|&u| 1.0 / u as f64).sum::<f64>();
             let sd = g.sd * (g.icc + (1.0 - g.icc) / m).sqrt();
             let need = sized
                 .bounds
@@ -555,7 +556,8 @@ pub enum Lookup {
 }
 
 /// The sd and icc the power gate uses in one group: the largest over the contrasts the
-/// hypothesis stands for, and the hashes of the estimate records they come from.
+/// hypothesis stands for, and the hashes of the estimate records they come from. A negative
+/// icc, which an analysis of variance can give, counts as 0, the larger and so safer value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StratumInput {
     /// `""` for the pooled group.
@@ -569,8 +571,8 @@ pub struct StratumInput {
 /// `estimates` names. That study must have finished. For each stratum the hypothesis lists
 /// (the pooled group `""` when none) and each contrast it stands for (with `selected`, each
 /// candidate of this plan's selection stage, with its params), the estimate with that
-/// contrast's key and the stratum, else the pooled one; its icc must be known. The largest sd
-/// and icc over the candidates.
+/// contrast's key and the stratum, else the pooled one; its icc must be known. Several such
+/// estimates must agree. The largest sd and icc over the candidates.
 pub fn estimate_inputs(spec: &Value, h: usize, ctx: &CheckCtx) -> Lookup {
     estimates_of(spec, &spec["question"]["hypotheses"][h], ctx)
         .unwrap_or_else(|| Lookup::Missing("The hypothesis is not well formed.".into()))
@@ -619,12 +621,13 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
                 .map(|p| format!(" with {} as the pick", shown(p)))
                 .unwrap_or_default();
             let found = [stratum, ""].into_iter().find_map(|group| {
-                estimates
+                let all: Vec<&(String, Estimate)> = estimates
                     .iter()
-                    .find(|(_, e)| e.key_hash == c.key && e.stratum == group)
-                    .map(|(hash, e)| (group, hash, e))
+                    .filter(|(_, e)| e.key_hash == c.key && e.stratum == group)
+                    .collect();
+                (!all.is_empty()).then_some((group, all))
             });
-            let Some((group, hash, e)) = found else {
+            let Some((group, all)) = found else {
                 let wanted = if stratum.is_empty() {
                     group_name("")
                 } else {
@@ -634,6 +637,14 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
                     "Study {from} has no estimate of this contrast{pick} in {wanted}."
                 )));
             };
+            let e = &all[0].1;
+            if all.iter().any(|(_, x)| x.var != e.var || x.icc != e.icc) {
+                return Some(Lookup::Missing(format!(
+                    "Study {from} holds {} estimates of this contrast{pick} in {}, with different variances or iccs.",
+                    all.len(),
+                    group_name(group)
+                )));
+            }
             let Some(icc) = e.icc.filter(|_| e.var > 0.0) else {
                 return Some(Lookup::Missing(format!(
                     "Study {from}'s estimate of this contrast{pick} in {} has no icc, or no variance above 0.",
@@ -642,7 +653,9 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
             };
             input.sd = input.sd.max(e.var.sqrt());
             input.icc = input.icc.max(icc);
-            input.records.push(hash.clone());
+            input
+                .records
+                .extend(all.iter().map(|(hash, _)| hash.clone()));
         }
         out.push(input);
     }
@@ -687,15 +700,18 @@ fn groups_of(hyp: &Value) -> Option<Vec<&str>> {
     Some(if names.is_empty() { vec![""] } else { names })
 }
 
-/// The contrasts a hypothesis stands for, each with its key: one, or with `selected` one per
-/// candidate of the selection stage. `None` when its outcome, a weight, a term or a candidate
-/// is one that `hypothesis-shape`, `condition-declared` or `param-shape` refuses.
+/// The contrasts a hypothesis stands for, each with its key, against the plan's reference
+/// with its params: one, or with `selected` one per candidate of the selection stage. `None`
+/// when the reference, its outcome, a weight, a term or a candidate is one that E-REF-001,
+/// `hypothesis-shape`, `condition-declared` or `param-shape` refuses.
 fn contrasts<'a>(spec: &'a Value, hyp: &'a Value) -> Option<Vec<Concrete<'a>>> {
     let id = hyp.get("outcome")?.as_str()?;
     let outcome = nodes(spec, "outcomes[*]")
         .into_iter()
         .find(|(_, o)| o.get("id").and_then(Value::as_str) == Some(id))
         .and_then(|(_, o)| serde_json::from_value::<Outcome>(o.clone()).ok())?;
+    let reference = text(spec, "design.reference")?;
+    let reference = (reference.to_string(), params_of(spec, reference)?);
     let terms_ok = names_for(spec, CONTRAST_KEYS)?;
     let terms: Vec<(&str, f64)> = hyp
         .get("contrast")?
@@ -733,7 +749,7 @@ fn contrasts<'a>(spec: &'a Value, hyp: &'a Value) -> Option<Vec<Concrete<'a>>> {
                     Some((c.to_string(), w, params_of(spec, c)?))
                 })
                 .collect::<Option<Vec<_>>>()?;
-            let key = contrast_key(&outcome, &concrete).1;
+            let key = contrast_key(&outcome, &reference, &concrete).1;
             Some(Concrete { pick, key })
         })
         .collect()

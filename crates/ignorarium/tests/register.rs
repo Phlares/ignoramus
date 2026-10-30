@@ -583,6 +583,47 @@ fn a_confirmatory_plan_registers_with_a_pending_timestamp() {
 }
 
 #[test]
+fn a_refusal_names_each_study_once() {
+    // Three hypotheses: two wait on my-pilot, one on later.
+    let more = |id: &str, from: &str| {
+        format!(
+            "[[question.hypotheses]]
+id = \"{id}\"
+statement = \"\"
+rival = \"\"
+outcome = \"ppl-ratio\"
+contrast = {{ arm-a = 1.0 }}
+claim = {{ below = 0.0 }}
+statistic = {{ quantile = 0.5 }}
+power_at = -1.0
+estimates = {{ from = \"{from}\" }}
+alpha_share = 0.3
+
+"
+        )
+    };
+    let (f, spec) = setup("numeric-ablation", |t| {
+        common::confirmatory(t)
+            .replacen("alpha_share = 1.0", "alpha_share = 0.4", 1)
+            .replacen(
+                "[[outcomes]]",
+                &format!(
+                    "{}{}[[outcomes]]",
+                    more("H2", "my-pilot"),
+                    more("H3", "later")
+                ),
+                1,
+            )
+    });
+    let (r, out) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(out.matches("warning[W-REF-001]").count(), 3, "{out}");
+    assert_eq!(
+        r.unwrap_err().msg,
+        "W-REF-001: a value waits on a study that has not finished; register after my-pilot finishes; register after later finishes. See docs/rules/W-REF-001.md"
+    );
+}
+
+#[test]
 fn register_refuses_pending_values() {
     let (f, spec) = setup("numeric-ablation", common::confirmatory);
     // Not registered, then registered and not finished: no analysis record yet.
@@ -646,6 +687,11 @@ creators = []
     let hashes = common::pilot(&f.home, vec![common::arm_a(), other, fiction]);
     let (r, out) = go(&f, &spec, &answer(&spec), true);
     assert_eq!(r.unwrap().code, 0, "{out}");
+    // The person approves the values with the plan: they are shown before the prompt.
+    let shown = "takes question.hypotheses[0].estimates from my-pilot: stratum article sd 2, icc 0.1; \
+                 stratum code sd 2, icc 0.1; stratum fiction sd 3, icc 0.2\n";
+    let at = out.find(shown).unwrap_or_else(|| panic!("{out}"));
+    assert!(at < out.find(PROMPT).unwrap(), "{out}");
     // A stratum's own estimate, else the pooled one, never another contrast's; each record
     // is named once.
     assert_eq!(

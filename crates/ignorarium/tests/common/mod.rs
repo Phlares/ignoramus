@@ -368,13 +368,26 @@ pub fn ppl_ratio() -> Outcome {
 /// A term of a contrast: condition id, weight and params.
 pub type Term<'a> = (&'a str, f64, serde_json::Value);
 
-/// The body of an estimate of the template outcome for the contrast `terms`, in `stratum`.
+/// The body of an estimate of the template outcome for the contrast `terms` against the
+/// template's reference `exact`, in `stratum`.
 pub fn estimate(terms: &[Term], stratum: &str, var: f64, icc: Option<f64>) -> serde_json::Value {
+    estimate_against(("exact", serde_json::json!({})), terms, stratum, var, icc)
+}
+
+/// `estimate` against another reference condition.
+pub fn estimate_against(
+    reference: (&str, serde_json::Value),
+    terms: &[Term],
+    stratum: &str,
+    var: f64,
+    icc: Option<f64>,
+) -> serde_json::Value {
     let terms: Vec<(String, f64, serde_json::Value)> = terms
         .iter()
         .map(|(c, w, p)| (c.to_string(), *w, p.clone()))
         .collect();
-    let (key, key_hash) = derived::contrast_key(&ppl_ratio(), &terms);
+    let reference = (reference.0.to_string(), reference.1);
+    let (key, key_hash) = derived::contrast_key(&ppl_ratio(), &reference, &terms);
     serde_json::json!({
         "hypothesis": "H1", "outcome": "ppl-ratio", "key": key, "key_hash": key_hash,
         "stratum": stratum, "clusters": 4, "units": 20, "mean": 1.0, "var": var, "icc": icc
