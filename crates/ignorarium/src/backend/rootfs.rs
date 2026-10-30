@@ -27,7 +27,8 @@
 //! yields the next one. It skips data through a fixed buffer, but holds long names, long link
 //! names and PAX records in memory. The outer archive and every layer stream have a fence.
 //! A GNU sparse entry is refused in both: its reported size is the expanded file, which would
-//! move the fence past data the archive does not hold.
+//! move the fence past data the archive does not hold. A PAX-format sparse file is a regular
+//! entry to the parser: its stored bytes, the sparse map included, are what the box writes.
 use crate::files::temp_beside;
 use crate::home::make_private_dir;
 use crate::store::{Store, StoreError};
