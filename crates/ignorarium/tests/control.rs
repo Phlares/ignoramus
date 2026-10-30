@@ -17,7 +17,6 @@ use serde_json::{Value, json};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
 use std::process::Command;
 use std::rc::Rc;
 use std::sync::{Arc, Barrier};
