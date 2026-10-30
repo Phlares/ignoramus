@@ -3,7 +3,7 @@ mod common;
 use common::{Lab, edited, lab, named, skip_level1};
 use ignorarium::backend::level0::Level0;
 use ignorarium::backend::level1::Level1;
-use ignorarium::backend::rootfs::{self, RootfsError, from_store, from_store_capped};
+use ignorarium::backend::rootfs::{self, Limits, RootfsError, from_store, from_store_capped};
 use ignorarium::backend::{Backend, Probe, RowJob, RowOutcome, Watch};
 use ignorarium::environ::Builder;
 use ignorarium::runner::{self, RunError, RunStatus, environment, prepare_with};
@@ -1310,10 +1310,10 @@ fn a_hostile_gzip_layer_is_judged_like_a_plain_one() {
     refused(&store, &layers, &host);
 }
 
-/// `from_store_capped` at `cap` fails with `message`, and neither the image's tree nor a temp
-/// folder for it is left in the store.
-fn fails_cleanly(store: &Store, digest: &str, cap: u64, message: &str) {
-    let err = from_store_capped(store, digest, cap).unwrap_err();
+/// `from_store_capped` with `limits` fails with `message`, and neither the image's tree nor a
+/// temp folder for it is left in the store.
+fn fails_cleanly(store: &Store, digest: &str, limits: Limits, message: &str) {
+    let err = from_store_capped(store, digest, limits).unwrap_err();
     assert!(matches!(&err, RootfsError::Format(_)), "{err}");
     assert_eq!(err.to_string(), message);
     let left: Vec<String> = fs::read_dir(store.root.join("rootfs"))
@@ -1324,13 +1324,48 @@ fn fails_cleanly(store: &Store, digest: &str, cap: u64, message: &str) {
     assert!(left.is_empty(), "{left:?}");
 }
 
+/// The default limits with an extraction budget of `cap`.
+fn budget(cap: u64) -> Limits {
+    Limits {
+        budget: cap,
+        ..rootfs::LIMITS
+    }
+}
+
+#[test]
+fn the_paths_an_extraction_records_are_capped() {
+    let (_h, store) = store();
+    let digest = image_of(
+        &store,
+        &[layer_bytes(&[
+            M::File("usr/a", "A"),
+            M::Sym("usr/s", "a"),
+            M::Hard("usr/h", "usr/a", "box"),
+        ])],
+    );
+    // The file, the link and the hard link are recorded: `usr/a`, `usr/s`, `usr/h`.
+    let records = |cap| Limits {
+        records: cap,
+        ..rootfs::LIMITS
+    };
+    fails_cleanly(
+        &store,
+        &digest,
+        records(14),
+        "bad image archive: the paths the extraction records are over 14 bytes",
+    );
+    let root = from_store_capped(&store, &digest, records(15)).unwrap();
+    assert_eq!(fs::read_to_string(root.join("usr/h")).unwrap(), "A");
+    assert_eq!(rootfs::LIMITS.records, 256 << 20);
+}
+
 /// The image is refused for its extraction budget at `cap`.
 fn over_budget(store: &Store, digest: &str, cap: u64) {
     let message = format!(
         "bad image archive: the image is over the extraction budget of {cap} bytes \
          (decoded layer bytes, read in two passes, plus 4096 per entry written)"
     );
-    fails_cleanly(store, digest, cap, &message);
+    fails_cleanly(store, digest, budget(cap), &message);
 }
 
 const FENCED: &str = "bad image archive: a header extension is larger than 1 MiB";
@@ -1402,7 +1437,7 @@ fn an_oversized_long_name_or_pax_record_is_refused_before_it_is_read() {
         let digest = image_of(&store, &[b.into_inner().unwrap()]);
         // A budget one byte past the fence: the fence error shows the stream gave the crate
         // at most that byte past the fence, so it never held the extension.
-        fails_cleanly(&store, &digest, (MIB + 1) as u64, FENCED);
+        fails_cleanly(&store, &digest, budget((MIB + 1) as u64), FENCED);
     }
 }
 
@@ -1429,7 +1464,7 @@ fn the_fence_is_exact_and_moves_with_each_entry() {
         ["usr", "usr/a"]
     );
     let past = image_of(&store, &[layer(MIB - 1023)]);
-    fails_cleanly(&store, &past, rootfs::WRITE_CAP, FENCED);
+    fails_cleanly(&store, &past, rootfs::LIMITS, FENCED);
     // Each entry opens a new window past its own declared data.
     let mut b = tar::Builder::new(Vec::new());
     extended(
@@ -1487,7 +1522,7 @@ fn the_outer_archive_is_fenced_too() {
         b.append(&h, data).unwrap();
     }
     let digest = store.put(&b.into_inner().unwrap()).unwrap();
-    fails_cleanly(&store, &digest, rootfs::WRITE_CAP, FENCED);
+    fails_cleanly(&store, &digest, rootfs::LIMITS, FENCED);
 }
 
 #[test]
@@ -1520,7 +1555,7 @@ fn the_window_after_an_entry_starts_past_its_padding() {
         ["usr", "usr/a"]
     );
     let past = image_of(&store, &[layer(MIB - 1023)]);
-    fails_cleanly(&store, &past, rootfs::WRITE_CAP, FENCED);
+    fails_cleanly(&store, &past, rootfs::LIMITS, FENCED);
 }
 
 /// Append a GNU sparse member `name` that stores `stored` bytes and expands to `logical`
@@ -1555,7 +1590,7 @@ fn a_gnu_sparse_member_is_refused() {
             b.into_inner().unwrap(),
         ],
     );
-    fails_cleanly(&store, &digest, rootfs::WRITE_CAP, &sparse_refused("usr/s"));
+    fails_cleanly(&store, &digest, rootfs::LIMITS, &sparse_refused("usr/s"));
     // In the outer archive too, before the member the box looks for.
     let mut b = tar::Builder::new(Vec::new());
     sparse(&mut b, "x", 512, 4096);
@@ -1573,7 +1608,7 @@ fn a_gnu_sparse_member_is_refused() {
         b.append(&h, data).unwrap();
     }
     let digest = store.put(&b.into_inner().unwrap()).unwrap();
-    fails_cleanly(&store, &digest, rootfs::WRITE_CAP, &sparse_refused("x"));
+    fails_cleanly(&store, &digest, rootfs::LIMITS, &sparse_refused("x"));
 }
 
 #[test]
@@ -1590,7 +1625,12 @@ fn a_sparse_member_cannot_widen_the_fence() {
     );
     let digest = image_of(&store, &[b.into_inner().unwrap()]);
     // A budget one byte past the fence: the error shows the long name was never read.
-    fails_cleanly(&store, &digest, (MIB + 1) as u64, &sparse_refused("usr/s"));
+    fails_cleanly(
+        &store,
+        &digest,
+        budget((MIB + 1) as u64),
+        &sparse_refused("usr/s"),
+    );
 }
 
 #[test]
@@ -1622,7 +1662,7 @@ fn an_extraction_over_the_write_cap_is_refused_and_publishes_nothing() {
     let digest = image_of(&store, &layers);
     over_budget(&store, &digest, 17407);
     assert_eq!(fs::read_dir(store.root.join("rootfs")).unwrap().count(), 0);
-    assert!(from_store_capped(&store, &digest, 17408).is_ok());
+    assert!(from_store_capped(&store, &digest, budget(17408)).is_ok());
     // The budget counts the whole image, across layers: layer 1 costs 2 * 1536 + 2 * 4096 =
     // 11264, layer 2 costs 2 * 1536 + 4096 = 7168 (the folder exists), 18432 in all.
     let two = image_of(
@@ -1633,7 +1673,7 @@ fn an_extraction_over_the_write_cap_is_refused_and_publishes_nothing() {
         ],
     );
     over_budget(&store, &two, 18431);
-    assert!(from_store_capped(&store, &two, 18432).is_ok());
+    assert!(from_store_capped(&store, &two, budget(18432)).is_ok());
 }
 
 #[test]
@@ -1659,7 +1699,7 @@ fn many_empty_entries_are_stopped_by_the_entry_charge() {
     // The decoded bytes, 2 * (1000 * 512 + 512) = 1025024, fit in 2 MiB; the 1001 entries
     // written (1000 files and `usr`) at 4096 each do not.
     over_budget(&store, &digest, 2 << 20);
-    assert!(from_store_capped(&store, &digest, 1_025_024 + 1001 * 4096).is_ok());
+    assert!(from_store_capped(&store, &digest, budget(1_025_024 + 1001 * 4096)).is_ok());
 }
 
 #[test]
@@ -1706,7 +1746,7 @@ fn folders_a_deep_path_implies_are_charged_as_entries() {
     // block: 4 * 512. Written: the file and 201 folders (`usr` and 200 `d`).
     let cost = 2 * 4 * 512 + 202 * 4096;
     over_budget(&store, &digest, cost - 1);
-    let root = from_store_capped(&store, &digest, cost).unwrap();
+    let root = from_store_capped(&store, &digest, budget(cost)).unwrap();
     assert!(root.join(&deep).is_file());
 }
 

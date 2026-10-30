@@ -12,6 +12,10 @@
 //! data, the parts outside the kept folders included. An image over the budget fails and
 //! publishes nothing.
 //!
+//! The extraction records the path of every file and link it writes. A second count bounds
+//! that memory: the bytes of every path recorded, `RECORD_CAP` in all. An image over it fails
+//! and publishes nothing.
+//!
 //! A fence bounds the memory of the tar reader. After it yields an entry, it may read the data
 //! that entry stores, padded to whole 512-byte blocks, and `EXTENSION` (1 MiB) more before it
 //! yields the next one. It skips data through a fixed buffer, but holds long names, long link
@@ -58,6 +62,23 @@ const HEAD: u64 = (USTAR_AT + USTAR.len()) as u64;
 pub const WRITE_CAP: u64 = 32 << 30;
 /// What one entry written costs the budget.
 const ENTRY: u64 = 4 << 10;
+/// The bytes of the paths one extraction records (see the module doc).
+pub const RECORD_CAP: u64 = 256 << 20;
+
+/// What one extraction may spend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    /// The extraction budget.
+    pub budget: u64,
+    /// The memory of the recorded paths.
+    pub records: u64,
+}
+
+/// The limits `from_store` applies.
+pub const LIMITS: Limits = Limits {
+    budget: WRITE_CAP,
+    records: RECORD_CAP,
+};
 /// What the tar reader may read past an entry's stored data before it yields the next one.
 const EXTENSION: u64 = 1 << 20;
 /// A tar block: headers and padded data come in these.
@@ -132,15 +153,14 @@ struct ManifestEntry {
 /// after, even when the image is gone from the store. A crash leaves a temp folder beside the
 /// result, never a partial tree at it.
 pub fn from_store(store: &Store, store_digest: &str) -> Result<PathBuf, RootfsError> {
-    from_store_capped(store, store_digest, WRITE_CAP)
+    from_store_capped(store, store_digest, LIMITS)
 }
 
-/// `from_store` with an extraction budget of `cap` bytes. An image over it fails the call and
-/// publishes nothing.
+/// `from_store` with other limits. An image over one fails the call and publishes nothing.
 pub fn from_store_capped(
     store: &Store,
     store_digest: &str,
-    cap: u64,
+    limits: Limits,
 ) -> Result<PathBuf, RootfsError> {
     let blob = store.path(store_digest)?;
     let parent = store.root.join("rootfs");
@@ -159,7 +179,7 @@ pub fn from_store_capped(
     let root = tmp.join("root");
     let built = fs::File::open(&blob)
         .map_err(RootfsError::from)
-        .and_then(|mut f| extract(&mut f, &root, cap))
+        .and_then(|mut f| extract(&mut f, &root, limits))
         .and_then(|()| match fs::rename(&root, &done) {
             Ok(()) => Ok(()),
             // Another box published the same tree first.
@@ -237,7 +257,7 @@ fn each_entry<R: Read, T>(
 
 /// Extract the image archive `blob` into `root`. The archive is read once to find its
 /// files; the manifest and each layer are then read from where they lie.
-fn extract(blob: &mut (impl Read + Seek), root: &Path, cap: u64) -> Result<(), RootfsError> {
+fn extract(blob: &mut (impl Read + Seek), root: &Path, limits: Limits) -> Result<(), RootfsError> {
     let found = members(blob)?;
     let mut manifest = Vec::new();
     let manifest_json = Path::new("manifest.json");
@@ -266,8 +286,9 @@ fn extract(blob: &mut (impl Read + Seek), root: &Path, cap: u64) -> Result<(), R
         }
     }
     fs::create_dir(root)?;
-    let budget = Meter::budget(cap);
-    let mut tree = Tree::new(root, &budget);
+    let budget = Meter::budget(limits.budget);
+    let records = Meter::records(limits.records);
+    let mut tree = Tree::new(root, &budget, &records);
     for name in &names {
         let what = format!("layer {}", name.display());
         for pass in [Pass::Whiteouts, Pass::Content] {
@@ -301,6 +322,14 @@ impl Meter {
                 "the image is over the extraction budget of {cap} bytes (decoded layer bytes, \
                  read in two passes, plus {ENTRY} per entry written)"
             ),
+        )
+    }
+
+    /// The paths an extraction records: `cap` bytes in all.
+    fn records(cap: u64) -> Meter {
+        Meter::new(
+            cap,
+            format!("the paths the extraction records are over {cap} bytes"),
         )
     }
 
@@ -410,22 +439,31 @@ enum Pass {
 }
 
 /// The tree under construction, and an exact record of what this extraction made: every
-/// symbolic link and every regular file, by path relative to the root.
+/// symbolic link and every regular file, by path relative to the root. `records` counts the
+/// bytes of every path recorded.
 struct Tree<'a> {
     root: &'a Path,
     links: BTreeSet<PathBuf>,
     files: BTreeSet<PathBuf>,
     budget: &'a Meter,
+    records: &'a Meter,
 }
 
 impl<'a> Tree<'a> {
-    fn new(root: &'a Path, budget: &'a Meter) -> Tree<'a> {
+    fn new(root: &'a Path, budget: &'a Meter, records: &'a Meter) -> Tree<'a> {
         Tree {
             root,
             links: BTreeSet::new(),
             files: BTreeSet::new(),
             budget,
+            records,
         }
+    }
+
+    /// `rel`, to record, once its bytes are counted.
+    fn kept(&self, rel: &Path) -> io::Result<PathBuf> {
+        self.records.charge(rel.as_os_str().len() as u64)?;
+        Ok(rel.to_path_buf())
     }
 
     /// One pass over the layer's members.
@@ -635,7 +673,7 @@ impl<'a> Tree<'a> {
             .mode(mode)
             .open(self.full(rel))?;
         io::copy(data, &mut f)?;
-        self.files.insert(rel.to_path_buf());
+        self.files.insert(self.kept(rel)?);
         Ok(())
     }
 
@@ -643,7 +681,7 @@ impl<'a> Tree<'a> {
         self.parents(rel, true)?;
         self.clear(rel)?;
         std::os::unix::fs::symlink(OsStr::from_bytes(target), self.full(rel))?;
-        self.links.insert(rel.to_path_buf());
+        self.links.insert(self.kept(rel)?);
         Ok(())
     }
 
@@ -678,7 +716,7 @@ impl<'a> Tree<'a> {
         self.parents(rel, true)?;
         self.clear(rel)?;
         fs::hard_link(self.full(&to), self.full(rel))?;
-        self.files.insert(rel.to_path_buf());
+        self.files.insert(self.kept(rel)?);
         Ok(())
     }
 }
@@ -738,7 +776,7 @@ mod tests {
             inner: io::Cursor::new(&image),
             read: 0,
         };
-        extract(&mut blob, &root, WRITE_CAP).unwrap();
+        extract(&mut blob, &root, LIMITS).unwrap();
         assert_eq!(fs::read_to_string(root.join("usr/a")).unwrap(), "A");
         // One pass over the archive, then the manifest and the layer's two passes, each read
         // from where it lies.
@@ -753,7 +791,8 @@ mod tests {
     #[test]
     fn forget_drops_a_path_and_its_descendants_and_keeps_its_neighbours() {
         let budget = Meter::budget(WRITE_CAP);
-        let mut tree = Tree::new(Path::new("/nonexistent"), &budget);
+        let records = Meter::records(RECORD_CAP);
+        let mut tree = Tree::new(Path::new("/nonexistent"), &budget, &records);
         let all = [
             "usr", "usr/a", "usr/a/b", "usr/a-b", "usr/a.b", "usr/a0", "usr/ab",
         ];
