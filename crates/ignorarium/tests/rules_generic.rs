@@ -1120,7 +1120,7 @@ fn the_documented_codes_are_exactly_the_register_refusals() {
         .map(|r| r.code.as_str())
         .collect();
     codes.sort_unstable();
-    assert_eq!(codes, ["E-REG-001", "E-REG-002"]);
+    assert_eq!(codes, ["E-REG-001", "E-REG-002", "E-REG-003"]);
 }
 
 #[test]

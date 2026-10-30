@@ -910,9 +910,18 @@ fn import_history_refuses_a_phase_in_the_form_of_a_studys_own_label() {
     assert!(stdout(&help).contains("Must not start with `study:`"));
 }
 
-/// Register the template through the library, then return the box.
+/// Give the study root of `spec` a payload folder, as `register` needs.
+fn give_payload(spec: &Path) {
+    let dir = spec.parent().unwrap().join("payload");
+    std::fs::create_dir_all(&dir).unwrap();
+    common::write_exec(&dir.join("run"), common::PAYLOAD);
+}
+
+/// Register the template through the library, then return the box. The box's payload copy
+/// is made writable again, so the temp folder can be removed.
 fn registered() -> (TempDir, PathBuf, PathBuf) {
     let (d, home, spec) = setup(|t| t);
+    give_payload(&spec);
     let h = ignorarium::home::Home::open_at(&home).unwrap();
     let typed = format!("{}\n", &ignorarium::spec::load(&spec).unwrap().hash[7..15]);
     let mut out = Vec::new();
@@ -924,6 +933,7 @@ fn registered() -> (TempDir, PathBuf, PathBuf) {
         true,
     )
     .unwrap();
+    common::unseal(&home);
     (d, home, spec)
 }
 
@@ -1538,6 +1548,7 @@ fn register_accepts_an_input_that_only_the_store_holds() {
     let pin = format!("sha256 = \"{digest}\"");
     assert!(text.contains("sha256 = \"\""));
     std::fs::write(&spec, text.replacen("sha256 = \"\"", &pin, 1)).unwrap();
+    give_payload(&spec);
     let h = Home::open_at(&home).unwrap();
     let typed = format!("{}\n", &ignorarium::spec::load(&spec).unwrap().hash[7..15]);
     let mut out = Vec::new();
@@ -1555,4 +1566,5 @@ fn register_accepts_an_input_that_only_the_store_holds() {
         leaves[0]["data_hashes"],
         serde_json::json!([[digest, ignorarium::canon::sha256_hex(b"stored words")]])
     );
+    common::unseal(&home);
 }

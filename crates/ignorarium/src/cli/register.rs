@@ -1,19 +1,24 @@
-//! `register`: a person approves a checked plan; the box stores it and logs it.
+//! `register`: a person approves a checked plan; the box stores it, its payload and its
+//! inputs, and logs it.
 use super::check::{self, Assessed};
 use super::{CliError, Ctx, Done};
+use crate::backend::output::file_digest;
 use crate::canon::to_canonical;
 use crate::derived::{REGISTER, Register};
 use crate::diag::render_human;
 use crate::estimate::defaults_json;
 use crate::files::{WriteOnceError, write_once};
 use crate::home::Home;
+use crate::inputs::{self, Found};
+use crate::payload::{self, PayloadError};
 use crate::planlog::store::{Leaf, PlanLog};
 use crate::planlog::{commitment, family};
 use crate::records::{self, RecordDraft};
-use crate::rules;
+use crate::rules::{self, input_path};
 use crate::spec::{self, model::Spec};
 use crate::store::Store;
 use crate::{keys, time};
+use ed25519_dalek::SigningKey;
 use serde_json::Value;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::Path;
@@ -33,15 +38,21 @@ pub fn approve(typed: &str, spec_hash: &str) -> bool {
         })
 }
 
-/// A refusal for a code that only the command line raises; the text comes from the rule file.
-fn refusal(code: &str) -> CliError {
+/// A refusal for a code that only the command line raises; the text comes from the rule
+/// file. `found` says what this case found, when the rule text alone does not.
+fn refusal(code: &str, found: &str) -> CliError {
     let text = rules::builtin()
         .iter()
         .find(|r| r.code == code)
         .map_or(String::new(), |r| {
             format!("{} {}", r.problem, r.instruction)
         });
-    CliError::refuse(format!("{code}: {text} See docs/rules/{code}.md"))
+    let found = if found.is_empty() {
+        String::new()
+    } else {
+        format!(" Found: {found}.")
+    };
+    CliError::refuse(format!("{code}: {text}{found} See docs/rules/{code}.md"))
 }
 
 fn io(what: &str, e: impl std::fmt::Display) -> CliError {
@@ -50,10 +61,17 @@ fn io(what: &str, e: impl std::fmt::Display) -> CliError {
 
 fn put(dir: &Path, name: &str, bytes: &[u8], mode: u32) -> Result<(), CliError> {
     write_once(&dir.join(name), bytes, mode).map_err(|e| match e {
-        WriteOnceError::Differs | WriteOnceError::Link => refusal("E-REG-002"),
+        WriteOnceError::Differs | WriteOnceError::Link => refusal("E-REG-002", ""),
         WriteOnceError::Io(e) => io(name, e),
     })?;
     Ok(())
+}
+
+/// What `register` freezes besides the spec: the payload folder's hash, and the digest of
+/// the stored copy of each input present.
+struct Frozen {
+    payload: String,
+    inputs: Vec<(String, String)>,
 }
 
 /// The body of the `register` record. A confirmatory plan waits for a timestamp, which a later version adds.
@@ -64,6 +82,7 @@ fn record_body(
     filled: &[(String, Value)],
     confirmatory: bool,
     root: &Path,
+    frozen: &Frozen,
 ) -> Result<Value, CliError> {
     let root = root
         .to_str()
@@ -74,6 +93,8 @@ fn record_body(
         log: log.into(),
         defaults: defaults_json(filled),
         root: root.into(),
+        payload: frozen.payload.clone(),
+        inputs: frozen.inputs.clone(),
         timestamp: confirmatory.then(|| "pending".into()),
     })
     .map_err(|e| io("register record", e))
@@ -85,7 +106,7 @@ pub fn run_stdio(ctx: &Ctx, spec_path: &Path) -> Result<Done, CliError> {
     // The terminal check comes before anything else, the home included.
     let is_tty = stdin.is_terminal();
     if !is_tty {
-        return Err(refusal("E-REG-001"));
+        return Err(refusal("E-REG-001", ""));
     }
     run(
         spec_path,
@@ -96,6 +117,9 @@ pub fn run_stdio(ctx: &Ctx, spec_path: &Path) -> Result<Done, CliError> {
     )
 }
 
+/// Every step that can refuse runs before the study folder exists: the rules, the payload
+/// hash and its pin, the approval, the input imports. Then the folder, the spec files, the
+/// payload copy, the plan leaf and the `register` record.
 pub fn run(
     spec_path: &Path,
     home: &Home,
@@ -104,7 +128,7 @@ pub fn run(
     is_tty: bool,
 ) -> Result<Done, CliError> {
     if !is_tty {
-        return Err(refusal("E-REG-001"));
+        return Err(refusal("E-REG-001", ""));
     }
     let ctx = Ctx {
         home: Ok(home.clone()),
@@ -126,16 +150,14 @@ pub fn run(
     let spec = Spec::from_value(&a.value).map_err(|e| io("spec does not fit the schema", e))?;
     let id = spec.study.id.as_str();
     if home.study_dir(id).symlink_metadata().is_ok() {
-        return Err(refusal("E-REG-002"));
+        return Err(refusal("E-REG-002", ""));
     }
-    let label = a
-        .estimate
-        .as_ref()
-        .map_or("", |e| e.label_earnable.as_str());
-    let mode = a.value["study"]["mode"].as_str().unwrap_or_default();
+    let payload = payload_hash(&a.root, &spec)?;
     writeln!(
         output,
-        "plan {id}: {mode}, earnable label {label}, spec {}",
+        "plan {id}: {}, earnable label {}, spec {}, payload sha256:{payload}",
+        mode_of(&a),
+        label_of(&a),
         a.hash
     )
     .map_err(say)?;
@@ -146,34 +168,102 @@ pub fn run(
     if !approve(&typed, &a.hash) {
         return Err(CliError::refuse("approval not given; nothing was written"));
     }
-    // An input that changed since the check would make the stored hashes a lie.
-    let root = &a.root;
+    let key = keys::load_or_create(home).map_err(|e| io("box key", e))?;
     let blobs = Store::open(&home.root).map_err(|e| io("store", e))?;
-    let now = check::input_hashes(&blobs, root, &a.value);
-    for ((path, checked), (_, now)) in a.input_hashes.iter().zip(&now) {
-        if now != checked {
-            return Err(CliError::refuse(format!(
-                "input {path} changed or became unreadable since the check; nothing was written"
-            )));
-        }
-    }
-    let leaf = store(spec_path, home, &spec, &a, label, mode)?;
+    let inputs = hold_inputs(&blobs, &key, &spec, &a)?;
+    let frozen = Frozen { payload, inputs };
+    let leaf = store(spec_path, home, &spec, &a, &key, &frozen)?;
     writeln!(output, "registered {id}: leaf {leaf}").map_err(say)?;
     Ok(done(0, Some(leaf)))
 }
 
-/// Load the key and check both log tails, then write the study folder, the plan leaf and the
-/// `register` record. A fault in the key or a log must not leave a folder that burns the id.
-/// Another process can register the same id between the check and the `create_dir`; the
-/// `create_dir` refuses it. The log appends are not atomic with the earlier-use lookup in
-/// `check`; v0 accepts that. `check_tails` runs before `append` takes its lock.
+fn mode_of(a: &Assessed) -> &str {
+    a.value["study"]["mode"].as_str().unwrap_or_default()
+}
+
+fn label_of(a: &Assessed) -> &str {
+    a.estimate
+        .as_ref()
+        .map_or("", |e| e.label_earnable.as_str())
+}
+
+/// The tree hash of the payload folder under the study root. E-REG-003 when there is no
+/// folder or no `payload/run`, the folder holds a link or another non-regular file, or
+/// `pins.payload` is set to another hash.
+fn payload_hash(root: &Path, spec: &Spec) -> Result<String, CliError> {
+    let hash = payload::tree_hash(&root.join(payload::DIR)).map_err(|e| match e {
+        PayloadError::Io(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            refusal("E-REG-003", "the study root has no payload folder")
+        }
+        PayloadError::Io(e) => io("payload", e),
+        e => refusal("E-REG-003", &e.to_string()),
+    })?;
+    let pin = spec.pins.payload.trim();
+    let pin = pin.strip_prefix("sha256:").unwrap_or(pin);
+    if !pin.is_empty() && pin != hash {
+        let found = format!("pins.payload is {pin}, and the folder hashes to {hash}");
+        return Err(refusal("E-REG-003", &found));
+    }
+    Ok(hash)
+}
+
+/// Bring every input into the store, and check that each still holds the bytes the check
+/// hashed: a file under the root is imported, in one streamed read, with a signed import
+/// record; a stored blob is hashed again in full, once. A pin must name the stored copy.
+/// Returns the path and digest of each input present.
+fn hold_inputs(
+    store: &Store,
+    key: &SigningKey,
+    spec: &Spec,
+    a: &Assessed,
+) -> Result<Vec<(String, String)>, CliError> {
+    let source = format!("register {}", spec.study.id);
+    let mut held = Vec::new();
+    for (input, (path, checked)) in spec.inputs.iter().zip(&a.input_hashes) {
+        let changed = || {
+            CliError::refuse(format!(
+                "input {path} changed or became unreadable since the check; nothing was written"
+            ))
+        };
+        let now = match inputs::resolve(store, &a.root, path, &input.sha256) {
+            Found::Stored { digest, meta } => {
+                let blob = store.path(&digest).map_err(|_| changed())?;
+                let same = file_digest(&blob).ok().flatten().as_ref() == Some(&digest);
+                same.then_some((digest, meta.normalized_sha256))
+            }
+            Found::File { .. } => {
+                let file = input_path(&a.root, path).ok_or_else(changed)?;
+                let (digest, meta) = store
+                    .import_signed(&file, key, &source)
+                    .map_err(|_| changed())?;
+                Some((digest, meta.normalized_sha256))
+            }
+            Found::Missing | Found::Unsafe | Found::Damaged(_) => None,
+        };
+        let pinned = input.sha256.is_empty() || now.as_ref().is_some_and(|h| h.0 == input.sha256);
+        if now != *checked || !pinned {
+            return Err(changed());
+        }
+        if let Some((digest, _)) = now {
+            held.push((path.clone(), digest));
+        }
+    }
+    Ok(held)
+}
+
+/// Load the key and check both log tails, then write the study folder, the payload copy, the
+/// plan leaf and the `register` record. A fault in the key or a log must not leave a folder
+/// that burns the id. Another process can register the same id between the check and the
+/// `create_dir`; the `create_dir` refuses it. The log appends are not atomic with the
+/// earlier-use lookup in `check`; v0 accepts that. `check_tails` runs before `append` takes
+/// its lock.
 fn store(
     spec_path: &Path,
     home: &Home,
     spec: &Spec,
     a: &Assessed,
-    label: &str,
-    mode: &str,
+    key: &SigningKey,
+    frozen: &Frozen,
 ) -> Result<u64, CliError> {
     let bytes = std::fs::read(spec_path).map_err(|e| io("cannot read spec", e))?;
     let raw = spec::parse(&bytes).map_err(|e| io("cannot read spec", e))?;
@@ -182,12 +272,12 @@ fn store(
     }
     let canon = to_canonical(&raw.value).map_err(|e| io("canonical form", e))?;
     let id = spec.study.id.as_str();
+    let mode = mode_of(a);
     let log = if spec.study.test_log {
         "testlog"
     } else {
         "planlog"
     };
-    let key = keys::load_or_create(home).map_err(|e| io("box key", e))?;
     let plan_log = PlanLog::open(&home.root.join(log))
         .and_then(|l| l.check_tails().map(|()| l))
         .map_err(|e| io(log, e))?;
@@ -196,7 +286,7 @@ fn store(
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut mk, 0o700);
     mk.create(&dir).map_err(|e| match e.kind() {
-        std::io::ErrorKind::AlreadyExists => refusal("E-REG-002"),
+        std::io::ErrorKind::AlreadyExists => refusal("E-REG-002", ""),
         _ => io("cannot create the study folder", e),
     })?;
     let mut salt = [0u8; 32];
@@ -205,6 +295,16 @@ fn store(
     put(&dir, "spec.json", &canon, 0o644)?;
     put(&dir, "spec.hash", format!("{}\n", a.hash).as_bytes(), 0o644)?;
     put(&dir, "salt", &salt, 0o600)?;
+    // The folder now exists: a payload edited since the check leaves it without a record.
+    let copied = payload::snapshot(&a.root, &dir).map_err(|e| match e {
+        PayloadError::Io(e) => io("payload copy", e),
+        e => refusal("E-REG-003", &e.to_string()),
+    })?;
+    if copied != frozen.payload {
+        return Err(CliError::refuse(format!(
+            "the payload changed after the check; the study folder of {id} has no register record"
+        )));
+    }
 
     let data_hashes = a
         .input_hashes
@@ -219,15 +319,15 @@ fn store(
                 family: Some(family(spec)),
                 mode: Some(mode.into()),
                 data_hashes,
-                label: label.into(),
+                label: label_of(a).into(),
                 ts: time::now_rfc3339(),
             },
-            &key,
+            key,
         )
         .map_err(|e| io(log, e))?;
     records::append(
         &dir.join("records.jsonl"),
-        &key,
+        key,
         RecordDraft {
             study: id.into(),
             row: None,
@@ -239,6 +339,7 @@ fn store(
                 &a.filled,
                 mode == "confirmatory",
                 &a.root,
+                frozen,
             )?,
         },
     )
@@ -255,14 +356,19 @@ mod tests {
     fn only_a_confirmatory_record_is_pending() {
         let filled = [("design.alpha".to_string(), json!(0.005))];
         let root = Path::new("/work/study");
-        let exp = record_body("sha256:ab", 3, "planlog", &filled, false, root).unwrap();
+        let frozen = Frozen {
+            payload: "ab".repeat(32),
+            inputs: vec![("data/x.txt".into(), "cd".repeat(32))],
+        };
+        let exp = record_body("sha256:ab", 3, "planlog", &filled, false, root, &frozen).unwrap();
         assert_eq!(
             exp,
             json!({"spec_hash": "sha256:ab", "leaf": 3, "log": "planlog",
                    "defaults": [{"path": "design.alpha", "value": 0.005}],
-                   "root": "/work/study"})
+                   "root": "/work/study", "payload": "ab".repeat(32),
+                   "inputs": [["data/x.txt", "cd".repeat(32)]]})
         );
-        let conf = record_body("sha256:ab", 3, "testlog", &filled, true, root).unwrap();
+        let conf = record_body("sha256:ab", 3, "testlog", &filled, true, root, &frozen).unwrap();
         assert_eq!(conf["timestamp"], "pending");
         assert_eq!(conf["log"], "testlog");
     }

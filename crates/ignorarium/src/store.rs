@@ -3,7 +3,10 @@ use crate::canon::sha256_hex;
 use crate::files::{self, WriteOnceError};
 use crate::home::{HomeError, make_private_dir};
 use crate::prior::file_hashes_within;
+use crate::records::{self, RecordDraft};
+use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{self, Read, Write};
@@ -167,6 +170,32 @@ impl Store {
         Ok((digest, meta))
     }
 
+    /// `import`, then one signed `import` record in `imports.jsonl` that names `source` and
+    /// the file's name, never its path. Every way a blob enters the store as an input
+    /// leaves this record.
+    pub fn import_signed(
+        &self,
+        file: &Path,
+        key: &SigningKey,
+        source: &str,
+    ) -> Result<(String, Meta), StoreError> {
+        let (digest, meta) = self.import(file)?;
+        let body = json!({
+            "digest": digest, "size": meta.size,
+            "normalized_sha256": meta.normalized_sha256,
+            "source": source, "file": record_name(file),
+        });
+        let draft = RecordDraft {
+            study: "store".into(),
+            row: None,
+            kind: "import".into(),
+            body,
+        };
+        records::append(&self.root.join("imports.jsonl"), key, draft)
+            .map_err(|e| io::Error::other(format!("imports.jsonl: {e}")))?;
+        Ok((digest, meta))
+    }
+
     /// The `Meta` of an imported blob, or `None` when the store has none for `digest`.
     pub fn meta(&self, digest: &str) -> Result<Option<Meta>, StoreError> {
         self.path(digest)?;
@@ -197,6 +226,12 @@ impl Store {
     pub fn has(&self, digest: &str) -> bool {
         self.path(digest).is_ok_and(|p| p.is_file())
     }
+}
+
+/// The name an import record keeps for `file`: its last component.
+pub fn record_name(file: &Path) -> String {
+    file.file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
 }
 
 /// A writer that hashes what it writes.

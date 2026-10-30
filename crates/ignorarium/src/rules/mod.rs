@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 mod generic;
 mod named;
 pub use generic::{check_generic, safe_key};
-pub use named::{CheckCtx, check_named, input_bytes, input_path, read_regular};
+pub use named::{CheckCtx, check_named, input_path, read_regular};
 
 /// The records of a box, found by hash. An `Err` is a log that cannot be read or trusted.
 pub trait BoxRecords {

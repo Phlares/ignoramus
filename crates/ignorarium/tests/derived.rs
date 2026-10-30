@@ -46,7 +46,8 @@ fn an_extra_field_is_not_an_estimate() {
 fn register_body() -> Value {
     json!({
         "spec_hash": "sha256:ab", "leaf": 3, "log": "planlog", "defaults": [],
-        "root": "/work/study"
+        "root": "/work/study", "payload": "p".repeat(64),
+        "inputs": [["data/a.txt", "d".repeat(64)]]
     })
 }
 
@@ -62,6 +63,8 @@ fn a_register_record_parses_with_its_root() {
         ),
         ("sha256:ab", 3, "planlog", "/work/study")
     );
+    assert_eq!(r.payload, "p".repeat(64));
+    assert_eq!(r.inputs, [("data/a.txt".to_string(), "d".repeat(64))]);
     assert_eq!(r.timestamp, None);
     let mut b = register_body();
     b["timestamp"] = json!("pending");
@@ -72,7 +75,15 @@ fn a_register_record_parses_with_its_root() {
 #[test]
 fn a_register_record_with_a_missing_or_extra_field_does_not_parse() {
     assert_eq!(Register::of(&rec("estimate", register_body())), None);
-    for field in ["spec_hash", "leaf", "log", "defaults", "root"] {
+    for field in [
+        "spec_hash",
+        "leaf",
+        "log",
+        "defaults",
+        "root",
+        "payload",
+        "inputs",
+    ] {
         let mut b = register_body();
         b.as_object_mut().unwrap().remove(field);
         assert_eq!(Register::of(&rec("register", b)), None, "{field}");

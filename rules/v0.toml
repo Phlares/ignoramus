@@ -590,3 +590,12 @@ instruction = "Choose a new `study.id` for a new plan. A registered plan cannot 
 why = "A plan registered once is fixed. A second plan under the same id would hide the first."
 sources = []
 check = "documented"
+
+[[rule]]
+code = "E-REG-003"
+severity = "error"
+problem = "The study root has no usable `payload/` folder, or `pins.payload` is not its hash."
+instruction = "Put the payload in `payload/` under the study root: an executable `payload/run`, and only regular files and folders below it, no links. Leave `pins.payload` empty, or set it to the folder hash that `register` prints."
+why = "The box copies the payload folder at registration and every row runs that copy. A copy of other code than the pinned code, or code outside the folder, would make the records name code that did not run."
+sources = []
+check = "documented"

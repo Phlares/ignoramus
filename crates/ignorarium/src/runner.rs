@@ -9,15 +9,16 @@ use crate::environ::{Builder, Built, Recipe};
 use crate::estimate::{apply_defaults, estimate, units};
 use crate::events::{self, Event};
 use crate::home::Home;
+use crate::inputs::{self, Found};
 use crate::machine::{self, Machine};
 use crate::payload::{self, PayloadError};
 use crate::planlog::store::{Leaf, LogError, PlanLog};
-use crate::prior::file_hashes;
 use crate::records::{self, RecordDraft, RecordError, VerifyError};
-use crate::rules::input_bytes;
+use crate::rules::input_path;
 use crate::schedule::{self, Row, Schedule, ScheduleError};
 use crate::spec::model::{Role, Spec};
 use crate::store::Store;
+use crate::view::{self, ViewError};
 use crate::{keys, spec, sys};
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
@@ -54,6 +55,10 @@ pub struct RunPlan {
     pub backend: Box<dyn Backend>,
     pub key: SigningKey,
     pub inputs: InputHashes,
+    /// The input view rows see: `<study>/in`, one link per input present.
+    pub view: PathBuf,
+    /// The scan of the view that `prepare` took before every file in it hashed to its digest.
+    pub view_seen: view::Scan,
     pub payload: PathBuf,
     pub payload_sha256: String,
     /// The environment root rows run in; `None` is the host root.
@@ -85,9 +90,13 @@ pub enum RunError {
     BadRegister(String),
     /// The stored spec no longer hashes to the registered hash.
     SpecChanged,
-    /// The payload folder differs from `pins.payload`.
+    /// The study's payload copy no longer hashes to the register record's `payload`.
     PayloadChanged,
     NoPayload(String),
+    /// A registered input's stored copy is not in the store, by input path.
+    InputMissing(String),
+    /// A registered input's stored copy no longer has its registered bytes, by input path.
+    InputChanged(String),
     /// `pins.environment` names an image that is not in the store.
     EnvironmentMissing(String),
     /// `pins.environment` is not a store digest (64 lowercase hex characters).
@@ -124,8 +133,18 @@ impl fmt::Display for RunError {
                 "the register record of {id} does not parse; register the plan again"
             ),
             RunError::SpecChanged => write!(f, "the stored spec differs from the registered hash"),
-            RunError::PayloadChanged => write!(f, "the payload differs from pins.payload"),
+            RunError::PayloadChanged => write!(f, "the payload differs from the registered copy"),
             RunError::NoPayload(e) => write!(f, "cannot read the payload: {e}"),
+            RunError::InputMissing(p) => {
+                write!(
+                    f,
+                    "the store no longer holds the registered copy of input {p}"
+                )
+            }
+            RunError::InputChanged(p) => write!(
+                f,
+                "the stored copy of input {p} no longer has the bytes it was registered with"
+            ),
             RunError::EnvironmentMissing(d) => {
                 write!(f, "the pinned environment {d} is not in the store")
             }
@@ -204,8 +223,10 @@ pub fn up_to(backends: Vec<Box<dyn Backend>>, max: u8) -> Vec<Box<dyn Backend>> 
     backends.into_iter().filter(|b| b.level() <= max).collect()
 }
 
-/// Load a registered study, gate its late data, write its schedule, and pick the highest
-/// backend that meets `scope.min_isolation`.
+/// Load a registered study, check its payload copy and its stored inputs, build its input
+/// view, gate its late data, write its schedule, and pick the highest backend that meets
+/// `scope.min_isolation`. Every input in the view is hashed in full here, once per `run` or
+/// `resume`; before each attempt the run only compares the view's stamps (see `stale`).
 pub fn prepare_with(
     home: &Home,
     study_id: &str,
@@ -233,8 +254,11 @@ pub fn prepare_with(
         .ok_or(RunError::NoBackend { need, have })?;
 
     let (payload, payload_sha256) = read_payload(&dir)?;
+    if payload_sha256 != register.payload {
+        return Err(RunError::PayloadChanged);
+    }
+    let store = Store::open(&home.root).map_err(io)?;
     let (rootfs, environment) = if backend.level() >= 1 {
-        let store = Store::open(&home.root).map_err(io)?;
         let pin = spec.pins.environment.trim();
         let found = environment(&store, &dir, pin, Builder::detect().as_ref())?;
         if let Some(b) = &found.built {
@@ -251,11 +275,6 @@ pub fn prepare_with(
     } else {
         (None, HOST.into())
     };
-    let pin = spec.pins.payload.trim();
-    let pin = pin.strip_prefix("sha256:").unwrap_or(pin);
-    if !pin.is_empty() && pin != payload_sha256 {
-        return Err(RunError::PayloadChanged);
-    }
 
     let leaf = register.leaf;
     let log = match register.log.as_str() {
@@ -267,7 +286,11 @@ pub fn prepare_with(
         }
     };
     let machine = machine::load(&home.root).map_err(io)?;
-    let inputs = gate_late_data(home, &spec, log, leaf, &key)?;
+    let inputs = held_inputs(&store, &key, &spec, &register)?;
+    let present = present(&inputs);
+    let view = view::build(&store, &dir, &present).map_err(view_error)?;
+    let view_seen = view::verify(&view, &present).map_err(view_error)?;
+    gate_late_data(home, &spec, log, leaf, &key, &inputs)?;
     let rows = expand_rows(&spec, &spec_hash)?;
     let schedule = Schedule::new(&spec_hash, rows);
     schedule::write_once(&dir, &schedule)?;
@@ -280,6 +303,8 @@ pub fn prepare_with(
         backend,
         key,
         inputs,
+        view,
+        view_seen,
         payload,
         payload_sha256,
         rootfs,
@@ -363,27 +388,90 @@ fn read_payload(dir: &Path) -> Result<(PathBuf, String), RunError> {
     Ok((path, hash))
 }
 
-fn input_hashes(dir: &Path, spec: &Spec) -> InputHashes {
-    spec.inputs
+/// The path and digest of each input present.
+fn present(inputs: &InputHashes) -> Vec<(String, String)> {
+    inputs
         .iter()
-        .map(|i| {
-            let hashes = input_bytes(dir, &i.path).map(|b| file_hashes(&b));
-            (i.path.clone(), hashes)
-        })
+        .filter_map(|(p, h)| Some((p.clone(), h.as_ref()?.0.clone())))
         .collect()
 }
 
-/// What no longer matches the hashes taken at prepare, as a pause reason. An unreadable or
-/// linked payload counts as changed.
+fn view_error(e: ViewError) -> RunError {
+    match e {
+        ViewError::Missing(p) => RunError::InputMissing(p),
+        ViewError::Changed(p) => RunError::InputChanged(p),
+        ViewError::Unsafe(p) => RunError::Unsafe(p),
+        ViewError::Io(e) => io(format!("input view: {e}")),
+    }
+}
+
+/// Each input's hashes. A registered input comes from its stored copy, which must still be
+/// in the store with its size. An input absent at registration is read from the study root
+/// the register record names, never from the box's copy of the study, and imported when it
+/// is there now; it is then late data for `gate_late_data`. A pin always resolves at
+/// registration (E-HSH-001), so such an input is unpinned.
+fn held_inputs(
+    store: &Store,
+    key: &SigningKey,
+    spec: &Spec,
+    register: &Register,
+) -> Result<InputHashes, RunError> {
+    let root = Path::new(&register.root);
+    let source = format!("run {}", spec.study.id);
+    let mut all = Vec::new();
+    for i in &spec.inputs {
+        let digest = register.inputs.iter().find(|(p, _)| *p == i.path);
+        let hashes = match digest {
+            // The blob first: `resolve` reads a missing blob and a resized one alike.
+            Some((path, digest)) if !store.has(digest) => {
+                return Err(RunError::InputMissing(path.clone()));
+            }
+            Some((path, digest)) => match inputs::resolve(store, root, path, digest) {
+                Found::Stored { digest, meta } => Some((digest, meta.normalized_sha256)),
+                Found::Damaged(_) => return Err(RunError::InputChanged(path.clone())),
+                _ => return Err(RunError::InputMissing(path.clone())),
+            },
+            None => match inputs::resolve(store, root, &i.path, &i.sha256) {
+                Found::Stored { digest, meta } => Some((digest, meta.normalized_sha256)),
+                Found::File { .. } => {
+                    let file = input_path(root, &i.path)
+                        .ok_or_else(|| RunError::Unsafe(i.path.clone()))?;
+                    let (digest, meta) = store.import_signed(&file, key, &source).map_err(io)?;
+                    Some((digest, meta.normalized_sha256))
+                }
+                Found::Missing | Found::Unsafe | Found::Damaged(_) => None,
+            },
+        };
+        all.push((i.path.clone(), hashes));
+    }
+    Ok(all)
+}
+
+/// What no longer matches what `prepare` saw, as a pause reason. The payload is hashed in
+/// full, and an unreadable or linked payload counts as changed. The input view is only
+/// scanned: a file whose device, inode, size or modification time differs is named; an entry
+/// added or removed elsewhere names the view. A large input is hashed in full at `prepare`
+/// only.
 fn stale(plan: &RunPlan, dir: &Path) -> Option<String> {
     let mut changed = Vec::new();
     if !read_payload(dir).is_ok_and(|(_, h)| h == plan.payload_sha256) {
         changed.push("payload");
     }
-    for ((path, then), (_, now)) in plan.inputs.iter().zip(input_hashes(dir, &plan.spec)) {
-        if *then != now {
-            changed.push(path);
+    let now = view::scan(&plan.view).unwrap_or_default();
+    if now != plan.view_seen {
+        let named: Vec<&str> = plan
+            .inputs
+            .iter()
+            .filter(|(p, h)| {
+                let k = view::key(p);
+                h.is_some() && now.get(&k) != plan.view_seen.get(&k)
+            })
+            .map(|(p, _)| p.as_str())
+            .collect();
+        if named.is_empty() {
+            changed.push("the input view");
         }
+        changed.extend(named);
     }
     (!changed.is_empty()).then(|| format!("{} changed after the run began", changed.join(", ")))
 }
@@ -457,25 +545,25 @@ pub fn progress(
     })
 }
 
-/// Hash every input. A selection or confirmation input that the registered plan leaf did not
-/// hold is late: refuse if another study used it, else record it under this study's id once.
-/// Every lookup finishes before the append takes its lock.
+/// A selection or confirmation input that the registered plan leaf did not hold is late:
+/// refuse if another study used it, else record it under this study's id once. `all` are the
+/// inputs' hashes in spec order. Every lookup finishes before the append takes its lock.
 fn gate_late_data(
     home: &Home,
     spec: &Spec,
     log_name: &str,
     leaf_index: u64,
     key: &SigningKey,
-) -> Result<InputHashes, RunError> {
+    all: &InputHashes,
+) -> Result<(), RunError> {
     let id = spec.study.id.as_str();
     let log = PlanLog::open(&home.root.join(log_name))?;
     let registered = log
         .leaf(leaf_index)?
         .ok_or_else(|| RunError::NotRegistered(id.into()))?
         .data_hashes;
-    let all = input_hashes(&home.study_dir(id), spec);
     let mut late = Vec::new();
-    for (input, (_, hashes)) in spec.inputs.iter().zip(&all) {
+    for (input, (_, hashes)) in spec.inputs.iter().zip(all) {
         if let Some(hashes) = hashes
             && matches!(input.role, Role::Selection | Role::Confirmation)
             && !registered.contains(hashes)
@@ -502,7 +590,7 @@ fn gate_late_data(
     if !new.is_empty() {
         log.append_legacy(&own, new, key)?;
     }
-    Ok(all)
+    Ok(())
 }
 
 /// The label of the late-data leaves a study appends. A study id holds no `:`, and
@@ -1231,7 +1319,6 @@ fn job_for(plan: &RunPlan, row: &Row, dir: &Path) -> Result<RowJob, RunError> {
         std::fs::rename(&out, moved).map_err(io)?;
     }
     std::fs::create_dir(&out).map_err(io)?;
-    let input_dir = std::path::absolute(dir.join("data")).map_err(io)?;
     let mut seed = [0u8; 32];
     hex::decode_to_slice(&row.seed_hex, &mut seed).map_err(io)?;
     let text = |p: &Path| p.to_string_lossy().into_owned();
@@ -1250,7 +1337,7 @@ fn job_for(plan: &RunPlan, row: &Row, dir: &Path) -> Result<RowJob, RunError> {
             ("IGNORARIUM_SEED".into(), row.seed_hex.clone()),
             ("IGNORARIUM_ROW".into(), row.index.to_string()),
         ],
-        input_dir,
+        input_dir: plan.view.clone(),
         output_dir: out,
         seed,
         wall_timeout: wall_timeout(plan.spec.design.row_seconds),

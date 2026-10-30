@@ -28,8 +28,36 @@ pub fn lab() -> Lab {
     }
 }
 
-/// Register a study with `register::run`, then give it a payload.
-/// `before` lists files (relative to the study folder) present at registration.
+impl Drop for Lab {
+    fn drop(&mut self) {
+        unseal(&self.root);
+    }
+}
+
+/// Give the owner write access to `dir` and every folder below it again, so a test can
+/// change a read-only copy and its temp folder can be removed. Links are not followed.
+pub fn unseal(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(m) = dir.symlink_metadata() else {
+        return;
+    };
+    if !m.is_dir() {
+        return;
+    }
+    let mode = m.permissions().mode() | 0o700;
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode));
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        unseal(&e.path());
+    }
+}
+
+/// The study root that `register_study` registers `id` from.
+pub fn work(lab: &Lab, id: &str) -> PathBuf {
+    lab.root.join(format!("work-{id}"))
+}
+
+/// Register a study with `register::run` from its own root, which holds `payload/run` and
+/// the files in `before` (paths relative to the root). Returns the study folder in the box.
 pub fn register_study(
     lab: &Lab,
     id: &str,
@@ -37,8 +65,10 @@ pub fn register_study(
     before: &[(&str, &str)],
     payload: &str,
 ) -> PathBuf {
-    let work = lab.root.join(format!("work-{id}"));
+    let work = work(lab, id);
     std::fs::create_dir_all(work.join("data")).unwrap();
+    std::fs::create_dir_all(work.join("payload")).unwrap();
+    write_exec(&work.join("payload/run"), payload);
     for (p, c) in before {
         std::fs::write(work.join(p), c).unwrap();
     }
@@ -56,10 +86,7 @@ pub fn register_study(
     let done = register::run(&spec_path, &lab.home, &mut input, &mut out, true)
         .unwrap_or_else(|e| panic!("{}: {}", e.msg, String::from_utf8_lossy(&out)));
     assert_eq!(done.code, 0, "{}", String::from_utf8_lossy(&out));
-    let dir = lab.home.study_dir(id);
-    std::fs::create_dir_all(dir.join("payload")).unwrap();
-    write_exec(&dir.join("payload/run"), payload);
-    dir
+    lab.home.study_dir(id)
 }
 
 /// A study whose one input is `data/example.txt`.
@@ -74,16 +101,13 @@ pub fn with_payload(lab: &Lab, id: &str, payload: &str) -> PathBuf {
 
 /// `with_payload` with the spec text changed by `edit` before registration.
 pub fn edited(lab: &Lab, id: &str, edit: impl Fn(String) -> String, payload: &str) -> PathBuf {
-    let dir = register_study(
+    register_study(
         lab,
         id,
         edit,
         &[("data/example.txt", "calibration")],
         payload,
-    );
-    std::fs::create_dir_all(dir.join("data")).unwrap();
-    std::fs::write(dir.join("data/example.txt"), "calibration").unwrap();
-    dir
+    )
 }
 
 /// Every verified record of the study, in order.

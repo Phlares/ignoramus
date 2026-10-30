@@ -279,7 +279,8 @@ fn pauses_after_row_0(lab: &Lab, id: &str, why: &str) {
 #[test]
 fn a_payload_edited_mid_run_pauses_before_the_next_row() {
     let lab = lab();
-    let edit = edits_in_row_0("printf '# edited\n' >> \"$0\"");
+    // The copy is read-only; a row at level 0 can still make it writable.
+    let edit = edits_in_row_0("chmod u+w \"$0\"; printf '# edited\n' >> \"$0\"");
     common::with_payload(&lab, "edit-pay", &edit);
     pauses_after_row_0(&lab, "edit-pay", "payload changed after the run began");
 }
@@ -287,33 +288,147 @@ fn a_payload_edited_mid_run_pauses_before_the_next_row() {
 #[test]
 fn editing_a_helper_file_pauses_before_the_next_attempt() {
     let lab = lab();
-    let edit = edits_in_row_0(
-        "printf '# edited
-' >> \"${0%/*}/helper.sh\"",
-    );
-    let dir = common::with_payload(&lab, "edit-helper", &edit);
-    std::fs::write(
-        dir.join("payload/helper.sh"),
-        "echo helper
-",
-    )
-    .unwrap();
+    let edit =
+        edits_in_row_0("h=\"${0%/*}/helper.sh\"; chmod u+w \"$h\"; printf '# edited\n' >> \"$h\"");
+    let helper = [("payload/helper.sh", "echo helper\n")];
+    register_study(&lab, "edit-helper", |t| t, &helper, &edit);
     pauses_after_row_0(&lab, "edit-helper", "payload changed after the run began");
 }
 
 #[test]
-fn an_input_added_mid_run_pauses_before_the_next_row() {
+fn a_file_added_to_the_input_view_mid_run_pauses_before_the_next_row() {
     let lab = lab();
-    // The one input, data/extra.txt, is absent until row 0 writes it.
-    let extra = |t: String| t.replace("data/example.txt", "data/extra.txt");
-    let edit = edits_in_row_0("printf x > \"$IGNORARIUM_IN/extra.txt\"");
-    let dir = register_study(&lab, "add-input", extra, &[], &edit);
-    std::fs::create_dir_all(dir.join("data")).unwrap();
+    let edit =
+        edits_in_row_0("chmod u+w \"$IGNORARIUM_IN\"; printf x > \"$IGNORARIUM_IN/extra.txt\"");
+    common::with_payload(&lab, "add-input", &edit);
     pauses_after_row_0(
         &lab,
         "add-input",
-        "data/extra.txt changed after the run began",
+        "the input view changed after the run began",
     );
+}
+
+#[test]
+fn an_input_that_appears_at_the_root_mid_run_does_not_reach_the_run() {
+    let lab = lab();
+    // The one input, data/extra.txt, is absent at registration; row 0 writes it at the root.
+    let extra = |t: String| t.replace("data/example.txt", "data/extra.txt");
+    let root = common::work(&lab, "root-input");
+    let at = root.join("data/extra.txt");
+    let edit = edits_in_row_0(&format!("printf x > '{}'", at.display()));
+    register_study(&lab, "root-input", extra, &[], &edit);
+    let plan = plan_of(&lab, "root-input");
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert!(at.is_file());
+    // The rows ran on the view taken at prepare, which had no such input.
+    for r in rows_of(&lab, "root-input") {
+        assert_eq!(r.body["data_hashes"], serde_json::json!([]));
+    }
+}
+
+/// The store path of the blob holding `bytes`.
+fn blob_of(lab: &Lab, bytes: &[u8]) -> std::path::PathBuf {
+    lab.home.root.join("store").join(sha256_hex(bytes))
+}
+
+#[test]
+fn a_changed_store_blob_pauses_the_run() {
+    let lab = lab();
+    let blob = blob_of(&lab, b"calibration");
+    let edit = edits_in_row_0(&format!(
+        "chmod u+w '{b}'; printf x >> '{b}'",
+        b = blob.display()
+    ));
+    common::with_payload(&lab, "blob", &edit);
+    pauses_after_row_0(&lab, "blob", "data/example.txt changed after the run began");
+    // The next prepare hashes the blob again and refuses it.
+    let err = err_of(&lab, "blob");
+    assert!(
+        matches!(&err, RunError::InputChanged(p) if p == "data/example.txt"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_missing_blob_refuses_prepare() {
+    let lab = lab();
+    let dir = plain(&lab, "noblob");
+    let blob = blob_of(&lab, b"calibration");
+    let aside = blob.with_extension("aside");
+    std::fs::rename(&blob, &aside).unwrap();
+    let err = err_of(&lab, "noblob");
+    assert!(
+        matches!(&err, RunError::InputMissing(p) if p == "data/example.txt"),
+        "{err}"
+    );
+    assert!(err.to_string().contains("data/example.txt"), "{err}");
+    assert!(!dir.join("schedule.json").exists());
+    // The root still holds the file, but a registered input comes from the store only.
+    assert!(
+        common::work(&lab, "noblob")
+            .join("data/example.txt")
+            .is_file()
+    );
+    std::fs::rename(&aside, &blob).unwrap();
+    assert_eq!(plan_of(&lab, "noblob").schedule.rows.len(), 6);
+}
+
+#[test]
+fn each_attempt_compares_stamps_and_prepare_hashes_in_full() {
+    let lab = lab();
+    // Row 0 rewrites one byte of the blob in place and puts its old time back: the size,
+    // the time and the file stay the same, so the check before each attempt sees nothing.
+    let blob = blob_of(&lab, b"calibration");
+    let edit = edits_in_row_0(&format!(
+        "b='{b}'; touch -r \"$b\" \"$IGNORARIUM_OUT/../t\"; chmod u+w \"$b\"; \
+         printf C | dd of=\"$b\" bs=1 count=1 conv=notrunc 2>/dev/null; \
+         touch -r \"$IGNORARIUM_OUT/../t\" \"$b\"",
+        b = blob.display()
+    ));
+    common::with_payload(&lab, "stamp", &edit);
+    assert_eq!(run(&plan_of(&lab, "stamp")).unwrap(), RunStatus::Done);
+    assert_eq!(std::fs::read(&blob).unwrap(), b"Calibration");
+    // A new run hashes every input once and refuses the changed one.
+    let err = err_of(&lab, "stamp");
+    assert!(
+        matches!(&err, RunError::InputChanged(p) if p == "data/example.txt"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_late_unpinned_input_is_read_from_the_root_and_gated() {
+    let lab = lab();
+    let dir = register_study(&lab, "late-root", conf_input, &[], PAYLOAD);
+    // A file in the box's copy of the study is not an input; the root's file is.
+    std::fs::create_dir_all(dir.join("data")).unwrap();
+    std::fs::write(dir.join("data/conf.txt"), "box copy").unwrap();
+    let root = common::work(&lab, "late-root");
+    std::fs::write(root.join("data/conf.txt"), "Late  Root").unwrap();
+    let plan = plan_of(&lab, "late-root");
+    let hashes = file_hashes(b"Late  Root");
+    assert_eq!(
+        plan.inputs,
+        vec![("data/conf.txt".to_string(), Some(hashes.clone()))]
+    );
+    // Imported into the store with a signed record, and seen by rows through the view.
+    let view = dir.join("in/data/conf.txt");
+    assert_eq!(std::fs::read(&view).unwrap(), b"Late  Root");
+    assert_eq!(
+        std::fs::read(blob_of(&lab, b"Late  Root")).unwrap(),
+        b"Late  Root"
+    );
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let imports = lab.home.root.join("store/imports.jsonl");
+    let recs = records::read_all(&imports, &key.verifying_key()).unwrap();
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].body["source"], "run late-root");
+    assert_eq!(recs[0].body["digest"], hashes.0.as_str());
+    // Gated as late data: one leaf under the study's own label.
+    let log = PlanLog::open(&lab.home.root.join("planlog")).unwrap();
+    let uses = log.uses(&hashes.0, &hashes.1).unwrap();
+    assert_eq!(uses.len(), 1);
+    assert_eq!(uses[0].1.label, "study:late-root");
 }
 
 #[test]
@@ -550,10 +665,9 @@ fn late_confirmation_data_used_before_is_refused() {
     let lab = lab();
     // Plan A and plan B both register with data/conf.txt absent.
     let a = register_study(&lab, "plan-a", conf_input, &[], PAYLOAD);
-    let b = register_study(&lab, "plan-b", conf_input, &[], PAYLOAD);
-    for dir in [&a, &b] {
-        std::fs::create_dir_all(dir.join("data")).unwrap();
-        std::fs::write(dir.join("data/conf.txt"), "late file").unwrap();
+    register_study(&lab, "plan-b", conf_input, &[], PAYLOAD);
+    for id in ["plan-a", "plan-b"] {
+        std::fs::write(common::work(&lab, id).join("data/conf.txt"), "late file").unwrap();
     }
     // B runs first; its hashes land.
     plan_of(&lab, "plan-b");
@@ -580,9 +694,9 @@ fn an_imported_phase_named_like_the_study_is_an_earlier_use() {
         .arg(&earlier)
         .assert()
         .code(0);
-    let dir = register_study(&lab, "mnist-ablation", conf_input, &[], PAYLOAD);
-    std::fs::create_dir_all(dir.join("data")).unwrap();
-    std::fs::write(dir.join("data/conf.txt"), "held-out rows").unwrap();
+    register_study(&lab, "mnist-ablation", conf_input, &[], PAYLOAD);
+    let late = common::work(&lab, "mnist-ablation").join("data/conf.txt");
+    std::fs::write(late, "held-out rows").unwrap();
     let err = err_of(&lab, "mnist-ablation");
     assert!(err.to_string().starts_with("E-CNF-005: "), "{err}");
     match err {
@@ -603,9 +717,9 @@ fn an_imported_phase_named_like_the_study_is_an_earlier_use() {
 #[test]
 fn late_data_lands_in_the_plan_log_once() {
     let lab = lab();
-    let dir = register_study(&lab, "late", conf_input, &[], PAYLOAD);
-    std::fs::create_dir_all(dir.join("data")).unwrap();
-    std::fs::write(dir.join("data/conf.txt"), "Late  File").unwrap();
+    register_study(&lab, "late", conf_input, &[], PAYLOAD);
+    let late = common::work(&lab, "late").join("data/conf.txt");
+    std::fs::write(late, "Late  File").unwrap();
     let (exact, norm) = file_hashes(b"Late  File");
     let log = PlanLog::open(&lab.home.root.join("planlog")).unwrap();
     assert_eq!(log.used(&exact, &norm).unwrap(), None);
@@ -623,15 +737,13 @@ fn late_data_lands_in_the_plan_log_once() {
 #[test]
 fn data_present_at_registration_is_not_late() {
     let lab = lab();
-    let dir = register_study(
+    register_study(
         &lab,
         "early",
         conf_input,
         &[("data/conf.txt", "known")],
         PAYLOAD,
     );
-    std::fs::create_dir_all(dir.join("data")).unwrap();
-    std::fs::write(dir.join("data/conf.txt"), "known").unwrap();
     plan_of(&lab, "early");
     let (exact, norm) = file_hashes(b"known");
     let log = PlanLog::open(&lab.home.root.join("planlog")).unwrap();
@@ -664,12 +776,24 @@ fn prepare_refuses_a_missing_backend_an_unknown_study_and_a_changed_spec() {
 }
 
 #[test]
-fn a_pinned_payload_must_match() {
+fn a_payload_copy_that_differs_from_the_register_record_is_refused() {
     let lab = lab();
-    let pin = |t: String| t.replace("payload = \"\"", "payload = \"sha256:00\"");
-    register_study(&lab, "pinned", pin, &[], PAYLOAD);
-    let err = err_of(&lab, "pinned");
+    let dir = plain(&lab, "copied");
+    let registered = kind_of(&lab, "copied", "register")[0].body["payload"].clone();
+    assert_eq!(
+        plan_of(&lab, "copied").payload_sha256,
+        registered.as_str().unwrap()
+    );
+    // The box's copy is read-only; an owner can still change it.
+    let copy = dir.join("payload");
+    common::unseal(&copy);
+    std::fs::write(copy.join("extra"), "").unwrap();
+    let err = err_of(&lab, "copied");
     assert!(matches!(err, RunError::PayloadChanged), "{err}");
+    assert_eq!(
+        err.to_string(),
+        "the payload differs from the registered copy"
+    );
 }
 
 #[test]
@@ -782,39 +906,13 @@ fn backend_max_filters_out_higher_levels() {
     assert!(matches!(err, RunError::NoBackend { need: 1, .. }), "{err}");
 }
 
-/// The folder hash of a payload folder holding only `run`.
-fn folder_hash_of_run_only() -> String {
-    let m = format!(
-        "[[\"run\",\"file\",\"{}\"]]",
-        sha256_hex(PAYLOAD.as_bytes())
-    );
-    sha256_hex(m.as_bytes())
-}
-
-#[test]
-fn pins_payload_is_the_folder_hash() {
-    let hash = folder_hash_of_run_only();
-    for (id, pin) in [("pin-a", format!("sha256:{hash}")), ("pin-b", hash.clone())] {
-        let lab = lab();
-        let set = move |t: String| t.replace("payload = \"\"", &format!("payload = \"{pin}\""));
-        register_study(&lab, id, set, &[], PAYLOAD);
-        assert_eq!(plan_of(&lab, id).payload_sha256, hash);
-    }
-    // The hash of payload/run alone is no longer the pin.
-    let lab = lab();
-    let alone = sha256_hex(PAYLOAD.as_bytes());
-    let set = move |t: String| t.replace("payload = \"\"", &format!("payload = \"{alone}\""));
-    register_study(&lab, "pin-run", set, &[], PAYLOAD);
-    let err = err_of(&lab, "pin-run");
-    assert!(matches!(err, RunError::PayloadChanged), "{err}");
-}
-
 #[test]
 fn a_symlinked_payload_is_refused() {
     let lab = lab();
     let dir = plain(&lab, "link-payload");
     let outside = lab.root.join("outside-payload");
     std::fs::write(&outside, PAYLOAD).unwrap();
+    common::unseal(&dir.join("payload"));
     std::fs::rename(dir.join("payload/run"), dir.join("payload/run.old")).unwrap();
     std::os::unix::fs::symlink(&outside, dir.join("payload/run")).unwrap();
     assert!(matches!(err_of(&lab, "link-payload"), RunError::Unsafe(_)));
@@ -905,7 +1003,7 @@ fn a_register_record_without_a_root_is_refused_as_bad() {
 #[test]
 fn a_reused_input_names_a_registered_plan_by_leaf() {
     let lab = lab();
-    let a = register_study(&lab, "plan-a", conf_input, &[], PAYLOAD);
+    register_study(&lab, "plan-a", conf_input, &[], PAYLOAD);
     register_study(
         &lab,
         "plan-c",
@@ -913,8 +1011,7 @@ fn a_reused_input_names_a_registered_plan_by_leaf() {
         &[("data/conf.txt", "shared")],
         PAYLOAD,
     );
-    std::fs::create_dir_all(a.join("data")).unwrap();
-    std::fs::write(a.join("data/conf.txt"), "shared").unwrap();
+    std::fs::write(common::work(&lab, "plan-a").join("data/conf.txt"), "shared").unwrap();
     match err_of(&lab, "plan-a") {
         RunError::DataReused { label, .. } => assert_eq!(label, "registered plan, leaf 1"),
         e => panic!("{e}"),
@@ -925,7 +1022,7 @@ fn a_reused_input_names_a_registered_plan_by_leaf() {
 fn a_plan_leaf_labelled_like_the_study_is_not_its_own_use() {
     let lab = lab();
     // A plan leaf carries the earnable label `signal`; a study with that id must not match it.
-    let s = register_study(&lab, "signal", conf_input, &[], PAYLOAD);
+    register_study(&lab, "signal", conf_input, &[], PAYLOAD);
     register_study(
         &lab,
         "other",
@@ -933,8 +1030,7 @@ fn a_plan_leaf_labelled_like_the_study_is_not_its_own_use() {
         &[("data/conf.txt", "shared")],
         PAYLOAD,
     );
-    std::fs::create_dir_all(s.join("data")).unwrap();
-    std::fs::write(s.join("data/conf.txt"), "shared").unwrap();
+    std::fs::write(common::work(&lab, "signal").join("data/conf.txt"), "shared").unwrap();
     assert!(matches!(
         err_of(&lab, "signal"),
         RunError::DataReused { .. }

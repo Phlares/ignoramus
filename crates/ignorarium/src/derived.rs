@@ -42,6 +42,10 @@ pub struct Register {
     pub defaults: Value,
     /// The absolute study root that the plan's paths were read from.
     pub root: String,
+    /// The tree hash of the payload folder, as copied into the study folder.
+    pub payload: String,
+    /// Each input present at registration, by path, with the digest of its stored copy.
+    pub inputs: Vec<(String, String)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
 }

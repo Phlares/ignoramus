@@ -16,12 +16,18 @@ use tempfile::TempDir;
 const PROMPT: &str = "Type the first 8 characters of the spec hash to approve:";
 
 struct Fixture {
-    _dir: TempDir,
+    tmp: TempDir,
     home: Home,
 }
 
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        common::unseal(self.tmp.path());
+    }
+}
+
 /// A box home with `max_level = 1`, and a spec made from a template in a
-/// study folder that holds `data/example.txt`.
+/// study folder that holds `data/example.txt` and `payload/run`.
 fn setup(template: &str, edit: impl Fn(String) -> String) -> (Fixture, PathBuf) {
     let dir = TempDir::new().unwrap();
     let root = dir.path().join("home");
@@ -31,10 +37,12 @@ fn setup(template: &str, edit: impl Fn(String) -> String) -> (Fixture, PathBuf) 
     let study = dir.path().join("work");
     std::fs::create_dir_all(study.join("data")).unwrap();
     std::fs::write(study.join("data/example.txt"), "Hello  World").unwrap();
+    std::fs::create_dir(study.join("payload")).unwrap();
+    common::write_exec(&study.join("payload/run"), common::PAYLOAD);
     let text = std::fs::read_to_string(format!("../../templates/{template}.toml")).unwrap();
     let spec = study.join("spec.toml");
     std::fs::write(&spec, edit(text)).unwrap();
-    (Fixture { _dir: dir, home }, spec)
+    (Fixture { tmp: dir, home }, spec)
 }
 
 fn same(t: String) -> String {
@@ -473,4 +481,184 @@ fn the_salt_appears_in_no_output_record_or_log() {
     for text in seen {
         assert!(!text.contains(&hex), "salt leaked");
     }
+}
+
+fn body_of(f: &Fixture) -> Value {
+    let rp = f.home.study_dir("my-study").join("records.jsonl");
+    records(&rp)[0]["record"]["body"].clone()
+}
+
+#[cfg(unix)]
+fn mode_of(p: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    p.symlink_metadata().unwrap().permissions().mode() & 0o777
+}
+
+#[test]
+fn register_copies_the_payload_folder_and_records_its_hash() {
+    let (f, spec) = setup("numeric-ablation", same);
+    let work = spec.parent().unwrap().join("payload");
+    std::fs::create_dir(work.join("lib")).unwrap();
+    std::fs::write(work.join("lib/util.sh"), "echo util\n").unwrap();
+    let hash = ignorarium::payload::tree_hash(&work).unwrap();
+    let (r, out) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap().code, 0, "{out}");
+    assert!(out.contains(&format!("payload sha256:{hash}")), "{out}");
+    let copy = f.home.study_dir("my-study").join("payload");
+    for rel in ["run", "lib/util.sh"] {
+        assert_eq!(
+            std::fs::read(copy.join(rel)).unwrap(),
+            std::fs::read(work.join(rel)).unwrap(),
+            "{rel}"
+        );
+    }
+    assert_eq!(ignorarium::payload::tree_hash(&copy).unwrap(), hash);
+    // The copy is read-only: an executable source stays executable, folders take no entry.
+    assert_eq!(mode_of(&copy.join("run")), 0o555);
+    assert_eq!(mode_of(&copy.join("lib/util.sh")), 0o444);
+    assert_eq!(mode_of(&copy), 0o555);
+    assert_eq!(mode_of(&copy.join("lib")), 0o555);
+    let body = body_of(&f);
+    assert_eq!(body["payload"], hash.as_str());
+    assert_eq!(
+        body["inputs"],
+        serde_json::json!([["data/example.txt", sha256_hex(b"Hello  World")]])
+    );
+}
+
+#[test]
+fn register_refuses_without_a_payload_folder() {
+    type Edit = fn(&Path);
+    let cases: [(&str, Edit, &str); 3] = [
+        (
+            "no folder",
+            |w| std::fs::rename(w.join("payload"), w.join("payload.off")).unwrap(),
+            "Found: the study root has no payload folder.",
+        ),
+        (
+            "no run file",
+            |w| std::fs::rename(w.join("payload/run"), w.join("payload/start")).unwrap(),
+            "Found: the payload folder has no run file.",
+        ),
+        (
+            "a link",
+            |w| std::os::unix::fs::symlink("run", w.join("payload/again")).unwrap(),
+            "payload/again is a link or not a regular file.",
+        ),
+    ];
+    for (name, edit, found) in cases {
+        let (f, spec) = setup("numeric-ablation", same);
+        edit(spec.parent().unwrap());
+        let (r, out) = go(&f, &spec, &answer(&spec), true);
+        let e = r.unwrap_err();
+        assert_eq!(e.code, 1, "{name}");
+        assert!(e.msg.starts_with("E-REG-003: "), "{name}: {}", e.msg);
+        assert!(e.msg.contains(found), "{name}: {}", e.msg);
+        assert!(
+            e.msg.ends_with(" See docs/rules/E-REG-003.md"),
+            "{name}: {}",
+            e.msg
+        );
+        // Refused before the approval: no prompt, no study folder, no leaf, no import.
+        assert!(!out.contains(PROMPT), "{name}: {out}");
+        assert!(!f.home.study_dir("my-study").exists(), "{name}");
+        assert!(leaves(&f.home.root.join("planlog")).is_empty(), "{name}");
+        assert!(!f.home.root.join("store/imports.jsonl").exists(), "{name}");
+    }
+}
+
+#[test]
+fn register_refuses_a_pin_that_is_not_the_folder_hash() {
+    let (f, spec) = setup("numeric-ablation", same);
+    let work = spec.parent().unwrap().join("payload");
+    let folder = ignorarium::payload::tree_hash(&work).unwrap();
+    // The hash of payload/run alone is not the pin.
+    let alone = sha256_hex(common::PAYLOAD.as_bytes());
+    let pinned = |pin: &str| {
+        let t = std::fs::read_to_string(&spec).unwrap();
+        let t = t.replace("payload = \"\"", &format!("payload = \"{pin}\""));
+        std::fs::write(&spec, t).unwrap();
+    };
+    pinned(&alone);
+    let (r, out) = go(&f, &spec, &answer(&spec), true);
+    let e = r.unwrap_err();
+    assert_eq!(e.code, 1);
+    assert!(e.msg.contains("E-REG-003"), "{}", e.msg);
+    assert!(e.msg.contains(&folder), "names the folder hash: {}", e.msg);
+    assert!(!out.contains(PROMPT), "{out}");
+    assert!(!f.home.study_dir("my-study").exists());
+    // The folder hash, bare or with its prefix, is the pin.
+    for (id, pin) in [
+        ("bare", folder.clone()),
+        ("prefixed", format!("sha256:{folder}")),
+    ] {
+        let (f, spec) = setup("numeric-ablation", |t| {
+            t.replace("id = \"my-study\"", &format!("id = \"{id}\""))
+                .replace("payload = \"\"", &format!("payload = \"{pin}\""))
+        });
+        let (r, out) = go(&f, &spec, &answer(&spec), true);
+        assert_eq!(r.unwrap().code, 0, "{id}: {out}");
+        let rp = f.home.study_dir(id).join("records.jsonl");
+        assert_eq!(
+            records(&rp)[0]["record"]["body"]["payload"],
+            folder.as_str()
+        );
+    }
+}
+
+#[test]
+fn register_imports_root_inputs_into_the_store() {
+    let (f, spec) = setup("numeric-ablation", same);
+    let (r, out) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap().code, 0, "{out}");
+    let digest = sha256_hex(b"Hello  World");
+    let store = ignorarium::store::Store::open(&f.home.root).unwrap();
+    assert_eq!(
+        std::fs::read(store.path(&digest).unwrap()).unwrap(),
+        b"Hello  World"
+    );
+    let meta = store.meta(&digest).unwrap().unwrap();
+    assert_eq!(meta.size, 12);
+    assert_eq!(meta.normalized_sha256, sha256_hex(b"hello world"));
+    // One signed import record names the study and the file name.
+    let key = keys::load_or_create(&f.home).unwrap();
+    let log = f.home.root.join("store/imports.jsonl");
+    assert_eq!(
+        ignorarium::records::verify(&log, &key.verifying_key()).unwrap(),
+        1
+    );
+    let rec = &records(&log)[0]["record"];
+    assert_eq!(rec["kind"], "import");
+    assert_eq!(rec["body"]["digest"], digest.as_str());
+    assert_eq!(rec["body"]["source"], "register my-study");
+    assert_eq!(rec["body"]["file"], "example.txt");
+}
+
+#[test]
+fn a_stored_input_whose_blob_changed_after_the_check_is_refused() {
+    let (f, spec) = setup("numeric-ablation", same);
+    // The input lives only in the store, pinned by digest.
+    let data = spec.parent().unwrap().join("data/example.txt");
+    let store = ignorarium::store::Store::open(&f.home.root).unwrap();
+    let (digest, _) = store.import(&data).unwrap();
+    std::fs::remove_file(&data).unwrap();
+    let t = std::fs::read_to_string(&spec).unwrap();
+    let pin = format!("sha256 = \"{digest}\"");
+    std::fs::write(&spec, t.replacen("sha256 = \"\"", &pin, 1)).unwrap();
+    // Same size, other bytes, after the check: only a full hash sees it.
+    let blob = store.path(&digest).unwrap();
+    let mut input = Hooked {
+        inner: Cursor::new(answer(&spec).into_bytes()),
+        hook: Some(move || {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&blob, PermissionsExt::from_mode(0o644)).unwrap();
+            std::fs::write(&blob, "Hello  Worle").unwrap();
+        }),
+    };
+    let mut out = Vec::new();
+    let e = register::run(&spec, &f.home, &mut input, &mut out, true).unwrap_err();
+    assert_eq!(e.code, 1);
+    assert!(e.msg.contains("example.txt"), "{}", e.msg);
+    assert!(e.msg.contains("changed"), "{}", e.msg);
+    assert!(!f.home.study_dir("my-study").exists());
 }

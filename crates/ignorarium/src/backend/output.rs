@@ -80,20 +80,26 @@ fn walk(dir: &Path, prefix: &str, rows: &mut Vec<TreeRow>) -> io::Result<()> {
 
 /// SHA-256 of a regular file, streamed. `None` when the path is no longer a
 /// regular file by the time it is open (swapped for a FIFO or a link).
-fn file_digest(path: &Path) -> io::Result<Option<String>> {
+pub(crate) fn file_digest(path: &Path) -> io::Result<Option<String>> {
+    let Some(mut f) = open_regular(path)? else {
+        return Ok(None);
+    };
+    let mut h = Sha256::new();
+    io::copy(&mut f, &mut h)?;
+    Ok(Some(hex::encode(h.finalize())))
+}
+
+/// The regular file at `path`, open for reading, without following a link or blocking on
+/// a FIFO. `None` when the path names anything else.
+pub(crate) fn open_regular(path: &Path) -> io::Result<Option<fs::File>> {
     let opened = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path);
-    let mut f = match opened {
+    let f = match opened {
         Ok(f) => f,
         Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Ok(None),
         Err(e) => return Err(e),
     };
-    if !f.metadata()?.is_file() {
-        return Ok(None);
-    }
-    let mut h = Sha256::new();
-    io::copy(&mut f, &mut h)?;
-    Ok(Some(hex::encode(h.finalize())))
+    Ok(f.metadata()?.is_file().then_some(f))
 }

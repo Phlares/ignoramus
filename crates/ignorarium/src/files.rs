@@ -232,6 +232,20 @@ pub fn temp_beside(path: &Path) -> io::Result<PathBuf> {
     )))
 }
 
+/// Set `dir` and every folder below it to mode 0o555, so no entry can be added, removed or
+/// renamed in them. Files keep their modes; links are not followed.
+#[cfg(unix)]
+pub fn seal(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for e in fs::read_dir(dir)? {
+        let e = e?;
+        if e.file_type()?.is_dir() {
+            seal(&e.path())?;
+        }
+    }
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o555))
+}
+
 /// Create `path` for writing; fails if it exists. `mode` applies on unix only.
 pub fn create_new(path: &Path, mode: u32) -> io::Result<fs::File> {
     let mut opts = OpenOptions::new();

@@ -216,12 +216,6 @@ pub fn input_path(root: &Path, rel: &str) -> Option<PathBuf> {
     resolve(root, rel)
 }
 
-/// The bytes of the regular file `rel` names under `root`, or `None` when
-/// the path is unsafe or the file is absent.
-pub fn input_bytes(root: &Path, rel: &str) -> Option<Vec<u8>> {
-    resolve(root, rel).and_then(|p| read_file(&p))
-}
-
 fn input_path_safe(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     flag(spec, pat, |v| {
         v.as_str()

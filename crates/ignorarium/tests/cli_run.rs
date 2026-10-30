@@ -144,6 +144,70 @@ fn run_a_registered_study_to_completion() {
 }
 
 #[test]
+fn editing_the_working_payload_after_register_does_not_reach_the_run() {
+    let lab = lab();
+    let dir = plain(&lab, "frozen");
+    let registered = kind_of(&lab, "frozen", "register")[0].body["payload"].clone();
+    // The author edits the working payload after registration; the box runs its copy.
+    let work = common::work(&lab, "frozen").join("payload/run");
+    common::write_exec(
+        &work,
+        "#!/bin/sh\necho edited > \"$IGNORARIUM_OUT/result\"\n",
+    );
+    bin(&lab).args(["run", "frozen"]).assert().code(0);
+    let rows = kind_of(&lab, "frozen", "row");
+    assert_eq!(rows.len(), 6);
+    for r in &rows {
+        assert_eq!(r.body["exit"], "ok");
+        assert_eq!(r.body["payload_sha256"], registered);
+        let out = dir.join(format!("run/rows/{}/out/result", r.row.unwrap()));
+        let got = std::fs::read_to_string(out).unwrap();
+        let want = format!(
+            "{} {} {}",
+            r.body["condition"].as_str().unwrap(),
+            r.body["unit"].as_str().unwrap(),
+            r.body["repeat"]
+        );
+        assert_eq!(got, want);
+    }
+}
+
+#[test]
+fn rows_see_exactly_the_declared_inputs() {
+    let lab = lab();
+    // A model the store holds and the root does not, pinned by digest.
+    let model = lab.root.join("weights.bin");
+    std::fs::write(&model, [0u8, 1, 2, 3]).unwrap();
+    let store = ignorarium::store::Store::open(&lab.home.root).unwrap();
+    let (digest, _) = store.import(&model).unwrap();
+    let declared = move |t: String| {
+        format!(
+            "{t}\n[[inputs]]\npath = \"models/m.bin\"\nsha256 = \"{digest}\"\nrole = \"model\"\n\
+             [inputs.licence]\nspdx = \"\"\ntype = \"unspecified\"\nsource = \"\"\ncreators = []\n"
+        )
+    };
+    let payload =
+        "#!/bin/sh\ncd \"$IGNORARIUM_IN\" && find . | LC_ALL=C sort > \"$IGNORARIUM_OUT/seen\"\n";
+    // The root also holds a file no input names.
+    let before = [
+        ("data/example.txt", "calibration"),
+        ("data/other.txt", "not declared"),
+    ];
+    let dir = register_study(&lab, "view", declared, &before, payload);
+    bin(&lab).args(["run", "view"]).assert().code(0);
+    let rows = kind_of(&lab, "view", "row");
+    assert_eq!(rows.len(), 6);
+    for r in &rows {
+        assert_eq!(r.body["exit"], "ok", "{:?}", r.body);
+        let seen = dir.join(format!("run/rows/{}/out/seen", r.row.unwrap()));
+        assert_eq!(
+            std::fs::read_to_string(seen).unwrap(),
+            ".\n./data\n./data/example.txt\n./models\n./models/m.bin\n"
+        );
+    }
+}
+
+#[test]
 fn run_refuses_when_the_machine_is_below_min_isolation() {
     let lab = lab();
     std::fs::write(lab.home.root.join("machine.toml"), "max_level = 2\n").unwrap();

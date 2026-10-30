@@ -69,7 +69,7 @@ creators = []
 
 [pins]
 environment = ""
-payload = ""
+payload = ""                    # "", or the hash of payload/ under the study root that register prints
 rule_base = ""
 
 [mutations]
