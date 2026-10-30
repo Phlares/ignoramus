@@ -17,6 +17,7 @@ Runtime:
 - `seccompiler` (from the Firecracker project): compiles the level 1 seccomp filter to BPF on the host, in pure Rust, for bubblewrap to load. https://github.com/rust-vmm/seccompiler
 - `tar` (no default features): reads the layers of a saved container image header by header, so one parser decides what each member is and the box writes the tree itself. The box never calls the `tar` program or the crate's unpack functions. https://github.com/alexcrichton/tar-rs
 - `flate2` (default features, pure-Rust backend, no C library): decodes the gzip layers that the containerd image store of Docker saves, so the same `tar` reader parses plain and gzip layers. https://github.com/rust-lang/flate2-rs
+- `evidence` (this workspace's crate, by path; no dependencies of its own): the statistics engine. The seeded draws that pick each cluster's units come from its `Rng`.
 - `libc`: the system calls rustix lacks, called only from each crate's `src/sys.rs`: a child's CPU time, signal handlers, vsock sockets, the kernel random-pool reseed, a kill of every other process, and `close_range`, which marks inherited descriptors close-on-exec in a level 1 sandbox launcher's child; also the `O_NOFOLLOW` and `O_NONBLOCK` open flags. The level 1 seccomp filter takes its system call numbers from it.
 
 Development:

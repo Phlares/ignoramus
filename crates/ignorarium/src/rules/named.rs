@@ -6,10 +6,10 @@ use super::generic::{applies, diagnostic, join, select};
 use super::{BoxRecords, Check, NoRecords, Rule};
 use crate::derived::Estimate;
 use crate::diag::Diagnostic;
-use crate::estimate::distinct;
 use crate::inputs::{self, Found};
 use crate::power::required_units;
 use crate::prior::PriorUse;
+use crate::schedule::ROW_CAP;
 use crate::store::Store;
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
@@ -69,6 +69,8 @@ const NAMED: &[(&str, NamedFn)] = &[
         selection_confirmation_disjoint,
     ),
     ("data-fresh", data_fresh),
+    ("units-declared", units_declared),
+    ("row-cap", row_cap),
     ("confirmatory-test-allowed", test_allowed),
     ("reference-is-condition", reference_is_condition),
     ("budget-present", budget_present),
@@ -154,8 +156,9 @@ fn flag(spec: &Value, pattern: &str, bad: impl Fn(&Value) -> bool) -> Vec<Hit> {
         .collect()
 }
 
-/// For a pattern `<parent>.<leaf>`: each selected leaf as (leaf path, its parent node, leaf node).
-fn with_parent<'a>(spec: &'a Value, pattern: &str) -> Vec<(String, &'a Value, &'a Value)> {
+/// For a pattern `<parent>.<leaf>`: each selected parent as (leaf path, parent node, leaf
+/// node), the leaf `None` where the parent lacks it.
+fn children<'a>(spec: &'a Value, pattern: &str) -> Vec<(String, &'a Value, Option<&'a Value>)> {
     let (parent, leaf) = pattern.rsplit_once('.').unwrap_or(("", pattern));
     let parents = if parent.is_empty() {
         vec![(String::new(), spec)]
@@ -164,8 +167,33 @@ fn with_parent<'a>(spec: &'a Value, pattern: &str) -> Vec<(String, &'a Value, &'
     };
     parents
         .into_iter()
-        .filter_map(|(p, el)| Some((join(&p, leaf), el, el.get(leaf)?)))
+        .map(|(p, el)| (join(&p, leaf), el, el.get(leaf)))
         .collect()
+}
+
+/// `children` with the leaf present.
+fn with_parent<'a>(spec: &'a Value, pattern: &str) -> Vec<(String, &'a Value, &'a Value)> {
+    children(spec, pattern)
+        .into_iter()
+        .filter_map(|(p, el, v)| Some((p, el, v?)))
+        .collect()
+}
+
+fn role(input: &Value) -> Option<&str> {
+    input.get("role")?.as_str()
+}
+
+/// A selection or confirmation input: one cluster of the schedule.
+fn is_cluster(input: &Value) -> bool {
+    matches!(role(input), Some("selection" | "confirmation"))
+}
+
+/// The input's `(exact, normalized)` hashes, from the store first; `None` when there is no
+/// file to read or its path is unsafe.
+fn input_hashes(ctx: &CheckCtx, input: &Value) -> Option<(String, String)> {
+    let path = input.get("path")?.as_str()?;
+    let sha = input.get("sha256").and_then(Value::as_str).unwrap_or("");
+    inputs::hashes(&inputs::resolve(&ctx.store, &ctx.root, path, sha))
 }
 
 // ---- files: one primitive guards every read ----
@@ -236,8 +264,9 @@ fn input_path_nested(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
         .collect();
     all.iter()
         .filter(|(_, inner)| {
-            all.iter()
-                .any(|(_, outer)| outer.len() < inner.len() && inner.starts_with(outer))
+            all.iter().any(|(_, outer)| {
+                !outer.is_empty() && outer.len() < inner.len() && inner.starts_with(outer)
+            })
         })
         .map(|(p, _)| hit(p.clone()))
         .collect()
@@ -276,16 +305,11 @@ fn follow_on_exists(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
 
 fn data_fresh(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     let mut out = vec![];
-    for (path, input, rel) in with_parent(spec, pat) {
-        let role = input.get("role").and_then(Value::as_str);
-        if !matches!(role, Some("selection" | "confirmation")) {
+    for (path, input, _) in with_parent(spec, pat) {
+        if !is_cluster(input) {
             continue;
         }
-        let sha = input.get("sha256").and_then(Value::as_str).unwrap_or("");
-        let found = rel
-            .as_str()
-            .and_then(|r| inputs::hashes(&inputs::resolve(&ctx.store, &ctx.root, r, sha)));
-        let Some((exact, normalized)) = found else {
+        let Some((exact, normalized)) = input_hashes(ctx, input) else {
             continue;
         };
         let detail = match ctx.prior.used(&exact, &normalized) {
@@ -315,6 +339,7 @@ fn open_unit(x: f64) -> bool {
     x > 0.0 && x < 1.0
 }
 
+/// The confirmation units are each confirmation input's units, up to `units_per_cluster`.
 /// Alpha, power and icc come from the defaults step. If one is absent the gate
 /// cannot be computed, so it fails closed. A mistyped one is skipped: the type rule reports it.
 fn power_met(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
@@ -354,15 +379,19 @@ fn power_met(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
     let per = per.max(0);
     let m = u32::try_from(per.max(1)).unwrap_or(u32::MAX);
     let mut out = vec![];
-    for (path, clusters) in nodes(spec, pat) {
-        let Some(clusters) = clusters.as_array() else {
+    for (path, list) in nodes(spec, pat) {
+        let Some(list) = list.as_array() else {
             continue;
         };
         let detail = if variance <= 0.0 {
             "The variance must be > 0.".to_string()
         } else {
-            let have = distinct(clusters.iter().filter_map(Value::as_str))
-                .saturating_mul(per.unsigned_abs());
+            let have = list
+                .iter()
+                .filter(|i| role(i) == Some("confirmation"))
+                .filter_map(|i| i.get("units")?.as_u64())
+                .map(|u| u.min(per.unsigned_abs()))
+                .fold(0, u64::saturating_add);
             let need = required_units(alpha, power, variance.sqrt(), sesoi, m, icc);
             if have >= need {
                 continue;
@@ -414,17 +443,89 @@ fn variance_from_record(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     out
 }
 
-/// The array is empty, or one element is also a selection cluster.
-fn selection_confirmation_disjoint(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
-    let selection = list(spec, "design.selection.clusters").map_or(&[][..], Vec::as_slice);
-    let elements = pat.ends_with("[*]");
-    flag(spec, pat, |v| {
-        if elements {
-            selection.contains(v)
-        } else {
-            v.as_array().is_some_and(Vec::is_empty)
+/// At `inputs`: no confirmation input. At `inputs[*].<field>`: a confirmation input holds a
+/// selection input's data: the same exact hash, or the same normalized hash (text that differs
+/// only in case and spacing). An empty normalized hash (not UTF-8 text) matches nothing.
+fn selection_confirmation_disjoint(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    if !pat.contains('.') {
+        return flag(spec, pat, |v| {
+            v.as_array()
+                .is_some_and(|a| !a.iter().any(|i| role(i) == Some("confirmation")))
+        });
+    }
+    let selection: Vec<(String, String)> = nodes(spec, "inputs[*]")
+        .into_iter()
+        .filter(|(_, i)| role(i) == Some("selection"))
+        .filter_map(|(_, i)| input_hashes(ctx, i))
+        .collect();
+    let shared = |(exact, normalized): &(String, String)| {
+        selection
+            .iter()
+            .any(|(e, n)| e == exact || (!n.is_empty() && n == normalized))
+    };
+    with_parent(spec, pat)
+        .into_iter()
+        .filter(|(_, input, _)| role(input) == Some("confirmation"))
+        .filter(|(_, input, _)| input_hashes(ctx, input).is_some_and(|h| shared(&h)))
+        .map(|(path, _, _)| hit(path))
+        .collect()
+}
+
+/// At `inputs`: no selection or confirmation input, so the schedule has no rows. At
+/// `inputs[*].units`: such an input does not declare its units. At `inputs[*].stratum`: such an
+/// input has no stratum, or `""`, while `design.stratum` names strata.
+fn units_declared(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let Some((_, field)) = pat.rsplit_once('.') else {
+        return flag(spec, pat, |v| {
+            v.as_array().is_some_and(|a| !a.iter().any(is_cluster))
+        });
+    };
+    let strata = text(spec, "design.stratum").is_some_and(|s| !s.is_empty());
+    children(spec, pat)
+        .into_iter()
+        .filter(|(_, input, v)| {
+            is_cluster(input)
+                && match field {
+                    "units" => v.is_none(),
+                    "stratum" => strata && v.is_none_or(|s| s.as_str() == Some("")),
+                    _ => false,
+                }
+        })
+        .map(|(path, _, _)| hit(path))
+        .collect()
+}
+
+/// The schedule would hold more than `ROW_CAP` rows: each cluster's units, up to the units per
+/// cluster at the target, times the conditions and the repeats. Counted before anything is
+/// built, so a typo cannot exhaust the memory of `check`.
+fn row_cap(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let (Some(conditions), Some(repeats)) = (
+        list(spec, "design.conditions"),
+        val(spec, "design.repeats").and_then(Value::as_u64),
+    ) else {
+        return vec![];
+    };
+    let units: Vec<u64> = nodes(spec, "inputs[*]")
+        .into_iter()
+        .filter(|(_, i)| is_cluster(i))
+        .filter_map(|(_, i)| i.get("units")?.as_u64())
+        .collect();
+    let mut out = vec![];
+    for (path, per) in nodes(spec, pat) {
+        let Some(per) = per.as_u64() else { continue };
+        let rows = units
+            .iter()
+            .fold(0u128, |n, u| n.saturating_add(u128::from((*u).min(per))))
+            .saturating_mul(conditions.len() as u128)
+            .saturating_mul(u128::from(repeats));
+        if rows > u128::from(ROW_CAP) {
+            out.push(Hit {
+                path,
+                detail: Some(format!("It would hold {rows} rows; the cap is {ROW_CAP}.")),
+            });
         }
-    })
+    }
+    out
 }
 
 /// The reference names no listed condition. With no condition ids, `non-empty` reports that.

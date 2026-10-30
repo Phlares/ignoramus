@@ -153,11 +153,21 @@ pub struct Design {
     pub power: f64,
     pub sesoi: f64,
     pub icc: f64,
+    /// Units each cluster gives the study, at most.
     pub units_per_cluster: u32,
+    pub pick: Pick,
     pub variance: Variance,
     pub conditions: Vec<Condition>,
-    pub selection: ClusterSet,
-    pub confirmation: ClusterSet,
+}
+
+/// Which of a cluster's units the study takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Pick {
+    /// Drawn without replacement from the seed `units/<input path>`.
+    Seeded,
+    /// Indices 0, 1, 2, …
+    First,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -183,16 +193,15 @@ pub struct Condition {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ClusterSet {
-    pub clusters: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Input {
     pub path: String,
     pub sha256: String,
     pub role: Role,
+    /// The stratum of this cluster; "" when the design names none.
+    #[serde(default)]
+    pub stratum: String,
+    /// The units the file holds. Selection and confirmation inputs declare it.
+    pub units: Option<u32>,
     pub licence: Licence,
 }
 

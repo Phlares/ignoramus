@@ -570,16 +570,8 @@ fn a_confirmatory_plan_registers_with_a_pending_timestamp() {
     let (f, spec) = setup("numeric-ablation", same);
     let source = common::plant_estimate(&f.home, "ppl-ratio", 4.0);
     let t = std::fs::read_to_string(&spec).unwrap();
+    // The confirmation input gives 55 units, against 54 needed.
     let edited = {
-        let ids = |p: &str, n: usize| {
-            format!(
-                "clusters = [{}]",
-                (0..n)
-                    .map(|i| format!("\"{p}{i:02}\""))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        };
         t.replace("mode = \"exploratory\"", "mode = \"confirmatory\"")
             .replace("label = \"signal\"", "label = \"confirmed\"")
             .replace("sesoi = 0.0", "sesoi = 1.0")
@@ -588,9 +580,8 @@ fn a_confirmatory_plan_registers_with_a_pending_timestamp() {
                 "source = \"stated\"",
                 &format!("source = \"record:{source}\""),
             )
-            .replace("units_per_cluster = 1", "units_per_cluster = 5")
-            .replacen("clusters = []", &ids("s", 3), 1)
-            .replacen("clusters = []", &ids("c", 11), 1)
+            .replace("units_per_cluster = 1", "units_per_cluster = 55")
+            .replace("units = 3 ", "units = 55 ")
             .replace(
                 "triggers = []",
                 "triggers = [{ id = \"T1\", metric = \"ppl-ratio\", threshold_e = 1.0 }]",

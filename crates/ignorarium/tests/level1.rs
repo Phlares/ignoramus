@@ -812,9 +812,10 @@ fn progress_of(lab: &common::Lab, id: &str) -> runner::Progress {
 
 /// The study's per-row CPU estimate in seconds.
 fn per_row_cpu(lab: &common::Lab, id: &str) -> f64 {
-    let spec = progress_of(lab, id).spec;
+    let p = progress_of(lab, id);
     let m = machine::load(&lab.home.root).unwrap();
-    let e = ignorarium::estimate::estimate(&spec, &m, ignorarium::estimate::units(&spec));
+    let rows = ignorarium::schedule::rows(&p.spec, &p.spec_hash).unwrap();
+    let e = ignorarium::estimate::estimate(&p.spec, &m, &rows);
     e.cpu_hours * 3600.0 / e.rows.max(1) as f64
 }
 

@@ -8,7 +8,7 @@ The confirmation sample is too small.
 
 ## Fix
 
-Add confirmation clusters or units per cluster until the count reaches the number the power gate needs.
+Add confirmation inputs, or raise design.units_per_cluster, until the count reaches the number the power gate needs. Each confirmation input gives at most its own units.
 
 ## Why
 
@@ -21,4 +21,4 @@ A test with too few units misses real effects and exaggerates the ones it finds.
 
 ## Applies to
 
-- `design.confirmation.clusters` (named:power-met), when mode = confirmatory
+- `inputs` (named:power-met), when mode = confirmatory

@@ -461,12 +461,9 @@ fn control_signals_keep_the_last_request_and_a_stop_stays() {
     assert!(RunLock::try_take(&lab.home, "ghost").is_err());
 }
 
+/// A confirmatory plan whose confirmation input gives 55 units, against 54 needed.
 fn confirmatory(source: String) -> impl Fn(String) -> String {
     move |t| {
-        let ids = |p: &str, n: usize| {
-            let all: Vec<String> = (0..n).map(|i| format!("\"{p}{i:02}\"")).collect();
-            format!("clusters = [{}]", all.join(", "))
-        };
         t.replace("mode = \"exploratory\"", "mode = \"confirmatory\"")
             .replace("label = \"signal\"", "label = \"confirmed\"")
             .replace("sesoi = 0.0", "sesoi = 1.0")
@@ -475,9 +472,8 @@ fn confirmatory(source: String) -> impl Fn(String) -> String {
                 "source = \"stated\"",
                 &format!("source = \"record:{source}\""),
             )
-            .replace("units_per_cluster = 3", "units_per_cluster = 5")
-            .replacen("clusters = []", &ids("s", 3), 1)
-            .replacen("clusters = []", &ids("c", 11), 1)
+            .replace("units_per_cluster = 3", "units_per_cluster = 55")
+            .replace("units = 3 ", "units = 55 ")
             .replace(
                 "triggers = []",
                 "triggers = [{ id = \"T1\", metric = \"ppl-ratio\", threshold_e = 1.0 }]",

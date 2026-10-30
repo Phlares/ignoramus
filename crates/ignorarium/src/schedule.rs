@@ -3,6 +3,7 @@ use crate::canon;
 use crate::files::{self, WriteOnceError};
 use crate::seed::seed;
 use crate::spec::model::Spec;
+use crate::units::{self, Cluster};
 use serde::Serialize;
 use std::fmt;
 use std::path::Path;
@@ -64,15 +65,17 @@ impl fmt::Display for ExpandError {
 
 impl std::error::Error for ExpandError {}
 
-type UnitKey = (String, String, String);
+/// The most rows a schedule may hold. `check` builds the whole schedule to count its rows,
+/// so a rule refuses a larger one first (E-UNT-002).
+pub const ROW_CAP: u64 = 100_000;
 
-/// Rows in the order stratum, cluster, unit, then reference condition first,
-/// then the other conditions in spec order, then repeat 0..repeats.
-/// `units` holds (unit, cluster, stratum); input order does not matter.
+/// Rows in the order stratum, cluster path, then each picked unit, then reference condition
+/// first, then the other conditions in spec order, then repeat 0..repeats. The order of
+/// `clusters` does not matter.
 pub fn expand(
     spec: &Spec,
     spec_hash: &[u8; 32],
-    units: &[UnitKey],
+    clusters: &[Cluster],
 ) -> Result<Vec<Row>, ExpandError> {
     let d = &spec.design;
     if !d.conditions.iter().any(|c| c.id == d.reference) {
@@ -85,53 +88,35 @@ pub fn expand(
         .chain(d.conditions.iter().filter(|c| c.id != d.reference))
         .map(|c| c.id.as_str())
         .collect();
-    let mut sorted: Vec<&UnitKey> = units.iter().collect();
-    sorted.sort_by(|a, b| (&a.2, &a.1, &a.0).cmp(&(&b.2, &b.1, &b.0)));
+    let mut sorted: Vec<&Cluster> = clusters.iter().collect();
+    sorted.sort_by(|a, b| (&a.stratum, &a.path).cmp(&(&b.stratum, &b.path)));
     let mut rows = Vec::new();
     let mut index: u64 = 0;
-    for u in sorted {
-        for cond in &conditions {
-            for repeat in 0..d.repeats {
-                rows.push(Row {
-                    index,
-                    unit: u.0.clone(),
-                    cluster: u.1.clone(),
-                    stratum: u.2.clone(),
-                    condition: (*cond).to_string(),
-                    repeat,
-                    shard: 0,
-                    seed_hex: hex::encode(seed(spec_hash, &format!("row/{index}"))),
-                });
-                index = index.saturating_add(1);
+    for c in sorted {
+        for &i in &c.picked {
+            for cond in &conditions {
+                for repeat in 0..d.repeats {
+                    rows.push(Row {
+                        index,
+                        unit: units::key(&c.path, i),
+                        cluster: c.path.clone(),
+                        stratum: c.stratum.clone(),
+                        condition: (*cond).to_string(),
+                        repeat,
+                        shard: 0,
+                        seed_hex: hex::encode(seed(spec_hash, &format!("row/{index}"))),
+                    });
+                    index = index.saturating_add(1);
+                }
             }
         }
     }
     Ok(rows)
 }
 
-/// The units of a spec as (unit, cluster, stratum): `<cluster>/w<i>` for each cluster in
-/// selection and confirmation, sorted, and one cluster named `all` when none is listed.
-pub fn units_from_spec(spec: &Spec) -> Vec<UnitKey> {
-    let d = &spec.design;
-    let mut clusters: Vec<&str> = d
-        .selection
-        .clusters
-        .iter()
-        .chain(&d.confirmation.clusters)
-        .map(String::as_str)
-        .collect();
-    clusters.sort_unstable();
-    clusters.dedup();
-    if clusters.is_empty() {
-        clusters.push("all");
-    }
-    clusters
-        .iter()
-        .flat_map(|c| {
-            (0..d.units_per_cluster)
-                .map(move |i| (format!("{c}/w{i}"), (*c).to_string(), d.stratum.clone()))
-        })
-        .collect()
+/// The schedule `run` writes for `spec`: its clusters' picked units, expanded.
+pub fn rows(spec: &Spec, spec_hash: &[u8; 32]) -> Result<Vec<Row>, ExpandError> {
+    expand(spec, spec_hash, &units::clusters(spec, spec_hash))
 }
 
 #[derive(Debug)]

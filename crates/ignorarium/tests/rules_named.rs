@@ -99,11 +99,27 @@ fn set(spec: &mut Value, ptr: &str, v: Option<Value>) {
     }
 }
 
-fn ids(prefix: &str, n: usize) -> Value {
-    Value::Array((0..n).map(|i| json!(format!("{prefix}{i:02}"))).collect())
+fn input(path: &str, role: &str, units: u64) -> Value {
+    json!({
+        "path": path, "sha256": "", "role": role, "stratum": "fiction", "units": units,
+        "licence": { "spdx": "", "type": "unspecified", "source": "", "creators": [] }
+    })
 }
 
-/// A confirmatory plan that passes every named check: 55 confirmation units against 54 needed.
+/// The template's calibration input, selection input `texts/s00.txt`, and `n` confirmation
+/// inputs `texts/c<i>.txt`, each declaring `units` units. None of the files exist.
+fn inputs(n: usize, units: u64) -> Value {
+    let template = spec_at("../../templates/numeric-ablation.toml");
+    let mut all = vec![
+        template["inputs"][0].clone(),
+        input("texts/s00.txt", "selection", units),
+    ];
+    all.extend((0..n).map(|i| input(&format!("texts/c{i:02}.txt"), "confirmation", units)));
+    Value::Array(all)
+}
+
+/// A confirmatory plan that passes every named check: 11 confirmation inputs of 5 units,
+/// 55 confirmation units against 54 needed.
 fn ok() -> Value {
     let mut s = spec_at("../../templates/numeric-ablation.toml");
     let edits = [
@@ -115,8 +131,7 @@ fn ok() -> Value {
             json!(format!("record:{}", "a".repeat(64))),
         ),
         ("/design/units_per_cluster", json!(5)),
-        ("/design/selection/clusters", ids("s", 3)),
-        ("/design/confirmation/clusters", ids("c", 11)),
+        ("/inputs", inputs(11, 5)),
         (
             "/mutations/triggers",
             json!([{ "id": "T1", "metric": "ppl-ratio", "threshold_e": 1.0 }]),
@@ -156,10 +171,11 @@ fn one(when: &str, spec: &str) -> Value {
     json!([{ "when": when, "spec": spec }])
 }
 
+/// `clusters` confirmation inputs that each give `upc` units.
 fn power_edits(upc: u32, clusters: usize) -> Vec<Edit> {
     vec![
         ("/design/units_per_cluster", j(json!(upc))),
-        ("/design/confirmation/clusters", j(ids("c", clusters))),
+        ("/inputs", j(inputs(clusters, upc.into()))),
     ]
 }
 
@@ -197,62 +213,92 @@ fn faults() -> Vec<Fault> {
             vec![("E-CNF-001", "design.sesoi")],
         ),
         // 53 units against 54 needed; 51 against 54 with clusters of 3.
-        f(
-            power_edits(1, 53),
-            vec![("E-CNF-002", "design.confirmation.clusters")],
-        ),
-        f(
-            power_edits(3, 17),
-            vec![("E-CNF-002", "design.confirmation.clusters")],
-        ),
-        // A repeated id counts once: 11 copies of one cluster are 5 units, a doubled list of 30 is 30.
+        f(power_edits(1, 53), vec![("E-CNF-002", "inputs")]),
+        f(power_edits(3, 17), vec![("E-CNF-002", "inputs")]),
+        // Each input gives at most units_per_cluster, and at most its own units: 44 each time.
+        // Selection units do not count: 10 confirmation inputs are 50 units.
         f(
             vec![
-                ("/design/units_per_cluster", j(json!(5))),
-                ("/design/confirmation/clusters", j(json!(vec!["c00"; 11]))),
+                ("/design/units_per_cluster", j(json!(4))),
+                ("/inputs", j(inputs(11, 9))),
             ],
-            vec![("E-CNF-002", "design.confirmation.clusters")],
+            vec![("E-CNF-002", "inputs")],
         ),
         f(
-            vec![
-                ("/design/units_per_cluster", j(json!(1))),
-                (
-                    "/design/confirmation/clusters",
-                    j(json!(
-                        ids("c", 30)
-                            .as_array()
-                            .unwrap()
-                            .iter()
-                            .chain(ids("c", 30).as_array().unwrap())
-                            .collect::<Vec<_>>()
-                    )),
-                ),
-            ],
-            vec![("E-CNF-002", "design.confirmation.clusters")],
+            vec![("/inputs", j(inputs(11, 4)))],
+            vec![("E-CNF-002", "inputs")],
+        ),
+        f(
+            vec![("/inputs", j(inputs(10, 5)))],
+            vec![("E-CNF-002", "inputs")],
         ),
         f(
             vec![("/design/variance/value", j(json!(0.0)))],
-            vec![("E-CNF-002", "design.confirmation.clusters")],
+            vec![("E-CNF-002", "inputs")],
         ),
         f(
             vec![("/design/variance/value", j(json!(-4.0)))],
-            vec![("E-CNF-002", "design.confirmation.clusters")],
+            vec![("E-CNF-002", "inputs")],
         ),
         f(
             vec![("/design/variance/source", j(json!("stated")))],
             vec![("E-CNF-003", "design.variance.source")],
         ),
-        // Overlap at the second element; an empty confirmation also fails the power gate.
+        // No confirmation input also fails the power gate.
         f(
-            vec![("/design/selection/clusters", j(json!(["s00", "c01"])))],
-            vec![("E-CNF-004", "design.confirmation.clusters[1]")],
+            vec![("/inputs", j(inputs(0, 5)))],
+            vec![("E-CNF-002", "inputs"), ("E-CNF-004", "inputs")],
+        ),
+        // No selection or confirmation input: the schedule would be empty, in every mode.
+        f(
+            vec![("/inputs", j(json!([inputs(0, 5)[0]])))],
+            vec![
+                ("E-CNF-002", "inputs"),
+                ("E-CNF-004", "inputs"),
+                ("E-UNT-001", "inputs"),
+            ],
         ),
         f(
-            vec![("/design/confirmation/clusters", j(json!([])))],
             vec![
-                ("E-CNF-002", "design.confirmation.clusters"),
-                ("E-CNF-004", "design.confirmation.clusters"),
+                ("/study/mode", j(json!("exploratory"))),
+                ("/inputs", j(json!([inputs(0, 5)[0]]))),
             ],
+            vec![("E-UNT-001", "inputs")],
+        ),
+        // A selection or confirmation input declares its units; 12 inputs keep the power gate quiet.
+        f(
+            vec![("/inputs", j(inputs(12, 5))), ("/inputs/2/units", None)],
+            vec![("E-UNT-001", "inputs[2].units")],
+        ),
+        f(
+            vec![("/inputs/1/units", None)],
+            vec![("E-UNT-001", "inputs[1].units")],
+        ),
+        // Calibration and model inputs need neither units nor a stratum.
+        f(vec![("/inputs/0/role", j(json!("model")))], vec![]),
+        // A stratum, when the design names strata.
+        f(
+            vec![("/inputs/2/stratum", j(json!("")))],
+            vec![("E-UNT-001", "inputs[2].stratum")],
+        ),
+        f(
+            vec![("/inputs/1/stratum", None)],
+            vec![("E-UNT-001", "inputs[1].stratum")],
+        ),
+        f(
+            vec![
+                ("/design/stratum", j(json!(""))),
+                ("/inputs/2/stratum", j(json!(""))),
+            ],
+            vec![],
+        ),
+        // (50,001 + 50,001 units) x 2 conditions: above the row cap.
+        f(
+            vec![
+                ("/design/units_per_cluster", j(json!(50_001))),
+                ("/inputs", j(inputs(1, 50_001))),
+            ],
+            vec![("E-UNT-002", "design.units_per_cluster")],
         ),
         f(
             vec![("/design/reference", j(json!("exakt")))],
@@ -351,6 +397,8 @@ fn faults() -> Vec<Fault> {
                 ("/inputs/0/path", j(json!("../secret.txt"))),
                 ("/inputs/0/sha256", j(json!("b".repeat(64)))),
                 ("/inputs/0/role", j(json!("confirmation"))),
+                ("/inputs/0/units", j(json!(5))),
+                ("/inputs/0/stratum", j(json!("fiction"))),
             ],
             vec![("E-PTH-001", "inputs[0].path")],
         ),
@@ -361,7 +409,7 @@ fn faults() -> Vec<Fault> {
         ),
         f(
             vec![("/design/units_per_cluster", j(json!(-5)))],
-            vec![("E-CNF-002", "design.confirmation.clusters")],
+            vec![("E-CNF-002", "inputs")],
         ),
         // Power-gate guards: with 2 clusters the gate fires if it computes, so [] means it skipped.
         f(guard("/design/alpha", json!(0.0)), vec![]),
@@ -373,39 +421,30 @@ fn faults() -> Vec<Fault> {
         f(guard("/design/alpha", json!("x")), vec![]),
         f(
             guard("/design/alpha", json!(0.45)),
-            vec![("E-CNF-002", "design.confirmation.clusters")],
+            vec![("E-CNF-002", "inputs")],
         ),
         f(
             guard("/design/power", json!(0.999)),
-            vec![("E-CNF-002", "design.confirmation.clusters")],
+            vec![("E-CNF-002", "inputs")],
         ),
         f(
             guard("/design/power", json!(0.5)),
-            vec![("E-CNF-002", "design.confirmation.clusters")],
+            vec![("E-CNF-002", "inputs")],
         ),
         f(
             guard("/design/icc", json!(0.0)),
-            vec![("E-CNF-002", "design.confirmation.clusters")],
+            vec![("E-CNF-002", "inputs")],
         ),
         // Fail closed: an absent alpha, power or icc cannot be computed.
-        f(
-            vec![("/design/alpha", None)],
-            vec![("E-CNF-002", "design.confirmation.clusters")],
-        ),
-        f(
-            vec![("/design/power", None)],
-            vec![("E-CNF-002", "design.confirmation.clusters")],
-        ),
-        f(
-            vec![("/design/icc", None)],
-            vec![("E-CNF-002", "design.confirmation.clusters")],
-        ),
-        // An empty array as an element is not an empty array-level field, and is no cluster.
+        f(vec![("/design/alpha", None)], vec![("E-CNF-002", "inputs")]),
+        f(vec![("/design/power", None)], vec![("E-CNF-002", "inputs")]),
+        f(vec![("/design/icc", None)], vec![("E-CNF-002", "inputs")]),
+        // An empty array as an element is no input, and no cluster.
         f(
             vec![(
-                "/design/confirmation/clusters",
+                "/inputs",
                 j(json!(
-                    ids("c", 11)
+                    inputs(11, 5)
                         .as_array()
                         .unwrap()
                         .iter()
@@ -552,6 +591,8 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
         "E-PTH-001",
         "E-HSH-001",
         "E-SEC-001",
+        "E-UNT-001",
+        "E-UNT-002",
     ]
     .into_iter()
     .map(String::from)
@@ -638,10 +679,10 @@ fn power_gate_uses_alpha_power_icc_and_defaults() {
         ("/design/sesoi", j(json!(0.5))),
     ]);
     assert!(named(&edited(&e), dir.path()).is_empty());
-    e[1] = ("/design/confirmation/clusters", j(ids("c", 31)));
+    e[1] = ("/inputs", j(inputs(31, 1)));
     assert_eq!(
         codes_paths(&named(&edited(&e), dir.path())),
-        [("E-CNF-002", "design.confirmation.clusters")]
+        [("E-CNF-002", "inputs")]
     );
     // Higher power needs more units.
     let mut e = power_edits(1, 54);
@@ -665,7 +706,7 @@ fn confirmatory_rules_do_not_fire_in_exploratory_mode() {
         ("/design/sesoi", j(json!(0.0))),
         ("/design/test", j(json!("descriptive"))),
         ("/design/variance/source", j(json!("stated"))),
-        ("/design/confirmation/clusters", j(json!([]))),
+        ("/inputs", j(inputs(0, 5))),
     ]);
     assert!(named(&s, dir.path()).is_empty());
     // And E-LBL-001 does not fire in confirmatory mode.
@@ -743,11 +784,14 @@ fn named_checks_never_panic_on_missing_or_mistyped_fields() {
 
 const ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
+/// `ok()` with its first input at `path`, pinned by `sha`, in `role`, with units and a stratum.
 fn with_input(path: &str, sha: &str, role: &str) -> Value {
     let mut s = ok();
     set(&mut s, "/inputs/0/path", j(json!(path)));
     set(&mut s, "/inputs/0/sha256", j(json!(sha)));
     set(&mut s, "/inputs/0/role", j(json!(role)));
+    set(&mut s, "/inputs/0/units", j(json!(5)));
+    set(&mut s, "/inputs/0/stratum", j(json!("fiction")));
     s
 }
 
@@ -784,13 +828,20 @@ fn missing_hash_is_a_warning_from_the_generic_rule() {
             .collect()
     };
     let d = w(&s);
-    assert_eq!(codes_paths(&d), [("W-HSH-001", "inputs[0].sha256")]);
+    assert_eq!(
+        codes_paths(&d),
+        [
+            ("W-HSH-001", "inputs[0].sha256"),
+            ("W-HSH-001", "inputs[1].sha256")
+        ]
+    );
     assert_eq!(d[0].severity, Severity::Warning);
     assert_eq!(
         d[0].instruction,
         "Pin the input: add its SHA-256, 64 lowercase hex characters."
     );
     set(&mut s, "/inputs/0/sha256", j(json!(ABC)));
+    set(&mut s, "/inputs/1/sha256", j(json!(ABC)));
     assert!(w(&s).is_empty());
 }
 
@@ -1103,7 +1154,7 @@ fn bal_brief_is_refused_with_three_codes() {
     assert!(
         power
             .problem
-            .ends_with("20 confirmation units; the power gate needs 54."),
+            .ends_with("5 confirmation units; the power gate needs 54."),
         "{}",
         power.problem
     );
@@ -1196,11 +1247,11 @@ fn a_stored_input_passes_without_its_file() {
     let store = ignorarium::store::Store::open(dir.path()).unwrap();
     let got = ignorarium::cli::check::input_hashes(&store, dir.path(), &spec);
     assert_eq!(
-        got,
-        [(
+        got[0],
+        (
             "data/a.txt".to_string(),
             Some((digest, meta.normalized_sha256))
-        )]
+        )
     );
     assert_eq!(got[0].1.as_ref().unwrap().1, normalized_sha256("some text"));
 }
@@ -1243,7 +1294,7 @@ fn an_input_inside_another_inputs_path_is_refused() {
         let mut s = with_input(first, "", "calibration");
         let mut extra = s["inputs"][0].clone();
         extra["path"] = json!(second);
-        s["inputs"].as_array_mut().unwrap().push(extra);
+        s["inputs"].as_array_mut().unwrap().insert(1, extra);
         named(&s, dir.path())
     };
     let nested = [("E-PTH-001", "inputs[1].path")];
@@ -1251,6 +1302,11 @@ fn an_input_inside_another_inputs_path_is_refused() {
     // The inner path is flagged whichever comes first.
     assert_eq!(
         codes_paths(&with_second("data/a/b", "data/a")),
+        [("E-PTH-001", "inputs[0].path")]
+    );
+    // An empty path is unsafe, and holds no other input.
+    assert_eq!(
+        codes_paths(&with_second("", "data/a")),
         [("E-PTH-001", "inputs[0].path")]
     );
     // A shared name prefix is not a shared folder.
@@ -1311,6 +1367,146 @@ fn two_inputs_with_one_path_are_not_nested() {
     let dir = tempfile::tempdir().unwrap();
     let mut s = with_input("data/a", "", "calibration");
     let again = s["inputs"][0].clone();
-    s["inputs"].as_array_mut().unwrap().push(again);
+    s["inputs"].as_array_mut().unwrap().insert(1, again);
     assert!(named(&s, dir.path()).is_empty());
+}
+
+// ---- clusters: content, units and strata ----
+
+/// `ok()` with its selection input at `sel` and its first confirmation input at `conf`.
+fn pair(sel: &str, conf: &str) -> Value {
+    let mut s = ok();
+    set(&mut s, "/inputs/1/path", j(json!(sel)));
+    set(&mut s, "/inputs/2/path", j(json!(conf)));
+    s
+}
+
+#[test]
+fn two_paths_with_the_same_bytes_are_not_disjoint() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data/s.txt", b"one text");
+    write(dir.path(), "data/c.txt", b"one text");
+    write(dir.path(), "data/d.txt", b"another text");
+    let d = named(&pair("data/s.txt", "data/c.txt"), dir.path());
+    assert_eq!(codes_paths(&d), [("E-CNF-004", "inputs[2].sha256")]);
+    assert_eq!(
+        d[0].problem,
+        "The plan has no confirmation input, or a confirmation input holds the same data as a selection input."
+    );
+    assert!(named(&pair("data/s.txt", "data/d.txt"), dir.path()).is_empty());
+    // A selection input that is not there shares nothing.
+    assert!(named(&pair("data/none.txt", "data/c.txt"), dir.path()).is_empty());
+    // Only confirmation inputs are compared, and only with selection inputs.
+    let mut s = pair("data/d.txt", "data/c.txt");
+    set(&mut s, "/inputs/0/path", j(json!("data/s.txt")));
+    set(&mut s, "/inputs/3/path", j(json!("data/s.txt")));
+    assert!(named(&s, dir.path()).is_empty());
+}
+
+#[test]
+fn a_case_and_space_copy_is_not_disjoint() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data/s.txt", b"Alpha  Beta\n");
+    write(dir.path(), "data/c.txt", b"alpha beta");
+    let d = named(&pair("data/s.txt", "data/c.txt"), dir.path());
+    assert_eq!(codes_paths(&d), [("E-CNF-004", "inputs[2].sha256")]);
+}
+
+#[test]
+fn binary_inputs_without_a_normalized_hash_are_compared_by_their_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data/s.bin", &[0xff, 0x00]);
+    write(dir.path(), "data/c.bin", &[0xfe, 0x01]);
+    write(dir.path(), "data/d.bin", &[0xff, 0x00]);
+    assert!(named(&pair("data/s.bin", "data/c.bin"), dir.path()).is_empty());
+    let d = named(&pair("data/s.bin", "data/d.bin"), dir.path());
+    assert_eq!(codes_paths(&d), [("E-CNF-004", "inputs[2].sha256")]);
+}
+
+#[test]
+fn a_stored_selection_input_is_compared_by_its_stored_hashes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (digest, _) = stored(dir.path(), b"Shared  Text");
+    write(dir.path(), "data/c.txt", b"shared text");
+    let mut s = pair("data/s.txt", "data/c.txt");
+    set(&mut s, "/inputs/1/sha256", j(json!(digest)));
+    let d = named(&s, dir.path());
+    assert_eq!(codes_paths(&d), [("E-CNF-004", "inputs[2].sha256")]);
+}
+
+#[test]
+fn a_confirmation_input_without_units_is_refused() {
+    let dir = study_dir();
+    let mut s = edited(&[("/inputs", j(inputs(12, 5)))]);
+    set(&mut s, "/inputs/5/units", None);
+    let d = named(&s, dir.path());
+    assert_eq!(codes_paths(&d), [("E-UNT-001", "inputs[5].units")]);
+    assert_eq!(
+        d[0].problem,
+        "The plan has no selection or confirmation input, or one does not declare its units, or its stratum while the design names strata."
+    );
+    // The same in exploratory mode.
+    set(&mut s, "/study/mode", j(json!("exploratory")));
+    let d = named(&s, dir.path());
+    assert_eq!(codes_paths(&d), [("E-UNT-001", "inputs[5].units")]);
+    // A mistyped count is the type rule's.
+    set(&mut s, "/inputs/5/units", j(json!("five")));
+    assert!(named(&s, dir.path()).is_empty());
+}
+
+#[test]
+fn a_stratum_is_required_when_the_design_names_strata() {
+    let dir = study_dir();
+    let mut s = ok();
+    set(&mut s, "/inputs/4/stratum", j(json!("")));
+    set(&mut s, "/inputs/6/stratum", None);
+    let want = [
+        ("E-UNT-001", "inputs[4].stratum"),
+        ("E-UNT-001", "inputs[6].stratum"),
+    ];
+    assert_eq!(codes_paths(&named(&s, dir.path())), want);
+    set(&mut s, "/design/stratum", j(json!("")));
+    assert!(named(&s, dir.path()).is_empty());
+    // A mistyped stratum is the type rule's.
+    set(&mut s, "/design/stratum", j(json!("genre")));
+    set(&mut s, "/inputs/4/stratum", j(json!(7)));
+    assert_eq!(
+        codes_paths(&named(&s, dir.path())),
+        [("E-UNT-001", "inputs[6].stratum")]
+    );
+}
+
+#[test]
+fn the_row_cap_counts_units_conditions_and_repeats() {
+    let dir = study_dir();
+    let at = |upc: u64, units: u64, repeats: u64| {
+        edited(&[
+            ("/design/units_per_cluster", j(json!(upc))),
+            ("/inputs", j(inputs(1, units))),
+            ("/design/repeats", j(json!(repeats))),
+        ])
+    };
+    let cap = [("E-UNT-002", "design.units_per_cluster")];
+    // (25,000 selection + 25,000 confirmation units) x 2 conditions x 1 repeat = 100,000 rows.
+    assert!(named(&at(25_000, 25_000, 1), dir.path()).is_empty());
+    let d = named(&at(25_001, 25_001, 1), dir.path());
+    assert_eq!(codes_paths(&d), cap);
+    assert_eq!(
+        d[0].problem,
+        "The schedule has more rows than the box allows. It would hold 100004 rows; the cap is 100000."
+    );
+    // A cluster gives at most units_per_cluster, and at most its own units.
+    assert!(named(&at(25_000, 4_000_000_000, 1), dir.path()).is_empty());
+    assert!(named(&at(4_000_000_000, 25_000, 1), dir.path()).is_empty());
+    // Repeats and conditions multiply.
+    assert_eq!(codes_paths(&named(&at(25_000, 25_000, 2), dir.path())), cap);
+    let mut s = at(25_000, 25_000, 1);
+    s["design"]["conditions"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({ "id": "arm-b" }));
+    assert_eq!(codes_paths(&named(&s, dir.path())), cap);
+    // The largest counts do not overflow.
+    let max = u64::from(u32::MAX);
+    assert_eq!(codes_paths(&named(&at(max, max, max), dir.path())), cap);
 }

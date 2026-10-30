@@ -1,6 +1,7 @@
 use ignorarium::schedule::{self, Row, Schedule, ScheduleError, expand};
 use ignorarium::seed::seed;
-use ignorarium::spec::model::Spec;
+use ignorarium::spec::model::{Pick, Role, Spec};
+use ignorarium::units::{self, Cluster};
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -20,12 +21,18 @@ fn spec(conds: &[&str], reference: &str, repeats: u64) -> Spec {
     Spec::from_value(&v).unwrap()
 }
 
-fn u(unit: &str, cluster: &str, stratum: &str) -> (String, String, String) {
-    (unit.into(), cluster.into(), stratum.into())
+fn cluster(path: &str, stratum: &str, picked: &[u32]) -> Cluster {
+    Cluster {
+        path: path.into(),
+        stratum: stratum.into(),
+        role: Role::Confirmation,
+        picked: picked.to_vec(),
+    }
 }
 
-fn units(n: usize) -> Vec<(String, String, String)> {
-    (0..n).map(|i| u(&format!("u{i}"), "c", "s")).collect()
+/// One cluster `c` whose units are 0..n.
+fn units(n: u32) -> Vec<Cluster> {
+    vec![cluster("c", "s", &(0..n).collect::<Vec<_>>())]
 }
 
 #[test]
@@ -57,13 +64,13 @@ fn expansion_count_and_order() {
     assert_eq!(
         first,
         [
-            ("u0", "ref", 0),
-            ("u0", "ref", 1),
-            ("u0", "a", 0),
-            ("u0", "a", 1)
+            ("c#0", "ref", 0),
+            ("c#0", "ref", 1),
+            ("c#0", "a", 0),
+            ("c#0", "a", 1)
         ]
     );
-    assert_eq!(rows[4].unit, "u1");
+    assert_eq!(rows[4].unit, "c#1");
     for (i, r) in rows.iter().enumerate() {
         assert_eq!(r.index, i as u64);
         assert_eq!(r.shard, 0);
@@ -80,13 +87,29 @@ fn row_count_for_second_shape() {
 }
 
 #[test]
-fn units_sort_by_stratum_cluster_unit_and_input_order_is_irrelevant() {
+fn rows_name_units_by_path_and_index() {
+    let s = spec(&["r"], "r", 1);
+    let rows = expand(&s, &hash(), &[cluster("data/a.txt", "code", &[3, 7])]).unwrap();
+    let got: Vec<_> = rows
+        .iter()
+        .map(|r| (&r.unit[..], &r.cluster[..], &r.stratum[..]))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("data/a.txt#3", "data/a.txt", "code"),
+            ("data/a.txt#7", "data/a.txt", "code")
+        ]
+    );
+}
+
+#[test]
+fn clusters_sort_by_stratum_then_path_and_their_order_is_irrelevant() {
     let s = spec(&["r"], "r", 1);
     let a = vec![
-        u("u2", "c1", "s1"),
-        u("u1", "c2", "s1"),
-        u("u3", "c1", "s0"),
-        u("u1", "c1", "s1"),
+        cluster("c2", "s1", &[0]),
+        cluster("c1", "s1", &[1, 4]),
+        cluster("c9", "s0", &[2]),
     ];
     let mut b = a.clone();
     b.reverse();
@@ -99,12 +122,52 @@ fn units_sort_by_stratum_cluster_unit_and_input_order_is_irrelevant() {
     assert_eq!(
         order,
         [
-            ("s0", "c1", "u3"),
-            ("s1", "c1", "u1"),
-            ("s1", "c1", "u2"),
-            ("s1", "c2", "u1")
+            ("s0", "c9", "c9#2"),
+            ("s1", "c1", "c1#1"),
+            ("s1", "c1", "c1#4"),
+            ("s1", "c2", "c2#0")
         ]
     );
+}
+
+fn input(path: &str, role: &str, units: u32) -> Value {
+    json!({
+        "path": path, "sha256": "", "role": role, "stratum": "fiction", "units": units,
+        "licence": { "spdx": "", "type": "unspecified", "source": "", "creators": [] }
+    })
+}
+
+#[test]
+fn the_schedule_of_a_spec_holds_each_clusters_picked_units() {
+    let mut v: Value = ignorarium::spec::load(Path::new("../../templates/numeric-ablation.toml"))
+        .unwrap()
+        .value;
+    v["design"]["units_per_cluster"] = json!(5);
+    v["design"]["repeats"] = json!(2);
+    v["design"]["conditions"] = json!([{ "id": "exact" }, { "id": "a" }, { "id": "b" }]);
+    v["inputs"] = json!([
+        input("data/cal.txt", "calibration", 40),
+        input("data/s.txt", "selection", 2),
+        input("data/c.txt", "confirmation", 7),
+    ]);
+    let s = Spec::from_value(&v).unwrap();
+    let rows = schedule::rows(&s, &hash()).unwrap();
+    assert_eq!(
+        rows,
+        expand(&s, &hash(), &units::clusters(&s, &hash())).unwrap()
+    );
+    // (2 + 5 units) × 3 conditions × 2 repeats: the count the row cap rule computes.
+    assert_eq!(rows.len(), 42);
+    let picked = units::pick(5, 7, Pick::Seeded, seed(&hash(), "units/data/c.txt"));
+    let mut want: Vec<String> = picked
+        .iter()
+        .map(|i| format!("data/c.txt#{i}"))
+        .chain(["data/s.txt#0".into(), "data/s.txt#1".into()])
+        .collect();
+    want.sort();
+    let mut got: Vec<String> = rows.iter().map(|r| r.unit.clone()).collect();
+    got.dedup();
+    assert_eq!(got, want);
 }
 
 #[test]
@@ -129,7 +192,7 @@ fn huge_repeats_with_no_units_do_not_overflow() {
     assert!(expand(&s, &hash(), &[]).unwrap().is_empty());
 }
 
-fn sched(n: usize) -> Schedule {
+fn sched(n: u32) -> Schedule {
     let rows: Vec<Row> = expand(&spec(&["r"], "r", 1), &hash(), &units(n)).unwrap();
     Schedule::new(&hash(), rows)
 }

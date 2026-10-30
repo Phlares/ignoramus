@@ -52,15 +52,13 @@ source = "stated"               # stated | record:<sha256>
 id = "exact"
 [[design.conditions]]
 id = "arm-a"
-[design.selection]
-clusters = ["t1", "t2", "t3", "t4"]   # cluster ids used to pick a winner
-[design.confirmation]
-clusters = ["t5", "t6", "t7", "t8"]   # cluster ids used to confirm; disjoint from selection
 
 [[inputs]]
 path = "bal-confirm.txt"       # relative to the study folder
 sha256 = ""
 role = "confirmation"            # calibration | selection | confirmation | model
+stratum = "code"
+units = 31
 [inputs.licence]
 spdx = ""                       # SPDX id, or "" when none was given
 type = "unspecified"            # common | custom | request-form | unspecified

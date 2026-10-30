@@ -6,7 +6,7 @@ use crate::budget::{Alerts, Cost, CostMeter, Decision, HostMeter, decide, dimens
 use crate::control::{self, ControlError, ControlFile, RunLock, Signal, State};
 use crate::derived::{REGISTER, Register};
 use crate::environ::{Builder, Built, Recipe};
-use crate::estimate::{apply_defaults, estimate, units};
+use crate::estimate::{apply_defaults, estimate};
 use crate::events::{self, Event};
 use crate::home::Home;
 use crate::inputs::{self, Found};
@@ -489,8 +489,7 @@ fn stored_spec(dir: &Path) -> Result<(Spec, [u8; 32], String), RunError> {
 }
 
 fn expand_rows(spec: &Spec, hash: &[u8; 32]) -> Result<Vec<Row>, RunError> {
-    schedule::expand(spec, hash, &schedule::units_from_spec(spec))
-        .map_err(|e| RunError::Spec(e.to_string()))
+    schedule::rows(spec, hash).map_err(|e| RunError::Spec(e.to_string()))
 }
 
 /// How far a study has run, from its signed records and its stored spec.
@@ -985,7 +984,7 @@ impl Watch for RunWatch<'_> {
 
 /// The spec estimate for one row. Zero when the schedule has no rows.
 fn row_estimate(plan: &RunPlan, machine: &Machine) -> Cost {
-    let e = estimate(&plan.spec, machine, units(&plan.spec));
+    let e = estimate(&plan.spec, machine, &plan.schedule.rows);
     let n = e.rows.max(1) as f64;
     Cost {
         cpu_seconds: e.cpu_hours * 3600.0 / n,

@@ -1,8 +1,8 @@
 //! Defaults for absent spec keys, and the cost estimate.
 use crate::machine::Machine;
+use crate::schedule::Row;
 use crate::spec::model::{Mode, Spec};
 use serde_json::{Map, Value, json};
-use std::collections::BTreeSet;
 
 /// The only place that holds default values: path, and the value given the spec.
 /// Computes a default from the whole spec.
@@ -12,6 +12,7 @@ const DEFAULTS: &[(&str, Make)] = &[
     ("design.alpha", |_| json!(0.005)),
     ("design.power", |_| json!(0.8)),
     ("design.repeats", |_| json!(1)),
+    ("design.pick", |_| json!("seeded")),
     ("mutations.depth_cap", |_| json!(2)),
     ("scope.min_isolation", |_| json!(1)),
     ("access.blind", |v| {
@@ -69,35 +70,24 @@ pub struct Estimate {
     pub is_long_job: bool,
 }
 
-/// How many different ids a list holds. The one count of clusters, here and in the power gate.
-pub fn distinct<T: Ord>(ids: impl IntoIterator<Item = T>) -> u64 {
-    ids.into_iter().collect::<BTreeSet<_>>().len() as u64
-}
-
-/// Distinct clusters in both sets times units per cluster; no listed cluster counts as one.
-pub fn units(spec: &Spec) -> u64 {
+/// The cost of `rows`, the schedule `run` writes, counted row by row.
+pub fn estimate(spec: &Spec, machine: &Machine, rows: &[Row]) -> Estimate {
     let d = &spec.design;
-    let clusters = distinct(d.selection.clusters.iter().chain(&d.confirmation.clusters));
-    clusters
-        .max(1)
-        .saturating_mul(u64::from(d.units_per_cluster))
-}
-
-pub fn estimate(spec: &Spec, machine: &Machine, units: u64) -> Estimate {
-    let d = &spec.design;
-    let per_condition = units.saturating_mul(u64::from(d.repeats));
     let rows_per_condition: Vec<(String, u64)> = d
         .conditions
         .iter()
-        .map(|c| (c.id.clone(), per_condition))
+        .map(|c| {
+            let n = rows.iter().filter(|r| r.condition == c.id).count();
+            (c.id.clone(), n as u64)
+        })
         .collect();
-    let rows = (d.conditions.len() as u64).saturating_mul(per_condition);
-    let cpu_seconds = rows as f64 * d.row_seconds;
+    let n = rows.len() as u64;
+    let cpu_seconds = n as f64 * d.row_seconds;
     let cpus = f64::from(machine.cpus.max(1));
     let cpu_hours = cpu_seconds / 3600.0;
     let wall_hours = cpu_hours / cpus;
     Estimate {
-        rows,
+        rows: n,
         rows_per_condition,
         cpu_hours,
         wall_hours,

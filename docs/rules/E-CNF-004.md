@@ -4,15 +4,15 @@ Severity: error
 
 ## Problem
 
-The confirmation clusters are empty or overlap the selection clusters.
+The plan has no confirmation input, or a confirmation input holds the same data as a selection input.
 
 ## Fix
 
-List confirmation clusters that do not appear in the selection clusters.
+Add a confirmation input. Give each one data that no selection input holds: not the same bytes, and not the same text in other case or spacing.
 
 ## Why
 
-A winner picked on some data looks better on that same data. Only fresh clusters give an honest test.
+A winner picked on some data looks better on that same data. Only fresh data gives an honest test. The content decides, not the file name.
 
 ## Sources
 
@@ -20,5 +20,5 @@ A winner picked on some data looks better on that same data. Only fresh clusters
 
 ## Applies to
 
-- `design.confirmation.clusters` (named:selection-confirmation-disjoint), when mode = confirmatory
-- `design.confirmation.clusters[*]` (named:selection-confirmation-disjoint), when mode = confirmatory
+- `inputs` (named:selection-confirmation-disjoint), when mode = confirmatory
+- `inputs[*].sha256` (named:selection-confirmation-disjoint), when mode = confirmatory

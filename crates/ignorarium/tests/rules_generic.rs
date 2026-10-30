@@ -163,18 +163,6 @@ fn faults() -> Vec<Fault> {
             Some(json!([1])),
             "design.conditions[0]",
         ),
-        (
-            "E-TYP-001",
-            "/design/selection/clusters",
-            Some(json!([1])),
-            "design.selection.clusters[0]",
-        ),
-        (
-            "E-TYP-001",
-            "/design/confirmation/clusters",
-            Some(json!([1])),
-            "design.confirmation.clusters[0]",
-        ),
         ("E-TYP-001", "/inputs", Some(json!([1])), "inputs[0]"),
         (
             "E-TYP-001",
@@ -225,10 +213,11 @@ fn each_fault_row_yields_its_code_and_path_alone() {
     for row in faults() {
         let (code, _, _, path) = &row;
         let d = rules::check_generic(&faulted(std::slice::from_ref(&row)), &rules);
-        // The template itself carries both warnings; drop them unless the row is about them.
+        // The template itself carries both warnings on each input; drop them unless the row is
+        // about that warning at that path.
         let d: Vec<_> = d
             .into_iter()
-            .filter(|x| !x.code.starts_with("W-") || x.code == *code)
+            .filter(|x| !x.code.starts_with("W-") || (x.code == *code && x.path == *path))
             .collect();
         assert_eq!(codes_paths(&d), [(*code, *path)], "{row:?}");
     }
@@ -243,7 +232,9 @@ fn templates_have_no_generic_errors_and_no_unknown_keys() {
             codes_paths(&d),
             [
                 ("W-LIC-001", "inputs[0].licence.spdx"),
+                ("W-LIC-001", "inputs[1].licence.spdx"),
                 ("W-HSH-001", "inputs[0].sha256"),
+                ("W-HSH-001", "inputs[1].sha256"),
             ]
         );
         assert!(d.iter().all(|x| x.severity == Severity::Warning));
@@ -267,7 +258,9 @@ fn all_faults_reported_at_once_in_rule_file_order() {
             ("E-RNG-001", "design.alpha"),
             ("E-FMT-001", "study.id"),
             ("W-LIC-001", "inputs[0].licence.spdx"),
+            ("W-LIC-001", "inputs[1].licence.spdx"),
             ("W-HSH-001", "inputs[0].sha256"),
+            ("W-HSH-001", "inputs[1].sha256"),
         ]
     );
 }
@@ -314,7 +307,9 @@ fn missing_licence_id_gives_the_schema_error_then_the_warning() {
         [
             ("E-REQ-001", "inputs[0].licence.spdx"),
             ("W-LIC-001", "inputs[0].licence.spdx"),
+            ("W-LIC-001", "inputs[1].licence.spdx"),
             ("W-HSH-001", "inputs[0].sha256"),
+            ("W-HSH-001", "inputs[1].sha256"),
         ]
     );
 }
@@ -327,8 +322,6 @@ fn fat_templates() -> Vec<Value> {
             let mut s = spec_at(&format!("../../templates/{t}.toml"));
             let mut second = s["outcomes"][0].clone();
             second["id"] = json!("second");
-            s["design"]["selection"]["clusters"] = json!(["s1", "s2"]);
-            s["design"]["confirmation"]["clusters"] = json!(["c1", "c2"]);
             s["inputs"][0]["licence"]["creators"] = json!(["x", "y"]);
             s["mutations"]["operators"] = json!([
                 { "name": "o1", "type": "int", "range": [1, 2], "acts_on": "a" },
@@ -458,7 +451,9 @@ fn indexed_paths_cover_second_elements() {
             ("E-FMT-001", "design.conditions[1].id"),
             ("E-OUT-001", "outcomes[1].unit"),
             ("W-LIC-001", "inputs[0].licence.spdx"),
+            ("W-LIC-001", "inputs[1].licence.spdx"),
             ("W-HSH-001", "inputs[0].sha256"),
+            ("W-HSH-001", "inputs[1].sha256"),
         ]
     );
 }
@@ -648,7 +643,7 @@ fn type_rules_accept_and_reject_the_right_values() {
     assert!(!bad(&["design", "repeats"], json!(u64::MAX))); // > i64::MAX are still ints
     assert!(bad(&["study", "test_log"], json!("no")));
     assert!(bad(&["study", "id"], json!(3)));
-    assert!(bad(&["design", "selection"], json!([])));
+    assert!(bad(&["design", "pick"], json!([])));
     assert!(bad(&["design", "conditions"], json!({})));
     assert!(!bad(&["design", "conditions"], json!([{"id": "a"}])));
 }
@@ -690,7 +685,9 @@ fn array_elements_are_checked_individually() {
             ("E-OUT-001", "outcomes[1].unit"),
             ("E-OUT-002", "outcomes[2].direction"),
             ("W-LIC-001", "inputs[0].licence.spdx"),
+            ("W-LIC-001", "inputs[1].licence.spdx"),
             ("W-HSH-001", "inputs[0].sha256"),
+            ("W-HSH-001", "inputs[1].sha256"),
         ]
     );
 }
@@ -1166,9 +1163,7 @@ key = \"id\"",
 }
 
 /// (array path, key) for each unique target of E-UNQ-001.
-const UNIQUE_TARGETS: [(&str, Option<&str>); 8] = [
-    ("design.selection.clusters", None),
-    ("design.confirmation.clusters", None),
+const UNIQUE_TARGETS: [(&str, Option<&str>); 6] = [
     ("design.conditions", Some("id")),
     ("outcomes", Some("id")),
     ("question.hypotheses", Some("id")),
@@ -1212,4 +1207,50 @@ fn e_unq_001_fires_on_a_repeat_in_each_list_and_not_on_distinct_values() {
         };
         assert_eq!(unq(&s), [want], "{path}");
     }
+}
+
+#[test]
+fn input_units_strata_and_the_pick_rule_are_checked_at_their_edges() {
+    let rules = v0();
+    let at = |ptr: &str, v: Value| -> Vec<(String, String)> {
+        let mut s = template();
+        apply(&mut s, ptr, Some(v));
+        rules::check_generic(&s, &rules)
+            .into_iter()
+            .filter(|d| !d.code.starts_with("W-"))
+            .map(|d| (d.code, d.path))
+            .collect()
+    };
+    let one = |code: &str, path: &str| vec![(code.to_string(), path.to_string())];
+    let units = "inputs[1].units";
+    assert_eq!(at("/inputs/1/units", json!(0)), one("E-RNG-001", units));
+    assert!(at("/inputs/1/units", json!(1)).is_empty());
+    assert!(at("/inputs/1/units", json!(4294967295u32)).is_empty());
+    assert_eq!(
+        at("/inputs/1/units", json!(4294967296u64)),
+        one("E-RNG-001", units)
+    );
+    assert_eq!(at("/inputs/1/units", json!("3")), one("E-TYP-001", units));
+    let stratum = "inputs[1].stratum";
+    assert_eq!(
+        at("/inputs/1/stratum", json!("Fiction")),
+        one("E-FMT-001", stratum)
+    );
+    assert!(at("/inputs/1/stratum", json!("short-fiction")).is_empty());
+    assert!(at("/inputs/1/stratum", json!("")).is_empty());
+    assert_eq!(at("/inputs/1/stratum", json!(3)), one("E-TYP-001", stratum));
+    assert_eq!(
+        at("/design/stratum", json!("by genre")),
+        one("E-FMT-001", "design.stratum")
+    );
+    assert!(at("/design/stratum", json!("")).is_empty());
+    assert_eq!(
+        at("/design/pick", json!("random")),
+        one("E-ENM-001", "design.pick")
+    );
+    assert!(at("/design/pick", json!("first")).is_empty());
+    assert_eq!(
+        at("/design/pick", json!(1)),
+        one("E-TYP-001", "design.pick")
+    );
 }

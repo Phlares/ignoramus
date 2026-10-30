@@ -89,7 +89,8 @@ pub fn register_study(
     lab.home.study_dir(id)
 }
 
-/// A study whose one input is `data/example.txt`.
+/// A study with the template's inputs: `data/example.txt`, written, and the confirmation
+/// input `data/confirm.txt`, absent, whose 3 declared units make 3 units x 2 conditions = 6 rows.
 pub fn plain(lab: &Lab, id: &str) -> PathBuf {
     with_payload(lab, id, PAYLOAD)
 }

@@ -17,9 +17,9 @@ use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
+/// The template's confirmation input at `data/conf.txt`.
 fn conf_input(t: String) -> String {
-    t.replace("data/example.txt", "data/conf.txt")
-        .replace("role = \"calibration\"", "role = \"confirmation\"")
+    t.replace("data/confirm.txt", "data/conf.txt")
 }
 
 /// Runs level 0, then replaces the exit with the next scripted one.
@@ -469,7 +469,10 @@ fn a_late_unpinned_input_is_read_from_the_root_and_gated() {
     let hashes = file_hashes(b"Late  Root");
     assert_eq!(
         plan.inputs,
-        vec![("data/conf.txt".to_string(), Some(hashes.clone()))]
+        vec![
+            ("data/example.txt".to_string(), None),
+            ("data/conf.txt".to_string(), Some(hashes.clone()))
+        ]
     );
     // Imported into the store with a signed record, and seen by rows through the view.
     let view = dir.join("in/data/conf.txt");
@@ -865,25 +868,38 @@ fn a_payload_copy_that_differs_from_the_register_record_is_refused() {
 }
 
 #[test]
-fn units_from_spec_matches_the_estimate_count() {
+fn the_schedule_runs_the_picked_units_of_the_confirmation_input() {
     let lab = lab();
     plain(&lab, "units");
-    let s = plan_of(&lab, "units").spec;
-    let units = schedule::units_from_spec(&s);
-    assert_eq!(units.len() as u64, estimate::units(&s));
+    let plan = plan_of(&lab, "units");
+    let rows = &plan.schedule.rows;
+    assert_eq!(rows, &schedule::rows(&plan.spec, &plan.spec_hash).unwrap());
+    let got: Vec<_> = rows
+        .iter()
+        .map(|r| {
+            (
+                &r.unit[..],
+                &r.cluster[..],
+                &r.stratum[..],
+                &r.condition[..],
+            )
+        })
+        .collect();
+    let c = "data/confirm.txt";
     assert_eq!(
-        units[0],
-        ("all/w0".to_string(), "all".to_string(), "genre".to_string())
+        got,
+        [
+            ("data/confirm.txt#0", c, "fiction", "exact"),
+            ("data/confirm.txt#0", c, "fiction", "arm-a"),
+            ("data/confirm.txt#1", c, "fiction", "exact"),
+            ("data/confirm.txt#1", c, "fiction", "arm-a"),
+            ("data/confirm.txt#2", c, "fiction", "exact"),
+            ("data/confirm.txt#2", c, "fiction", "arm-a"),
+        ]
     );
-    let mut s2 = s.clone();
-    s2.design.selection.clusters = vec!["b".into(), "a".into()];
-    s2.design.confirmation.clusters = vec!["b".into(), "c".into()];
-    let units = schedule::units_from_spec(&s2);
-    assert_eq!(units.len() as u64, estimate::units(&s2));
-    assert_eq!(units.len(), 9);
-    assert_eq!(units[0].0, "a/w0");
-    assert_eq!(units[8].0, "c/w2");
-    assert_eq!(units[3].1, "b");
+    // The estimate a row is held to counts these rows.
+    let m = ignorarium::machine::load(&lab.home.root).unwrap();
+    assert_eq!(estimate::estimate(&plan.spec, &m, rows).rows, 6);
 }
 
 #[test]

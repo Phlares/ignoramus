@@ -168,7 +168,7 @@ fn check_json_passing_plan_has_estimate_and_defaults() {
         .iter()
         .map(|d| d["code"].as_str().unwrap())
         .collect();
-    assert_eq!(codes, ["W-LIC-001", "W-HSH-001"]);
+    assert_eq!(codes, ["W-LIC-001", "W-LIC-001", "W-HSH-001", "W-HSH-001"]);
     assert_eq!(v["estimate"]["rows"], 2);
     assert_eq!(v["estimate"]["label"], "signal");
     assert_eq!(v["estimate"]["long_job"], false);
@@ -454,7 +454,7 @@ fn check_resolves_inputs_from_a_bare_filename() {
     let write = |sha: &str| {
         std::fs::write(
             dir.path().join("spec.toml"),
-            text.replace("sha256 = \"\"", &format!("sha256 = \"{sha}\"")),
+            text.replacen("sha256 = \"\"", &format!("sha256 = \"{sha}\""), 1),
         )
         .unwrap();
     };
@@ -499,10 +499,12 @@ fn rooted(edit: impl Fn(String) -> String) -> (TempDir, PathBuf, PathBuf) {
     (dir, home, spec)
 }
 
+/// The first input pinned to the bytes `hello`.
 fn pinned(t: String) -> String {
-    t.replace(
+    t.replacen(
         "sha256 = \"\"",
         &format!("sha256 = \"{}\"", ignorarium::canon::sha256_hex(b"hello")),
+        1,
     )
 }
 
@@ -1169,16 +1171,9 @@ fn content_faults_that_break_the_model_exit_1_with_a_code() {
     type Case = (fn(String) -> String, &'static str, &'static str);
     let cases: [Case; 4] = [
         (
-            |t| {
-                t.replace(
-                    "[design.confirmation]
-clusters = []",
-                    "[design.confirmation]
-clusters = [1]",
-                )
-            },
+            |t| t.replace("units = 3 ", "units = [3] "),
             "E-TYP-001",
-            "design.confirmation.clusters[0]",
+            "inputs[1].units",
         ),
         (
             |t| t.replace("creators = []", "creators = [1]"),

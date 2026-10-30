@@ -55,10 +55,6 @@ target = [
   { path = "design.variance.source", check = "required" },
   { path = "design.conditions", check = "required" },
   { path = "design.conditions[*].id", check = "required" },
-  { path = "design.selection", check = "required" },
-  { path = "design.selection.clusters", check = "required" },
-  { path = "design.confirmation", check = "required" },
-  { path = "design.confirmation.clusters", check = "required" },
   { path = "inputs", check = "required" },
   { path = "inputs[*].path", check = "required" },
   { path = "inputs[*].sha256", check = "required" },
@@ -147,23 +143,20 @@ target = [
   { path = "design.sesoi", check = "type", kind = "float" },
   { path = "design.icc", check = "type", kind = "float" },
   { path = "design.units_per_cluster", check = "type", kind = "int" },
+  { path = "design.pick", check = "type", kind = "string" },
   { path = "design.variance", check = "type", kind = "table" },
   { path = "design.variance.value", check = "type", kind = "float" },
   { path = "design.variance.source", check = "type", kind = "string" },
   { path = "design.conditions", check = "type", kind = "array" },
   { path = "design.conditions[*]", check = "type", kind = "table" },
   { path = "design.conditions[*].id", check = "type", kind = "string" },
-  { path = "design.selection", check = "type", kind = "table" },
-  { path = "design.selection.clusters", check = "type", kind = "array" },
-  { path = "design.selection.clusters[*]", check = "type", kind = "string" },
-  { path = "design.confirmation", check = "type", kind = "table" },
-  { path = "design.confirmation.clusters", check = "type", kind = "array" },
-  { path = "design.confirmation.clusters[*]", check = "type", kind = "string" },
   { path = "inputs", check = "type", kind = "array" },
   { path = "inputs[*]", check = "type", kind = "table" },
   { path = "inputs[*].path", check = "type", kind = "string" },
   { path = "inputs[*].sha256", check = "type", kind = "string" },
   { path = "inputs[*].role", check = "type", kind = "string" },
+  { path = "inputs[*].stratum", check = "type", kind = "string" },
+  { path = "inputs[*].units", check = "type", kind = "int" },
   { path = "inputs[*].licence", check = "type", kind = "table" },
   { path = "inputs[*].licence.spdx", check = "type", kind = "string" },
   { path = "inputs[*].licence.type", check = "type", kind = "string" },
@@ -212,6 +205,7 @@ target = [
   { path = "scope.stop_rule", check = "enum", values = ["budget-only", "e-process"] },
   { path = "scope.end_of_run.route", check = "enum", values = ["report", "follow-on", "share"] },
   { path = "design.test", check = "enum", values = ["paired-mean", "descriptive"] },
+  { path = "design.pick", check = "enum", values = ["seeded", "first"] },
   { path = "inputs[*].role", check = "enum", values = ["calibration", "selection", "confirmation", "model"] },
   { path = "inputs[*].licence.type", check = "enum", values = ["common", "custom", "request-form", "unspecified"] },
   { path = "mutations.operators[*].type", check = "enum", values = ["int", "float", "enum"] },
@@ -222,7 +216,7 @@ target = [
 code = "E-RNG-001"
 severity = "error"
 problem = "A number is outside its allowed range."
-instruction = "Bring the value into range: min_isolation 0 to 3, alpha above 0 up to 0.5, power 0.5 to 0.999, icc 0 up to but below 1, repeats at least 1, each budget value 0 or more, row_seconds above 0, units_per_cluster 1 up to 4294967295, repeats up to 4294967295, variance and sesoi 0 or more, depth_cap 0 to 255, each trigger threshold_e above 0."
+instruction = "Bring the value into range: min_isolation 0 to 3, alpha above 0 up to 0.5, power 0.5 to 0.999, icc 0 up to but below 1, repeats at least 1, each budget value 0 or more, row_seconds above 0, units_per_cluster 1 up to 4294967295, each input's units 1 up to 4294967295, repeats up to 4294967295, variance and sesoi 0 or more, depth_cap 0 to 255, each trigger threshold_e above 0."
 why = "Values outside these ranges are meaningless or make the sample-size maths fail. The default alpha is 0.005, because 0.05 gives too many false findings."
 sources = ["https://doi.org/10.1038/s41562-017-0189-z", "https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661"]
 target = [
@@ -236,6 +230,7 @@ target = [
   { path = "scope.budget.money_usd", check = "range", interval = "[0, inf)" },
   { path = "design.row_seconds", check = "range", interval = "(0, inf)" },
   { path = "design.units_per_cluster", check = "range", interval = "[1, 4294967295]" },
+  { path = "inputs[*].units", check = "range", interval = "[1, 4294967295]" },
   { path = "design.variance.value", check = "range", interval = "[0, inf)" },
   { path = "design.sesoi", check = "range", interval = "[0, inf)" },
   { path = "mutations.depth_cap", check = "range", interval = "[0, 255]" },
@@ -246,13 +241,15 @@ target = [
 code = "E-FMT-001"
 severity = "error"
 problem = "An id is not ASCII kebab-case."
-instruction = "Use ASCII lowercase letters and digits, joined by single hyphens, for example my-study."
-why = "Ids become file names and seed inputs. Accents and look-alike letters would make two ids that look the same differ."
+instruction = "Use ASCII lowercase letters and digits, joined by single hyphens, for example my-study. A stratum may be empty when there are none."
+why = "Ids and strata become file names, seed inputs and record keys, and are printed in diagnostics. Accents and look-alike letters would make two ids that look the same differ."
 sources = ["https://toml.io/en/v1.0.0"]
 target = [
   { path = "study.id", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
   { path = "design.conditions[*].id", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
   { path = "outcomes[*].id", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
+  { path = "design.stratum", check = "format", pattern = "^([a-z0-9]+(-[a-z0-9]+)*)?$" },
+  { path = "inputs[*].stratum", check = "format", pattern = "^([a-z0-9]+(-[a-z0-9]+)*)?$" },
 ]
 
 [[rule]]
@@ -304,11 +301,9 @@ code = "E-UNQ-001"
 severity = "error"
 problem = "A list repeats an id, path or name."
 instruction = "Give every entry its own value. Remove the repeat, or rename it."
-why = "A repeated cluster would count its units twice in the power gate. A repeated condition, outcome, hypothesis, input, operator or trigger id makes later steps pick one entry and ignore the other."
+why = "A repeated input would run its units twice and count them twice in the power gate. A repeated condition, outcome, hypothesis, operator or trigger id makes later steps pick one entry and ignore the other."
 sources = []
 target = [
-  { path = "design.selection.clusters", check = "unique" },
-  { path = "design.confirmation.clusters", check = "unique" },
   { path = "design.conditions", check = "unique", key = "id" },
   { path = "outcomes", check = "unique", key = "id" },
   { path = "question.hypotheses", check = "unique", key = "id" },
@@ -402,12 +397,12 @@ target = [
 code = "E-CNF-002"
 severity = "error"
 problem = "The confirmation sample is too small."
-instruction = "Add confirmation clusters or units per cluster until the count reaches the number the power gate needs."
+instruction = "Add confirmation inputs, or raise design.units_per_cluster, until the count reaches the number the power gate needs. Each confirmation input gives at most its own units."
 why = "A test with too few units misses real effects and exaggerates the ones it finds. The gate uses alpha, power, the variance, the smallest effect, and the cluster correlation."
 sources = ["https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661"]
 when = { mode = "confirmatory" }
 target = [
-  { path = "design.confirmation.clusters", check = "named:power-met" },
+  { path = "inputs", check = "named:power-met" },
 ]
 
 [[rule]]
@@ -425,14 +420,14 @@ target = [
 [[rule]]
 code = "E-CNF-004"
 severity = "error"
-problem = "The confirmation clusters are empty or overlap the selection clusters."
-instruction = "List confirmation clusters that do not appear in the selection clusters."
-why = "A winner picked on some data looks better on that same data. Only fresh clusters give an honest test."
+problem = "The plan has no confirmation input, or a confirmation input holds the same data as a selection input."
+instruction = "Add a confirmation input. Give each one data that no selection input holds: not the same bytes, and not the same text in other case or spacing."
+why = "A winner picked on some data looks better on that same data. Only fresh data gives an honest test. The content decides, not the file name."
 sources = ["https://doi.org/10.1038/s41562-016-0021"]
 when = { mode = "confirmatory" }
 target = [
-  { path = "design.confirmation.clusters", check = "named:selection-confirmation-disjoint" },
-  { path = "design.confirmation.clusters[*]", check = "named:selection-confirmation-disjoint" },
+  { path = "inputs", check = "named:selection-confirmation-disjoint" },
+  { path = "inputs[*].sha256", check = "named:selection-confirmation-disjoint" },
 ]
 
 [[rule]]
@@ -457,6 +452,30 @@ sources = []
 when = { mode = "confirmatory" }
 target = [
   { path = "design.test", check = "named:confirmatory-test-allowed" },
+]
+
+[[rule]]
+code = "E-UNT-001"
+severity = "error"
+problem = "The plan has no selection or confirmation input, or one does not declare its units, or its stratum while the design names strata."
+instruction = "List each file of units as a selection or confirmation input. Set its units to the number of units the file holds. When design.stratum is set, give each such input its stratum."
+why = "Each selection or confirmation input is one cluster, and the schedule picks its units from the count the input declares. The box does not count units itself. A plan without a cluster runs nothing."
+sources = []
+target = [
+  { path = "inputs", check = "named:units-declared" },
+  { path = "inputs[*].units", check = "named:units-declared" },
+  { path = "inputs[*].stratum", check = "named:units-declared" },
+]
+
+[[rule]]
+code = "E-UNT-002"
+severity = "error"
+problem = "The schedule has more rows than the box allows."
+instruction = "Lower design.units_per_cluster, design.repeats, the number of conditions, or the units of the selection and confirmation inputs."
+why = "check builds the whole schedule to count its rows and cost. A typo in a unit count must stop here, not exhaust the memory."
+sources = []
+target = [
+  { path = "design.units_per_cluster", check = "named:row-cap" },
 ]
 
 [[rule]]

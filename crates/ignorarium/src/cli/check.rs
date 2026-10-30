@@ -1,7 +1,7 @@
 //! `check`: load a spec, run every rule, and report. Shared with `review`.
 use super::{CliError, Ctx, Done, Run, out};
 use crate::diag::{Diagnostic, Severity, render_human};
-use crate::estimate::{Estimate, defaults_json, estimate, units};
+use crate::estimate::{Estimate, defaults_json, estimate};
 use crate::home::Home;
 use crate::inputs;
 use crate::keys;
@@ -9,6 +9,7 @@ use crate::planlog::store::PlanLog;
 use crate::prior::{PriorError, PriorUse};
 use crate::records;
 use crate::rules::{self, BoxRecords, CheckCtx};
+use crate::schedule;
 use crate::spec::{self, LoadError, model::Spec};
 use crate::store::Store;
 use ed25519_dalek::VerifyingKey;
@@ -180,9 +181,13 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         estimate: None,
     };
     if !a.has_errors() {
-        match Spec::from_value(&a.value) {
-            Ok(s) => a.estimate = Some(estimate(&s, &machine, units(&s))),
-            Err(_) => a.diags.push(rules::schema_fault()),
+        let rows = Spec::from_value(&a.value).ok().and_then(|s| {
+            let hash = spec::hash_bytes(&a.hash)?;
+            Some((schedule::rows(&s, &hash).ok()?, s))
+        });
+        match rows {
+            Some((rows, s)) => a.estimate = Some(estimate(&s, &machine, &rows)),
+            None => a.diags.push(rules::schema_fault()),
         }
     }
     Ok(a)

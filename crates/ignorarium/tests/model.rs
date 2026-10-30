@@ -42,14 +42,13 @@ fn unknown_key_is_rejected_at_every_depth() {
         "/scope/end_of_run",
         "/design",
         "/design/conditions/0",
-        "/design/selection",
-        "/design/confirmation",
         "/pins",
         "/mutations",
         "/access",
         "/report",
         "/design/variance",
         "/inputs/0",
+        "/inputs/1",
         "/inputs/0/licence",
         "/scope/budget",
         "/mutations/seeds",
@@ -93,6 +92,7 @@ fn wrong_enum_value_is_rejected() {
         "/scope/stop_rule",
         "/scope/end_of_run/route",
         "/design/test",
+        "/design/pick",
         "/inputs/0/role",
         "/inputs/0/licence/type",
         "/report/publish",
@@ -119,7 +119,7 @@ fn whole_numbers_widen_to_floats_and_fractions_do_not_fit_integers() {
 
 #[test]
 fn every_allowed_enum_value_deserializes() {
-    let cases: [(&str, &[&str]); 11] = [
+    let cases: [(&str, &[&str]); 12] = [
         ("/study/template", &["numeric-ablation", "planted-spawn"]),
         ("/study/mode", &["exploratory", "confirmatory"]),
         (
@@ -130,6 +130,7 @@ fn every_allowed_enum_value_deserializes() {
         ("/scope/stop_rule", &["budget-only", "e-process"]),
         ("/scope/end_of_run/route", &["report", "follow-on", "share"]),
         ("/design/test", &["paired-mean", "descriptive"]),
+        ("/design/pick", &["seeded", "first"]),
         (
             "/inputs/0/role",
             &["calibration", "selection", "confirmation", "model"],

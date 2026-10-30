@@ -44,7 +44,8 @@ alpha = 0.005
 power = 0.8
 sesoi = 0.0                     # smallest effect of interest, in outcome units
 icc = 0.0
-units_per_cluster = 1
+units_per_cluster = 1           # units each cluster gives the study, at most
+pick = "seeded"                 # seeded | first: which of a cluster's units the study takes
 [design.variance]
 value = 0.0                     # variance of the paired difference per unit
 source = "stated"               # stated | record:<sha256>
@@ -52,10 +53,6 @@ source = "stated"               # stated | record:<sha256>
 id = "exact"
 [[design.conditions]]
 id = "arm-a"
-[design.selection]
-clusters = []                   # cluster ids used to pick a winner
-[design.confirmation]
-clusters = []                   # cluster ids used to confirm; disjoint from selection
 
 [[inputs]]
 path = "data/example.txt"       # from the study root (the folder with ignorarium.toml; without one, the spec's folder)
@@ -64,6 +61,18 @@ role = "calibration"            # calibration | selection | confirmation | model
 [inputs.licence]
 spdx = ""                       # SPDX id, or "" when none was given
 type = "unspecified"            # common | custom | request-form | unspecified
+source = ""
+creators = []
+
+[[inputs]]
+path = "data/confirm.txt"       # each selection or confirmation input is one cluster
+sha256 = ""
+role = "confirmation"
+stratum = "fiction"             # its stratum; required when design.stratum is set
+units = 3                       # the units the file holds (the box does not count them)
+[inputs.licence]
+spdx = ""
+type = "unspecified"
 source = ""
 creators = []
 
