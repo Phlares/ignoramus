@@ -8,10 +8,11 @@ use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome, Watch};
 use ignorarium::budget::{Cost, FakeMeter, MeterError};
 use ignorarium::canon::sha256_hex;
 use ignorarium::control::State;
+use ignorarium::derived::{Analysis, Estimate, StudyState, contrast_key};
 use ignorarium::planlog::store::PlanLog;
 use ignorarium::prior::{PriorUse, file_hashes};
 use ignorarium::runner::{RunError, RunPlan, RunStatus, prepare, prepare_with, run, up_to};
-use ignorarium::{estimate, keys, records, schedule, spec};
+use ignorarium::{analysis, estimate, keys, records, schedule, spec};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -272,7 +273,7 @@ fn run_writes_one_record_per_row_in_order() {
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
     let key = keys::load(&lab.home).unwrap().unwrap();
     let log = dir.join("records.jsonl");
-    assert_eq!(records::verify(&log, &key.verifying_key()).unwrap(), 7);
+    assert_eq!(records::verify(&log, &key.verifying_key()).unwrap(), 9);
     let rows = rows_of(&lab, "s1");
     assert_eq!(rows.len(), 6);
     for (i, r) in rows.iter().enumerate() {
@@ -2062,4 +2063,135 @@ impl Backend for Ended {
         o.cpu_seconds = 1.0;
         Ok(o)
     }
+}
+
+// ---- a finished run records its estimates ----
+
+/// The template with a second hypothesis, `H2`, over the same contrast: two estimates.
+fn two_hypotheses(t: String) -> String {
+    let h2 = r#"[[question.hypotheses]]
+id = "H2"
+statement = ""
+rival = ""
+outcome = "ppl-ratio"
+contrast = { arm-a = 1.0 }
+strata = []
+
+[[outcomes]]"#;
+    t.replacen("[[outcomes]]", h2, 1)
+}
+
+/// Kinds of the records after the last row record.
+fn after_the_rows(lab: &Lab, id: &str) -> Vec<String> {
+    let all = common::records_of(lab, id);
+    let last = all.iter().rposition(|r| r.kind == "row").unwrap();
+    all[last + 1..].iter().map(|r| r.kind.clone()).collect()
+}
+
+/// Keep the first `n` records of the study's log: the log a crash after record `n` leaves.
+fn keep_records(dir: &std::path::Path, n: usize) {
+    let log = dir.join("records.jsonl");
+    let text = std::fs::read_to_string(&log).unwrap();
+    std::fs::write(&log, text.split_inclusive('\n').take(n).collect::<String>()).unwrap();
+}
+
+fn finished(lab: &Lab, id: &str) -> bool {
+    let all = common::records_of(lab, id);
+    matches!(StudyState::of(Some(all)), StudyState::Finished(_))
+}
+
+#[test]
+fn a_finished_run_writes_each_record_once_and_heals_a_crash() {
+    let lab = lab();
+    let dir = register_study(
+        &lab,
+        "fin",
+        two_hypotheses,
+        &[("data/example.txt", "calibration")],
+        PAYLOAD,
+    );
+    let plan = plan_of(&lab, "fin");
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    // Register, 6 rows, the analysis record, then one estimate per hypothesis.
+    let kinds = ["analysis", "estimate", "estimate"];
+    assert_eq!(after_the_rows(&lab, "fin"), kinds);
+    assert!(finished(&lab, "fin"));
+    let all = common::records_of(&lab, "fin");
+    let a = Analysis::of(&all[7]).unwrap();
+    let version = env!("CARGO_PKG_VERSION");
+    assert_eq!(
+        (a.box_version.as_str(), a.estimates, a.verdicts, a.slot),
+        (version, 2, 0, None)
+    );
+    // The commit hashes the stored spec's question, outcomes and design, then the version.
+    let mut stored = spec::load(&dir.join("spec.toml")).unwrap().value;
+    estimate::apply_defaults(&mut stored);
+    assert_eq!(a.commit, analysis::commit(&stored, version).unwrap());
+    assert_eq!(a.commit.len(), 64);
+    stored["design"]["alpha"] = serde_json::json!(0.5);
+    assert_ne!(a.commit, analysis::commit(&stored, version).unwrap());
+    assert_ne!(a.commit, analysis::commit(&stored, "9.9.9").unwrap());
+    let es: Vec<Estimate> = all[8..].iter().map(|r| Estimate::of(r).unwrap()).collect();
+    assert_eq!(es[0].hypothesis, "H1");
+    assert_eq!(es[1].hypothesis, "H2");
+    for e in &es {
+        // 3 units in 1 cluster, all paired to 0 %: no icc.
+        assert_eq!((e.stratum.as_str(), e.clusters, e.units), ("", 1, 3));
+        assert_eq!((e.mean, e.var, e.icc), (0.0, 0.0, None));
+    }
+    // A second run adds nothing.
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(common::records_of(&lab, "fin").len(), 10);
+    // A crash after any record of the tail: the next run adds what is missing, once.
+    for kept in [10, 9, 8] {
+        keep_records(&dir, kept);
+        assert_eq!(finished(&lab, "fin"), kept == 10, "kept {kept}");
+        assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+        assert_eq!(after_the_rows(&lab, "fin"), kinds, "kept {kept}");
+        assert!(finished(&lab, "fin"));
+        assert_eq!(
+            common::records_of(&lab, "fin")[8..]
+                .iter()
+                .map(|r| Estimate::of(r).unwrap().hypothesis)
+                .collect::<Vec<_>>(),
+            ["H1", "H2"],
+            "kept {kept}"
+        );
+    }
+    // A crash after the last row and before the analysis record: it is written first.
+    keep_records(&dir, 7);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(after_the_rows(&lab, "fin"), kinds);
+}
+
+#[test]
+fn a_run_with_a_row_missing_writes_no_analysis() {
+    let lab = lab();
+    plain(&lab, "unfin");
+    let mut plan = plan_of(&lab, "unfin");
+    let (mut b, _) = fake(vec![]);
+    b.panic_at = Some(5);
+    plan.backend = Box::new(b);
+    assert!(catch_unwind(AssertUnwindSafe(|| run(&plan))).is_err());
+    assert_eq!(indices(&lab, "unfin"), vec![0, 1, 2, 3, 4]);
+    // Not even a direct call writes results while a row has no record.
+    analysis::finish(&plan).unwrap();
+    assert!(kind_of(&lab, "unfin", "analysis").is_empty());
+    assert!(kind_of(&lab, "unfin", "estimate").is_empty());
+}
+
+#[test]
+fn a_staged_run_keys_its_estimate_by_the_pick_and_its_params() {
+    let lab = lab();
+    register_study(&lab, "keyed", staged, &[], STAGED);
+    assert_eq!(run(&plan_of(&lab, "keyed")).unwrap(), RunStatus::Done);
+    let es = kind_of(&lab, "keyed", "estimate");
+    assert_eq!(es.len(), 1);
+    let e = Estimate::of(&es[0]).unwrap();
+    let terms = [("arm-b".to_string(), 1.0, serde_json::json!({ "bits": 8 }))];
+    let reference = ("exact".to_string(), serde_json::json!({}));
+    let (key, hash) = contrast_key(&common::ppl_ratio(), &reference, &terms);
+    assert_eq!((e.key, e.key_hash), (key, hash));
+    // The pick pairs to -25 % on every confirmation unit.
+    assert_eq!((e.clusters, e.units, e.mean, e.var), (1, 3, -25.0, 0.0));
 }

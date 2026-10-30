@@ -1,10 +1,17 @@
 //! Reading the rows back: each condition's value for a unit, paired with the reference
 //! condition's value for the same unit and repeat.
-use crate::derived::{Candidate, Selection};
-use crate::records::Record;
+use crate::canon::{sha256_hex, to_canonical};
+use crate::derived::{ANALYSIS, Analysis, Candidate, ESTIMATE, Estimate, Selection, contrast_key};
+use crate::estimate::apply_defaults;
+use crate::records::{self, Record, RecordDraft};
+use crate::runner::{RunError, RunPlan};
 use crate::schedule::SELECTION_STAGE;
-use crate::spec::model::{Direction, Paired as Rule, Spec};
+use crate::spec::model::{Direction, Outcome, Paired as Rule, Role, SELECTED, Spec};
+use crate::units::{self, Cluster};
+use serde::Serialize;
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 /// Paired values by (unit, condition, outcome id).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -149,4 +156,215 @@ pub fn select(spec: &Spec, rows: &[Record]) -> Result<Selection, String> {
         incomplete_units: (units.len() - complete.len()) as u64,
         candidates,
     })
+}
+
+/// Each declared condition's params as a JSON table, by condition id: `{}` for none.
+pub fn declared_params(spec: &Spec) -> BTreeMap<String, Value> {
+    (spec.design.conditions.iter())
+        .map(|c| (c.id.clone(), json!(&c.params)))
+        .collect()
+}
+
+/// One estimate per hypothesis, per group: each stratum the hypothesis lists, then the pooled
+/// group `""` (alone when it lists none). A group holds the confirmation clusters of its
+/// stratum. A unit's value is the contrast over its paired values, and counts only when
+/// every term has one. A `selected` row is recorded under `selected`, so its value is read
+/// there, while the key names the pick. `params` holds each condition's params, by id. A hypothesis whose outcome is unknown, or whose contrast needs a pick that
+/// `selection` does not give, has none, and neither has a group with fewer than 2 values.
+pub fn estimates(
+    spec: &Spec,
+    params: &BTreeMap<String, Value>,
+    paired: &Paired,
+    clusters: &[Cluster],
+    selection: Option<&Selection>,
+) -> Vec<Estimate> {
+    let params_of = |c: &str| params.get(c).cloned().unwrap_or_else(|| json!({}));
+    let reference = (
+        spec.design.reference.clone(),
+        params_of(&spec.design.reference),
+    );
+    let mut out = Vec::new();
+    for h in &spec.question.hypotheses {
+        let Some(outcome) = spec.outcomes.iter().find(|o| o.id == h.outcome) else {
+            continue;
+        };
+        let terms: Option<Vec<(String, f64, Value)>> = (h.contrast.iter())
+            .map(|(c, w)| {
+                let c = if c == SELECTED {
+                    selection?.selected.as_str()
+                } else {
+                    c
+                };
+                Some((c.to_string(), *w, params_of(c)))
+            })
+            .collect();
+        let Some(terms) = terms else { continue };
+        let (key, key_hash) = contrast_key(outcome, &reference, &terms);
+        let mut groups: Vec<&str> = h.strata.iter().map(String::as_str).collect();
+        groups.push("");
+        for stratum in groups {
+            let samples: Vec<Vec<f64>> = (clusters.iter())
+                .filter(|c| c.role == Role::Confirmation)
+                .filter(|c| stratum.is_empty() || c.stratum == stratum)
+                .map(|c| cluster_values(c, outcome, &h.contrast, paired))
+                .filter(|xs| !xs.is_empty())
+                .collect();
+            if let Some(f) = fit(&samples) {
+                out.push(Estimate {
+                    hypothesis: h.id.clone(),
+                    outcome: outcome.id.clone(),
+                    key: key.clone(),
+                    key_hash: key_hash.clone(),
+                    stratum: stratum.into(),
+                    clusters: samples.len() as u64,
+                    units: samples.iter().map(Vec::len).sum::<usize>() as u64,
+                    mean: f.mean,
+                    var: f.var,
+                    icc: f.icc,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The contrast's value for each picked unit of `c` that has a paired value for every term.
+fn cluster_values(
+    c: &Cluster,
+    outcome: &Outcome,
+    contrast: &BTreeMap<String, f64>,
+    paired: &Paired,
+) -> Vec<f64> {
+    (c.picked.iter())
+        .filter_map(|&i| {
+            let unit = units::key(&c.path, i);
+            (contrast.iter())
+                .map(|(cond, w)| Some(w * paired.get(&unit, cond, &outcome.id)?))
+                .sum::<Option<f64>>()
+        })
+        .collect()
+}
+
+struct Fit {
+    /// The unweighted mean of the cluster means: what a follow-on's test targets.
+    mean: f64,
+    /// The variance of one unit: between plus within clusters.
+    var: f64,
+    /// Between over total; `None` when it is not defined.
+    icc: Option<f64>,
+}
+
+/// A one-way analysis of variance over the clusters, `None` when the mean or the variance is
+/// not finite, which is so for fewer than 2 values (a divisor of 0). With k clusters and n values, MSB = SSB / (k - 1) and
+/// MSW = SSW / (n - k); `m0 = (n - sum m_c^2 / n) / (k - 1)`; the between-cluster variance
+/// is `max(0, (MSB - MSW) / m0)`, `var` is it plus MSW and `icc` is it over `var`. With
+/// k < 2 or n <= k a degree of freedom is missing: `var` is the sample variance of all
+/// values and there is no icc.
+fn fit(samples: &[Vec<f64>]) -> Option<Fit> {
+    let k = samples.len() as f64;
+    let n = samples.iter().map(Vec::len).sum::<usize>() as f64;
+    let sum = |xs: &[f64]| xs.iter().sum::<f64>();
+    let means: Vec<f64> = samples.iter().map(|xs| sum(xs) / xs.len() as f64).collect();
+    let grand = samples.iter().map(|xs| sum(xs)).sum::<f64>() / n;
+    let spread = |xs: &[f64], about: f64| xs.iter().map(|x| (x - about).powi(2)).sum::<f64>();
+    let (var, icc) = if k < 2.0 || n <= k {
+        (spread(&samples.concat(), grand) / (n - 1.0), None)
+    } else {
+        let ssb: f64 = (samples.iter().zip(&means))
+            .map(|(xs, m)| xs.len() as f64 * (m - grand).powi(2))
+            .sum();
+        let ssw: f64 = (samples.iter().zip(&means))
+            .map(|(xs, m)| spread(xs, *m))
+            .sum();
+        let squares: f64 = samples.iter().map(|xs| (xs.len() as f64).powi(2)).sum();
+        let m0 = (n - squares / n) / (k - 1.0);
+        let msw = ssw / (n - k);
+        let between = ((ssb / (k - 1.0) - msw) / m0).max(0.0);
+        let var = between + msw;
+        (var, (var > 0.0).then(|| between / var))
+    };
+    let mean = sum(&means) / k;
+    (mean.is_finite() && var.is_finite()).then_some(Fit { mean, var, icc })
+}
+
+/// SHA-256 hex of the canonical `{"question", "outcomes", "design"}` of `spec` followed by
+/// `box_version`: what the analysis asked, and the box that ran it.
+pub fn commit(spec: &Value, box_version: &str) -> Result<String, RunError> {
+    let part = json!({
+        "question": spec["question"], "outcomes": spec["outcomes"], "design": spec["design"],
+    });
+    let mut bytes = to_canonical(&part).map_err(|e| RunError::Spec(e.to_string()))?;
+    bytes.extend_from_slice(box_version.as_bytes());
+    Ok(sha256_hex(&bytes))
+}
+
+/// When every scheduled row has a record, add what the study's results still lack: the
+/// `analysis` record first, which states how many records follow it, then each estimate it
+/// promises. A call after a crash adds only what is missing; a complete study gets nothing.
+pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
+    let dir = plan.home.study_dir(&plan.study_id);
+    let log = dir.join("records.jsonl");
+    let all = records::read_all(&log, &plan.key.verifying_key())?;
+    let rowed: BTreeSet<u64> = (all.iter())
+        .filter(|r| r.kind == "row")
+        .filter_map(|r| r.row)
+        .collect();
+    if plan.schedule.rows.iter().any(|r| !rowed.contains(&r.index)) {
+        return Ok(());
+    }
+    let selection = all.iter().find_map(Selection::of);
+    let clusters = units::clusters(&plan.spec, &plan.spec_hash);
+    let mut wanted = estimates(
+        &plan.spec,
+        &declared_params(&plan.spec),
+        &paired(&plan.spec, &all),
+        &clusters,
+        selection.as_ref(),
+    );
+    let mut seen = BTreeSet::new();
+    wanted.retain(|e| seen.insert(identity(e)));
+    let mut have = BTreeSet::new();
+    match all.iter().position(|r| r.kind == ANALYSIS) {
+        Some(at) => {
+            Analysis::of(&all[at])
+                .ok_or_else(|| RunError::Records("the analysis record does not parse".into()))?;
+            let after = all[at + 1..].iter().filter_map(Estimate::of);
+            have.extend(after.map(|e| identity(&e)));
+        }
+        None => {
+            let mut spec = crate::spec::load(&dir.join("spec.toml"))
+                .map_err(|e| RunError::Spec(e.to_string()))?
+                .value;
+            apply_defaults(&mut spec);
+            let version = env!("CARGO_PKG_VERSION");
+            let body = Analysis {
+                commit: commit(&spec, version)?,
+                box_version: version.into(),
+                estimates: wanted.len() as u64,
+                verdicts: 0,
+                slot: None,
+            };
+            append(plan, &log, ANALYSIS, &body)?;
+        }
+    }
+    for e in wanted.iter().filter(|e| !have.contains(&identity(e))) {
+        append(plan, &log, ESTIMATE, e)?;
+    }
+    Ok(())
+}
+
+/// What makes an estimate distinct: its hypothesis, contrast and stratum.
+fn identity(e: &Estimate) -> (String, String, String) {
+    (e.hypothesis.clone(), e.key_hash.clone(), e.stratum.clone())
+}
+
+fn append(plan: &RunPlan, log: &Path, kind: &str, body: &impl Serialize) -> Result<(), RunError> {
+    let draft = RecordDraft {
+        study: plan.study_id.clone(),
+        row: None,
+        kind: kind.into(),
+        body: serde_json::to_value(body).map_err(|e| RunError::Records(e.to_string()))?,
+    };
+    records::append(log, &plan.key, draft)?;
+    Ok(())
 }

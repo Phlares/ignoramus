@@ -1,8 +1,10 @@
-use ignorarium::analysis::{paired, select};
-use ignorarium::derived::{Candidate, Selection};
+use ignorarium::analysis::{declared_params, estimates, paired, select};
+use ignorarium::derived::{Candidate, Estimate, Selection, contrast_key};
 use ignorarium::records::Record;
-use ignorarium::spec::model::{Direction, SelectionRule, Spec};
+use ignorarium::spec::model::{Direction, Role, SelectionRule, Spec};
+use ignorarium::units::Cluster;
 use serde_json::json;
+use std::collections::BTreeMap;
 
 fn spec(kind: &str) -> Spec {
     let mut v = ignorarium::spec::load("../../templates/numeric-ablation.toml".as_ref())
@@ -324,4 +326,237 @@ fn a_repeat_with_a_zero_reference_drops_out_of_the_percent_mean() {
     let p = paired(&spec("percent"), &rows);
     let got = p.get("a#0", "new", "ppl-ratio").unwrap();
     assert!((got - 20.0).abs() < 1e-9, "{got}");
+}
+
+// ---- estimates ----
+
+/// The template's spec, reference `base`, difference-paired, with `strata` on its hypothesis.
+fn one_hypothesis(strata: &[&str]) -> Spec {
+    let mut v = ignorarium::spec::load("../../templates/numeric-ablation.toml".as_ref())
+        .unwrap()
+        .value;
+    v["outcomes"][0]["paired"] = json!("difference");
+    v["design"]["reference"] = json!("base");
+    v["question"]["hypotheses"][0]["strata"] = json!(strata);
+    Spec::from_value(&v).unwrap()
+}
+
+/// A confirmation cluster whose units `<path>#0`, `<path>#1`, ... are all picked.
+fn cluster(path: &str, stratum: &str, units: u32) -> Cluster {
+    Cluster {
+        path: path.into(),
+        stratum: stratum.into(),
+        role: Role::Confirmation,
+        picked: (0..units).collect(),
+    }
+}
+
+/// `arm-a` rows that pair to `x` against `base`, for the units `<path>#i`.
+fn arm_a_rows(path: &str, xs: &[f64]) -> Vec<Record> {
+    xs.iter()
+        .enumerate()
+        .flat_map(|(i, x)| {
+            let u = format!("{path}#{i}");
+            [ok(&u, "base", 0, 10.0), ok(&u, "arm-a", 0, 10.0 + x)]
+        })
+        .collect()
+}
+
+fn no_params() -> BTreeMap<String, serde_json::Value> {
+    BTreeMap::new()
+}
+
+/// The pooled estimates of the one hypothesis over `groups` (one cluster per slice).
+fn pooled(groups: &[&[f64]]) -> Vec<Estimate> {
+    let spec = one_hypothesis(&[]);
+    let mut rows = Vec::new();
+    let mut clusters = Vec::new();
+    for (i, g) in groups.iter().enumerate() {
+        let path = format!("c{i}");
+        rows.extend(arm_a_rows(&path, g));
+        clusters.push(cluster(&path, "", g.len() as u32));
+    }
+    let p = paired(&spec, &rows);
+    estimates(&spec, &no_params(), &p, &clusters, None)
+}
+
+fn close(a: f64, b: f64) {
+    assert!((a - b).abs() < 1e-9, "{a} != {b}");
+}
+
+#[test]
+fn anova_matches_a_hand_computed_case() {
+    // Cluster means 2.5, 4.5, 6.5; MSB = 16, MSW = 15 / 9, m0 = 4:
+    // sigma_b^2 = 43 / 12, var = 63 / 12 = 5.25, icc = 43 / 63.
+    let e = pooled(&[
+        &[1.0, 2.0, 3.0, 4.0],
+        &[3.0, 4.0, 5.0, 6.0],
+        &[5.0, 6.0, 7.0, 8.0],
+    ]);
+    assert_eq!(e.len(), 1);
+    let e = &e[0];
+    assert_eq!((e.clusters, e.units), (3, 12));
+    close(e.mean, 4.5);
+    close(e.var, 5.25);
+    close(e.icc.unwrap(), 43.0 / 63.0);
+    assert_eq!(
+        (
+            e.hypothesis.as_str(),
+            e.outcome.as_str(),
+            e.stratum.as_str()
+        ),
+        ("H1", "ppl-ratio", "")
+    );
+    // Unequal clusters: m0 = 4 / 3, sigma_b^2 = 3, var = 5, icc = 0.6, and the mean is the
+    // unweighted mean of the cluster means (3.5), not of the units (3).
+    let e = &pooled(&[&[1.0, 3.0], &[5.0]])[0];
+    assert_eq!((e.clusters, e.units), (2, 3));
+    close(e.mean, 3.5);
+    close(e.var, 5.0);
+    close(e.icc.unwrap(), 0.6);
+}
+
+#[test]
+fn a_negative_between_variance_counts_as_zero() {
+    // Equal cluster means: MSB = 0 < MSW = 2, so sigma_b^2 = 0, var = MSW, icc = 0.
+    let e = &pooled(&[&[1.0, 3.0], &[1.0, 3.0]])[0];
+    close(e.var, 2.0);
+    assert_eq!(e.icc, Some(0.0));
+    // No variance at all: no icc.
+    let e = &pooled(&[&[2.0, 2.0], &[2.0, 2.0]])[0];
+    assert_eq!((e.var, e.icc), (0.0, None));
+}
+
+#[test]
+fn one_cluster_has_no_icc() {
+    // The sample variance of all x: 5 / 3.
+    let e = &pooled(&[&[1.0, 2.0, 3.0, 4.0]])[0];
+    assert_eq!((e.clusters, e.units), (1, 4));
+    close(e.mean, 2.5);
+    close(e.var, 5.0 / 3.0);
+    assert_eq!(e.icc, None);
+    // One unit per cluster (n = k): MSW has no degrees of freedom; the sample variance
+    // of 1, 2, 4 is 7 / 3.
+    let e = &pooled(&[&[1.0], &[2.0], &[4.0]])[0];
+    assert_eq!((e.clusters, e.units), (3, 3));
+    close(e.var, 7.0 / 3.0);
+    assert_eq!(e.icc, None);
+}
+
+#[test]
+fn fewer_than_two_units_give_no_estimate() {
+    assert!(pooled(&[&[1.0]]).is_empty());
+    assert!(pooled(&[]).is_empty());
+    // Two units in two clusters do give one.
+    assert_eq!(pooled(&[&[1.0], &[2.0]]).len(), 1);
+    // A cluster with no complete unit is not counted.
+    let e = &pooled(&[&[1.0, 3.0], &[], &[5.0]])[0];
+    assert_eq!((e.clusters, e.units), (2, 3));
+    close(e.var, 5.0);
+}
+
+#[test]
+fn estimates_cover_each_stratum_and_the_pool() {
+    let spec = one_hypothesis(&["fiction", "news"]);
+    let mut rows = arm_a_rows("f1", &[1.0, 2.0]);
+    rows.extend(arm_a_rows("f2", &[3.0, 4.0]));
+    rows.extend(arm_a_rows("n1", &[10.0, 20.0]));
+    // A unit without its reference row is incomplete and stays out.
+    rows.push(ok("n1#2", "arm-a", 0, 99.0));
+    // The selection cluster has values, and they stay out.
+    rows.extend(arm_a_rows("s1", &[1000.0, 2000.0]));
+    let clusters = [
+        cluster("f1", "fiction", 2),
+        cluster("f2", "fiction", 2),
+        cluster("n1", "news", 3),
+        // A selection cluster never counts.
+        Cluster {
+            role: Role::Selection,
+            ..cluster("s1", "fiction", 2)
+        },
+    ];
+    let p = paired(&spec, &rows);
+    let all = estimates(&spec, &no_params(), &p, &clusters, None);
+    let by: Vec<(&str, u64, u64)> = all
+        .iter()
+        .map(|e| (e.stratum.as_str(), e.clusters, e.units))
+        .collect();
+    assert_eq!(by, [("fiction", 2, 4), ("news", 1, 2), ("", 3, 6)]);
+    close(all[1].mean, 15.0);
+    close(all[1].var, 50.0);
+    assert_eq!(all[1].icc, None);
+    // The pool is the unweighted mean of the cluster means 1.5, 3.5 and 15.
+    close(all[2].mean, 20.0 / 3.0);
+    // Every estimate of one contrast shares the key and its hash.
+    let terms = [("arm-a".to_string(), 1.0, json!({}))];
+    let (key, hash) = contrast_key(&spec.outcomes[0], &("base".into(), json!({})), &terms);
+    assert!(all.iter().all(|e| e.key == key && e.key_hash == hash));
+}
+
+#[test]
+fn the_key_carries_the_params_and_the_pick() {
+    let mut v = ignorarium::spec::load("../../templates/numeric-ablation.toml".as_ref())
+        .unwrap()
+        .value;
+    v["outcomes"][0]["paired"] = json!("difference");
+    v["design"]["reference"] = json!("base");
+    v["design"]["selection"] =
+        json!({ "metric": "ppl-ratio", "conditions": ["arm-a", "arm-b"], "rule": "best-mean" });
+    v["design"]["confirmation"] = json!({ "conditions": ["selected", "arm-a"] });
+    v["question"]["hypotheses"][0]["contrast"] = json!({ "selected": 2.0, "arm-a": -1.0 });
+    let spec = Spec::from_value(&v).unwrap();
+    let mut params = no_params();
+    params.insert("arm-b".into(), json!({ "bits": 8 }));
+    params.insert("base".into(), json!({ "bits": 16 }));
+    let pick = Selection {
+        metric: "ppl-ratio".into(),
+        rule: SelectionRule::BestMean,
+        direction: Direction::Lower,
+        candidates: vec![],
+        selected: "arm-b".into(),
+        units: vec![],
+        complete_units: 0,
+        incomplete_units: 0,
+    };
+    let mut rows = Vec::new();
+    for i in 0..2 {
+        let u = format!("c#{i}");
+        rows.push(ok(&u, "base", 0, 10.0));
+        rows.push(ok(&u, "arm-a", 0, 11.0 + f64::from(i)));
+        // The row of the picked condition is recorded as `selected`.
+        rows.push(ok(&u, "selected", 0, 15.0));
+    }
+    let p = paired(&spec, &rows);
+    let clusters = [cluster("c", "", 2)];
+    let e = estimates(&spec, &params, &p, &clusters, Some(&pick));
+    // x = 2 * 5 - 1 = 9 and 2 * 5 - 2 = 8.
+    assert_eq!(e.len(), 1);
+    close(e[0].mean, 8.5);
+    let terms = [
+        ("arm-a".to_string(), -1.0, json!({})),
+        ("arm-b".to_string(), 2.0, json!({ "bits": 8 })),
+    ];
+    let want = contrast_key(
+        &spec.outcomes[0],
+        &("base".into(), json!({ "bits": 16 })),
+        &terms,
+    );
+    assert_eq!((e[0].key.clone(), e[0].key_hash.clone()), want);
+    // Without the selection record a contrast on `selected` gives no estimate.
+    assert!(estimates(&spec, &params, &p, &clusters, None).is_empty());
+}
+
+#[test]
+fn declared_params_are_the_specs_scalars_by_condition() {
+    let mut v = ignorarium::spec::load("../../templates/numeric-ablation.toml".as_ref())
+        .unwrap()
+        .value;
+    v["design"]["conditions"][1]["params"] = json!({ "bits": 4, "mode": "fast", "lr": 0.5 });
+    let got = declared_params(&Spec::from_value(&v).unwrap());
+    assert_eq!(got["exact"], json!({}));
+    assert_eq!(
+        got["arm-a"],
+        json!({ "bits": 4, "mode": "fast", "lr": 0.5 })
+    );
+    assert_eq!(got.len(), 2);
 }

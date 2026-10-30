@@ -763,6 +763,7 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
             return halt(plan, &dir, lock, h, failed);
         }
     }
+    analysis::finish(plan)?;
     State::Done.write(&plan.home, &plan.study_id).map_err(io)?;
     Ok(RunStatus::Done)
 }

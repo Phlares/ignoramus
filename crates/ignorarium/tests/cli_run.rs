@@ -1020,3 +1020,101 @@ fn run_refuses_while_another_run_holds_the_lock() {
     let a = bin(&lab).args(["run", "bz"]).assert().code(1);
     assert!(err(&a).contains("in progress"), "{}", err(&a));
 }
+
+// ---- a pilot's estimates serve a follow-on ----
+
+/// The template with a second confirmation input: 2 clusters of 3 units.
+fn two_clusters(t: String) -> String {
+    let second = r#"[[inputs]]
+path = "data/confirm2.txt"
+sha256 = ""
+role = "confirmation"
+stratum = "fiction"
+units = 3
+[inputs.licence]
+spdx = ""
+type = "unspecified"
+source = ""
+creators = []
+
+[pins]"#;
+    t.replacen("[pins]", second, 1)
+}
+
+/// A payload that writes `base` for the reference and `base + step * k` for `arm-a` on
+/// unit `k` of the first cluster and `base + step * (k + 4)` on the second: arm-a pairs to
+/// 100 * step / base percent per k.
+fn graded(base: f64, step: f64) -> String {
+    let mut cases = String::new();
+    for (path, offset) in [("data/confirm.txt", 0), ("data/confirm2.txt", 4)] {
+        for k in 0..3 {
+            let v = base + step * f64::from(k + offset + 1);
+            cases += &format!("\"{path}#{k}\") v={v};; ");
+        }
+    }
+    format!(
+        "#!/bin/sh\ncase \"$2\" in exact) v={base};; *) case \"$4\" in {cases}esac;; esac\nprintf '{{\"ppl\": %s}}' \"$v\" > \"$IGNORARIUM_OUT/values.json\"\n"
+    )
+}
+
+/// Register and run a pilot study `id` at level 0.
+fn pilot_run(lab: &Lab, id: &str, payload: &str) {
+    use ignorarium::backend::level0::Level0;
+    use ignorarium::runner::{RunStatus, prepare_with, run};
+    register_study(lab, id, two_clusters, &[], payload);
+    let plan = prepare_with(&lab.home, id, vec![Box::new(Level0)]).unwrap();
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+}
+
+fn check_json(lab: &Lab, spec: &std::path::Path) -> (i32, Value) {
+    let a = bin(lab).arg("check").arg(spec).arg("--json").assert();
+    let out = a.get_output();
+    (
+        out.status.code().unwrap(),
+        serde_json::from_slice(&out.stdout).unwrap(),
+    )
+}
+
+/// The codes of the diagnostics that concern the plan's values, not its licences or pins.
+fn codes(v: &Value) -> Vec<&str> {
+    let d = v["diagnostics"].as_array().unwrap();
+    let all = d.iter().map(|d| d["code"].as_str().unwrap());
+    all.filter(|c| !c.starts_with("W-LIC") && !c.starts_with("W-HSH"))
+        .collect()
+}
+
+#[test]
+fn a_pilot_then_a_follow_on_resolve_end_to_end() {
+    let lab = lab();
+    // Cluster means 0.2 % and 0.6 % (percent values 0.1 k): var 0.0867, icc 0.885.
+    pilot_run(&lab, "my-pilot", &graded(1000.0, 1.0));
+    // The same shape, 1000 times wider.
+    pilot_run(&lab, "wide-pilot", &graded(1.0, 1.0));
+    let est = kind_of(&lab, "my-pilot", "estimate");
+    assert_eq!(est.len(), 1);
+    let e = ignorarium::derived::Estimate::of(&est[0]).unwrap();
+    assert_eq!((e.clusters, e.units, e.stratum.as_str()), (2, 6, ""));
+    assert!((e.var - 0.086_666_666_7).abs() < 1e-6, "{}", e.var);
+    assert!(
+        (e.icc.unwrap() - 2300.0 / 2600.0).abs() < 1e-6,
+        "{:?}",
+        e.icc
+    );
+    let follow = |from: &str| {
+        let t = std::fs::read_to_string("../../templates/numeric-ablation.toml").unwrap();
+        let path = lab.root.join(format!("follow-{from}.toml"));
+        // The power gate sizes a claim on a mean statistic, over the clusters it is given.
+        let text = common::confirmatory(two_clusters(t))
+            .replace("{ quantile = 0.5 }", "{ mean = [-50.0, 50.0] }");
+        std::fs::write(&path, text.replace("my-pilot", from)).unwrap();
+        path
+    };
+    // The estimate resolves: no pending value, no missing estimate, and the power gate
+    // passes on the small variance.
+    let (code, v) = check_json(&lab, &follow("my-pilot"));
+    assert_eq!((code, codes(&v)), (0, Vec::<&str>::new()), "{v}");
+    assert_eq!(v["pending"], serde_json::json!([]));
+    // The wide pilot resolves too, and the gate refuses on its variance alone.
+    let (code, v) = check_json(&lab, &follow("wide-pilot"));
+    assert_eq!((code, codes(&v)), (1, vec!["E-CNF-002"]), "{v}");
+}
