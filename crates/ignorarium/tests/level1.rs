@@ -7,7 +7,9 @@ use common::{
 };
 use ignorarium::backend::level0::Level0;
 use ignorarium::backend::level1::{Level1, isolation_args, row_args};
-use ignorarium::backend::{Backend, Exit, Probe, RowJob, Watch, output_hash, seccomp};
+use ignorarium::backend::selftest::SelfTest;
+use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome, Watch, output_hash, seccomp};
+use ignorarium::control::ControlFile;
 use ignorarium::machine;
 use ignorarium::runner::{self, RunError, RunStatus, prepare, prepare_with};
 use std::cell::Cell;
@@ -852,6 +854,92 @@ fn an_unknown_cpu_attempt_that_is_retried_leaves_a_spend_record_and_still_pauses
     assert_eq!(rows.len(), 1);
     assert!(rows[0].body.get("cpu_unknown").is_none());
     assert_eq!(rows[0].body["attempts"], 2);
+}
+
+/// Breaks the event log during the row, then reports `exit` with an unknown CPU count and,
+/// with `selftest`, a passed self-test. With `stop`, it first sends a stop and ticks, so the
+/// watch ends the row.
+struct BreakEvents {
+    dir: PathBuf,
+    exit: Exit,
+    selftest: bool,
+    stop: Option<ControlFile>,
+}
+
+impl Backend for BreakEvents {
+    fn level(&self) -> u8 {
+        1
+    }
+    fn probe(&self) -> Probe {
+        Probe::Available
+    }
+    fn launcher(&self) -> String {
+        "stub".into()
+    }
+    fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> std::io::Result<RowOutcome> {
+        if let Some(c) = &self.stop {
+            c.request_stop("stopped mid-row").unwrap();
+            assert!(!watch.tick());
+        }
+        std::fs::rename(self.dir.join("events.jsonl"), self.dir.join("events.old"))?;
+        std::fs::create_dir(self.dir.join("events.jsonl"))?;
+        let passed = SelfTest {
+            connect_blocked: true,
+            vsock_blocked: true,
+            io_uring_blocked: true,
+            vsock_absent: false,
+            io_uring_absent: false,
+        };
+        Ok(RowOutcome {
+            exit: self.exit.clone(),
+            cpu_seconds: 0.0,
+            wall_seconds: 0.1,
+            output_hash: output_hash(&job.output_dir)?,
+            selftest: self.selftest.then_some(passed),
+            cpu_unknown: Some(UNKNOWN.into()),
+        })
+    }
+}
+
+#[test]
+fn an_attempts_record_is_written_before_its_events_can_fail() {
+    // (exit, self-test result, stop, the record kind that must hold the attempt)
+    let cases = [
+        (Exit::Ok, true, false, "row"),
+        (Exit::Ok, false, false, "row"),
+        (Exit::Infra("lost".into()), false, false, "spend"),
+        (Exit::Stopped, false, true, "spend"),
+    ];
+    for (i, (exit, selftest, stop, kind)) in cases.into_iter().enumerate() {
+        let lab = lab();
+        let id = format!("ev{i}");
+        let dir = plain(&lab, &id);
+        let mut plan = prepare(&lab.home, &id, 0).unwrap();
+        plan.backend = Box::new(BreakEvents {
+            dir: dir.clone(),
+            exit,
+            selftest,
+            stop: stop.then(|| ControlFile::of(&lab.home, &id)),
+        });
+        let err = runner::run(&plan).expect_err("an event write fails");
+        assert!(matches!(err, RunError::Io(_)), "{i}: {err}");
+        let held = common::kind_of(&lab, &id, kind);
+        assert_eq!(held.len(), 1, "{i}");
+        assert_eq!(held[0].row, Some(0));
+        assert_eq!(held[0].body["cpu_unknown"], UNKNOWN, "{i}");
+        let est = per_row_cpu(&lab, &id);
+        assert_eq!(held[0].body["cpu_seconds"].as_f64().unwrap(), est, "{i}");
+        // The run ends at that row, and the charge stands for the next one.
+        assert_eq!(
+            common::records_of(&lab, &id)
+                .iter()
+                .filter(|r| r.row.is_some())
+                .count(),
+            1
+        );
+        let p = progress_of(&lab, &id);
+        assert_eq!((p.unknown_cpu, p.cost.cpu_seconds), (1, est), "{i}");
+    }
 }
 
 fn why(b: &Level1) -> String {

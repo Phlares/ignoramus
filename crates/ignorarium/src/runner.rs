@@ -961,6 +961,10 @@ fn attempt_row(
 ) -> Result<(String, Option<Halt>), RunError> {
     let mut attempts = 0u32;
     let mut unknown = false;
+    let span = watch.row.borrow().1.clone();
+    // An attempt's events come after its record, so a failed event write cannot lose the
+    // attempt's spend.
+    let noted = |o: &RowOutcome| attempt_events(plan, dir, &span, row.index, o);
     let outcome = loop {
         attempts += 1;
         let job = job_for(plan, row, dir)?;
@@ -975,34 +979,17 @@ fn attempt_row(
                 selftest: None,
                 cpu_unknown: None,
             });
-        let span = watch.row.borrow().1.clone();
-        if let Some(t) = &o.selftest {
-            let attrs = json!({
-                "row": row.index,
-                "connect_blocked": t.connect_blocked,
-                "vsock_blocked": t.vsock_blocked,
-                "io_uring_blocked": t.io_uring_blocked,
-                "vsock": t.vsock_state(),
-                "io_uring": t.io_uring_state(),
-            });
-            log_event(plan, dir, Some(&span), "sandbox.selftest", "info", attrs)?;
-        }
         // A meter that cannot read is charged the row estimate, as the fail-safe rule says,
         // and the run pauses once the row is recorded.
-        if let Some(reason) = &o.cpu_unknown {
+        if o.cpu_unknown.is_some() {
             o.cpu_seconds = o.cpu_seconds.max(books.per_row.cpu_seconds);
             unknown = true;
-            let attrs = json!({
-                "row": row.index,
-                "reason": reason,
-                "charged_cpu_seconds": o.cpu_seconds,
-            });
-            log_event(plan, dir, Some(&span), "row.cpu_unknown", "warn", attrs)?;
         }
         control::row_ended(&plan.home, &plan.study_id);
         // A row ended early is not data: its spend is recorded, and the run ends.
         if let Some(h) = watch.ended.borrow_mut().take() {
             unrecorded(plan, log, row, books, &o, &h.reason())?;
+            noted(&o)?;
             return Ok((h.exit().into(), Some(h)));
         }
         // A stop nobody asked for is a backend fault: void the row and pause, no retry.
@@ -1024,6 +1011,7 @@ fn attempt_row(
             &o,
             &format!("infrastructure fault: {why}"),
         )?;
+        noted(&o)?;
         let halt = match plan.backend.probe() {
             Probe::Unavailable(why) => Some(Halt::Pause(format!("backend unavailable: {why}"))),
             Probe::Available => gate(plan, dir, books)?,
@@ -1071,6 +1059,7 @@ fn attempt_row(
         },
     )?;
     books.add(plan, &outcome, true);
+    noted(&outcome)?;
     let halt = match outcome.exit {
         Exit::Infra(why) => Some(Halt::Pause(format!(
             "row {} voided by infrastructure faults: {why}",
@@ -1084,6 +1073,37 @@ fn attempt_row(
         }),
     };
     Ok((exit, halt))
+}
+
+/// The events of one recorded attempt: what the self-test found, and the charge for a CPU
+/// count the backend could not read.
+fn attempt_events(
+    plan: &RunPlan,
+    dir: &Path,
+    span: &str,
+    row: u64,
+    o: &RowOutcome,
+) -> Result<(), RunError> {
+    if let Some(t) = &o.selftest {
+        let attrs = json!({
+            "row": row,
+            "connect_blocked": t.connect_blocked,
+            "vsock_blocked": t.vsock_blocked,
+            "io_uring_blocked": t.io_uring_blocked,
+            "vsock": t.vsock_state(),
+            "io_uring": t.io_uring_state(),
+        });
+        log_event(plan, dir, Some(span), "sandbox.selftest", "info", attrs)?;
+    }
+    if let Some(reason) = &o.cpu_unknown {
+        let attrs = json!({
+            "row": row,
+            "reason": reason,
+            "charged_cpu_seconds": o.cpu_seconds,
+        });
+        log_event(plan, dir, Some(span), "row.cpu_unknown", "warn", attrs)?;
+    }
+    Ok(())
 }
 
 /// An attempt no row record holds: its spend goes into one signed `spend` record, so a
