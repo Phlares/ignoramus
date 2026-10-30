@@ -476,6 +476,7 @@ fn rooted(edit: impl Fn(String) -> String) -> (TempDir, PathBuf, PathBuf) {
 ",
     )
     .unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
     let root = dir.path().join("root");
     std::fs::create_dir_all(root.join("spec")).unwrap();
     std::fs::create_dir_all(root.join("data")).unwrap();
@@ -532,32 +533,63 @@ fn follow_on_specs_resolve_from_the_root() {
     assert!(!stdout(&a).contains("E-END-002"));
 }
 
+/// A temp folder that holds `.git`, so the root search stops inside it and a stray
+/// marker in `/tmp` or above cannot reach the test.
+fn repo() -> TempDir {
+    let dir = TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    dir
+}
+
+fn mark(dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("ignorarium.toml"), "").unwrap();
+}
+
 #[test]
 fn no_marker_keeps_the_spec_folder() {
-    let dir = TempDir::new().unwrap();
+    let dir = repo();
     let spec = dir.path().join("a/b/s.toml");
     assert_eq!(check::study_root(&spec), dir.path().join("a/b"));
-    let bare = std::env::current_dir().unwrap();
-    assert_eq!(check::study_root(Path::new("s.toml")), bare);
+}
+
+#[test]
+fn a_relative_spec_without_a_marker_roots_at_the_current_folder() {
+    let dir = repo();
+    std::fs::write(dir.path().join("s.toml"), "").unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    let a = bin(&home)
+        .current_dir(dir.path())
+        .args(["review", "s.toml"])
+        .assert();
+    assert!(
+        stdout(&a).contains(
+            "Study root: .
+"
+        ),
+        "{}",
+        stdout(&a)
+    );
 }
 
 #[test]
 fn the_nearest_marker_above_the_spec_wins() {
-    let dir = TempDir::new().unwrap();
+    let dir = repo();
     let inner = dir.path().join("outer/inner");
     std::fs::create_dir_all(inner.join("deep")).unwrap();
-    std::fs::write(dir.path().join("outer/ignorarium.toml"), "").unwrap();
+    mark(&dir.path().join("outer"));
     let spec = inner.join("deep/s.toml");
     assert_eq!(check::study_root(&spec), dir.path().join("outer"));
-    std::fs::write(inner.join("ignorarium.toml"), "").unwrap();
+    mark(&inner);
     assert_eq!(check::study_root(&spec), inner);
-    std::fs::write(inner.join("deep/ignorarium.toml"), "").unwrap();
+    mark(&inner.join("deep"));
     assert_eq!(check::study_root(&spec), inner.join("deep"));
 }
 
 #[test]
 fn a_marker_that_is_a_folder_or_a_link_is_not_a_marker() {
-    let dir = TempDir::new().unwrap();
+    let dir = repo();
     let folder = dir.path().join("f");
     std::fs::create_dir_all(folder.join("spec/ignorarium.toml")).unwrap();
     assert_eq!(
@@ -579,8 +611,42 @@ fn a_marker_that_is_a_folder_or_a_link_is_not_a_marker() {
 }
 
 #[test]
-fn review_shows_the_study_root() {
-    let (_d, home, spec) = rooted(|t| t);
+fn the_search_stops_at_the_repo_root_but_checks_it() {
+    let dir = TempDir::new().unwrap();
+    mark(dir.path());
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(repo.join("sub/spec")).unwrap();
+    let spec = repo.join("sub/spec/s.toml");
+    // The marker above the repo is out of reach.
+    assert_eq!(check::study_root(&spec), repo.join("sub/spec"));
+    // A marker in the repo root itself counts.
+    mark(&repo);
+    assert_eq!(check::study_root(&spec), repo);
+}
+
+#[test]
+fn the_search_never_uses_a_marker_in_the_home_folder() {
+    let dir = repo();
+    let home = dir.path().join("home");
+    mark(&home);
+    let spec = home.join("study/s.toml");
+    assert_eq!(check::study_root_in(&spec, Some(&home)), home.join("study"));
+    assert_eq!(check::study_root_in(&spec, None), home);
+}
+
+#[test]
+fn dotdot_in_the_spec_argument_is_folded_before_the_walk() {
+    let dir = repo();
+    mark(&dir.path().join("a"));
+    std::fs::create_dir_all(dir.path().join("b")).unwrap();
+    let spec = dir.path().join("a/../b/s.toml");
+    assert_eq!(check::study_root(&spec), dir.path().join("b"));
+}
+
+#[test]
+fn review_shows_the_root_relative_to_the_current_folder_when_inside_it() {
+    let (d, home, spec) = rooted(|t| t);
     let root = spec.parent().unwrap().parent().unwrap();
     let a = bin(&home).arg("review").arg(&spec).assert();
     assert!(stdout(&a).contains(&format!(
@@ -588,6 +654,18 @@ fn review_shows_the_study_root() {
 ",
         root.display()
     )));
+    let a = bin(&home)
+        .current_dir(d.path())
+        .args(["review", "root/spec/s.toml"])
+        .assert();
+    assert!(
+        stdout(&a).contains(
+            "Study root: root
+"
+        ),
+        "{}",
+        stdout(&a)
+    );
 }
 
 #[test]

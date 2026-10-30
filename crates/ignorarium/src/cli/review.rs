@@ -75,6 +75,18 @@ fn withheld(v: &Value) -> Value {
 
 const NO_ESTIMATE: &str = "Not available: the plan has errors.\n";
 
+/// The root relative to the current folder when it lies inside it, else the full path.
+fn shown_root(root: &Path) -> String {
+    let rel = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| root.strip_prefix(cwd).ok().map(Path::to_path_buf));
+    match rel {
+        Some(r) if r.as_os_str().is_empty() => ".".into(),
+        Some(r) => r.display().to_string(),
+        None => root.display().to_string(),
+    }
+}
+
 fn page(a: &Assessed) -> String {
     let v = &withheld(&a.value);
     let est = a.estimate.as_ref();
@@ -116,7 +128,7 @@ fn page(a: &Assessed) -> String {
         "# Plan review: {}\n\nSpec hash: {}\n\nStudy root: {}\n\n## Plan\n\n",
         at(v, "/study/id"),
         a.hash,
-        a.root.display()
+        shown_root(&a.root)
     );
     s.push_str(&bullets([
         format!(

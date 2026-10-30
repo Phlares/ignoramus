@@ -29,6 +29,24 @@ fn status(lab: &Lab, id: &str) -> Value {
 }
 
 #[test]
+fn a_register_record_that_does_not_parse_is_not_a_registered_study() {
+    let lab = lab();
+    let dir = plain(&lab, "noroot");
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let log = dir.join("records.jsonl");
+    std::fs::rename(&log, dir.join("records.old")).unwrap();
+    let draft = ignorarium::records::RecordDraft {
+        study: "noroot".into(),
+        row: None,
+        kind: "register".into(),
+        body: serde_json::json!({"spec_hash": "sha256:ab", "leaf": 1, "log": "planlog", "defaults": []}),
+    };
+    ignorarium::records::append(&log, &key, draft).unwrap();
+    let a = bin(&lab).args(["status", "noroot"]).assert().code(1);
+    assert!(err(&a).contains("is not registered"), "{}", err(&a));
+}
+
+#[test]
 fn probe_writes_machine_toml_and_prints_the_level() {
     let lab = lab();
     std::fs::write(

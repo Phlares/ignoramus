@@ -11,7 +11,7 @@ use crate::rules::{self, BoxRecords, CheckCtx, input_bytes};
 use crate::spec::{self, LoadError, model::Spec};
 use ed25519_dalek::VerifyingKey;
 use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Everything a check finds about one spec file.
 pub struct Assessed {
@@ -85,20 +85,49 @@ pub const ROOT_MARKER: &str = "ignorarium.toml";
 
 /// The folder every study path is relative to: the nearest folder at or above the spec's
 /// own folder that holds a regular `ignorarium.toml` (a link or folder of that name does
-/// not count). Without one, the spec's folder. The marker's content is not read.
+/// not count; the content is not read). The walk checks the first folder that holds a
+/// `.git` entry and goes no further. It never uses a marker in the user's home folder or
+/// the filesystem root. Without a marker, the spec's folder.
 pub fn study_root(spec_path: &Path) -> PathBuf {
+    study_root_in(spec_path, std::env::home_dir().as_deref())
+}
+
+/// `study_root` for a given home folder.
+pub fn study_root_in(spec_path: &Path, home: Option<&Path>) -> PathBuf {
     let spec = std::path::absolute(spec_path).unwrap_or_else(|_| spec_path.to_path_buf());
+    let spec = fold_dots(&spec);
     let folder = spec
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    for dir in folder.ancestors() {
+        if dir.parent().is_none() || Some(dir) == home {
+            break;
+        }
+        let has = |name: &str| dir.join(name).symlink_metadata();
+        if has(ROOT_MARKER).is_ok_and(|m| m.is_file()) {
+            return dir.to_path_buf();
+        }
+        if has(".git").is_ok() {
+            break;
+        }
+    }
     folder
-        .ancestors()
-        .find(|dir| {
-            dir.join(ROOT_MARKER)
-                .symlink_metadata()
-                .is_ok_and(|m| m.is_file())
-        })
-        .map_or(folder.clone(), Path::to_path_buf)
+}
+
+/// Drop `.` and fold `..` against the segment before it, without touching the disk, so the
+/// walk climbs real parents only.
+fn fold_dots(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {

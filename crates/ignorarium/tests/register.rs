@@ -27,6 +27,7 @@ fn setup(template: &str, edit: impl Fn(String) -> String) -> (Fixture, PathBuf) 
     let root = dir.path().join("home");
     let home = Home::open_at(&root).unwrap();
     std::fs::write(root.join("machine.toml"), "max_level = 1\n").unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
     let study = dir.path().join("work");
     std::fs::create_dir_all(study.join("data")).unwrap();
     std::fs::write(study.join("data/example.txt"), "Hello  World").unwrap();

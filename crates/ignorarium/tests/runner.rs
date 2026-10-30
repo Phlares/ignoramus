@@ -879,7 +879,27 @@ fn a_register_record_without_a_leaf_is_refused() {
     };
     records::append(&log, &key, draft).unwrap();
     let err = err_of(&lab, "noleaf");
-    assert!(matches!(err, RunError::NotRegistered(_)), "{err}");
+    assert!(matches!(err, RunError::BadRegister(_)), "{err}");
+}
+
+#[test]
+fn a_register_record_without_a_root_is_refused_as_bad() {
+    let lab = lab();
+    let dir = plain(&lab, "noroot");
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let log = dir.join("records.jsonl");
+    std::fs::rename(&log, dir.join("records.old")).unwrap();
+    let hash = spec::load(&dir.join("spec.toml")).unwrap().hash;
+    let draft = records::RecordDraft {
+        study: "noroot".into(),
+        row: None,
+        kind: "register".into(),
+        body: serde_json::json!({"spec_hash": hash, "leaf": 1, "log": "planlog", "defaults": []}),
+    };
+    records::append(&log, &key, draft).unwrap();
+    let err = err_of(&lab, "noroot");
+    assert!(matches!(err, RunError::BadRegister(_)), "{err}");
+    assert!(err.to_string().contains("does not parse"), "{err}");
 }
 
 #[test]

@@ -81,6 +81,8 @@ pub enum RunStatus {
 pub enum RunError {
     /// The study has no `register` record.
     NotRegistered(String),
+    /// The `register` record exists but does not parse.
+    BadRegister(String),
     /// The stored spec no longer hashes to the registered hash.
     SpecChanged,
     /// The payload folder differs from `pins.payload`.
@@ -117,6 +119,10 @@ impl fmt::Display for RunError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RunError::NotRegistered(id) => write!(f, "study {id} has no register record"),
+            RunError::BadRegister(id) => write!(
+                f,
+                "the register record of {id} does not parse; register the plan again"
+            ),
             RunError::SpecChanged => write!(f, "the stored spec differs from the registered hash"),
             RunError::PayloadChanged => write!(f, "the payload differs from pins.payload"),
             RunError::NoPayload(e) => write!(f, "cannot read the payload: {e}"),
@@ -212,8 +218,7 @@ pub fn prepare_with(
         .iter()
         .find(|r| r.kind == REGISTER)
         .ok_or_else(|| RunError::NotRegistered(study_id.into()))?;
-    let register =
-        Register::of(register).ok_or_else(|| RunError::NotRegistered(study_id.into()))?;
+    let register = Register::of(register).ok_or_else(|| RunError::BadRegister(study_id.into()))?;
     let (spec, spec_hash, hash_text) = stored_spec(&dir)?;
     if register.spec_hash != hash_text {
         return Err(RunError::SpecChanged);

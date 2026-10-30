@@ -347,7 +347,10 @@ fn registered<'a>(
         .ok_or_else(|| not_registered(id))?;
     let all = crate::records::read_all(&log, &key.verifying_key())
         .map_err(|e| CliError::usage(format!("records of {id}: {e}")))?;
-    if !all.iter().any(|r| r.kind == "register") {
+    if !all
+        .iter()
+        .any(|r| crate::derived::Register::of(r).is_some())
+    {
         return Err(not_registered(id));
     }
     Ok((home, key, all))
