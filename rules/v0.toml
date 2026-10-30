@@ -28,6 +28,8 @@ target = [
   { path = "question.hypotheses[*].rival", check = "required" },
   { path = "outcomes", check = "required" },
   { path = "outcomes[*].id", check = "required" },
+  { path = "outcomes[*].measure", check = "required" },
+  { path = "outcomes[*].paired", check = "required" },
   { path = "outcomes[*].registered", check = "required" },
   { path = "scope", check = "required" },
   { path = "scope.stop_rule", check = "required" },
@@ -116,6 +118,8 @@ target = [
   { path = "outcomes[*].id", check = "type", kind = "string" },
   { path = "outcomes[*].unit", check = "type", kind = "string" },
   { path = "outcomes[*].direction", check = "type", kind = "string" },
+  { path = "outcomes[*].measure", check = "type", kind = "string" },
+  { path = "outcomes[*].paired", check = "type", kind = "string" },
   { path = "outcomes[*].registered", check = "type", kind = "bool" },
   { path = "scope", check = "type", kind = "table" },
   { path = "scope.min_isolation", check = "type", kind = "int" },
@@ -206,6 +210,7 @@ target = [
   { path = "scope.end_of_run.route", check = "enum", values = ["report", "follow-on", "share"] },
   { path = "design.test", check = "enum", values = ["paired-mean", "descriptive"] },
   { path = "design.pick", check = "enum", values = ["seeded", "first"] },
+  { path = "outcomes[*].paired", check = "enum", values = ["difference", "percent"] },
   { path = "inputs[*].role", check = "enum", values = ["calibration", "selection", "confirmation", "model"] },
   { path = "inputs[*].licence.type", check = "enum", values = ["common", "custom", "request-form", "unspecified"] },
   { path = "mutations.operators[*].type", check = "enum", values = ["int", "float", "enum"] },
@@ -301,11 +306,12 @@ code = "E-UNQ-001"
 severity = "error"
 problem = "A list repeats an id, path or name."
 instruction = "Give every entry its own value. Remove the repeat, or rename it."
-why = "A repeated input would run its units twice and count them twice in the power gate. A repeated condition, outcome, hypothesis, operator or trigger id makes later steps pick one entry and ignore the other."
+why = "A repeated input would run its units twice and count them twice in the power gate. A repeated condition, outcome, measure, hypothesis, operator or trigger id makes later steps pick one entry and ignore the other."
 sources = []
 target = [
   { path = "design.conditions", check = "unique", key = "id" },
   { path = "outcomes", check = "unique", key = "id" },
+  { path = "outcomes", check = "unique", key = "measure" },
   { path = "question.hypotheses", check = "unique", key = "id" },
   { path = "inputs", check = "unique", key = "path" },
   { path = "mutations.operators", check = "unique", key = "name" },

@@ -250,7 +250,8 @@ fn an_unavailable_backend_pauses_before_the_retry() {
 fn edits_in_row_0(edit: &str) -> String {
     format!(
         "#!/bin/sh\nif [ \"$IGNORARIUM_ROW\" = 0 ]; then {edit}; fi\n\
-         echo ok > \"$IGNORARIUM_OUT/result\"\n"
+         echo ok > \"$IGNORARIUM_OUT/result\"\n{}\n",
+        common::VALUES
     )
 }
 
@@ -522,6 +523,86 @@ fn a_payload_that_removes_its_output_runs_once_and_is_void() {
     let runs = std::fs::read_to_string(dir.join("run/rows/0/runs")).unwrap();
     assert_eq!(runs, "run\n");
     assert!(kind_of(&lab, "gone", "spend").is_empty());
+}
+
+/// A payload that writes `values` as its values file, and one result file.
+fn writes_values(values: &str) -> String {
+    format!(
+        "#!/bin/sh
+printf '%s' '{values}' > \"$IGNORARIUM_OUT/values.json\"
+"
+    )
+}
+
+#[test]
+fn a_row_with_bad_values_is_void_and_not_retried() {
+    let lab = lab();
+    // (payload, the reason must contain)
+    let cases = [
+        (
+            "#!/bin/sh
+true
+"
+            .to_string(),
+            "missing",
+        ),
+        (writes_values(r#"{"ppl": "x"}"#), "number"),
+        (writes_values(r#"{"ppl": 1, "extra": 2}"#), "unknown"),
+        (writes_values("{"), "JSON"),
+        (
+            "#!/bin/sh
+mkdir \"$IGNORARIUM_OUT/values.json\"
+"
+            .to_string(),
+            "regular",
+        ),
+    ];
+    for (i, (payload, want)) in cases.iter().enumerate() {
+        let id = format!("badvalues{i}");
+        common::with_payload(&lab, &id, payload);
+        assert_eq!(run(&plan_of(&lab, &id)).unwrap(), RunStatus::Done, "{want}");
+        let rows = rows_of(&lab, &id);
+        assert_eq!(rows.len(), 6, "{want}");
+        for r in &rows {
+            assert_eq!(r.body["exit"], "void:output", "{want}");
+            assert_eq!(r.body["attempts"], 1, "{want}");
+            assert!(r.body.get("values").is_none(), "{want}");
+            let reason = r.body["reason"].as_str().unwrap_or_default();
+            assert!(reason.starts_with("values: "), "{reason}");
+            assert!(reason.contains(want), "{reason}");
+            // The output was hashed before the values were read.
+            assert_eq!(r.body["output_hash"].as_str().unwrap().len(), 64);
+        }
+        assert!(kind_of(&lab, &id, "spend").is_empty());
+    }
+}
+
+#[test]
+fn ok_rows_record_their_values() {
+    let lab = lab();
+    common::with_payload(&lab, "hasvalues", &writes_values(r#"{"ppl": 12.5}"#));
+    assert_eq!(run(&plan_of(&lab, "hasvalues")).unwrap(), RunStatus::Done);
+    let rows = rows_of(&lab, "hasvalues");
+    assert_eq!(rows.len(), 6);
+    for r in &rows {
+        assert_eq!(r.body["exit"], "ok");
+        assert_eq!(r.body["values"], serde_json::json!({ "ppl": 12.5 }));
+    }
+}
+
+#[test]
+fn a_failed_payload_records_no_values() {
+    let lab = lab();
+    let payload = "#!/bin/sh
+printf '{\"ppl\": 1}' > \"$IGNORARIUM_OUT/values.json\"
+exit 3
+";
+    common::with_payload(&lab, "failvalues", payload);
+    assert_eq!(run(&plan_of(&lab, "failvalues")).unwrap(), RunStatus::Done);
+    for r in rows_of(&lab, "failvalues") {
+        assert_eq!(r.body["exit"], "payload:3");
+        assert!(r.body.get("values").is_none());
+    }
 }
 
 #[test]

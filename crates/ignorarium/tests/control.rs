@@ -32,6 +32,7 @@ if [ "$IGNORARIUM_ROW" = 1 ]; then
   sleep 0.5
 fi
 echo ok > "$IGNORARIUM_OUT/result"
+printf '{"ppl": 1.5}' > "$IGNORARIUM_OUT/values.json"
 "#;
 
 /// Row `i` marks itself started, leaves a child that writes `late` after 1.5 s, and sleeps
@@ -45,6 +46,7 @@ if [ "$IGNORARIUM_ROW" = {i} ] && [ ! -e "$IGNORARIUM_OUT/../out.crashed-0" ]; t
   sleep 30
 fi
 echo ok > "$IGNORARIUM_OUT/result"
+printf '{{"ppl": 1.5}}' > "$IGNORARIUM_OUT/values.json"
 "#
     )
 }
@@ -157,7 +159,11 @@ fn heartbeat_is_fifteen_seconds() {
 #[test]
 fn heartbeat_fires_on_the_cadence() {
     let lab = lab();
-    let dir = with_payload(&lab, "hb", "#!/bin/sh\nsleep 0.3\n");
+    let dir = with_payload(
+        &lab,
+        "hb",
+        &format!("#!/bin/sh\nsleep 0.3\n{}\n", common::VALUES),
+    );
     let mut plan = plan_of(&lab, "hb");
     plan.heartbeat = Duration::from_millis(50);
     assert_eq!(go(&plan).unwrap(), RunStatus::Done);

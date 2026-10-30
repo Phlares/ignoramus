@@ -18,7 +18,7 @@ use crate::schedule::{self, Row, Schedule, ScheduleError};
 use crate::spec::model::{Role, Spec};
 use crate::store::Store;
 use crate::view::{self, ViewError};
-use crate::{keys, spec, sys};
+use crate::{keys, spec, sys, values};
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
 use std::cell::{Cell, RefCell};
@@ -1084,13 +1084,15 @@ fn attempt_row(
     let mut attempts = 0u32;
     let mut unknown = false;
     let mut bound;
+    let mut out_dir = PathBuf::new();
     let span = watch.row.borrow().1.clone();
     // An attempt's events come after its record, so a failed event write cannot lose the
     // attempt's spend.
     let noted = |o: &RowOutcome| attempt_events(plan, dir, &span, row.index, o);
-    let outcome = loop {
+    let mut outcome = loop {
         attempts += 1;
         let job = job_for(plan, row, dir)?;
+        out_dir.clone_from(&job.output_dir);
         let mut o = plan
             .backend
             .run_row(&job, watch)
@@ -1164,6 +1166,20 @@ fn attempt_row(
             return Ok((h.exit().into(), Some(h)));
         }
     };
+    // Values are payload output, read after the output hash. An unreadable file voids the row.
+    let mut values = None;
+    if outcome.exit == Exit::Ok {
+        let measures: Vec<&str> = plan
+            .spec
+            .outcomes
+            .iter()
+            .map(|o| o.measure.as_str())
+            .collect();
+        match values::read(&out_dir, &measures) {
+            Ok(v) => values = Some(v),
+            Err(why) => outcome.exit = Exit::Void(format!("values: {why}")),
+        }
+    }
     let (exit, reason) = match &outcome.exit {
         Exit::Ok => ("ok".to_string(), None),
         Exit::Payload(c) => (format!("payload:{c}"), None),
@@ -1188,6 +1204,9 @@ fn attempt_row(
     });
     if let Some(why) = reason {
         body["reason"] = json!(why);
+    }
+    if let Some(v) = values {
+        body["values"] = json!(v);
     }
     if let Some(why) = &outcome.cpu_unknown {
         body["cpu_unknown"] = json!(why);

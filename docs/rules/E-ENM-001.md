@@ -27,6 +27,7 @@ A value outside the set has no defined meaning in the checker or the run.
 - `scope.end_of_run.route` (enum)
 - `design.test` (enum)
 - `design.pick` (enum)
+- `outcomes[*].paired` (enum)
 - `inputs[*].role` (enum)
 - `inputs[*].licence.type` (enum)
 - `mutations.operators[*].type` (enum)

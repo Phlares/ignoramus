@@ -704,13 +704,15 @@ fn a_row_runs_in_the_pinned_image() {
     }
     assert_eq!(level1.probe(), Probe::Available);
     let digest = shell_image(&store_of(&lab));
-    let payload =
-        "#!/bin/sh\nread x < /etc/os-release\nprintf '%s' \"$x\" > \"$IGNORARIUM_OUT/os\"\n";
+    let payload = format!(
+        "#!/bin/sh\nread x < /etc/os-release\nprintf '%s' \"$x\" > \"$IGNORARIUM_OUT/os\"\n{}\n",
+        common::VALUES
+    );
     let dir = edited(
         &lab,
         "e2e",
         |t| t.replace("environment = \"\"", &format!("environment = \"{digest}\"")),
-        payload,
+        &payload,
     );
     let plan = prepare_with(&lab.home, "e2e", vec![Box::new(level1)]).unwrap();
     assert_eq!(plan.environment, digest);
@@ -738,6 +740,7 @@ fn a_built_environment_runs_at_level1() {
         "#!/bin/sh\n",
         "head -n1 /etc/passwd > \"$IGNORARIUM_OUT/os\"\n",
         "[ -e /bin/busybox ] && echo busybox >> \"$IGNORARIUM_OUT/os\"\n",
+        "printf '{\"ppl\": 1.5}' > \"$IGNORARIUM_OUT/values.json\"\n",
     );
     let dir = edited(&lab, "built", |t| t, payload);
     let env = dir.join("env");

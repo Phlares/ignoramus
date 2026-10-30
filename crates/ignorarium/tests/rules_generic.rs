@@ -133,6 +133,36 @@ fn faults() -> Vec<Fault> {
             "outcomes[0].direction",
         ),
         (
+            "E-REQ-001",
+            "/outcomes/0/measure",
+            None,
+            "outcomes[0].measure",
+        ),
+        (
+            "E-REQ-001",
+            "/outcomes/0/paired",
+            None,
+            "outcomes[0].paired",
+        ),
+        (
+            "E-TYP-001",
+            "/outcomes/0/measure",
+            Some(json!(1)),
+            "outcomes[0].measure",
+        ),
+        (
+            "E-TYP-001",
+            "/outcomes/0/paired",
+            Some(json!(true)),
+            "outcomes[0].paired",
+        ),
+        (
+            "E-ENM-001",
+            "/outcomes/0/paired",
+            Some(json!("ratio")),
+            "outcomes[0].paired",
+        ),
+        (
             "W-LIC-001",
             "/inputs/0/licence/spdx",
             Some(json!("")),
@@ -322,6 +352,7 @@ fn fat_templates() -> Vec<Value> {
             let mut s = spec_at(&format!("../../templates/{t}.toml"));
             let mut second = s["outcomes"][0].clone();
             second["id"] = json!("second");
+            second["measure"] = json!("second-measure");
             s["inputs"][0]["licence"]["creators"] = json!(["x", "y"]);
             s["mutations"]["operators"] = json!([
                 { "name": "o1", "type": "int", "range": [1, 2], "acts_on": "a" },
@@ -481,6 +512,14 @@ fn human_render_matches_exactly() {
     assert_eq!(render_human(&[]), "");
 }
 
+/// The key of a unique check: two unique checks on one array differ by it.
+fn unique_key(c: &Check) -> Option<String> {
+    match c {
+        Check::Unique(k) => k.clone(),
+        _ => None,
+    }
+}
+
 #[test]
 fn no_duplicate_path_and_kind_pairs() {
     let mut seen = HashSet::new();
@@ -489,7 +528,11 @@ fn no_duplicate_path_and_kind_pairs() {
         .filter(|r| !matches!(r.check, Check::Documented))
     {
         assert!(
-            seen.insert((r.path.clone(), r.check.name())),
+            seen.insert((
+                r.path.clone(),
+                unique_key(&r.check).unwrap_or_default(),
+                r.check.name()
+            )),
             "{}: {}",
             r.code,
             r.path
@@ -674,9 +717,9 @@ fn child_checks_skip_when_the_parent_is_missing_or_wrong() {
 fn array_elements_are_checked_individually() {
     let mut s = template();
     s["outcomes"] = json!([
-        { "id": "a", "unit": "s", "direction": "lower", "registered": true },
-        { "id": "b", "unit": "", "direction": "higher", "registered": true },
-        { "id": "c", "unit": "s", "direction": "up", "registered": true },
+        { "id": "a", "unit": "s", "direction": "lower", "measure": "m1", "paired": "percent", "registered": true },
+        { "id": "b", "unit": "", "direction": "higher", "measure": "m2", "paired": "percent", "registered": true },
+        { "id": "c", "unit": "s", "direction": "up", "measure": "m3", "paired": "percent", "registered": true },
     ]);
     let d = rules::check_generic(&s, &v0());
     assert_eq!(
@@ -1163,9 +1206,10 @@ key = \"id\"",
 }
 
 /// (array path, key) for each unique target of E-UNQ-001.
-const UNIQUE_TARGETS: [(&str, Option<&str>); 6] = [
+const UNIQUE_TARGETS: [(&str, Option<&str>); 7] = [
     ("design.conditions", Some("id")),
     ("outcomes", Some("id")),
+    ("outcomes", Some("measure")),
     ("question.hypotheses", Some("id")),
     ("inputs", Some("path")),
     ("mutations.operators", Some("name")),

@@ -41,6 +41,8 @@ A wrong type changes what the value means, and later checks cannot read it.
 - `outcomes[*].id` (type)
 - `outcomes[*].unit` (type)
 - `outcomes[*].direction` (type)
+- `outcomes[*].measure` (type)
+- `outcomes[*].paired` (type)
 - `outcomes[*].registered` (type)
 - `scope` (type)
 - `scope.min_isolation` (type)

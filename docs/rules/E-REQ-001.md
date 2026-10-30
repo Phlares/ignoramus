@@ -37,6 +37,8 @@ The checker and the run need every field. A silent default would hide a gap in t
 - `question.hypotheses[*].rival` (required)
 - `outcomes` (required)
 - `outcomes[*].id` (required)
+- `outcomes[*].measure` (required)
+- `outcomes[*].paired` (required)
 - `outcomes[*].registered` (required)
 - `scope` (required)
 - `scope.stop_rule` (required)

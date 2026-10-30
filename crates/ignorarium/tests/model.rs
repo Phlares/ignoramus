@@ -89,6 +89,7 @@ fn wrong_enum_value_is_rejected() {
         "/study/mode",
         "/study/label",
         "/outcomes/0/direction",
+        "/outcomes/0/paired",
         "/scope/stop_rule",
         "/scope/end_of_run/route",
         "/design/test",
@@ -119,7 +120,7 @@ fn whole_numbers_widen_to_floats_and_fractions_do_not_fit_integers() {
 
 #[test]
 fn every_allowed_enum_value_deserializes() {
-    let cases: [(&str, &[&str]); 12] = [
+    let cases: [(&str, &[&str]); 13] = [
         ("/study/template", &["numeric-ablation", "planted-spawn"]),
         ("/study/mode", &["exploratory", "confirmatory"]),
         (
@@ -127,6 +128,7 @@ fn every_allowed_enum_value_deserializes() {
             &["signal", "confirmed", "replicated", "generalized"],
         ),
         ("/outcomes/0/direction", &["lower", "higher"]),
+        ("/outcomes/0/paired", &["difference", "percent"]),
         ("/scope/stop_rule", &["budget-only", "e-process"]),
         ("/scope/end_of_run/route", &["report", "follow-on", "share"]),
         ("/design/test", &["paired-mean", "descriptive"]),

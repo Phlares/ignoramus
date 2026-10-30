@@ -81,7 +81,20 @@ pub struct Outcome {
     pub id: String,
     pub unit: String,
     pub direction: Direction,
+    /// The key the payload writes this outcome's value under in `values.json`.
+    pub measure: String,
+    /// How the box pairs a condition's value with the reference condition's.
+    pub paired: Paired,
     pub registered: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Paired {
+    /// Condition minus reference.
+    Difference,
+    /// 100 x (condition / reference - 1).
+    Percent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

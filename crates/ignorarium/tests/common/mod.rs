@@ -7,8 +7,10 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
-pub const PAYLOAD: &str =
-    "#!/bin/sh\nprintf '%s %s %s' \"$2\" \"$4\" \"$6\" > \"$IGNORARIUM_OUT/result\"\n";
+/// The shell line that writes the template's one measure.
+pub const VALUES: &str = "printf '{\"ppl\": 1.5}' > \"$IGNORARIUM_OUT/values.json\"";
+
+pub const PAYLOAD: &str = "#!/bin/sh\nprintf '%s %s %s' \"$2\" \"$4\" \"$6\" > \"$IGNORARIUM_OUT/result\"\nprintf '{\"ppl\": 1.5}' > \"$IGNORARIUM_OUT/values.json\"\n";
 
 pub struct Lab {
     pub _dir: TempDir,

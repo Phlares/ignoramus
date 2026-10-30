@@ -152,7 +152,7 @@ fn editing_the_working_payload_after_register_does_not_reach_the_run() {
     let work = common::work(&lab, "frozen").join("payload/run");
     common::write_exec(
         &work,
-        "#!/bin/sh\necho edited > \"$IGNORARIUM_OUT/result\"\n",
+        "#!/bin/sh\necho edited > \"$IGNORARIUM_OUT/result\"\nprintf '{\"ppl\": 1.5}' > \"$IGNORARIUM_OUT/values.json\"\n",
     );
     bin(&lab).args(["run", "frozen"]).assert().code(0);
     let rows = kind_of(&lab, "frozen", "row");
@@ -186,8 +186,7 @@ fn rows_see_exactly_the_declared_inputs() {
              [inputs.licence]\nspdx = \"\"\ntype = \"unspecified\"\nsource = \"\"\ncreators = []\n"
         )
     };
-    let payload =
-        "#!/bin/sh\ncd \"$IGNORARIUM_IN\" && find . | LC_ALL=C sort > \"$IGNORARIUM_OUT/seen\"\n";
+    let payload = "#!/bin/sh\ncd \"$IGNORARIUM_IN\" && find . | LC_ALL=C sort > \"$IGNORARIUM_OUT/seen\"\nprintf '{\"ppl\": 1.5}' > \"$IGNORARIUM_OUT/values.json\"\n";
     // The root also holds a file no input names.
     let before = [
         ("data/example.txt", "calibration"),
@@ -400,6 +399,7 @@ if [ "$IGNORARIUM_ROW" = 0 ]; then
   echo started > "$IGNORARIUM_OUT/started"
   sleep 30
 fi
+printf '{"ppl": 1.5}' > "$IGNORARIUM_OUT/values.json"
 "#;
 
 /// `ignorarium run <id>` in the background, through `env` with `env_args`, which `env`
@@ -575,6 +575,7 @@ if [ "$IGNORARIUM_ROW" = 0 ]; then
   echo started > "$IGNORARIUM_OUT/started"
   sleep 1
 fi
+printf '{"ppl": 1.5}' > "$IGNORARIUM_OUT/values.json"
 "#;
 
 #[test]

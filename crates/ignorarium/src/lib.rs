@@ -1,5 +1,6 @@
 //! ignorarium library crate.
 #![deny(unsafe_code)]
+pub mod analysis;
 pub mod backend;
 pub mod budget;
 pub mod canon;
@@ -30,4 +31,5 @@ pub mod store;
 pub mod sys;
 pub mod time;
 pub mod units;
+pub mod values;
 pub mod view;
