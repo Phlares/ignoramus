@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 
 /// Everything a check finds about one spec file.
 pub struct Assessed {
+    /// The study root the checks read from.
+    pub root: PathBuf,
     /// Hash of the author's file, never of the defaulted value.
     pub hash: String,
     /// The spec with defaults filled.
@@ -69,26 +71,34 @@ impl BoxRecords for HomeRecords {
 }
 
 /// Hash every input the spec lists. This is the one read `register` relies on.
-pub fn input_hashes(study_dir: &Path, spec: &Value) -> Vec<(String, Option<(String, String)>)> {
+pub fn input_hashes(root: &Path, spec: &Value) -> Vec<(String, Option<(String, String)>)> {
     let paths = spec["inputs"].as_array().map_or(&[][..], Vec::as_slice);
     paths
         .iter()
         .filter_map(|i| i["path"].as_str())
-        .map(|p| {
-            (
-                p.to_string(),
-                input_bytes(study_dir, p).map(|b| file_hashes(&b)),
-            )
-        })
+        .map(|p| (p.to_string(), input_bytes(root, p).map(|b| file_hashes(&b))))
         .collect()
 }
 
-/// The folder an input path is relative to: the spec's own folder.
-pub fn study_dir(spec_path: &Path) -> PathBuf {
-    match spec_path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-        _ => PathBuf::from("."),
-    }
+/// The file whose presence marks a study root.
+pub const ROOT_MARKER: &str = "ignorarium.toml";
+
+/// The folder every study path is relative to: the nearest folder at or above the spec's
+/// own folder that holds a regular `ignorarium.toml` (a link or folder of that name does
+/// not count). Without one, the spec's folder. The marker's content is not read.
+pub fn study_root(spec_path: &Path) -> PathBuf {
+    let spec = std::path::absolute(spec_path).unwrap_or_else(|_| spec_path.to_path_buf());
+    let folder = spec
+        .parent()
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    folder
+        .ancestors()
+        .find(|dir| {
+            dir.join(ROOT_MARKER)
+                .symlink_metadata()
+                .is_ok_and(|m| m.is_file())
+        })
+        .map_or(folder.clone(), Path::to_path_buf)
 }
 
 pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
@@ -107,7 +117,7 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         .map(|k| k.map(|k| k.verifying_key()))
         .map_err(|e| e.to_string());
     let cc = CheckCtx {
-        study_dir: study_dir(spec_path),
+        root: study_root(spec_path),
         prior,
         machine_max_level: machine.max_level,
         spec_text: raw.text,
@@ -118,8 +128,9 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
     };
     let (value, filled, diags) = rules::check_all(&raw.value, rules::builtin(), &cc);
     let mut a = Assessed {
+        root: cc.root.clone(),
         hash: raw.hash,
-        input_hashes: input_hashes(&cc.study_dir, &value),
+        input_hashes: input_hashes(&cc.root, &value),
         value,
         filled,
         diags,

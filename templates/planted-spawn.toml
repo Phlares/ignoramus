@@ -58,7 +58,7 @@ clusters = []                   # cluster ids used to pick a winner
 clusters = []                   # cluster ids used to confirm; disjoint from selection
 
 [[inputs]]
-path = "data/example.txt"       # relative to the study folder
+path = "data/example.txt"       # from the study root (the folder with ignorarium.toml)
 sha256 = ""
 role = "calibration"            # calibration | selection | confirmation | model
 [inputs.licence]

@@ -14,8 +14,8 @@ use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
 
 pub struct CheckCtx {
-    /// Every file the checks read lives under this folder.
-    pub study_dir: PathBuf,
+    /// The study root. Every file the checks read lives under this folder.
+    pub root: PathBuf,
     pub prior: Box<dyn PriorUse>,
     /// The highest isolation level this machine offers.
     pub machine_max_level: u8,
@@ -28,7 +28,7 @@ impl CheckCtx {
     /// A context with no prior use and no records, for the folder `root`.
     pub fn empty(root: &Path) -> CheckCtx {
         CheckCtx {
-            study_dir: root.to_path_buf(),
+            root: root.to_path_buf(),
             prior: Box::new(crate::prior::NoPriorUse),
             machine_max_level: 2,
             spec_text: String::new(),
@@ -163,15 +163,15 @@ fn with_parent<'a>(spec: &'a Value, pattern: &str) -> Vec<(String, &'a Value, &'
 
 // ---- files: one primitive guards every read ----
 
-/// `rel` under the study folder, or `None` when it could leave the folder. Every
+/// `rel` under the study root, or `None` when it could leave the folder. Every
 /// segment must be one plain name; empty segments (`a//b`) are skipped. A `:`, a
 /// backslash, a leading `/`, a segment ending in `.` or a space (Windows trims
 /// them), or any symlink on the way makes it unsafe.
-fn resolve(study_dir: &Path, rel: &str) -> Option<PathBuf> {
+fn resolve(root: &Path, rel: &str) -> Option<PathBuf> {
     if rel.starts_with('/') || rel.contains(['\\', ':']) {
         return None;
     }
-    let mut path = study_dir.to_path_buf();
+    let mut path = root.to_path_buf();
     let mut any = false;
     for part in rel.split('/').filter(|c| !c.is_empty()) {
         let mut parts = Path::new(part).components();
@@ -200,16 +200,16 @@ fn read_file(path: &Path) -> Option<Vec<u8>> {
         .and_then(|_| std::fs::read(path).ok())
 }
 
-/// The bytes of the regular file `rel` names under `study_dir`, or `None` when
+/// The bytes of the regular file `rel` names under `root`, or `None` when
 /// the path is unsafe or the file is absent.
-pub fn input_bytes(study_dir: &Path, rel: &str) -> Option<Vec<u8>> {
-    resolve(study_dir, rel).and_then(|p| read_file(&p))
+pub fn input_bytes(root: &Path, rel: &str) -> Option<Vec<u8>> {
+    resolve(root, rel).and_then(|p| read_file(&p))
 }
 
 fn input_path_safe(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     flag(spec, pat, |v| {
         v.as_str()
-            .is_some_and(|rel| resolve(&ctx.study_dir, rel).is_none())
+            .is_some_and(|rel| resolve(&ctx.root, rel).is_none())
     })
 }
 
@@ -223,7 +223,7 @@ fn input_hash_matches(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
         if want.is_empty() {
             continue;
         }
-        let Some(file) = resolve(&ctx.study_dir, rel) else {
+        let Some(file) = resolve(&ctx.root, rel) else {
             continue;
         };
         if read_file(&file).map(|b| sha256_hex(&b)).as_deref() != Some(want) {
@@ -236,7 +236,7 @@ fn input_hash_matches(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
 fn follow_on_exists(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     flag(spec, pat, |v| {
         v.as_str()
-            .and_then(|rel| resolve(&ctx.study_dir, rel))
+            .and_then(|rel| resolve(&ctx.root, rel))
             .is_some_and(|p| !p.is_file())
     })
 }
@@ -248,7 +248,7 @@ fn data_fresh(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
         if !matches!(role, Some("selection" | "confirmation")) {
             continue;
         }
-        let Some(bytes) = rel.as_str().and_then(|r| input_bytes(&ctx.study_dir, r)) else {
+        let Some(bytes) = rel.as_str().and_then(|r| input_bytes(&ctx.root, r)) else {
             continue;
         };
         let (exact, normalized) = file_hashes(&bytes);

@@ -17,7 +17,7 @@ command = "ignorarium new --template numeric-ablation --id <id>"
 [[step]]
 id = "fill"
 title = "Fill in the spec"
-does = "Replace each empty field with the real value. Keep the comments for the fields you did not change."
+does = "Replace each empty field with the real value. Keep the comments for the fields you did not change. Write file paths from the study root: the nearest folder above the spec that holds ignorarium.toml, or the spec's own folder."
 produces = "A complete spec.toml."
 command = "edit studies/<id>/spec.toml"
 

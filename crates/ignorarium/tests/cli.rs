@@ -1,6 +1,7 @@
 mod common;
 
 use assert_cmd::Command;
+use ignorarium::cli::check;
 use ignorarium::home::Home;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -461,6 +462,139 @@ fn check_resolves_inputs_from_a_bare_filename() {
         .assert()
         .code(1);
     assert!(stdout(&a).contains("E-HSH-001"));
+}
+
+/// A study root with `ignorarium.toml`, the input at `root/data/example.txt`, and a
+/// spec in `root/spec/` made from the template.
+fn rooted(edit: impl Fn(String) -> String) -> (TempDir, PathBuf, PathBuf) {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(
+        home.join("machine.toml"),
+        "max_level = 1
+",
+    )
+    .unwrap();
+    let root = dir.path().join("root");
+    std::fs::create_dir_all(root.join("spec")).unwrap();
+    std::fs::create_dir_all(root.join("data")).unwrap();
+    std::fs::write(root.join("ignorarium.toml"), "").unwrap();
+    std::fs::write(root.join("data/example.txt"), "hello").unwrap();
+    let text = std::fs::read_to_string(TEMPLATE).unwrap();
+    let spec = root.join("spec/s.toml");
+    std::fs::write(&spec, edit(text)).unwrap();
+    (dir, home, spec)
+}
+
+fn pinned(t: String) -> String {
+    t.replace(
+        "sha256 = \"\"",
+        &format!("sha256 = \"{}\"", ignorarium::canon::sha256_hex(b"hello")),
+    )
+}
+
+#[test]
+fn a_spec_in_spec_reads_inputs_from_the_root() {
+    let (_d, home, spec) = rooted(pinned);
+    let a = bin(&home).arg("check").arg(&spec).assert().code(0);
+    assert!(!stdout(&a).contains("E-HSH-001"));
+    // A wrong pin fails with the same call: the file was found and hashed.
+    std::fs::write(
+        &spec,
+        pinned(std::fs::read_to_string(TEMPLATE).unwrap())
+            .replace(&ignorarium::canon::sha256_hex(b"hello"), &"0".repeat(64)),
+    )
+    .unwrap();
+    let a = bin(&home).arg("check").arg(&spec).assert().code(1);
+    assert!(stdout(&a).contains("E-HSH-001"));
+}
+
+#[test]
+fn follow_on_specs_resolve_from_the_root() {
+    let follow = |t: String| {
+        t.replace(
+            "follow_on = []",
+            "follow_on = [{ when = \"H1.pass\", spec = \"spec/next.toml\" }]",
+        )
+    };
+    let (_d, home, spec) = rooted(follow);
+    let root = spec.parent().unwrap().parent().unwrap();
+    let a = bin(&home).arg("check").arg(&spec).assert().code(1);
+    assert!(stdout(&a).contains("E-END-002"), "{}", stdout(&a));
+    std::fs::write(
+        root.join("spec/next.toml"),
+        "x = 1
+",
+    )
+    .unwrap();
+    let a = bin(&home).arg("check").arg(&spec).assert().code(0);
+    assert!(!stdout(&a).contains("E-END-002"));
+}
+
+#[test]
+fn no_marker_keeps_the_spec_folder() {
+    let dir = TempDir::new().unwrap();
+    let spec = dir.path().join("a/b/s.toml");
+    assert_eq!(check::study_root(&spec), dir.path().join("a/b"));
+    let bare = std::env::current_dir().unwrap();
+    assert_eq!(check::study_root(Path::new("s.toml")), bare);
+}
+
+#[test]
+fn the_nearest_marker_above_the_spec_wins() {
+    let dir = TempDir::new().unwrap();
+    let inner = dir.path().join("outer/inner");
+    std::fs::create_dir_all(inner.join("deep")).unwrap();
+    std::fs::write(dir.path().join("outer/ignorarium.toml"), "").unwrap();
+    let spec = inner.join("deep/s.toml");
+    assert_eq!(check::study_root(&spec), dir.path().join("outer"));
+    std::fs::write(inner.join("ignorarium.toml"), "").unwrap();
+    assert_eq!(check::study_root(&spec), inner);
+    std::fs::write(inner.join("deep/ignorarium.toml"), "").unwrap();
+    assert_eq!(check::study_root(&spec), inner.join("deep"));
+}
+
+#[test]
+fn a_marker_that_is_a_folder_or_a_link_is_not_a_marker() {
+    let dir = TempDir::new().unwrap();
+    let folder = dir.path().join("f");
+    std::fs::create_dir_all(folder.join("spec/ignorarium.toml")).unwrap();
+    assert_eq!(
+        check::study_root(&folder.join("spec/s.toml")),
+        folder.join("spec")
+    );
+    #[cfg(unix)]
+    {
+        let linked = dir.path().join("l");
+        std::fs::create_dir_all(linked.join("spec")).unwrap();
+        std::fs::write(linked.join("real.toml"), "").unwrap();
+        std::os::unix::fs::symlink(linked.join("real.toml"), linked.join("ignorarium.toml"))
+            .unwrap();
+        assert_eq!(
+            check::study_root(&linked.join("spec/s.toml")),
+            linked.join("spec")
+        );
+    }
+}
+
+#[test]
+fn review_shows_the_study_root() {
+    let (_d, home, spec) = rooted(|t| t);
+    let root = spec.parent().unwrap().parent().unwrap();
+    let a = bin(&home).arg("review").arg(&spec).assert();
+    assert!(stdout(&a).contains(&format!(
+        "Study root: {}
+",
+        root.display()
+    )));
+}
+
+#[test]
+fn dotdot_is_still_refused_under_a_root() {
+    let (_d, home, spec) = rooted(|t| t.replace("data/example.txt", "../x"));
+    let a = bin(&home).arg("check").arg(&spec).assert().code(1);
+    assert!(stdout(&a).contains("E-PTH-001"), "{}", stdout(&a));
 }
 
 #[test]

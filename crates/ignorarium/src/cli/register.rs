@@ -2,6 +2,7 @@
 use super::check::{self, Assessed};
 use super::{CliError, Ctx, Done};
 use crate::canon::to_canonical;
+use crate::derived::{REGISTER, Register};
 use crate::diag::render_human;
 use crate::estimate::defaults_json;
 use crate::files::{WriteOnceError, write_once};
@@ -13,7 +14,7 @@ use crate::records::{self, RecordDraft};
 use crate::rules::{self, input_bytes};
 use crate::spec::{self, model::Spec};
 use crate::{keys, time};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::Path;
 
@@ -62,17 +63,20 @@ fn record_body(
     log: &str,
     filled: &[(String, Value)],
     confirmatory: bool,
-) -> Value {
-    let mut body = json!({
-        "spec_hash": hash,
-        "leaf": leaf,
-        "log": log,
-        "defaults": defaults_json(filled),
-    });
-    if confirmatory {
-        body["timestamp"] = json!("pending");
-    }
-    body
+    root: &Path,
+) -> Result<Value, CliError> {
+    let root = root
+        .to_str()
+        .ok_or_else(|| CliError::usage("the study root is not valid text"))?;
+    serde_json::to_value(Register {
+        spec_hash: hash.into(),
+        leaf,
+        log: log.into(),
+        defaults: defaults_json(filled),
+        root: root.into(),
+        timestamp: confirmatory.then(|| "pending".into()),
+    })
+    .map_err(|e| io("register record", e))
 }
 
 /// `register` on the real stdin and stdout.
@@ -143,9 +147,9 @@ pub fn run(
         return Err(CliError::refuse("approval not given; nothing was written"));
     }
     // An input that changed since the check would make the stored hashes a lie.
-    let study_dir = check::study_dir(spec_path);
+    let root = &a.root;
     for (path, checked) in &a.input_hashes {
-        let now = input_bytes(&study_dir, path).map(|b| file_hashes(&b));
+        let now = input_bytes(root, path).map(|b| file_hashes(&b));
         if &now != checked {
             return Err(CliError::refuse(format!(
                 "input {path} changed or became unreadable since the check; nothing was written"
@@ -226,8 +230,15 @@ fn store(
         RecordDraft {
             study: id.into(),
             row: None,
-            kind: "register".into(),
-            body: record_body(&a.hash, leaf, log, &a.filled, mode == "confirmatory"),
+            kind: REGISTER.into(),
+            body: record_body(
+                &a.hash,
+                leaf,
+                log,
+                &a.filled,
+                mode == "confirmatory",
+                &a.root,
+            )?,
         },
     )
     .map_err(|e| io("records.jsonl", e))?;
@@ -237,17 +248,20 @@ fn store(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn only_a_confirmatory_record_is_pending() {
         let filled = [("design.alpha".to_string(), json!(0.005))];
-        let exp = record_body("sha256:ab", 3, "planlog", &filled, false);
+        let root = Path::new("/work/study");
+        let exp = record_body("sha256:ab", 3, "planlog", &filled, false, root).unwrap();
         assert_eq!(
             exp,
             json!({"spec_hash": "sha256:ab", "leaf": 3, "log": "planlog",
-                   "defaults": [{"path": "design.alpha", "value": 0.005}]})
+                   "defaults": [{"path": "design.alpha", "value": 0.005}],
+                   "root": "/work/study"})
         );
-        let conf = record_body("sha256:ab", 3, "testlog", &filled, true);
+        let conf = record_body("sha256:ab", 3, "testlog", &filled, true, root).unwrap();
         assert_eq!(conf["timestamp"], "pending");
         assert_eq!(conf["log"], "testlog");
     }

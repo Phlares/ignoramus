@@ -113,9 +113,10 @@ fn page(a: &Assessed) -> String {
         )
     });
     let mut s = format!(
-        "# Plan review: {}\n\nSpec hash: {}\n\n## Plan\n\n",
+        "# Plan review: {}\n\nSpec hash: {}\n\nStudy root: {}\n\n## Plan\n\n",
         at(v, "/study/id"),
-        a.hash
+        a.hash,
+        a.root.display()
     );
     s.push_str(&bullets([
         format!(

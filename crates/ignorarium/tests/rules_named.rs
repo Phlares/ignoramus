@@ -454,6 +454,22 @@ fn edited(edits: &[Edit]) -> Value {
 }
 
 #[test]
+fn checks_read_files_from_the_context_root() {
+    let dir = study_dir();
+    let other = tempfile::tempdir().unwrap();
+    assert_eq!(CheckCtx::empty(dir.path()).root, dir.path());
+    let spec = edited(&route(one("H1.fail", "f.toml")));
+    assert!(
+        !codes_paths(&named(&spec, dir.path()))
+            .contains(&("E-END-002", "scope.end_of_run.follow_on[0].spec"))
+    );
+    assert!(
+        codes_paths(&named(&spec, other.path()))
+            .contains(&("E-END-002", "scope.end_of_run.follow_on[0].spec"))
+    );
+}
+
+#[test]
 fn the_base_plan_passes_every_named_check() {
     let dir = study_dir();
     assert!(named(&ok(), dir.path()).is_empty());

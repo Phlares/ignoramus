@@ -8,11 +8,11 @@ A file path is absolute, starts with a drive, has a . or .. segment, contains a 
 
 ## Fix
 
-Write the path from the study folder with no `.` or `..` segment, no `:` or `\`, and no segment ending in a dot or space; write `data/x.txt`, not `./data/x.txt`.
+Write the path from the study root with no `.` or `..` segment, no `:` or `\`, and no segment ending in a dot or space; write `data/x.txt`, not `./data/x.txt`.
 
 ## Why
 
-The checker reads only files inside the study folder. It never follows links, so a spec cannot point it at other files.
+The checker reads only files inside the study root. It never follows links, so a spec cannot point it at other files.
 
 ## Applies to
 

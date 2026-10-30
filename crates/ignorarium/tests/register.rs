@@ -184,6 +184,33 @@ fn defaults_are_recorded_and_the_stored_spec_is_the_authors() {
 }
 
 #[test]
+fn register_records_the_absolute_root() {
+    let (f, spec) = setup("numeric-ablation", same);
+    let work = spec.parent().unwrap().to_path_buf();
+    go(&f, &spec, &answer(&spec), true).0.unwrap();
+    let rp = f.home.study_dir("my-study").join("records.jsonl");
+    // No marker: the root is the spec's folder.
+    assert_eq!(
+        records(&rp)[0]["record"]["body"]["root"],
+        work.to_str().unwrap()
+    );
+    // With a marker above the spec, the root is the marker's folder.
+    let (f, spec) = setup("numeric-ablation", same);
+    let work = spec.parent().unwrap().to_path_buf();
+    std::fs::create_dir(work.join("spec")).unwrap();
+    std::fs::rename(&spec, work.join("spec/s.toml")).unwrap();
+    std::fs::write(work.join("ignorarium.toml"), "").unwrap();
+    let spec = work.join("spec/s.toml");
+    let (r, out) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap().code, 0, "{out}");
+    let rp = f.home.study_dir("my-study").join("records.jsonl");
+    assert_eq!(
+        records(&rp)[0]["record"]["body"]["root"],
+        work.to_str().unwrap()
+    );
+}
+
+#[test]
 fn the_planted_spawn_template_registers_into_the_test_log() {
     let (f, spec) = setup("planted-spawn", same);
     let (r, out) = go(&f, &spec, &answer(&spec), true);

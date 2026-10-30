@@ -4,6 +4,7 @@ use crate::backend::rootfs;
 use crate::backend::{self, Backend, Exit, Probe, RowJob, RowOutcome, Watch};
 use crate::budget::{Alerts, Cost, CostMeter, Decision, HostMeter, decide, dimension_name};
 use crate::control::{self, ControlError, ControlFile, RunLock, Signal, State};
+use crate::derived::{REGISTER, Register};
 use crate::environ::{Builder, Built, Recipe};
 use crate::estimate::{apply_defaults, estimate, units};
 use crate::events::{self, Event};
@@ -209,10 +210,12 @@ pub fn prepare_with(
     let all = records::read_all(&dir.join("records.jsonl"), &key.verifying_key())?;
     let register = all
         .iter()
-        .find(|r| r.kind == "register")
+        .find(|r| r.kind == REGISTER)
         .ok_or_else(|| RunError::NotRegistered(study_id.into()))?;
+    let register =
+        Register::of(register).ok_or_else(|| RunError::NotRegistered(study_id.into()))?;
     let (spec, spec_hash, hash_text) = stored_spec(&dir)?;
-    if register.body["spec_hash"].as_str() != Some(hash_text.as_str()) {
+    if register.spec_hash != hash_text {
         return Err(RunError::SpecChanged);
     }
 
@@ -249,11 +252,9 @@ pub fn prepare_with(
         return Err(RunError::PayloadChanged);
     }
 
-    let leaf = register.body["leaf"]
-        .as_u64()
-        .ok_or_else(|| RunError::NotRegistered(study_id.into()))?;
-    let log = match register.body["log"].as_str() {
-        Some(l @ ("planlog" | "testlog")) => l,
+    let leaf = register.leaf;
+    let log = match register.log.as_str() {
+        l @ ("planlog" | "testlog") => l,
         other => {
             return Err(RunError::Records(format!(
                 "register record names log {other:?}"

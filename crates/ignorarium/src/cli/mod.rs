@@ -7,7 +7,7 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
 
-mod check;
+pub mod check;
 mod docs;
 mod guide;
 mod history;

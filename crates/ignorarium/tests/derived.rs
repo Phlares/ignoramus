@@ -1,4 +1,4 @@
-use ignorarium::derived::Estimate;
+use ignorarium::derived::{Estimate, Register};
 use ignorarium::records::Record;
 use serde_json::{Value, json};
 
@@ -41,4 +41,43 @@ fn an_extra_field_is_not_an_estimate() {
     let mut b = body();
     b["extra"] = json!(1);
     assert_eq!(Estimate::of(&rec("estimate", b)), None);
+}
+
+fn register_body() -> Value {
+    json!({
+        "spec_hash": "sha256:ab", "leaf": 3, "log": "planlog", "defaults": [],
+        "root": "/work/study"
+    })
+}
+
+#[test]
+fn a_register_record_parses_with_its_root() {
+    let r = Register::of(&rec("register", register_body())).unwrap();
+    assert_eq!(
+        (
+            r.spec_hash.as_str(),
+            r.leaf,
+            r.log.as_str(),
+            r.root.as_str()
+        ),
+        ("sha256:ab", 3, "planlog", "/work/study")
+    );
+    assert_eq!(r.timestamp, None);
+    let mut b = register_body();
+    b["timestamp"] = json!("pending");
+    let r = Register::of(&rec("register", b)).unwrap();
+    assert_eq!(r.timestamp.as_deref(), Some("pending"));
+}
+
+#[test]
+fn a_register_record_with_a_missing_or_extra_field_does_not_parse() {
+    assert_eq!(Register::of(&rec("estimate", register_body())), None);
+    for field in ["spec_hash", "leaf", "log", "defaults", "root"] {
+        let mut b = register_body();
+        b.as_object_mut().unwrap().remove(field);
+        assert_eq!(Register::of(&rec("register", b)), None, "{field}");
+    }
+    let mut b = register_body();
+    b["extra"] = json!(1);
+    assert_eq!(Register::of(&rec("register", b)), None);
 }
