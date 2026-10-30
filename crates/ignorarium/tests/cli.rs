@@ -59,7 +59,8 @@ fn guide_json_lists_every_step_with_its_output() {
     assert_eq!(
         ids,
         [
-            "brief", "template", "fill", "check", "review", "register", "run", "status", "report"
+            "brief", "template", "fill", "import", "check", "review", "register", "run", "status",
+            "report"
         ]
     );
     for s in steps {
@@ -86,6 +87,7 @@ fn guide_prints_steps_in_order() {
             .unwrap_or_else(|| panic!("{id}"))
     };
     assert!(at("brief") < at("template") && at("template") < at("report"));
+    assert!(at("fill") < at("import") && at("import") < at("check"));
     assert!(out.contains("ignorarium check"));
 }
 
@@ -1295,4 +1297,152 @@ fn logs_without_a_box_key_cannot_answer() {
         out.contains("The box cannot read its records: the box key is missing"),
         "{out}"
     );
+}
+
+// ---- import ----
+
+fn blob_lines(home: &Path) -> Vec<Value> {
+    std::fs::read_to_string(home.join("store/imports.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+#[test]
+fn import_prints_digests_and_signs_one_record_per_file() {
+    let (d, home, _) = setup(|t| t);
+    let (a, b) = (d.path().join("a.txt"), d.path().join("b.bin"));
+    std::fs::write(&a, "Hello  World").unwrap();
+    std::fs::write(&b, [0xff, 0xfe, 0x00]).unwrap();
+    let out = bin(&home)
+        .args(["import", "--source", "the pilot corpus"])
+        .args([&a, &b])
+        .assert()
+        .code(0);
+    let sha = ignorarium::canon::sha256_hex;
+    let (da, db) = (sha(b"Hello  World"), sha(&[0xff, 0xfe, 0x00]));
+    assert_eq!(
+        stdout(&out),
+        format!(
+            "{da}  {}
+{db}  {}
+",
+            a.display(),
+            b.display()
+        )
+    );
+    assert_eq!(
+        std::fs::read(home.join("store").join(&da)).unwrap(),
+        b"Hello  World"
+    );
+    let key = ignorarium::keys::load(&Home::open_at(&home).unwrap())
+        .unwrap()
+        .unwrap()
+        .verifying_key();
+    let recs = ignorarium::records::read_all(&home.join("store/imports.jsonl"), &key).unwrap();
+    assert_eq!(recs.len(), 2);
+    assert_eq!(
+        (recs[0].study.as_str(), recs[0].kind.as_str()),
+        ("store", "import")
+    );
+    assert_eq!(recs[0].row, None);
+    assert_eq!(
+        recs[0].body,
+        serde_json::json!({
+            "digest": da, "size": 12, "source": "the pilot corpus",
+            "normalized_sha256": sha(b"hello world"), "file": a.display().to_string()
+        })
+    );
+    assert_eq!(recs[1].body["digest"], db);
+    assert_eq!(recs[1].body["normalized_sha256"], "");
+    assert_eq!(recs[1].seq, 1);
+    let ev = events(&home);
+    assert_eq!(ev[0]["name"], "import");
+    assert_eq!(ev[0]["attrs"]["exit"], 0);
+}
+
+#[test]
+fn import_refuses_a_bad_file_before_it_adds_anything() {
+    let (d, home, _) = setup(|t| t);
+    let good = d.path().join("good.txt");
+    std::fs::write(&good, "x").unwrap();
+    for bad in [d.path().join("missing.txt"), d.path().to_path_buf()] {
+        let a = bin(&home)
+            .args(["import", "--source", "s"])
+            .arg(&good)
+            .arg(&bad)
+            .assert()
+            .code(2);
+        assert!(
+            stderr(&a).contains(&bad.display().to_string()),
+            "{}",
+            stderr(&a)
+        );
+        assert!(
+            !home
+                .join("store")
+                .join(ignorarium::canon::sha256_hex(b"x"))
+                .exists()
+        );
+        assert!(blob_lines(&home).is_empty());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn import_refuses_a_symlink() {
+    let (d, home, _) = setup(|t| t);
+    let real = d.path().join("real.txt");
+    std::fs::write(&real, "x").unwrap();
+    let link = d.path().join("link.txt");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let a = bin(&home)
+        .args(["import", "--source", "s"])
+        .arg(&link)
+        .assert()
+        .code(2);
+    assert!(stderr(&a).contains("not a regular file"), "{}", stderr(&a));
+    assert!(blob_lines(&home).is_empty());
+}
+
+#[test]
+fn import_refuses_a_source_that_looks_like_a_secret_and_does_not_echo_it() {
+    let (d, home, _) = setup(|t| t);
+    let f = d.path().join("a.txt");
+    std::fs::write(&f, "x").unwrap();
+    let secret = &format!("AKIA{}", "ABCDEFGHIJKLMNOP");
+    let a = bin(&home)
+        .args(["import", "--source", &format!("bucket key {secret}")])
+        .arg(&f)
+        .assert()
+        .code(1);
+    let err = stderr(&a);
+    assert!(err.contains("aws-key"), "{err}");
+    assert!(!err.contains(secret), "{err}");
+    assert!(!stdout(&a).contains(secret));
+    assert!(blob_lines(&home).is_empty());
+    assert!(
+        !home
+            .join("store")
+            .join(ignorarium::canon::sha256_hex(b"x"))
+            .exists()
+    );
+    // The event log keeps no copy of the secret either.
+    let log = std::fs::read_to_string(home.join("events.jsonl")).unwrap_or_default();
+    assert!(!log.contains(secret), "{log}");
+}
+
+#[test]
+fn import_needs_a_source() {
+    let (d, home, _) = setup(|t| t);
+    let f = d.path().join("a.txt");
+    std::fs::write(&f, "x").unwrap();
+    bin(&home).arg("import").arg(&f).assert().code(2);
+    let a = bin(&home)
+        .args(["import", "--source", ""])
+        .arg(&f)
+        .assert()
+        .code(2);
+    assert!(stderr(&a).contains("--source needs text"), "{}", stderr(&a));
 }

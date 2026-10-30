@@ -540,20 +540,21 @@ target = [
 [[rule]]
 code = "E-PTH-001"
 severity = "error"
-problem = "A file path is absolute, starts with a drive, has a . or .. segment, contains a backslash or a colon, has a segment ending in a dot or space, or passes through a symbolic link."
-instruction = "Write the path from the study root with no `.` or `..` segment, no `:` or `\\`, and no segment ending in a dot or space; write `data/x.txt`, not `./data/x.txt`."
+problem = "A file path is absolute, starts with a drive, has a . or .. segment, contains a backslash or a colon, has a segment ending in a dot or space, passes through a symbolic link, or lies inside the path of another input."
+instruction = "Write the path from the study root with no `.` or `..` segment, no `:` or `\\`, and no segment ending in a dot or space; write `data/x.txt`, not `./data/x.txt`. List a folder or the files in it, not both."
 why = "The checker reads only files inside the study root. It never follows links, so a spec cannot point it at other files."
 sources = []
 target = [
   { path = "inputs[*].path", check = "named:input-path-safe" },
+  { path = "inputs[*].path", check = "named:input-path-nested" },
   { path = "scope.end_of_run.follow_on[*].spec", check = "named:input-path-safe" },
 ]
 
 [[rule]]
 code = "E-HSH-001"
 severity = "error"
-problem = "An input file is missing or its SHA-256 differs from the pin."
-instruction = "Fix the path, or update the sha256 if the file was changed on purpose."
+problem = "An input is in neither place: the pin names no object in the box's store, and the file is missing or its SHA-256 differs from the pin."
+instruction = "Fix the path, or update the sha256 if the file was changed on purpose. To pin a stored object, run `ignorarium import` and use the digest it prints."
 why = "The pin says which bytes the plan was approved on. A different file is a different study."
 sources = []
 target = [

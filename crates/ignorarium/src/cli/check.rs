@@ -3,12 +3,14 @@ use super::{CliError, Ctx, Done, Run, out};
 use crate::diag::{Diagnostic, Severity, render_human};
 use crate::estimate::{Estimate, defaults_json, estimate, units};
 use crate::home::Home;
+use crate::inputs;
 use crate::keys;
 use crate::planlog::store::PlanLog;
-use crate::prior::{PriorError, PriorUse, file_hashes};
+use crate::prior::{PriorError, PriorUse};
 use crate::records;
-use crate::rules::{self, BoxRecords, CheckCtx, input_bytes};
+use crate::rules::{self, BoxRecords, CheckCtx};
 use crate::spec::{self, LoadError, model::Spec};
+use crate::store::Store;
 use ed25519_dalek::VerifyingKey;
 use serde_json::{Value, json};
 use std::path::{Component, Path, PathBuf};
@@ -70,13 +72,20 @@ impl BoxRecords for HomeRecords {
     }
 }
 
-/// Hash every input the spec lists. This is the one read `register` relies on.
-pub fn input_hashes(root: &Path, spec: &Value) -> Vec<(String, Option<(String, String)>)> {
-    let paths = spec["inputs"].as_array().map_or(&[][..], Vec::as_slice);
-    paths
-        .iter()
-        .filter_map(|i| i["path"].as_str())
-        .map(|p| (p.to_string(), input_bytes(root, p).map(|b| file_hashes(&b))))
+/// Hash every input the spec lists, from the store when the pin names a stored object.
+/// This is the one read `register` relies on.
+pub fn input_hashes(
+    store: &Store,
+    root: &Path,
+    spec: &Value,
+) -> Vec<(String, Option<(String, String)>)> {
+    let list = spec["inputs"].as_array().map_or(&[][..], Vec::as_slice);
+    list.iter()
+        .filter_map(|i| Some((i["path"].as_str()?, i["sha256"].as_str().unwrap_or(""))))
+        .map(|(p, sha)| {
+            let found = inputs::resolve(store, root, p, sha);
+            (p.to_string(), inputs::hashes(&found))
+        })
         .collect()
 }
 
@@ -145,6 +154,7 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
     let key = keys::load(home)
         .map(|k| k.map(|k| k.verifying_key()))
         .map_err(|e| e.to_string());
+    let store = Store::open(&home.root).map_err(|e| CliError::usage(format!("store: {e}")))?;
     let cc = CheckCtx {
         root: study_root(spec_path),
         prior,
@@ -154,12 +164,13 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
             home: home.clone(),
             key,
         }),
+        store,
     };
     let (value, filled, diags) = rules::check_all(&raw.value, rules::builtin(), &cc);
     let mut a = Assessed {
         root: cc.root.clone(),
         hash: raw.hash,
-        input_hashes: input_hashes(&cc.root, &value),
+        input_hashes: input_hashes(&cc.store, &cc.root, &value),
         value,
         filled,
         diags,

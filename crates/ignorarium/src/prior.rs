@@ -1,5 +1,6 @@
 //! Earlier-use lookup: has a data file already been seen by an earlier study?
 use crate::canon::sha256_hex;
+use crate::store::NORMALIZE_LIMIT;
 
 /// The earlier-use log cannot be read. Callers must treat this as a refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,10 +44,14 @@ pub fn normalized_sha256(text: &str) -> String {
 }
 
 /// `(exact, normalized)` SHA-256 of a file. The normalized hash is empty
-/// when the bytes are not UTF-8 text.
+/// when the bytes are not UTF-8 text or exceed `NORMALIZE_LIMIT`.
 pub fn file_hashes(bytes: &[u8]) -> (String, String) {
-    let normalized = std::str::from_utf8(bytes)
-        .map(normalized_sha256)
-        .unwrap_or_default();
+    let normalized = if bytes.len() as u64 <= NORMALIZE_LIMIT {
+        std::str::from_utf8(bytes)
+            .map(normalized_sha256)
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     (sha256_hex(bytes), normalized)
 }

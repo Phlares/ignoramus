@@ -4,12 +4,13 @@
 //! is missing or mistyped: the generic rules report that.
 use super::generic::{applies, diagnostic, join, select};
 use super::{BoxRecords, Check, NoRecords, Rule};
-use crate::canon::sha256_hex;
 use crate::derived::Estimate;
 use crate::diag::Diagnostic;
 use crate::estimate::distinct;
+use crate::inputs::{self, Found};
 use crate::power::required_units;
-use crate::prior::{PriorUse, file_hashes};
+use crate::prior::PriorUse;
+use crate::store::Store;
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
 
@@ -22,6 +23,8 @@ pub struct CheckCtx {
     /// The spec text the loader parsed, for checks that read comments.
     pub spec_text: String,
     pub records: Box<dyn BoxRecords>,
+    /// The content store inputs resolve from first.
+    pub store: Store,
 }
 
 impl CheckCtx {
@@ -33,6 +36,9 @@ impl CheckCtx {
             machine_max_level: 2,
             spec_text: String::new(),
             records: Box::new(NoRecords),
+            store: Store {
+                root: root.join("store"),
+            },
         }
     }
 }
@@ -73,6 +79,7 @@ const NAMED: &[(&str, NamedFn)] = &[
     ("trigger-declared", trigger_declared),
     ("isolation-reachable", isolation_reachable),
     ("input-path-safe", input_path_safe),
+    ("input-path-nested", input_path_nested),
     ("input-hash-matches", input_hash_matches),
     ("secret-scan", secret_scan),
     ("comment-scan", comment_scan),
@@ -200,6 +207,11 @@ fn read_file(path: &Path) -> Option<Vec<u8>> {
         .and_then(|_| std::fs::read(path).ok())
 }
 
+/// `rel` under `root` when it stays inside the folder; see `resolve`.
+pub fn input_path(root: &Path, rel: &str) -> Option<PathBuf> {
+    resolve(root, rel)
+}
+
 /// The bytes of the regular file `rel` names under `root`, or `None` when
 /// the path is unsafe or the file is absent.
 pub fn input_bytes(root: &Path, rel: &str) -> Option<Vec<u8>> {
@@ -213,6 +225,26 @@ fn input_path_safe(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     })
 }
 
+/// An input whose path lies inside another input's path (`data/a` and `data/a/b`).
+fn input_path_nested(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let all: Vec<(String, Vec<&str>)> = nodes(spec, pat)
+        .into_iter()
+        .filter_map(|(p, v)| {
+            Some((
+                p,
+                v.as_str()?.split('/').filter(|s| !s.is_empty()).collect(),
+            ))
+        })
+        .collect();
+    all.iter()
+        .filter(|(_, inner)| {
+            all.iter()
+                .any(|(_, outer)| outer.len() < inner.len() && inner.starts_with(outer))
+        })
+        .map(|(p, _)| hit(p.clone()))
+        .collect()
+}
+
 fn input_hash_matches(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     let mut out = vec![];
     for (path, input, sha) in with_parent(spec, pat) {
@@ -223,11 +255,10 @@ fn input_hash_matches(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
         if want.is_empty() {
             continue;
         }
-        let Some(file) = resolve(&ctx.root, rel) else {
-            continue;
-        };
-        if read_file(&file).map(|b| sha256_hex(&b)).as_deref() != Some(want) {
-            out.push(hit(path));
+        match inputs::resolve(&ctx.store, &ctx.root, rel, want) {
+            Found::Stored { .. } | Found::Unsafe => {}
+            Found::File { exact, .. } if exact == want => {}
+            Found::File { .. } | Found::Missing => out.push(hit(path)),
         }
     }
     out
@@ -248,10 +279,13 @@ fn data_fresh(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
         if !matches!(role, Some("selection" | "confirmation")) {
             continue;
         }
-        let Some(bytes) = rel.as_str().and_then(|r| input_bytes(&ctx.root, r)) else {
+        let sha = input.get("sha256").and_then(Value::as_str).unwrap_or("");
+        let found = rel
+            .as_str()
+            .and_then(|r| inputs::hashes(&inputs::resolve(&ctx.store, &ctx.root, r, sha)));
+        let Some((exact, normalized)) = found else {
             continue;
         };
-        let (exact, normalized) = file_hashes(&bytes);
         let detail = match ctx.prior.used(&exact, &normalized) {
             Ok(None) => continue,
             Ok(Some(id)) => format!("The earlier entry is {id}."),

@@ -4,7 +4,20 @@ use crate::keys;
 use crate::planlog::store::PlanLog;
 use crate::prior::file_hashes;
 use crate::runner::OWN_PREFIX;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Refuse a path that is missing, a link, or not a regular file.
+pub(super) fn regular_file(f: &Path) -> Result<(), CliError> {
+    let shown = f.display();
+    let regular = std::fs::symlink_metadata(f)
+        .map_err(|e| CliError::usage(format!("{shown}: {e}")))?
+        .is_file();
+    if regular {
+        Ok(())
+    } else {
+        Err(CliError::usage(format!("{shown}: not a regular file")))
+    }
+}
 
 pub fn run(ctx: &Ctx, phase: &str, files: &[PathBuf]) -> Run {
     let home = ctx.home()?;
@@ -19,14 +32,9 @@ pub fn run(ctx: &Ctx, phase: &str, files: &[PathBuf]) -> Run {
     // Every file is read before the log changes, so a bad file adds nothing.
     let mut data_hashes = Vec::new();
     for f in files {
-        let shown = f.display();
-        let regular = std::fs::symlink_metadata(f)
-            .map_err(|e| CliError::usage(format!("{shown}: {e}")))?
-            .is_file();
-        if !regular {
-            return Err(CliError::usage(format!("{shown}: not a regular file")));
-        }
-        let bytes = std::fs::read(f).map_err(|e| CliError::usage(format!("{shown}: {e}")))?;
+        regular_file(f)?;
+        let bytes =
+            std::fs::read(f).map_err(|e| CliError::usage(format!("{}: {e}", f.display())))?;
         data_hashes.push(file_hashes(&bytes));
     }
     let key = keys::load_or_create(home).map_err(|e| CliError::usage(format!("box key: {e}")))?;

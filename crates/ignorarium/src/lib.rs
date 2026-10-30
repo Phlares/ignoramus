@@ -12,6 +12,7 @@ pub mod estimate;
 pub mod events;
 pub mod files;
 pub mod home;
+pub mod inputs;
 pub mod keys;
 pub mod machine;
 pub mod payload;

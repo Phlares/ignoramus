@@ -9,10 +9,10 @@ use crate::files::{WriteOnceError, write_once};
 use crate::home::Home;
 use crate::planlog::store::{Leaf, PlanLog};
 use crate::planlog::{commitment, family};
-use crate::prior::file_hashes;
 use crate::records::{self, RecordDraft};
-use crate::rules::{self, input_bytes};
+use crate::rules;
 use crate::spec::{self, model::Spec};
+use crate::store::Store;
 use crate::{keys, time};
 use serde_json::Value;
 use std::io::{BufRead, IsTerminal, Write};
@@ -148,9 +148,10 @@ pub fn run(
     }
     // An input that changed since the check would make the stored hashes a lie.
     let root = &a.root;
-    for (path, checked) in &a.input_hashes {
-        let now = input_bytes(root, path).map(|b| file_hashes(&b));
-        if &now != checked {
+    let blobs = Store::open(&home.root).map_err(|e| io("store", e))?;
+    let now = check::input_hashes(&blobs, root, &a.value);
+    for ((path, checked), (_, now)) in a.input_hashes.iter().zip(&now) {
+        if now != checked {
             return Err(CliError::refuse(format!(
                 "input {path} changed or became unreadable since the check; nothing was written"
             )));

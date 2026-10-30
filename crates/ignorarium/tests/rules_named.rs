@@ -1171,3 +1171,89 @@ fn every_named_diagnostic_is_reported_at_a_path_its_target_matches() {
     assert!(seen.len() > 15, "{}", seen.len());
     assert!(matches_pattern("a[12].b", "a[*].b") && !matches_pattern("a.b", "a[*].b"));
 }
+
+// ---- inputs from the store ----
+
+/// Put `bytes` in the store under `dir` and return its digest and meta.
+fn stored(dir: &Path, bytes: &[u8]) -> (String, ignorarium::store::Meta) {
+    let src = tempfile::tempdir().unwrap();
+    std::fs::write(src.path().join("f"), bytes).unwrap();
+    ignorarium::store::Store::open(dir)
+        .unwrap()
+        .import(&src.path().join("f"))
+        .unwrap()
+}
+
+#[test]
+fn a_stored_input_passes_without_its_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let (digest, meta) = stored(dir.path(), b"Some  Text");
+    let spec = with_input("data/a.txt", &digest, "calibration");
+    assert!(named(&spec, dir.path()).is_empty());
+    // The store comes first: a different file at the path does not matter.
+    write(dir.path(), "data/a.txt", b"other bytes");
+    assert!(named(&spec, dir.path()).is_empty());
+    let store = ignorarium::store::Store::open(dir.path()).unwrap();
+    let got = ignorarium::cli::check::input_hashes(&store, dir.path(), &spec);
+    assert_eq!(
+        got,
+        [(
+            "data/a.txt".to_string(),
+            Some((digest, meta.normalized_sha256))
+        )]
+    );
+    assert_eq!(got[0].1.as_ref().unwrap().1, normalized_sha256("some text"));
+}
+
+#[test]
+fn a_stored_input_counts_for_freshness_through_its_meta() {
+    let dir = tempfile::tempdir().unwrap();
+    let (digest, meta) = stored(dir.path(), b"Some  Text");
+    let (prior, seen) = fake(None, Some(&meta.normalized_sha256));
+    let d = fresh(
+        &with_input("data/a.txt", &digest, "confirmation"),
+        dir.path(),
+        prior,
+    );
+    assert_eq!(codes_paths(&d), [("E-CNF-005", "inputs[0].path")]);
+    assert!(d[0].problem.ends_with("The earlier entry is entry-norm."));
+    assert_eq!(*seen.borrow(), [(digest, meta.normalized_sha256)]);
+}
+
+#[test]
+fn an_input_in_neither_place_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (digest, _) = stored(dir.path(), b"abc!");
+    let run = |path: &str, sha: &str| named(&with_input(path, sha, "calibration"), dir.path());
+    let hsh = [("E-HSH-001", "inputs[0].sha256")];
+    // The pin names no stored object and no file is there.
+    assert_eq!(codes_paths(&run("data/none.txt", ABC)), hsh);
+    // The pin is a stored digest: it passes.
+    assert!(run("data/none.txt", &digest).is_empty());
+    // A pin that is no digest at all, with a file under the path whose hash differs.
+    write(dir.path(), "data/a.txt", b"abc");
+    assert_eq!(codes_paths(&run("data/a.txt", "xyz")), hsh);
+    assert!(run("data/a.txt", ABC).is_empty());
+}
+
+#[test]
+fn an_input_inside_another_inputs_path_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let with_second = |first: &str, second: &str| {
+        let mut s = with_input(first, "", "calibration");
+        let mut extra = s["inputs"][0].clone();
+        extra["path"] = json!(second);
+        s["inputs"].as_array_mut().unwrap().push(extra);
+        named(&s, dir.path())
+    };
+    let nested = [("E-PTH-001", "inputs[1].path")];
+    assert_eq!(codes_paths(&with_second("data/a", "data/a/b")), nested);
+    // The inner path is flagged whichever comes first.
+    assert_eq!(
+        codes_paths(&with_second("data/a/b", "data/a")),
+        [("E-PTH-001", "inputs[0].path")]
+    );
+    // A shared name prefix is not a shared folder.
+    assert!(with_second("data/a", "data/ab").is_empty());
+    assert!(with_second("data/a", "data/b/a").is_empty());
+}

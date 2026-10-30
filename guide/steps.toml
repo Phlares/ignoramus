@@ -22,6 +22,13 @@ produces = "A complete spec.toml."
 command = "edit studies/<id>/spec.toml"
 
 [[step]]
+id = "import"
+title = "Import the data"
+does = "Optional. Add a data file to the box's store, then pin the input in the spec by the digest this prints. The store keeps the bytes, so the study does not depend on the file staying where it was."
+produces = "The file's SHA-256 digest and a signed entry in the store's import log."
+command = "ignorarium import --source <where the file came from> <file>"
+
+[[step]]
 id = "check"
 title = "Check the plan"
 does = "Run every rule on the spec. Fix each error the output lists, then run again until it passes."
