@@ -3,9 +3,13 @@
 //! cannot run level 2.
 mod common;
 use common::{in_child, is_child, write_exec};
+use ignorarium::backend::level1::Level1;
 use ignorarium::backend::level2::{Level2, guest_job, outcome_of, rootfs_disk, selftest_of};
 use ignorarium::backend::selftest::SelfTest;
-use ignorarium::backend::{Backend, Exit, Probe, RowJob, TIMEOUT_CODE, Watch, output_hash, rootfs};
+use ignorarium::backend::{
+    Backend, Exit, Probe, RowJob, RowOutcome, TIMEOUT_CODE, Watch, output_hash, rootfs,
+};
+use ignorarium::runner::{self, RunStatus};
 use ignorarium::store::Store;
 use ignorarium_guest::host::{Timings, VmError, VmOutcome};
 use ignorarium_guest::image::{KERNEL, VMM, sha256_file};
@@ -19,6 +23,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -38,7 +43,7 @@ struct Ready {
     level2: Level2,
     /// The environment root of the test image.
     root: PathBuf,
-    #[expect(dead_code, reason = "for tests that register a study from the image")]
+    /// The `docker save` tar the root came from.
     image: PathBuf,
 }
 
@@ -1074,4 +1079,195 @@ fn filling_out_is_the_payloads_result() {
     let o = r.level2.run_row(&job, &|| true).unwrap();
     assert_eq!(o.exit, Exit::Payload(7), "{o:?}");
     assert_eq!(o.output_hash, output_hash(&job.output_dir).unwrap());
+}
+
+#[test]
+fn registered_lists_levels_0_1_and_2() {
+    let levels: Vec<u8> = ignorarium::backend::registered()
+        .iter()
+        .map(|b| b.level())
+        .collect();
+    assert_eq!(levels, [0, 1, 2]);
+}
+
+#[test]
+fn probe_reaches_level_2_on_a_kvm_host() {
+    let Some(_r) = ready() else { return };
+    let lab = common::lab();
+    let a = assert_cmd::Command::cargo_bin("ignorarium")
+        .unwrap()
+        .env("IGNORARIUM_HOME", &lab.home.root)
+        .arg("probe")
+        .assert()
+        .code(0);
+    let out = String::from_utf8_lossy(&a.get_output().stdout).into_owned();
+    assert!(out.contains("max level: 2\n"), "{out}");
+    assert!(
+        out.contains("level 2 (cloud-hypervisor v54.0): available\n"),
+        "{out}"
+    );
+    assert!(out.ends_with("/dev/kvm: present\n"), "{out}");
+    let m = ignorarium::machine::load(&lab.home.root).unwrap();
+    assert_eq!(m.max_level, 2);
+}
+
+// -- the overhead of level 2 against level 1, through the runner -------------------------------
+
+/// Level 2 that records each row's boot time, in seconds.
+struct Timed {
+    inner: Level2,
+    boots: Rc<RefCell<Vec<f64>>>,
+}
+
+impl Backend for Timed {
+    fn level(&self) -> u8 {
+        self.inner.level()
+    }
+    fn probe(&self) -> Probe {
+        self.inner.probe()
+    }
+    fn launcher(&self) -> String {
+        self.inner.launcher()
+    }
+    fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> io::Result<RowOutcome> {
+        let (o, timings) = self.inner.run_timed(job, watch)?;
+        if let Some(t) = timings {
+            self.boots.borrow_mut().push(t.boot.as_secs_f64());
+        }
+        Ok(o)
+    }
+}
+
+const OVERHEAD_TRIALS: usize = 11;
+const OVERHEAD_ROWS: usize = 4;
+/// Two-sided 95% Student t for the 10 kept trials (9 degrees of freedom).
+const T95_9: f64 = 2.262;
+
+/// Registers a study of four rows at `min_isolation`, pinned to the environment `digest`.
+fn register_overhead(lab: &common::Lab, id: &str, min_isolation: u8, digest: &str) {
+    let work = lab.root.join(format!("work-{id}"));
+    fs::create_dir_all(work.join("data")).unwrap();
+    fs::write(work.join("data/example.txt"), "calibration").unwrap();
+    let text = fs::read_to_string("../../templates/numeric-ablation.toml")
+        .unwrap()
+        .replace("id = \"my-study\"", &format!("id = \"{id}\""))
+        .replace(
+            "min_isolation = 1",
+            &format!("min_isolation = {min_isolation}"),
+        )
+        .replace("units_per_cluster = 1", "units_per_cluster = 2")
+        .replace("environment = \"\"", &format!("environment = \"{digest}\""));
+    let spec_path = work.join("spec.toml");
+    fs::write(&spec_path, text).unwrap();
+    let hash = ignorarium::spec::load(&spec_path).unwrap().hash;
+    let typed = format!("{}\n", &hash["sha256:".len()..][..8]);
+    let mut out = Vec::new();
+    let mut input = io::Cursor::new(typed.into_bytes());
+    let done = ignorarium::cli::register::run(&spec_path, &lab.home, &mut input, &mut out, true)
+        .unwrap_or_else(|e| panic!("{}: {}", e.msg, String::from_utf8_lossy(&out)));
+    assert_eq!(done.code, 0, "{}", String::from_utf8_lossy(&out));
+    let dir = lab.home.study_dir(id);
+    fs::create_dir_all(dir.join("payload")).unwrap();
+    write_exec(&dir.join("payload/run"), common::PAYLOAD);
+    fs::create_dir_all(dir.join("data")).unwrap();
+    fs::write(dir.join("data/example.txt"), "calibration").unwrap();
+}
+
+/// The wall time of each row of study `id` but the first, in milliseconds; every row is `ok`.
+fn kept_walls(lab: &common::Lab, id: &str) -> Vec<f64> {
+    let mut rows = common::rows_of(lab, id);
+    rows.sort_by_key(|r| r.row);
+    assert_eq!(rows.len(), OVERHEAD_ROWS, "{id}");
+    rows.iter()
+        .skip(1)
+        .map(|r| {
+            assert_eq!(r.body["exit"], "ok", "{id}: {:?}", r.body);
+            r.body["wall_seconds"].as_f64().unwrap() * 1000.0
+        })
+        .collect()
+}
+
+fn mean(v: &[f64]) -> f64 {
+    v.iter().sum::<f64>() / v.len() as f64
+}
+
+/// The mean of `trials` and its 95% half-width, from the spread of the trial values.
+fn interval(trials: &[f64]) -> (f64, f64) {
+    let m = mean(trials);
+    let var = trials.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (trials.len() - 1) as f64;
+    (m, T95_9 * (var / trials.len() as f64).sqrt())
+}
+
+fn report(name: &str, rows: usize, trials: &[f64]) {
+    let (mean, ci95) = interval(trials);
+    let trials = trials.len();
+    println!(
+        r#"{{"series":"{name}","unit":"ms","trials":{trials},"n":{rows},"mean":{mean:.2},"ci95":{ci95:.2}}}"#
+    );
+}
+
+/// Level 1 against level 2 on one machine: 11 trials, trial 0 dropped (it builds the rootfs
+/// disk and warms the cache), the order alternating, the first row of each study dropped.
+/// Rows sit inside trials, so the interval comes from the 10 trial values, as in Georges et
+/// al. (2007) and Laaber et al. (2019).
+#[test]
+#[ignore = "measurement; run on the VPS for the pull request"]
+fn overhead_through_the_runner() {
+    let Some(r) = ready() else { return };
+    if let Some(why) = common::no_level1() {
+        panic!("the overhead needs level 1: {why}");
+    }
+    let lab = common::lab();
+    // Registration refuses a minimum the machine file does not reach.
+    fs::write(lab.home.root.join("machine.toml"), "max_level = 2\n").unwrap();
+    let store = Store::open(&lab.home.root).unwrap();
+    let digest = store
+        .put_reader(&mut File::open(&r.image).unwrap())
+        .unwrap();
+    let box_exe = env!("CARGO_BIN_EXE_ignorarium");
+    let (mut l1, mut l2, mut boot) = (vec![], vec![], vec![]);
+    let (mut l1_rows, mut l2_rows) = (0, 0);
+    for trial in 0..OVERHEAD_TRIALS {
+        let boots = Rc::new(RefCell::new(Vec::new()));
+        let mut walls = [Vec::new(), Vec::new()];
+        // Even trials run level 1 first, odd trials level 2 first.
+        let order = if trial % 2 == 0 { [1, 2] } else { [2, 1] };
+        for level in order {
+            let id = format!("overhead-l{level}-t{trial}");
+            register_overhead(&lab, &id, level, &digest);
+            let backend: Box<dyn Backend> = if level == 1 {
+                Box::new(Level1::with(Level1::new().bwrap, box_exe.into()))
+            } else {
+                Box::new(Timed {
+                    inner: Level2::new(),
+                    boots: boots.clone(),
+                })
+            };
+            let plan = runner::prepare_with(&lab.home, &id, vec![backend]).unwrap();
+            assert_eq!(runner::run(&plan).unwrap(), RunStatus::Done, "{id}");
+            walls[level as usize - 1] = kept_walls(&lab, &id);
+        }
+        if trial == 0 {
+            continue;
+        }
+        let boots = boots.borrow();
+        assert_eq!(boots.len(), OVERHEAD_ROWS, "one boot per level 2 row");
+        l1_rows += walls[0].len();
+        l2_rows += walls[1].len();
+        l1.push(mean(&walls[0]));
+        l2.push(mean(&walls[1]));
+        boot.push(mean(&boots[1..]) * 1000.0);
+    }
+    assert_eq!((l1_rows, l2_rows), (30, 30));
+    let diff: Vec<f64> = l2.iter().zip(&l1).map(|(b, a)| b - a).collect();
+    for series in [&l1, &l2, &boot] {
+        assert!(
+            series.iter().all(|x| x.is_finite() && *x > 0.0),
+            "{series:?}"
+        );
+    }
+    report("l1_row", l1_rows, &l1);
+    report("l2_row", l2_rows, &l2);
+    report("l2_boot", l2_rows, &boot);
+    report("l2_minus_l1", l2_rows, &diff);
 }

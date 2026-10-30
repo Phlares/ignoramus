@@ -3,10 +3,13 @@
 mod common;
 use assert_cmd::Command;
 use common::{Lab, kind_of, lab, no_level1, plain, register_study, with_payload};
+use ignorarium::backend::level2::Level2;
+use ignorarium::backend::{Backend, Probe};
 use ignorarium::cli::status::blind_order;
 use ignorarium::control::{ControlFile, RunLock, Signal, State};
 use ignorarium::keys;
 use serde_json::Value;
+use std::path::Path;
 use std::time::Duration;
 
 fn bin(lab: &Lab) -> Command {
@@ -61,14 +64,24 @@ fn probe_writes_machine_toml_and_prints_the_level() {
         "max_level = 0\nrate_usd_per_hour = 2.5\n",
     )
     .unwrap();
-    // Level 1 where bubblewrap can run here, else level 0.
-    let want = u8::from(no_level1().is_none());
+    // The highest level that probes available here.
+    let want = match (Level2::new().probe(), no_level1()) {
+        (Probe::Available, _) => 2,
+        (_, None) => 1,
+        _ => 0,
+    };
     let a = bin(&lab).arg("probe").assert().code(0);
     let out = text(&a);
     assert!(out.contains(&format!("max level: {want}")), "{out}");
-    assert!(out.contains("/dev/kvm"), "{out}");
+    assert!(out.contains("level 2 ("), "{out}");
+    let kvm = if Path::new("/dev/kvm").exists() {
+        "present"
+    } else {
+        "absent"
+    };
+    assert!(out.ends_with(&format!("/dev/kvm: {kvm}\n")), "{out}");
     assert!(out.contains("level 0 (process): available\n"), "{out}");
-    if want == 1 {
+    if want >= 1 {
         assert!(out.contains("): available\n"), "{out}");
         assert!(out.contains("level 1 (bubblewrap 0."), "{out}");
     }

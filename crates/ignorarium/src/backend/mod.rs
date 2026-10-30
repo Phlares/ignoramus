@@ -98,7 +98,11 @@ pub trait Backend {
 
 /// Every backend this build knows, lowest level first.
 pub fn registered() -> Vec<Box<dyn Backend>> {
-    vec![Box::new(level0::Level0), Box::new(level1::Level1::new())]
+    vec![
+        Box::new(level0::Level0),
+        Box::new(level1::Level1::new()),
+        Box::new(level2::Level2::new()),
+    ]
 }
 
 /// The CPUs this host gives a row: what the OS reports, 1 when it cannot.

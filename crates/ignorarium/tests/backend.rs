@@ -421,6 +421,10 @@ fn every_registered_backend_reports_each_sandbox_start_as_a_leader() {
     let box_exe = env!("CARGO_BIN_EXE_ignorarium");
     for b in ignorarium::backend::registered() {
         let level = b.level();
+        // Level 2 needs an environment image; its leaders are covered in tests/level2.rs.
+        if level == 2 {
+            continue;
+        }
         let b: Box<dyn Backend> = if level == 1 {
             Box::new(level1::Level1::with(bwrap.clone(), box_exe.into()))
         } else {

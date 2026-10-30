@@ -12,11 +12,7 @@ pub fn run(ctx: &Ctx) -> Run {
     let m = machine::measure(&home.root, &probes).map_err(|e| CliError::refuse(e.to_string()))?;
     machine::write(&home.root, &m).map_err(|e| CliError::usage(e.to_string()))?;
     let kvm = Path::new("/dev/kvm").exists();
-    let note = if kvm {
-        "present (level 2 needs a backend this build lacks)"
-    } else {
-        "absent (level 2 is not possible here)"
-    };
+    let kvm_word = if kvm { "present" } else { "absent" };
     let mut report = String::new();
     for (b, (level, probe)) in backends.iter().zip(&probes) {
         let answer = match probe {
@@ -26,7 +22,7 @@ pub fn run(ctx: &Ctx) -> Run {
         report.push_str(&format!("level {level} ({}): {answer}\n", b.launcher()));
     }
     out(&format!(
-        "machine: {}\ncpus: {}\nmemory: {} GiB\n{report}max level: {}\n/dev/kvm: {note}\n",
+        "machine: {}\ncpus: {}\nmemory: {} GiB\n{report}max level: {}\n/dev/kvm: {kvm_word}\n",
         m.name, m.cpus, m.mem_gib, m.max_level
     ))?;
     Ok(Done {
