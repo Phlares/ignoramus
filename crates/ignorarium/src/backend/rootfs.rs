@@ -12,10 +12,12 @@
 //! data, the parts outside the kept folders included. An image over the budget fails and
 //! publishes nothing.
 //!
-//! A fence bounds the memory of the tar reader. After it yields an entry, it may read that
-//! entry's declared data and `EXTENSION` (1 MiB) more before it yields the next one. It skips
-//! data through a fixed buffer, but holds long names, long link names and PAX records in
-//! memory. The outer archive and every layer stream have a fence.
+//! A fence bounds the memory of the tar reader. After it yields an entry, it may read the data
+//! that entry stores, padded to whole 512-byte blocks, and `EXTENSION` (1 MiB) more before it
+//! yields the next one. It skips data through a fixed buffer, but holds long names, long link
+//! names and PAX records in memory. The outer archive and every layer stream have a fence.
+//! A GNU sparse entry is refused in both: its reported size is the expanded file, which would
+//! move the fence past data the archive does not hold.
 use crate::files::temp_beside;
 use crate::home::make_private_dir;
 use crate::store::{Store, StoreError};
@@ -53,8 +55,10 @@ const HEAD: u64 = (USTAR_AT + USTAR.len()) as u64;
 pub const WRITE_CAP: u64 = 32 << 30;
 /// What one entry written costs the budget.
 const ENTRY: u64 = 4 << 10;
-/// What the tar reader may read past an entry's declared data before it yields the next one.
+/// What the tar reader may read past an entry's stored data before it yields the next one.
 const EXTENSION: u64 = 1 << 20;
+/// A tar block: headers and padded data come in these.
+const BLOCK: u64 = 512;
 
 #[derive(Debug)]
 pub enum RootfsError {
@@ -182,7 +186,7 @@ fn with_member<T>(
     });
     for entry in outer.entries().map_err(tar_err)? {
         let mut entry = entry.map_err(tar_err)?;
-        fence.past(&entry);
+        fence.past(&entry)?;
         let is_file = matches!(
             entry.header().entry_type(),
             EntryType::Regular | EntryType::Continuous
@@ -284,11 +288,23 @@ impl Meter {
             .saturating_add(1)
     }
 
-    /// For a fence: the reader yielded `entry`, so it may read the entry's declared data, then
-    /// `EXTENSION` more for the padding, the next header and its extensions.
-    fn past<R: Read>(&self, entry: &tar::Entry<'_, R>) {
-        let data_end = entry.raw_file_position().saturating_add(entry.size());
+    /// For a fence: the reader yielded `entry`, so it may read the data the entry stores, padded
+    /// to whole blocks, then `EXTENSION` more for the next header and its extensions.
+    ///
+    /// A GNU sparse entry is refused: the reader reports its expanded size, not the data it
+    /// stores. For every other entry the size is the stored data, the header's size or the PAX
+    /// `size` record that replaces it, which is what the reader skips.
+    fn past<R: Read>(&self, entry: &tar::Entry<'_, R>) -> Result<(), RootfsError> {
+        if entry.header().entry_type().is_gnu_sparse() {
+            return Err(RootfsError::Format(format!(
+                "{} is a GNU sparse file (image archives do not use them)",
+                String::from_utf8_lossy(&entry.path_bytes())
+            )));
+        }
+        let stored = entry.size().div_ceil(BLOCK).saturating_mul(BLOCK);
+        let data_end = entry.raw_file_position().saturating_add(stored);
         self.end.set(data_end.saturating_add(EXTENSION));
+        Ok(())
     }
 }
 
@@ -397,7 +413,7 @@ impl<'a> Tree<'a> {
         });
         for entry in ar.entries().map_err(tar_err)? {
             let mut entry = entry.map_err(tar_err)?;
-            fence.past(&entry);
+            fence.past(&entry)?;
             let Some(path) = normalize(&entry.path_bytes())? else {
                 continue;
             };
@@ -460,8 +476,7 @@ impl<'a> Tree<'a> {
                 })?;
                 self.hard_link(path, &target)?
             }
-            // Devices, pipes, sockets and the rest (GNU sparse files too, whose holes do not
-            // come from the counted stream) are not part of the root.
+            // Devices, pipes, sockets and the rest are not part of the root.
             _ => return Ok(()),
         }
         Ok(self.budget.charge(ENTRY)?)

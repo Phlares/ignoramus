@@ -1272,6 +1272,109 @@ fn the_outer_archive_is_fenced_too() {
 }
 
 #[test]
+fn the_window_after_an_entry_starts_past_its_padding() {
+    let (_h, store) = store();
+    // After a 1-byte file and its 511 bytes of padding: the long-name header, its data and
+    // the next file header may take 1 MiB.
+    let layer = |n: usize| {
+        let mut b = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_path("var/a").unwrap();
+        h.set_mode(0o644);
+        h.set_size(1);
+        h.set_cksum();
+        b.append(&h, &b"a"[..]).unwrap();
+        extended(
+            &mut b,
+            tar::EntryType::GNULongName,
+            "v".repeat(n).as_bytes(),
+            "var/x",
+        );
+        b.into_inner().unwrap()
+    };
+    let at = image_of(
+        &store,
+        &[layer(MIB - 1024), layer_bytes(&[M::File("usr/a", "A")])],
+    );
+    assert_eq!(
+        files_under(&from_store(&store, &at).unwrap()),
+        ["usr", "usr/a"]
+    );
+    let past = image_of(&store, &[layer(MIB - 1023)]);
+    fails_cleanly(&store, &past, rootfs::WRITE_CAP, FENCED);
+}
+
+/// Append a GNU sparse member `name` that stores `stored` bytes and expands to `logical`
+/// bytes: one data block at the end, a hole before it.
+fn sparse(b: &mut tar::Builder<Vec<u8>>, name: &str, stored: u64, logical: u64) {
+    let mut h = tar::Header::new_gnu();
+    h.set_path(name).unwrap();
+    h.set_entry_type(tar::EntryType::GNUSparse);
+    h.set_mode(0o644);
+    h.set_size(stored);
+    let gnu = h.as_gnu_mut().unwrap();
+    gnu.set_real_size(logical);
+    gnu.sparse[0].set_offset(logical - stored);
+    gnu.sparse[0].set_length(stored);
+    h.set_cksum();
+    b.append(&h, &vec![b's'; stored as usize][..]).unwrap();
+}
+
+fn sparse_refused(name: &str) -> String {
+    format!("bad image archive: {name} is a GNU sparse file (image archives do not use them)")
+}
+
+#[test]
+fn a_gnu_sparse_member_is_refused() {
+    let (_h, store) = store();
+    let mut b = tar::Builder::new(Vec::new());
+    sparse(&mut b, "usr/s", 512, 4096);
+    let digest = image_of(
+        &store,
+        &[
+            layer_bytes(&[M::File("usr/a", "A")]),
+            b.into_inner().unwrap(),
+        ],
+    );
+    fails_cleanly(&store, &digest, rootfs::WRITE_CAP, &sparse_refused("usr/s"));
+    // In the outer archive too, before the member the box looks for.
+    let mut b = tar::Builder::new(Vec::new());
+    sparse(&mut b, "x", 512, 4096);
+    let manifest = br#"[{"Layers":["l0/layer.tar"]}]"#;
+    let layer = layer_bytes(&[M::File("usr/a", "A")]);
+    for (name, data) in [
+        ("manifest.json", &manifest[..]),
+        ("l0/layer.tar", &layer[..]),
+    ] {
+        let mut h = tar::Header::new_gnu();
+        h.set_path(name).unwrap();
+        h.set_mode(0o644);
+        h.set_size(data.len() as u64);
+        h.set_cksum();
+        b.append(&h, data).unwrap();
+    }
+    let digest = store.put(&b.into_inner().unwrap()).unwrap();
+    fails_cleanly(&store, &digest, rootfs::WRITE_CAP, &sparse_refused("x"));
+}
+
+#[test]
+fn a_sparse_member_cannot_widen_the_fence() {
+    let (_h, store) = store();
+    // 512 bytes stored that expand to 1 TiB, then a 4 MiB long name.
+    let mut b = tar::Builder::new(Vec::new());
+    sparse(&mut b, "usr/s", 512, 1 << 40);
+    extended(
+        &mut b,
+        tar::EntryType::GNULongName,
+        &vec![b'v'; 4 * MIB],
+        "var/x",
+    );
+    let digest = image_of(&store, &[b.into_inner().unwrap()]);
+    // A budget one byte past the fence: the error shows the long name was never read.
+    fails_cleanly(&store, &digest, (MIB + 1) as u64, &sparse_refused("usr/s"));
+}
+
+#[test]
 fn a_plain_tar_whose_first_name_starts_like_bzip2_extracts() {
     let (_h, store) = store();
     let digest = image_of(
