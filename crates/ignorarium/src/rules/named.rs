@@ -200,6 +200,10 @@ fn resolve(root: &Path, rel: &str) -> Option<PathBuf> {
 }
 
 /// The bytes of a regular file; never opens a pipe or device.
+pub fn read_regular(path: &Path) -> Option<Vec<u8>> {
+    read_file(path)
+}
+
 fn read_file(path: &Path) -> Option<Vec<u8>> {
     path.metadata()
         .ok()
@@ -259,6 +263,10 @@ fn input_hash_matches(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
             Found::Stored { .. } | Found::Unsafe => {}
             Found::File { exact, .. } if exact == want => {}
             Found::File { .. } | Found::Missing => out.push(hit(path)),
+            Found::Damaged(why) => out.push(Hit {
+                path,
+                detail: Some(format!("The store entry for this pin is damaged: {why}.")),
+            }),
         }
     }
     out

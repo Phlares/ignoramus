@@ -182,7 +182,7 @@ fn bad_digests_are_refused() {
 // ---- import ----
 
 use ignorarium::canon::sha256_hex;
-use ignorarium::prior::{file_hashes, normalized_sha256};
+use ignorarium::prior::{file_hashes, file_hashes_within, normalized_sha256};
 use ignorarium::store::{Meta, NORMALIZE_LIMIT};
 
 fn source(bytes: &[u8]) -> (tempfile::TempDir, std::path::PathBuf) {
@@ -256,22 +256,54 @@ fn a_binary_file_has_no_normalized_hash() {
 }
 
 #[test]
-fn the_normalized_hash_stops_at_the_size_limit() {
-    let at = vec![b'a'; NORMALIZE_LIMIT as usize];
-    let over = vec![b'a'; NORMALIZE_LIMIT as usize + 1];
-    // One function decides: the store and the plan log agree on both sides of the limit.
-    assert_eq!(file_hashes(&at).1, normalized_sha256(&"a".repeat(at.len())));
-    assert_eq!(file_hashes(&over).1, "");
+fn the_limit_is_64_mib_and_the_plain_calls_use_it() {
+    assert_eq!(NORMALIZE_LIMIT, 64 << 20);
     let (_d, s) = open();
-    let (_src, f) = source(&at);
+    let (_src, f) = source(b"Some  Text");
     assert_eq!(
         s.import(&f).unwrap().1.normalized_sha256,
-        file_hashes(&at).1
+        file_hashes(b"Some  Text").1
     );
-    let (_src2, f2) = source(&over);
-    let (_, meta) = s.import(&f2).unwrap();
-    assert_eq!(meta.size, NORMALIZE_LIMIT + 1);
-    assert_eq!(meta.normalized_sha256, "");
+    assert_eq!(
+        file_hashes_within(b"Some  Text", NORMALIZE_LIMIT),
+        file_hashes(b"Some  Text")
+    );
+}
+
+#[test]
+fn the_normalized_hash_stops_at_the_size_limit() {
+    let (at, over) = (b"Ab Cd  e", b"Ab Cd  eF");
+    assert_eq!(file_hashes_within(at, 8).1, normalized_sha256("ab cd e"));
+    assert_eq!(file_hashes_within(over, 8).1, "");
+    assert_eq!(file_hashes_within(over, 8).0, sha256_hex(over));
+    let (_d, s) = open();
+    let (_src, f) = source(at);
+    let (_, meta) = s.import_within(&f, 8).unwrap();
+    assert_eq!(
+        (meta.size, meta.normalized_sha256),
+        (8, normalized_sha256("ab cd e"))
+    );
+    let (_src2, f2) = source(over);
+    let (_, meta) = s.import_within(&f2, 8).unwrap();
+    assert_eq!((meta.size, meta.normalized_sha256), (9, String::new()));
+}
+
+#[test]
+fn re_importing_over_a_corrupt_blob_is_refused_and_writes_no_meta() {
+    let (_d, s) = open();
+    let (_src, f) = source(b"abc");
+    let digest = sha256_hex(b"abc");
+    std::fs::write(s.root.join(&digest), b"bad").unwrap();
+    assert!(s.import(&f).is_err());
+    assert!(!meta_file(&s, &digest).exists());
+}
+
+#[test]
+fn re_importing_over_an_intact_blob_succeeds() {
+    let (_d, s) = open();
+    let (_src, f) = source(b"abc");
+    s.put(b"abc").unwrap();
+    assert_eq!(s.import(&f).unwrap().0, sha256_hex(b"abc"));
 }
 
 #[test]

@@ -2,7 +2,7 @@
 use crate::canon::sha256_hex;
 use crate::files::{self, WriteOnceError};
 use crate::home::{HomeError, make_private_dir};
-use crate::prior::file_hashes;
+use crate::prior::file_hashes_within;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -11,9 +11,7 @@ use std::path::{Path, PathBuf};
 
 const MODE: u32 = 0o444;
 
-/// The largest file that gets a normalized hash. Larger files, and files that are not
-/// UTF-8 text, have none.
-pub const NORMALIZE_LIMIT: u64 = 64 << 20;
+pub use crate::prior::NORMALIZE_LIMIT;
 
 /// What the store knows about one blob besides its bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,11 +112,15 @@ impl Store {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 // `hard_link` also reports AlreadyExists for a symlink at the path.
-                if fs::symlink_metadata(self.root.join(&digest))?
-                    .file_type()
-                    .is_symlink()
-                {
+                let path = self.root.join(&digest);
+                if fs::symlink_metadata(&path)?.file_type().is_symlink() {
                     return Err(StoreError::Link);
+                }
+                // The blob was there before: its bytes must still be the digest's.
+                let mut hasher = Sha256::new();
+                io::copy(&mut fs::File::open(&path)?, &mut hasher)?;
+                if hex::encode(hasher.finalize()) != digest {
+                    return Err(io::Error::other("stored blob differs").into());
                 }
             }
             Err(e) => return Err(e.into()),
@@ -127,27 +129,36 @@ impl Store {
     }
 
     /// Add the regular file `file` to the store: stream it under its digest and write its
-    /// `Meta` once. A link or a file of another kind is refused.
+    /// `Meta` once. A link or a file of another kind is refused, and so is a stored blob
+    /// that does not hash to its digest.
     pub fn import(&self, file: &Path) -> Result<(String, Meta), StoreError> {
+        self.import_within(file, NORMALIZE_LIMIT)
+    }
+
+    /// `import` with another limit for the normalized hash.
+    pub fn import_within(&self, file: &Path, limit: u64) -> Result<(String, Meta), StoreError> {
         let kind = fs::symlink_metadata(file)?.file_type();
         if kind.is_symlink() {
             return Err(StoreError::Link);
         }
-        let mut f = fs::File::open(file)?;
-        if !kind.is_file() || !f.metadata()?.is_file() {
+        if !kind.is_file() {
             return Err(StoreError::NotRegular);
         }
-        let digest = self.put_reader(&mut f)?;
-        let blob = self.path(&digest)?;
-        let size = fs::metadata(&blob)?.len();
-        let normalized_sha256 = if size <= NORMALIZE_LIMIT {
-            file_hashes(&fs::read(&blob)?).1
-        } else {
-            String::new()
+        let mut f = fs::File::open(file)?;
+        if !f.metadata()?.is_file() {
+            return Err(StoreError::NotRegular);
+        }
+        // One read: the stream feeds the blob, the size and the normalized hash.
+        let mut seen = Seen {
+            inner: &mut f,
+            size: 0,
+            head: Vec::new(),
+            limit,
         };
+        let digest = self.put_reader(&mut seen)?;
         let meta = Meta {
-            size,
-            normalized_sha256,
+            size: seen.size,
+            normalized_sha256: file_hashes_within(&seen.head, limit).1,
         };
         let dir = self.root.join("meta");
         make_private_dir(&dir, false, true)?;
@@ -203,5 +214,24 @@ impl Write for Tee {
 
     fn flush(&mut self) -> io::Result<()> {
         self.file.flush()
+    }
+}
+
+/// A reader that counts what passes and keeps the first `limit + 1` bytes: enough to
+/// normalize a file within the limit, and to see that a larger one is over it.
+struct Seen<'a, R> {
+    inner: &'a mut R,
+    size: u64,
+    head: Vec<u8>,
+    limit: u64,
+}
+
+impl<R: Read> Read for Seen<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.size += n as u64;
+        let room = (self.limit + 1).saturating_sub(self.head.len() as u64) as usize;
+        self.head.extend_from_slice(&buf[..n.min(room)]);
+        Ok(n)
     }
 }

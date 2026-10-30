@@ -1351,10 +1351,11 @@ fn import_prints_digests_and_signs_one_record_per_file() {
         recs[0].body,
         serde_json::json!({
             "digest": da, "size": 12, "source": "the pilot corpus",
-            "normalized_sha256": sha(b"hello world"), "file": a.display().to_string()
+            "normalized_sha256": sha(b"hello world"), "file": "a.txt"
         })
     );
     assert_eq!(recs[1].body["digest"], db);
+    assert_eq!(recs[1].body["file"], "b.bin");
     assert_eq!(recs[1].body["normalized_sha256"], "");
     assert_eq!(recs[1].seq, 1);
     let ev = events(&home);
@@ -1445,4 +1446,113 @@ fn import_needs_a_source() {
         .assert()
         .code(2);
     assert!(stderr(&a).contains("--source needs text"), "{}", stderr(&a));
+}
+
+#[test]
+fn a_whitespace_only_source_is_refused() {
+    let (d, home, _) = setup(|t| t);
+    let f = d.path().join("a.txt");
+    std::fs::write(&f, "x").unwrap();
+    let a = bin(&home)
+        .args(["import", "--source", "  "])
+        .arg(&f)
+        .assert()
+        .code(2);
+    assert!(stderr(&a).contains("--source needs text"), "{}", stderr(&a));
+}
+
+#[test]
+fn import_refuses_a_home_path_in_the_source_and_a_secret_in_the_file_name() {
+    let (d, home, _) = setup(|t| t);
+    let f = d.path().join("a.txt");
+    std::fs::write(&f, "x").unwrap();
+    for src in [
+        format!("copied from /{}/{}/data", "home", "alice"),
+        format!("copied from /{}/{}/data", "Users", "alice"),
+        format!("copied from C:\\{}\\{}\\data", "Users", "alice"),
+    ] {
+        let a = bin(&home)
+            .args(["import", "--source", &src])
+            .arg(&f)
+            .assert()
+            .code(1);
+        assert!(stderr(&a).contains("home-path"), "{src}: {}", stderr(&a));
+        assert!(!stderr(&a).contains("alice"), "{}", stderr(&a));
+    }
+    // A placeholder is not a path.
+    bin(&home)
+        .args(["import", "--source", "kept under /home/<name>/data"])
+        .arg(&f)
+        .assert()
+        .code(0);
+    let secret = format!("AKIA{}.txt", "ABCDEFGHIJKLMNOP");
+    let g = d.path().join(&secret);
+    std::fs::write(&g, "y").unwrap();
+    let a = bin(&home)
+        .args(["import", "--source", "s"])
+        .arg(&g)
+        .assert()
+        .code(1);
+    assert!(stderr(&a).contains("aws-key"), "{}", stderr(&a));
+    assert!(!stderr(&a).contains(&secret), "{}", stderr(&a));
+}
+
+#[test]
+fn a_signed_import_record_holds_the_file_name_only() {
+    let (d, home, _) = setup(|t| t);
+    let sub = d.path().join("deep/er");
+    std::fs::create_dir_all(&sub).unwrap();
+    let f = sub.join("a.txt");
+    std::fs::write(&f, "x").unwrap();
+    let a = bin(&home)
+        .args(["import", "--source", "s"])
+        .arg(&f)
+        .assert()
+        .code(0);
+    // The path as given is printed, and kept out of the record.
+    assert!(stdout(&a).contains("deep"), "{}", stdout(&a));
+    let raw = std::fs::read_to_string(home.join("store/imports.jsonl")).unwrap();
+    assert!(!raw.contains("deep"), "{raw}");
+}
+
+#[test]
+fn check_creates_no_store_folder() {
+    let (_d, home, spec) = setup(no_alpha);
+    bin(&home).arg("check").arg(&spec).assert().code(0);
+    assert!(!home.join("store").exists());
+}
+
+#[test]
+fn register_accepts_an_input_that_only_the_store_holds() {
+    let (d, home, _) = setup(|t| t);
+    let f = d.path().join("corpus.txt");
+    std::fs::write(&f, "Stored  Words").unwrap();
+    bin(&home)
+        .args(["import", "--source", "s"])
+        .arg(&f)
+        .assert()
+        .code(0);
+    let digest = ignorarium::canon::sha256_hex(b"Stored  Words");
+    let spec = d.path().join("stored-spec.toml");
+    let text = std::fs::read_to_string(TEMPLATE).unwrap();
+    let pin = format!("sha256 = \"{digest}\"");
+    assert!(text.contains("sha256 = \"\""));
+    std::fs::write(&spec, text.replacen("sha256 = \"\"", &pin, 1)).unwrap();
+    let h = Home::open_at(&home).unwrap();
+    let typed = format!("{}\n", &ignorarium::spec::load(&spec).unwrap().hash[7..15]);
+    let mut out = Vec::new();
+    let done = ignorarium::cli::register::run(
+        &spec,
+        &h,
+        &mut std::io::Cursor::new(typed.into_bytes()),
+        &mut out,
+        true,
+    )
+    .unwrap_or_else(|e| panic!("{}", e.msg));
+    assert_eq!(done.code, 0);
+    let leaves = leaf_lines(&home, "planlog");
+    assert_eq!(
+        leaves[0]["data_hashes"],
+        serde_json::json!([[digest, ignorarium::canon::sha256_hex(b"stored words")]])
+    );
 }

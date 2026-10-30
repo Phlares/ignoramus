@@ -1257,3 +1257,60 @@ fn an_input_inside_another_inputs_path_is_refused() {
     assert!(with_second("data/a", "data/ab").is_empty());
     assert!(with_second("data/a", "data/b/a").is_empty());
 }
+
+#[test]
+fn a_stored_input_whose_blob_is_gone_or_changed_is_not_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let (digest, _) = stored(dir.path(), b"abcdef");
+    let blob = dir.path().join("store").join(&digest);
+    let spec = with_input("data/none.txt", &digest, "calibration");
+    assert!(named(&spec, dir.path()).is_empty());
+    let store = ignorarium::store::Store::open(dir.path()).unwrap();
+    let hsh = [("E-HSH-001", "inputs[0].sha256")];
+    std::fs::remove_file(&blob).unwrap();
+    assert_eq!(codes_paths(&named(&spec, dir.path())), hsh);
+    // Another size: the check can afford a stat, not a read.
+    std::fs::write(&blob, b"abc").unwrap();
+    assert_eq!(codes_paths(&named(&spec, dir.path())), hsh);
+    assert_eq!(
+        ignorarium::cli::check::input_hashes(&store, dir.path(), &spec)[0].1,
+        None
+    );
+    std::fs::remove_file(&blob).unwrap();
+    std::fs::create_dir(&blob).unwrap();
+    assert_eq!(codes_paths(&named(&spec, dir.path())), hsh);
+}
+
+#[test]
+fn a_damaged_meta_is_reported_not_hidden() {
+    let dir = tempfile::tempdir().unwrap();
+    let (digest, _) = stored(dir.path(), b"abc");
+    let meta = dir.path().join("store/meta").join(format!("{digest}.json"));
+    let mut perm = std::fs::metadata(&meta).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perm.set_readonly(false);
+    std::fs::set_permissions(&meta, perm).unwrap();
+    std::fs::write(&meta, b"not json").unwrap();
+    let d = named(
+        &with_input("data/none.txt", &digest, "calibration"),
+        dir.path(),
+    );
+    assert_eq!(codes_paths(&d), [("E-HSH-001", "inputs[0].sha256")]);
+    assert!(d[0].problem.contains("cannot be read"), "{}", d[0].problem);
+}
+
+#[test]
+fn a_pin_on_an_unsafe_path_is_left_to_the_path_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = named(&with_input("../d.txt", ABC, "calibration"), dir.path());
+    assert_eq!(codes_paths(&d), [("E-PTH-001", "inputs[0].path")]);
+}
+
+#[test]
+fn two_inputs_with_one_path_are_not_nested() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = with_input("data/a", "", "calibration");
+    let again = s["inputs"][0].clone();
+    s["inputs"].as_array_mut().unwrap().push(again);
+    assert!(named(&s, dir.path()).is_empty());
+}

@@ -149,6 +149,7 @@ enum Verb {
         files: Vec<PathBuf>,
     },
     /// Add files to the box's content store, so an input can name one by its digest.
+    /// Importing a file again adds another signed record.
     Import {
         /// Where the files came from, kept in the signed record.
         #[arg(long)]

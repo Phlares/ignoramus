@@ -169,7 +169,7 @@ fn load_matches_builtin() {
             .map(|p| (p.kind.clone(), p.regex.as_str().to_string(), p.allow.len()))
             .collect()
     };
-    assert_eq!(loaded.len(), 7);
+    assert_eq!(loaded.len(), 8);
     assert_eq!(pairs(&loaded), pairs(scan::builtin()));
 }
 
@@ -326,4 +326,18 @@ b = 1  # fine
     );
     assert!(run_text(&template(), &text).is_empty());
     assert!(run_text(&template(), "").is_empty());
+}
+
+#[test]
+fn home_path_rules() {
+    let path = |root: &str, name: &str| format!("at {root}{name}/data");
+    for root in ["/home/", "/Users/"] {
+        assert_eq!(kinds(&path(root, "alice")), ["home-path"], "{root}");
+        assert!(kinds(&path(root, "<name>")).is_empty(), "{root}");
+    }
+    let win = |drive: &str, root: &str, name: &str| [drive, root, name, "data"].join("\\");
+    assert_eq!(kinds(&win("C:", "Users", "alice")), ["home-path"]);
+    assert_eq!(kinds(&win("d:", "users", "alice")), ["home-path"]);
+    assert!(kinds(&win("C:", "Users", "<name>")).is_empty());
+    assert!(kinds("the home folder and the Users table").is_empty());
 }

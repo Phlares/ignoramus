@@ -154,7 +154,10 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
     let key = keys::load(home)
         .map(|k| k.map(|k| k.verifying_key()))
         .map_err(|e| e.to_string());
-    let store = Store::open(&home.root).map_err(|e| CliError::usage(format!("store: {e}")))?;
+    // Not opened: a check writes nothing, and `meta` reads a missing folder as empty.
+    let store = Store {
+        root: home.root.join("store"),
+    };
     let cc = CheckCtx {
         root: study_root(spec_path),
         prior,
