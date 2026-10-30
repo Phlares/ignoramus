@@ -331,6 +331,14 @@ impl<T: Transport> Zenodo<T> {
         })
     }
 
+    /// Only a `PublishToken` publishes. A `StageToken` does not compile:
+    /// ```compile_fail,E0308
+    /// use deposit::http::Transport;
+    /// use deposit::zenodo::{Draft, StageToken, Zenodo};
+    /// fn f<T: Transport>(z: &Zenodo<T>, s: &StageToken, d: &Draft) {
+    ///     let _ = z.publish(s, d);
+    /// }
+    /// ```
     pub fn publish(&self, t: &PublishToken, d: &Draft) -> Result<Step, Error> {
         let (v, step) = self.call(
             "publish",

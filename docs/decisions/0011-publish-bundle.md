@@ -49,7 +49,7 @@ Steps by profile:
 Deposit:
 
 - The adapter targets the Zenodo sandbox only. It refuses any URL outside `https://sandbox.zenodo.org/` before a request leaves, including bucket and file URLs the server supplies. https://developers.zenodo.org/
-- Two tokens. The stage token creates, describes, uploads and verifies. The publish token only publishes. A staging mistake cannot publish.
+- Two tokens. The stage token creates, describes, uploads and verifies. The publish token only publishes. The split is a client-side guard: `publish` takes only a `PublishToken`, so staging code cannot call it. Zenodo does not enforce the split. On 2026-10-30 the sandbox accepted a publish (status 202) with a token whose only scope was `deposit:write`. Both token files need the same protection.
 - Verify lists the draft's files with the documented files endpoint, `GET /api/deposit/depositions/:id/files`. It compares the file names with ours, downloads each file's `links.download`, and compares its SHA-256 with ours. Publish comes after verify.
 - `curl` runs with `--config -` only. The URL, the token and the body go on stdin, so none shows in the process list. Globbing is off. Redirects are followed only for file downloads, because curl drops a custom `Authorization` header when a redirect changes host. A status outside 100-599 is a transport error.
 - curl aborts only a stalled transfer: one slower than 1 KiB/s for 2 minutes, or a connection not made in 30 seconds. A long upload that keeps moving is never cut.
