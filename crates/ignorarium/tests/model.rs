@@ -49,7 +49,6 @@ fn unknown_key_is_rejected_at_every_depth() {
         "/mutations",
         "/access",
         "/report",
-        "/design/variance",
         "/design/confirmation",
         "/inputs/0",
         "/inputs/1",
@@ -112,18 +111,18 @@ fn whole_numbers_widen_to_floats_and_fractions_do_not_fit_integers() {
     let mut v = template_value();
     v["scope"]["budget"]["cpu_hours"] = json!(1);
     v["design"]["row_seconds"] = json!(0);
-    v["design"]["variance"]["value"] = json!(0);
+    v["design"]["power"] = json!(1);
     let s = Spec::from_value(&v).unwrap();
     assert_eq!(s.scope.budget.cpu_hours, 1.0);
     assert_eq!(s.design.row_seconds, 0.0);
-    assert_eq!(s.design.variance.value, 0.0);
+    assert_eq!(s.design.power, 1.0);
     v["scope"]["min_isolation"] = json!(1.5);
     assert!(Spec::from_value(&v).is_err());
 }
 
 #[test]
 fn every_allowed_enum_value_deserializes() {
-    let cases: [(&str, &[&str]); 12] = [
+    let cases: [(&str, &[&str]); 11] = [
         ("/study/template", &["numeric-ablation", "planted-spawn"]),
         ("/study/mode", &["exploratory", "confirmatory"]),
         (
@@ -144,7 +143,6 @@ fn every_allowed_enum_value_deserializes() {
             &["common", "custom", "request-form", "unspecified"],
         ),
         ("/report/publish", &["none", "zenodo-sandbox"]),
-        ("/design/variance/source", &["stated", "record:abc"]),
     ];
     for (path, values) in cases {
         for val in values {

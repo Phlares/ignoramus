@@ -8,7 +8,7 @@ A number is outside its allowed range.
 
 ## Fix
 
-Bring the value into range: min_isolation 0 to 3, alpha above 0 up to 0.5, power 0.5 to 0.999, icc 0 up to but below 1, repeats at least 1, each budget value 0 or more, row_seconds above 0, units_per_cluster 1 up to 4294967295, each input's units 1 up to 4294967295, repeats up to 4294967295, variance and sesoi 0 or more, depth_cap 0 to 255, each trigger threshold_e above 0.
+Bring the value into range: min_isolation 0 to 3, alpha above 0 up to 0.5, power 0.5 to 0.999, repeats at least 1, each budget value 0 or more, row_seconds above 0, units_per_cluster 1 up to 4294967295, each input's units 1 up to 4294967295, repeats up to 4294967295, depth_cap 0 to 255, each trigger threshold_e above 0.
 
 ## Why
 
@@ -25,7 +25,6 @@ Values outside these ranges are meaningless or make the sample-size maths fail. 
 - `scope.min_isolation` (range)
 - `design.alpha` (range)
 - `design.power` (range)
-- `design.icc` (range)
 - `design.repeats` (range)
 - `scope.budget.cpu_hours` (range)
 - `scope.budget.wall_hours` (range)
@@ -33,7 +32,5 @@ Values outside these ranges are meaningless or make the sample-size maths fail. 
 - `design.row_seconds` (range)
 - `design.units_per_cluster` (range)
 - `inputs[*].units` (range)
-- `design.variance.value` (range)
-- `design.sesoi` (range)
 - `mutations.depth_cap` (range)
 - `mutations.triggers[*].threshold_e` (range)

@@ -1,10 +1,10 @@
 //! `register`: a person approves a checked plan; the box stores it, its payload and its
 //! inputs, and logs it.
-use super::check::{self, Assessed};
+use super::check::{self, Assessed, PENDING};
 use super::{CliError, Ctx, Done};
 use crate::backend::output::file_digest;
 use crate::canon::to_canonical;
-use crate::derived::{REGISTER, Register};
+use crate::derived::{REGISTER, Register, Resolved};
 use crate::diag::render_human;
 use crate::estimate::defaults_json;
 use crate::files::{self, WriteOnceError, write_once};
@@ -14,12 +14,12 @@ use crate::payload::{self, PayloadError};
 use crate::planlog::store::{Leaf, PlanLog};
 use crate::planlog::{commitment, family};
 use crate::records::{self, RecordDraft};
-use crate::rules;
+use crate::rules::{self, Lookup};
 use crate::spec::{self, model::Spec};
 use crate::store::Store;
 use crate::{keys, time};
 use ed25519_dalek::SigningKey;
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 use std::io::{BufRead, IsTerminal, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -68,11 +68,12 @@ fn put(dir: &Path, name: &str, bytes: &[u8], mode: u32) -> Result<(), CliError> 
     Ok(())
 }
 
-/// What `register` freezes besides the spec: the payload folder's hash, and the digest of
-/// the stored copy of each input present.
+/// What `register` freezes besides the spec: the payload folder's hash, the digest of the
+/// stored copy of each input present, and the values taken from other studies.
 struct Frozen {
     payload: String,
     inputs: Vec<(String, String)>,
+    resolved: Vec<Resolved>,
 }
 
 /// The body of the `register` record. A confirmatory plan waits for a timestamp, which a later version adds.
@@ -96,6 +97,7 @@ fn record_body(
         root: root.into(),
         payload: frozen.payload.clone(),
         inputs: frozen.inputs.clone(),
+        resolved: frozen.resolved.clone(),
         timestamp: confirmatory.then(|| "pending".into()),
     })
     .map_err(|e| io("register record", e))
@@ -119,8 +121,8 @@ pub fn run_stdio(ctx: &Ctx, spec_path: &Path) -> Result<Done, CliError> {
 }
 
 /// Nothing named `studies/<id>` exists until every local write has succeeded. Every check
-/// that can refuse comes first: the rules, the payload hash and its pin, the approval, the
-/// input imports, the spec re-read and the log tails. Then the study is staged under a
+/// that can refuse comes first: the rules, the values taken from other studies, the payload
+/// hash and its pin, the approval, the input imports, the spec re-read and the log tails. Then the study is staged under a
 /// temporary name and published by one rename, and only the plan leaf and the `register`
 /// record are appended after it.
 pub fn run(
@@ -150,6 +152,7 @@ pub fn run(
     if a.has_errors() {
         return Ok(done(1, None));
     }
+    let resolved = resolve(&a)?;
     let spec = Spec::from_value(&a.value).map_err(|e| io("spec does not fit the schema", e))?;
     let id = spec.study.id.as_str();
     if home.study_dir(id).symlink_metadata().is_ok() {
@@ -174,10 +177,76 @@ pub fn run(
     let key = keys::load_or_create(home).map_err(|e| io("box key", e))?;
     let blobs = Store::open(&home.root).map_err(|e| io("store", e))?;
     let inputs = hold_inputs(&blobs, &key, &spec, &a)?;
-    let frozen = Frozen { payload, inputs };
+    let frozen = Frozen {
+        payload,
+        inputs,
+        resolved,
+    };
     let leaf = store(spec_path, home, &spec, &a, &key, &frozen)?;
     writeln!(output, "registered {id}: leaf {leaf}").map_err(say)?;
     Ok(done(0, Some(leaf)))
+}
+
+/// The values the plan takes from other studies: for each hypothesis with a claim in a
+/// confirmatory plan, the sd and icc per group and the estimate records they come from. A value
+/// still pending refuses, naming the study to wait for, and so does one the box no longer
+/// finds as the check found it.
+fn resolve(a: &Assessed) -> Result<Vec<Resolved>, CliError> {
+    let hypotheses = a.value["question"]["hypotheses"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    let claimed = || {
+        hypotheses
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| h.get("claim").is_some())
+            .map(|(i, h)| {
+                let path = format!("question.hypotheses[{i}].estimates");
+                (i, path, h["estimates"]["from"].as_str().unwrap_or_default())
+            })
+    };
+    let pending = a.pending();
+    let waits: Vec<String> = claimed()
+        .filter(|(_, path, _)| pending.contains(&path.as_str()))
+        .map(|(_, _, study)| format!("register after {study} finishes"))
+        .collect();
+    if !pending.is_empty() {
+        return Err(CliError::refuse(format!(
+            "{PENDING}: a value waits on a study that has not finished; {}. See docs/rules/{PENDING}.md",
+            waits.join("; ")
+        )));
+    }
+    if mode_of(a) != "confirmatory" {
+        return Ok(vec![]);
+    }
+    let mut out = Vec::new();
+    for (i, path, study) in claimed() {
+        let groups = match rules::estimate_inputs(&a.value, i, &a.ctx) {
+            Lookup::Found(groups) => groups,
+            Lookup::Pending(why) | Lookup::Missing(why) => {
+                return Err(CliError::refuse(format!(
+                    "{path} no longer reads as the check read it: {why} The study was not registered."
+                )));
+            }
+        };
+        let mut records: Vec<String> = Vec::new();
+        let mut value = Map::new();
+        for g in groups {
+            for r in g.records {
+                if !records.contains(&r) {
+                    records.push(r);
+                }
+            }
+            value.insert(g.stratum, json!({ "sd": g.sd, "icc": g.icc }));
+        }
+        out.push(Resolved {
+            path,
+            study: study.into(),
+            records,
+            value: Value::Object(value),
+        });
+    }
+    Ok(out)
 }
 
 fn mode_of(a: &Assessed) -> &str {
@@ -403,7 +472,6 @@ fn stage(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn only_a_confirmatory_record_is_pending() {
@@ -412,6 +480,12 @@ mod tests {
         let frozen = Frozen {
             payload: "ab".repeat(32),
             inputs: vec![("data/x.txt".into(), "cd".repeat(32))],
+            resolved: vec![Resolved {
+                path: "question.hypotheses[0].estimates".into(),
+                study: "pilot".into(),
+                records: vec!["ef".repeat(32)],
+                value: json!({ "": { "sd": 2.0, "icc": 0.1 } }),
+            }],
         };
         let exp = record_body("sha256:ab", 3, "planlog", &filled, false, root, &frozen).unwrap();
         assert_eq!(
@@ -419,10 +493,46 @@ mod tests {
             json!({"spec_hash": "sha256:ab", "leaf": 3, "log": "planlog",
                    "defaults": [{"path": "design.alpha", "value": 0.005}],
                    "root": "/work/study", "payload": "ab".repeat(32),
-                   "inputs": [["data/x.txt", "cd".repeat(32)]]})
+                   "inputs": [["data/x.txt", "cd".repeat(32)]],
+                   "resolved": [{ "path": "question.hypotheses[0].estimates",
+                                  "study": "pilot", "records": ["ef".repeat(32)],
+                                  "value": { "": { "sd": 2.0, "icc": 0.1 } } }]})
         );
         let conf = record_body("sha256:ab", 3, "testlog", &filled, true, root, &frozen).unwrap();
         assert_eq!(conf["timestamp"], "pending");
         assert_eq!(conf["log"], "testlog");
+    }
+
+    #[test]
+    fn a_value_the_box_no_longer_holds_refuses() {
+        // A plan the check passed, read again against a box without the study it names.
+        let value = json!({
+            "study": { "id": "s", "mode": "confirmatory" },
+            "question": { "hypotheses": [{
+                "outcome": "o", "contrast": { "arm-a": 1.0 }, "claim": { "below": 0.0 },
+                "estimates": { "from": "pilot" }
+            }] },
+            "outcomes": [{ "id": "o", "unit": "u", "direction": "lower", "measure": "m",
+                           "paired": "difference", "registered": true }],
+            "design": { "reference": "exact", "conditions": [{ "id": "exact" }, { "id": "arm-a" }],
+                        "confirmation": { "conditions": ["arm-a"] } }
+        });
+        let root = Path::new("/work/study");
+        let a = Assessed {
+            root: root.into(),
+            hash: "sha256:ab".into(),
+            value,
+            filled: vec![],
+            diags: vec![],
+            estimate: None,
+            input_hashes: vec![],
+            ctx: rules::CheckCtx::empty(root),
+        };
+        let e = resolve(&a).unwrap_err();
+        assert_eq!(e.code, 1);
+        assert_eq!(
+            e.msg,
+            "question.hypotheses[0].estimates no longer reads as the check read it: Waits on study pilot, which is not registered. The study was not registered."
+        );
     }
 }

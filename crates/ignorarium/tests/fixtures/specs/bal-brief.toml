@@ -16,6 +16,17 @@ statement = ""
 rival = ""
 outcome = "ppl-ratio"
 contrast = { arm-a = 1.0 }
+claim = { below = 0.0 }
+statistic = { mean = [-50.0, 50.0] }
+power_at = -1.0
+estimates = { from = "bal-pilot" }
+alpha_share = 1.0
+[[question.hypotheses]]
+id = "H2"
+statement = ""
+rival = ""
+outcome = "ppl-ratio"
+contrast = { arm-a = 1.0 }
 
 [[outcomes]]
 id = "ppl-ratio"
@@ -45,12 +56,7 @@ repeats = 1
 row_seconds = 60.0              # estimate per row, until a record gives one
 alpha = 0.005
 power = 0.8
-sesoi = 1.0                     # smallest effect of interest, in outcome units
-icc = 0.0
 units_per_cluster = 5
-[design.variance]
-value = 4.0                     # variance of the paired difference per unit
-source = "stated"               # stated | record:<sha256>
 [[design.conditions]]
 id = "exact"
 [[design.conditions]]

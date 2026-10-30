@@ -1,5 +1,7 @@
-use ignorarium::derived::{Estimate, Register, Selection};
+use ignorarium::canon::{sha256_hex, to_canonical};
+use ignorarium::derived::{Analysis, Estimate, Register, Selection, StudyState, contrast_key};
 use ignorarium::records::Record;
+use ignorarium::spec::model::{Direction, Outcome, Paired};
 use serde_json::{Value, json};
 
 fn rec(kind: &str, body: Value) -> Record {
@@ -47,7 +49,11 @@ fn register_body() -> Value {
     json!({
         "spec_hash": "sha256:ab", "leaf": 3, "log": "planlog", "defaults": [],
         "root": "/work/study", "payload": "p".repeat(64),
-        "inputs": [["data/a.txt", "d".repeat(64)]]
+        "inputs": [["data/a.txt", "d".repeat(64)]],
+        "resolved": [{
+            "path": "question.hypotheses[0].estimates", "study": "pilot",
+            "records": ["e".repeat(64)], "value": { "": { "sd": 2.0, "icc": 0.1 } }
+        }]
     })
 }
 
@@ -65,6 +71,15 @@ fn a_register_record_parses_with_its_root() {
     );
     assert_eq!(r.payload, "p".repeat(64));
     assert_eq!(r.inputs, [("data/a.txt".to_string(), "d".repeat(64))]);
+    assert_eq!(r.resolved.len(), 1);
+    let frozen = &r.resolved[0];
+    assert_eq!(
+        (frozen.path.as_str(), frozen.study.as_str()),
+        ("question.hypotheses[0].estimates", "pilot")
+    );
+    assert_eq!(frozen.records, ["e".repeat(64)]);
+    assert_eq!(frozen.value, json!({ "": { "sd": 2.0, "icc": 0.1 } }));
+    assert_eq!(serde_json::to_value(&r).unwrap(), register_body());
     assert_eq!(r.timestamp, None);
     let mut b = register_body();
     b["timestamp"] = json!("pending");
@@ -83,6 +98,7 @@ fn a_register_record_with_a_missing_or_extra_field_does_not_parse() {
         "root",
         "payload",
         "inputs",
+        "resolved",
     ] {
         let mut b = register_body();
         b.as_object_mut().unwrap().remove(field);
@@ -113,4 +129,181 @@ fn a_selection_record_parses_and_only_as_its_kind() {
     let mut b = selection_body();
     b["candidates"][0]["extra"] = json!(1);
     assert_eq!(Selection::of(&rec("selection", b)), None);
+}
+
+type Terms = Vec<(String, f64, Value)>;
+
+fn ppl_ratio() -> Outcome {
+    Outcome {
+        id: "ppl-ratio".into(),
+        unit: "ratio".into(),
+        direction: Direction::Lower,
+        measure: "ppl".into(),
+        paired: Paired::Percent,
+        registered: true,
+    }
+}
+
+#[test]
+fn a_contrast_key_is_canonical_json_sorted_by_condition() {
+    let terms = [
+        ("b".to_string(), -1.0, json!({})),
+        ("a".to_string(), 1.0, json!({ "bits": 4 })),
+    ];
+    let (key, hash) = contrast_key(&ppl_ratio(), &terms);
+    let text = r#"{"contrast":[["a",1.0,{"bits":4}],["b",-1.0,{}]],"measure":"ppl","outcome":"ppl-ratio","paired":"percent"}"#;
+    assert_eq!(
+        String::from_utf8(to_canonical(&key).unwrap()).unwrap(),
+        text
+    );
+    assert_eq!(hash, sha256_hex(text.as_bytes()));
+    assert_eq!(
+        hash,
+        "5852a5a16c099e3dcf0750aaa3166c2461cda65e9ebabf622706ef647ec5fc48"
+    );
+    // The order the terms come in does not matter; each part of the key does.
+    let reversed = [terms[1].clone(), terms[0].clone()];
+    assert_eq!(contrast_key(&ppl_ratio(), &reversed).1, hash);
+    let other = |edit: &dyn Fn(&mut Outcome, &mut Terms)| {
+        let (mut o, mut t) = (ppl_ratio(), terms.to_vec());
+        edit(&mut o, &mut t);
+        contrast_key(&o, &t).1
+    };
+    let changed = [
+        other(&|o, _| o.id = "ppl".into()),
+        other(&|o, _| o.measure = "nll".into()),
+        other(&|o, _| o.paired = Paired::Difference),
+        other(&|_, t| t[0].1 = -2.0),
+        other(&|_, t| t[1].2 = json!({ "bits": 8 })),
+        other(&|_, t| t[0].0 = "c".into()),
+        other(&|_, t| {
+            t.pop();
+        }),
+    ];
+    for h in &changed {
+        assert_ne!(*h, hash);
+    }
+    // Unit, direction and registration do not change what the values are.
+    assert_eq!(other(&|o, _| o.unit = "percent".into()), hash);
+    assert_eq!(other(&|o, _| o.direction = Direction::Higher), hash);
+    assert_eq!(other(&|o, _| o.registered = false), hash);
+}
+
+#[test]
+fn a_contrast_key_orders_two_weights_of_one_condition() {
+    let a = |w: f64| ("a".to_string(), w, json!({}));
+    let (key, hash) = contrast_key(&ppl_ratio(), &[a(1.0), a(-1.0)]);
+    assert_eq!(key["contrast"], json!([["a", -1.0, {}], ["a", 1.0, {}]]));
+    assert_eq!(contrast_key(&ppl_ratio(), &[a(-1.0), a(1.0)]).1, hash);
+}
+
+fn analysis_body() -> Value {
+    json!({
+        "commit": "c".repeat(64), "box_version": "0.1.0", "estimates": 2, "verdicts": 1,
+        "slot": 3
+    })
+}
+
+#[test]
+fn an_analysis_record_states_what_follows_it() {
+    let a = Analysis::of(&rec("analysis", analysis_body())).unwrap();
+    assert_eq!(
+        a,
+        Analysis {
+            commit: "c".repeat(64),
+            box_version: "0.1.0".into(),
+            estimates: 2,
+            verdicts: 1,
+            slot: Some(3),
+        }
+    );
+    assert_eq!(serde_json::to_value(&a).unwrap(), analysis_body());
+    let mut b = analysis_body();
+    b["slot"] = Value::Null;
+    assert_eq!(
+        Analysis::of(&rec("analysis", b)).unwrap().slot,
+        None,
+        "an exploratory study holds no slot"
+    );
+    assert_eq!(Analysis::of(&rec("estimate", analysis_body())), None);
+    for field in ["commit", "box_version", "estimates", "verdicts", "slot"] {
+        let mut b = analysis_body();
+        b.as_object_mut().unwrap().remove(field);
+        assert_eq!(Analysis::of(&rec("analysis", b)), None, "{field}");
+    }
+}
+
+/// A record whose hash is its own: `seq` tells two records with one body apart.
+fn at(seq: u64, kind: &str, body: Value) -> Record {
+    Record {
+        seq,
+        ..rec(kind, body)
+    }
+}
+
+fn estimate_for(hypothesis: &str, stratum: &str) -> Value {
+    let mut b = body();
+    b["hypothesis"] = json!(hypothesis);
+    b["stratum"] = json!(stratum);
+    b
+}
+
+#[test]
+fn a_study_is_finished_once_every_record_its_analysis_promises_follows_it() {
+    assert_eq!(StudyState::of(None), StudyState::NotRegistered);
+    let register = at(0, "register", register_body());
+    let analysis = at(2, "analysis", analysis_body());
+    let e1 = at(3, "estimate", estimate_for("H1", ""));
+    let e2 = at(4, "estimate", estimate_for("H1", "code"));
+    let verdict = at(5, "verdict", json!({ "hypothesis": "H1" }));
+    let state =
+        |records: &[&Record]| StudyState::of(Some(records.iter().map(|r| (*r).clone()).collect()));
+    // No analysis record yet, or one whose estimates and verdict are not all there. A crash
+    // after the analysis record leaves the study unfinished, not finished without values.
+    assert_eq!(state(&[&register]), StudyState::NotFinished);
+    assert_eq!(state(&[&register, &analysis]), StudyState::NotFinished);
+    assert_eq!(
+        state(&[&register, &analysis, &e1, &e2]),
+        StudyState::NotFinished
+    );
+    assert_eq!(
+        state(&[&register, &analysis, &e1, &verdict]),
+        StudyState::NotFinished
+    );
+    // A repeat of an estimate is the same estimate; one written before the analysis does
+    // not count.
+    let again = at(6, "estimate", estimate_for("H1", ""));
+    assert_eq!(
+        state(&[&register, &analysis, &e1, &again, &verdict]),
+        StudyState::NotFinished
+    );
+    assert_eq!(
+        state(&[&register, &e2, &analysis, &e1, &verdict]),
+        StudyState::NotFinished
+    );
+    // Another value for the same hypothesis, key and stratum is no second estimate.
+    let mut other = estimate_for("H1", "");
+    other["mean"] = json!(2.5);
+    let other = at(7, "estimate", other);
+    assert_eq!(
+        state(&[&register, &analysis, &e1, &other, &verdict]),
+        StudyState::NotFinished
+    );
+    let all = [&register, &analysis, &e1, &e2, &verdict];
+    assert_eq!(
+        state(&all),
+        StudyState::Finished(all.iter().map(|r| (*r).clone()).collect())
+    );
+    // An analysis record that does not parse promises nothing a reader can trust.
+    let torn = at(2, "analysis", json!({ "commit": "c" }));
+    assert_eq!(state(&[&register, &torn]), StudyState::NotFinished);
+    // An analysis that promises nothing finishes the study at once.
+    let mut nothing = analysis_body();
+    nothing["estimates"] = json!(0);
+    nothing["verdicts"] = json!(0);
+    let bare = [register.clone(), at(2, "analysis", nothing)];
+    assert_eq!(
+        StudyState::of(Some(bare.to_vec())),
+        StudyState::Finished(bare.to_vec())
+    );
 }

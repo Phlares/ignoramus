@@ -4,15 +4,15 @@ Severity: error
 
 ## Problem
 
-The variance record is missing, is not an estimate for an outcome of this plan, or holds another value.
+A confirmatory hypothesis takes its sd and icc from no matching estimate of a finished study.
 
 ## Fix
 
-Measure the variance in an earlier run. Set design.variance.source to record:<sha256> of its estimate record, and design.variance.value to the variance that record holds.
+Set estimates = { from = "<study id>" } to a study in this box that measured this hypothesis's contrast: the same outcome, measure and paired rule, and the same conditions, weights and params. A contrast on selected needs an estimate for each candidate. The study needs an estimate in each stratum the hypothesis lists, or a pooled one, with an icc, which takes 2 or more clusters.
 
 ## Why
 
-A variance guessed by hand can be too small, which makes the power gate pass a study that is too small.
+A variance typed by hand can be too small, which makes the power gate pass a study that is too small. The box reads the sd and icc from the records of a finished study instead, so no one types them.
 
 ## Sources
 
@@ -21,4 +21,4 @@ A variance guessed by hand can be too small, which makes the power gate pass a s
 
 ## Applies to
 
-- `design.variance.source` (named:variance-from-record), when mode = confirmatory
+- `question.hypotheses[*].estimates` (named:estimates-from-record), when mode = confirmatory

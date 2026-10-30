@@ -2,7 +2,7 @@ mod common;
 
 use common::{
     Lab, PAYLOAD, boxed_study, events_of, indices, kill_box_at, kind_of, lab, lines_of, named,
-    plain, plant_estimate, proc_state, register_study, rows_of, with_payload,
+    plain, proc_state, register_study, rows_of, with_payload,
 };
 use ignorarium::backend::level0::Level0;
 use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome, Watch};
@@ -467,32 +467,11 @@ fn control_signals_keep_the_last_request_and_a_stop_stays() {
     assert!(RunLock::try_take(&lab.home, "ghost").is_err());
 }
 
-/// A confirmatory plan whose confirmation input gives 55 units, against 54 needed.
-fn confirmatory(source: String) -> impl Fn(String) -> String {
-    move |t| {
-        common::with_claim(t)
-            .replace("mode = \"exploratory\"", "mode = \"confirmatory\"")
-            .replace("label = \"signal\"", "label = \"confirmed\"")
-            .replace("sesoi = 0.0", "sesoi = 1.0")
-            .replace("value = 0.0", "value = 4.0")
-            .replace(
-                "source = \"stated\"",
-                &format!("source = \"record:{source}\""),
-            )
-            .replace("units_per_cluster = 3", "units_per_cluster = 55")
-            .replace("units = 3 ", "units = 55 ")
-            .replace(
-                "triggers = []",
-                "triggers = [{ id = \"T1\", metric = \"ppl-ratio\", threshold_e = 1.0 }]",
-            )
-    }
-}
-
 #[test]
 fn stop_lowers_the_label_to_signal() {
     let lab = lab();
-    let source = plant_estimate(&lab.home, "ppl-ratio", 4.0);
-    register_study(&lab, "conf", confirmatory(source), &[], PAYLOAD);
+    common::pilot(&lab.home, vec![common::arm_a()]);
+    register_study(&lab, "conf", common::confirmatory, &[], PAYLOAD);
     let rec = send_stop(&lab.home, "conf", "manual").unwrap();
     assert_eq!(rec.body["label_before"], "confirmed");
     assert_eq!(rec.body["label_after"], "signal");

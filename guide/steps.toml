@@ -38,7 +38,7 @@ command = "ignorarium import --source <where the file came from> <file>"
 [[step]]
 id = "check"
 title = "Check the plan"
-does = "Run every rule on the spec. Fix each error the output lists, then run again until it passes."
+does = "Run every rule on the spec. Fix each error the output lists, then run again until it passes. It exits 3 when no error is left but a value waits on a study that has not finished, such as the pilot whose estimates size a confirmatory hypothesis: run that study first."
 produces = "Diagnostics, a cost estimate and the claim label the plan can earn."
 command = "ignorarium check studies/<id>/spec.toml"
 
@@ -52,7 +52,7 @@ command = "ignorarium review studies/<id>/spec.toml"
 [[step]]
 id = "register"
 title = "Register the plan"
-does = "A person types the first 8 characters of the spec hash to approve. The plan is then frozen."
+does = "A person types the first 8 characters of the spec hash to approve. The plan is then frozen, with the records of other studies it takes values from. It refuses while a value waits on a study that has not finished."
 produces = "A frozen copy of the spec and of the payload folder, every input in the box's store, and a signed entry in the plan log."
 command = "ignorarium register studies/<id>/spec.toml"
 

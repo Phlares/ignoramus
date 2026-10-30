@@ -1,5 +1,6 @@
 //! `check`: load a spec, run every rule, and report. Shared with `review`.
 use super::{CliError, Ctx, Done, Run, out};
+use crate::derived::Register;
 use crate::diag::{Diagnostic, Severity, render_human};
 use crate::estimate::{Estimate, defaults_json, estimate};
 use crate::home::Home;
@@ -31,15 +32,36 @@ pub struct Assessed {
     /// `(path, (exact, normalized) SHA-256)` of each input, read once here; `None`
     /// when the file is absent or its path is unsafe. `register` stores these.
     pub input_hashes: Vec<(String, Option<(String, String)>)>,
+    /// What the rules read, the box's records among them; `register` resolves from it.
+    pub ctx: CheckCtx,
 }
+
+/// The code of a value that waits on a study that has not finished.
+pub const PENDING: &str = "W-REF-001";
 
 impl Assessed {
     pub fn has_errors(&self) -> bool {
         self.diags.iter().any(|d| d.severity == Severity::Error)
     }
 
+    /// The paths of the values that wait on a study that has not finished.
+    pub fn pending(&self) -> Vec<&str> {
+        self.diags
+            .iter()
+            .filter(|d| d.code == PENDING)
+            .map(|d| d.path.as_str())
+            .collect()
+    }
+
+    /// 1 with an error, 3 with no error and a value pending, else 0.
     pub fn exit_code(&self) -> i32 {
-        i32::from(self.has_errors())
+        if self.has_errors() {
+            1
+        } else if !self.pending().is_empty() {
+            3
+        } else {
+            0
+        }
     }
 }
 
@@ -53,23 +75,31 @@ impl PriorUse for Unreadable {
 }
 
 /// The records of the box in `home`. `key` is the box key, or why it cannot be read.
-/// With no key the box holds no records, unless a study log exists: that log cannot be trusted.
+/// A study with no log needs no key; a log that no key can verify cannot be trusted.
 pub struct HomeRecords {
     pub home: Home,
     pub key: Result<Option<VerifyingKey>, String>,
 }
 
 impl BoxRecords for HomeRecords {
-    fn find(&self, hash: &str) -> Result<Option<records::Record>, String> {
-        match &self.key {
-            Err(e) => Err(e.clone()),
-            Ok(Some(key)) => records::find(&self.home, key, hash).map_err(|e| e.to_string()),
-            Ok(None) => match records::logs(&self.home) {
-                Ok(logs) if logs.is_empty() => Ok(None),
-                Ok(_) => Err("the box key is missing".to_string()),
-                Err(e) => Err(e.to_string()),
-            },
+    /// A study is registered when its log holds a `register` record. An id that is not a
+    /// study id names no study, and no path is built from it.
+    fn study(&self, id: &str) -> Result<Option<Vec<records::Record>>, String> {
+        if !rules::is_study_id(id) {
+            return Ok(None);
         }
+        let log = self.home.study_dir(id).join("records.jsonl");
+        if log.symlink_metadata().is_err() {
+            return Ok(None);
+        }
+        let key = match &self.key {
+            Err(e) => return Err(e.clone()),
+            Ok(None) => return Err("the box key is missing".into()),
+            Ok(Some(key)) => key,
+        };
+        let all = records::read_all(&log, key).map_err(|e| e.to_string())?;
+        let registered = all.iter().any(|r| Register::of(r).is_some());
+        Ok(registered.then_some(all))
     }
 }
 
@@ -179,6 +209,7 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         filled,
         diags,
         estimate: None,
+        ctx: cc,
     };
     if !a.has_errors() {
         let rows = Spec::from_value(&a.value).ok().and_then(|s| {
@@ -254,6 +285,7 @@ fn render_json(a: &Assessed) -> Result<String, CliError> {
     });
     let v = json!({
         "diagnostics": a.diags,
+        "pending": a.pending(),
         "estimate": estimate,
         "defaults": defaults_json(&a.filled),
         "hash": a.hash,

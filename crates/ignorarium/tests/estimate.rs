@@ -1,3 +1,5 @@
+mod common;
+
 use ignorarium::diag::Severity;
 use ignorarium::estimate::{Estimate, apply_defaults, estimate};
 use ignorarium::machine::{self, Machine};
@@ -357,16 +359,29 @@ fn v0() -> Vec<Rule> {
     rules::load(Path::new("../../rules/v0.toml")).unwrap()
 }
 
+/// A box in which `my-pilot` has finished with the template contrast's estimate.
 fn ctx(dir: &Path) -> CheckCtx {
-    CheckCtx::empty(dir)
+    let pilot = common::finished(vec![common::arm_a()]);
+    CheckCtx {
+        records: Box::new(common::Studies(vec![(
+            "my-pilot",
+            Ok(common::records_for("my-pilot", &pilot)),
+        )])),
+        ..CheckCtx::empty(dir)
+    }
 }
 
-/// Confirmatory, alpha and power absent, 10 confirmation units against 54 needed.
+/// Confirmatory with a mean claim sized by `my-pilot`, alpha and power absent: 2 clusters
+/// against the 14 needed.
 fn thin() -> Value {
     let mut v = template();
     v["study"]["mode"] = json!("confirmatory");
-    v["design"]["sesoi"] = json!(1.0);
-    v["design"]["variance"]["value"] = json!(4.0);
+    let h = &mut v["question"]["hypotheses"][0];
+    h["claim"] = json!({ "below": 0.0 });
+    h["statistic"] = json!({ "mean": [-50.0, 50.0] });
+    h["power_at"] = json!(-1.0);
+    h["estimates"] = json!({ "from": "my-pilot" });
+    h["alpha_share"] = json!(1.0);
     v["design"]["units_per_cluster"] = json!(5);
     v["inputs"] = json!(clusters("confirmation", 2, 5));
     remove(&mut v, "/design/alpha");
@@ -402,7 +417,7 @@ fn check_named_alone_fails_closed_without_defaults() {
 }
 
 /// Paths of the numeric fields in the template.
-const NUMERIC: [&[&str]; 11] = [
+const NUMERIC: [&[&str]; 9] = [
     &["scope", "min_isolation"],
     &["scope", "budget", "cpu_hours"],
     &["scope", "budget", "wall_hours"],
@@ -411,8 +426,6 @@ const NUMERIC: [&[&str]; 11] = [
     &["design", "row_seconds"],
     &["design", "alpha"],
     &["design", "power"],
-    &["design", "sesoi"],
-    &["design", "icc"],
     &["design", "units_per_cluster"],
 ];
 
@@ -430,11 +443,7 @@ fn a_spec_that_passes_check_always_deserializes() {
         json!(1.5),
         json!(i64::MAX),
     ];
-    let more: [&[&str]; 3] = [
-        &["design", "variance", "value"],
-        &["mutations", "depth_cap"],
-        &["mutations", "triggers"],
-    ];
+    let more: [&[&str]; 2] = [&["mutations", "depth_cap"], &["mutations", "triggers"]];
     for path in NUMERIC.iter().chain(more.iter()) {
         for x in &sweep {
             let mut v = template();

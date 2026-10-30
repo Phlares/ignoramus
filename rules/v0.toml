@@ -28,6 +28,7 @@ target = [
   { path = "question.hypotheses[*].rival", check = "required" },
   { path = "question.hypotheses[*].outcome", check = "required" },
   { path = "question.hypotheses[*].contrast", check = "required" },
+  { path = "question.hypotheses[*].estimates.from", check = "required" },
   { path = "outcomes", check = "required" },
   { path = "outcomes[*].id", check = "required" },
   { path = "outcomes[*].measure", check = "required" },
@@ -50,12 +51,7 @@ target = [
   { path = "design.stratum", check = "required" },
   { path = "design.reference", check = "required" },
   { path = "design.row_seconds", check = "required" },
-  { path = "design.sesoi", check = "required" },
-  { path = "design.icc", check = "required" },
   { path = "design.units_per_cluster", check = "required" },
-  { path = "design.variance", check = "required" },
-  { path = "design.variance.value", check = "required" },
-  { path = "design.variance.source", check = "required" },
   { path = "design.conditions", check = "required" },
   { path = "design.conditions[*].id", check = "required" },
   { path = "design.selection.metric", check = "required" },
@@ -167,13 +163,8 @@ target = [
   { path = "design.row_seconds", check = "type", kind = "float" },
   { path = "design.alpha", check = "type", kind = "float" },
   { path = "design.power", check = "type", kind = "float" },
-  { path = "design.sesoi", check = "type", kind = "float" },
-  { path = "design.icc", check = "type", kind = "float" },
   { path = "design.units_per_cluster", check = "type", kind = "int" },
   { path = "design.pick", check = "type", kind = "string" },
-  { path = "design.variance", check = "type", kind = "table" },
-  { path = "design.variance.value", check = "type", kind = "float" },
-  { path = "design.variance.source", check = "type", kind = "string" },
   { path = "design.conditions", check = "type", kind = "array" },
   { path = "design.conditions[*]", check = "type", kind = "table" },
   { path = "design.conditions[*].id", check = "type", kind = "string" },
@@ -255,14 +246,13 @@ target = [
 code = "E-RNG-001"
 severity = "error"
 problem = "A number is outside its allowed range."
-instruction = "Bring the value into range: min_isolation 0 to 3, alpha above 0 up to 0.5, power 0.5 to 0.999, icc 0 up to but below 1, repeats at least 1, each budget value 0 or more, row_seconds above 0, units_per_cluster 1 up to 4294967295, each input's units 1 up to 4294967295, repeats up to 4294967295, variance and sesoi 0 or more, depth_cap 0 to 255, each trigger threshold_e above 0."
+instruction = "Bring the value into range: min_isolation 0 to 3, alpha above 0 up to 0.5, power 0.5 to 0.999, repeats at least 1, each budget value 0 or more, row_seconds above 0, units_per_cluster 1 up to 4294967295, each input's units 1 up to 4294967295, repeats up to 4294967295, depth_cap 0 to 255, each trigger threshold_e above 0."
 why = "Values outside these ranges are meaningless or make the sample-size maths fail. The default alpha is 0.005, because 0.05 gives too many false findings."
 sources = ["https://doi.org/10.1038/s41562-017-0189-z", "https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661"]
 target = [
   { path = "scope.min_isolation", check = "range", interval = "[0, 3]" },
   { path = "design.alpha", check = "range", interval = "(0, 0.5]" },
   { path = "design.power", check = "range", interval = "[0.5, 0.999]" },
-  { path = "design.icc", check = "range", interval = "[0, 1)" },
   { path = "design.repeats", check = "range", interval = "[1, 4294967295]" },
   { path = "scope.budget.cpu_hours", check = "range", interval = "[0, inf)" },
   { path = "scope.budget.wall_hours", check = "range", interval = "[0, inf)" },
@@ -270,8 +260,6 @@ target = [
   { path = "design.row_seconds", check = "range", interval = "(0, inf)" },
   { path = "design.units_per_cluster", check = "range", interval = "[1, 4294967295]" },
   { path = "inputs[*].units", check = "range", interval = "[1, 4294967295]" },
-  { path = "design.variance.value", check = "range", interval = "[0, inf)" },
-  { path = "design.sesoi", check = "range", interval = "[0, inf)" },
   { path = "mutations.depth_cap", check = "range", interval = "[0, 255]" },
   { path = "mutations.triggers[*].threshold_e", check = "range", interval = "(0, inf)" },
 ]
@@ -292,17 +280,6 @@ target = [
   { path = "inputs[*].stratum", check = "format", pattern = "^([a-z0-9]+(-[a-z0-9]+)*)?$" },
   { path = "question.hypotheses[*].strata[*]", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
   { path = "question.hypotheses[*].estimates.from", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
-]
-
-[[rule]]
-code = "E-FMT-002"
-severity = "error"
-problem = "The variance source is not in a known form."
-instruction = "Use stated, or record:<sha256> with the 64 lowercase hex characters of a record."
-why = "A variance must say where it came from. A record reference must name one exact record."
-sources = ["https://toml.io/en/v1.0.0"]
-target = [
-  { path = "design.variance.source", check = "format", pattern = "^(stated|record:[0-9a-f]{64})$" },
 ]
 
 [[rule]]
@@ -415,6 +392,30 @@ target = [
 ]
 
 [[rule]]
+code = "E-REF-002"
+severity = "error"
+problem = "A reference names this study."
+instruction = "Set estimates.from to the id of another study: one that has run, or will run, before this one."
+why = "A value taken from a study exists only once that study has finished. This study's own values come from this run, so a plan cannot be sized by them."
+sources = []
+when = { mode = "confirmatory" }
+target = [
+  { path = "question.hypotheses[*].estimates.from", check = "named:reference-not-self" },
+]
+
+[[rule]]
+code = "W-REF-001"
+severity = "warning"
+problem = "A value waits on a study that has not finished."
+instruction = "Run the study it names to its end, then check again. Until then check exits 3 and register refuses the plan; nothing else needs to change."
+why = "A follow-on plan is written and checked before the study it builds on runs. Its values are read from that study's records once the study has written them all, so a value cannot change after the plan is registered. The box cannot read a study it has not run."
+sources = []
+when = { mode = "confirmatory" }
+target = [
+  { path = "question.hypotheses[*].estimates", check = "named:reference-finished" },
+]
+
+[[rule]]
 code = "E-LBL-001"
 severity = "error"
 problem = "An exploratory study carries a label above signal."
@@ -429,37 +430,37 @@ target = [
 [[rule]]
 code = "E-CNF-001"
 severity = "error"
-problem = "A confirmatory study has no smallest effect of interest above zero."
-instruction = "Set design.sesoi to the smallest effect, in outcome units, that you would act on. It must be above 0."
-why = "The sample size depends on the effect you care about. Without it the power gate has nothing to size."
-sources = ["https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661"]
+problem = "A confirmatory hypothesis has no power_at strictly on its claimed side, or power_at lies outside the range of its mean statistic."
+instruction = "Set power_at to the true value of the statistic at which the test must have its power: below m for a claim below m, above m for a claim above m, strictly between a and b for a claim within [a, b], and inside [lo, hi] for a mean statistic."
+why = "The sample size depends on the effect the study must detect, so the power gate needs a value to size at. It is set when the plan is written, not read from a pilot: an effect seen in a small pilot is noisy, and sizing at it gives studies too small to detect the effect."
+sources = ["https://doi.org/10.1016/j.jesp.2017.09.004", "https://doi.org/10.1038/nrn3475"]
 when = { mode = "confirmatory" }
 target = [
-  { path = "design.sesoi", check = "named:sesoi-required" },
+  { path = "question.hypotheses[*].power_at", check = "named:power-at-side" },
 ]
 
 [[rule]]
 code = "E-CNF-002"
 severity = "error"
 problem = "The confirmation sample is too small."
-instruction = "Add confirmation inputs, or raise design.units_per_cluster, until the count reaches the number the power gate needs. Each confirmation input gives at most its own units."
-why = "A test with too few units misses real effects and exaggerates the ones it finds. The gate uses alpha, power, the variance, the smallest effect, and the cluster correlation."
+instruction = "Add confirmation inputs to each group the detail names, until it has the clusters the power gate needs. Raising design.units_per_cluster helps only as far as the icc allows, since the test takes one value per cluster. Two inputs that hold the same data are one cluster."
+why = "A test with too few clusters misses real effects and exaggerates the ones it finds. The test takes one value per cluster, so the gate counts the clusters of each stratum the claim lists, or of all confirmation inputs when it lists none. For a mean statistic it uses the hypothesis's share of design.alpha, design.power, the sd and icc from the study in estimates, the mean units a cluster gives, and the distance from power_at to each margin."
 sources = ["https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661"]
 when = { mode = "confirmatory" }
 target = [
-  { path = "inputs", check = "named:power-met" },
+  { path = "question.hypotheses[*]", check = "named:power-met" },
 ]
 
 [[rule]]
 code = "E-CNF-003"
 severity = "error"
-problem = "The variance record is missing, is not an estimate for an outcome of this plan, or holds another value."
-instruction = "Measure the variance in an earlier run. Set design.variance.source to record:<sha256> of its estimate record, and design.variance.value to the variance that record holds."
-why = "A variance guessed by hand can be too small, which makes the power gate pass a study that is too small."
+problem = "A confirmatory hypothesis takes its sd and icc from no matching estimate of a finished study."
+instruction = "Set estimates = { from = \"<study id>\" } to a study in this box that measured this hypothesis's contrast: the same outcome, measure and paired rule, and the same conditions, weights and params. A contrast on selected needs an estimate for each candidate. The study needs an estimate in each stratum the hypothesis lists, or a pooled one, with an icc, which takes 2 or more clusters."
+why = "A variance typed by hand can be too small, which makes the power gate pass a study that is too small. The box reads the sd and icc from the records of a finished study instead, so no one types them."
 sources = ["https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661"]
 when = { mode = "confirmatory" }
 target = [
-  { path = "design.variance.source", check = "named:variance-from-record" },
+  { path = "question.hypotheses[*].estimates", check = "named:estimates-from-record" },
 ]
 
 [[rule]]

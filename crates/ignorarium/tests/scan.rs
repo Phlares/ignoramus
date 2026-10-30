@@ -157,7 +157,7 @@ fn pinned_hashes_in_a_spec_pass() {
     let mut s = template();
     s["inputs"] = json!([{"path": "data/a.csv", "sha256": sha, "role": "selection"}]);
     s["pins"] = json!({"model": sha});
-    s["design"]["variance"]["source"] = json!(format!("record:{sha}"));
+    s["question"]["hypotheses"][0]["estimates"] = json!({ "from": format!("study-{sha}") });
     assert!(run(&s).is_empty());
 }
 

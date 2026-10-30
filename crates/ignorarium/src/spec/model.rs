@@ -158,7 +158,7 @@ pub struct Outcome {
     pub registered: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Paired {
     /// Condition minus reference.
@@ -233,12 +233,9 @@ pub struct Design {
     pub row_seconds: f64,
     pub alpha: f64,
     pub power: f64,
-    pub sesoi: f64,
-    pub icc: f64,
     /// Units each cluster gives the study, at most.
     pub units_per_cluster: u32,
     pub pick: Pick,
-    pub variance: Variance,
     pub conditions: Vec<Condition>,
     /// The stage that picks one candidate on the selection inputs; `None` when there is none.
     pub selection: Option<Selection>,
@@ -284,14 +281,6 @@ pub enum Pick {
     Seeded,
     /// Indices 0, 1, 2, …
     First,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Variance {
-    pub value: f64,
-    /// "stated" or "record:<sha256>"; the rules check the format.
-    pub source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

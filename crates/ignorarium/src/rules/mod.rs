@@ -8,20 +8,33 @@ use std::sync::OnceLock;
 mod generic;
 mod named;
 pub use generic::{check_generic, safe_key};
-pub use named::{CheckCtx, check_named, input_path, read_regular};
+pub use named::{
+    CheckCtx, Lookup, StratumInput, check_named, estimate_inputs, input_path, read_regular,
+};
 
-/// The records of a box, found by hash. An `Err` is a log that cannot be read or trusted.
+/// The records of a box, by study. An `Err` is a log that cannot be read or trusted.
 pub trait BoxRecords {
-    fn find(&self, hash: &str) -> Result<Option<crate::records::Record>, String>;
+    /// The verified records of the registered study `id`, in order; `None` when no study
+    /// with that id is registered in the box.
+    fn study(&self, id: &str) -> Result<Option<Vec<crate::records::Record>>, String>;
 }
 
 /// An empty box.
 pub struct NoRecords;
 
 impl BoxRecords for NoRecords {
-    fn find(&self, _: &str) -> Result<Option<crate::records::Record>, String> {
+    fn study(&self, _: &str) -> Result<Option<Vec<crate::records::Record>>, String> {
         Ok(None)
     }
+}
+
+/// True when `id` has the form E-FMT-001 gives `study.id` in the built-in rules.
+pub fn is_study_id(id: &str) -> bool {
+    builtin().iter().any(|r| {
+        r.code == "E-FMT-001"
+            && r.path == "study.id"
+            && matches!(&r.check, Check::Format(re) if re.is_match(id))
+    })
 }
 
 #[derive(Debug, Clone)]

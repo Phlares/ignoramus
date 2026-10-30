@@ -1,7 +1,10 @@
 //! A registered study in a temp home, shared by the run tests.
 #![allow(dead_code)]
 use ignorarium::cli::register;
+use ignorarium::derived;
 use ignorarium::home::Home;
+use ignorarium::rules::BoxRecords;
+use ignorarium::spec::model::{Direction, Outcome, Paired};
 use ignorarium::{keys, records, spec};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -336,20 +339,141 @@ pub fn no_level1() -> Option<String> {
     }
 }
 
-/// Plant an `estimate` record for `outcome` in a donor study log and return its hash.
-pub fn plant_estimate(home: &Home, outcome: &str, var: f64) -> String {
-    let key = keys::load_or_create(home).unwrap();
-    std::fs::create_dir_all(home.study_dir("donor")).unwrap();
-    let body = serde_json::json!({
-        "hypothesis": "H1", "outcome": outcome, "key": {}, "key_hash": "k", "stratum": "",
-        "clusters": 4, "units": 20, "mean": 1.0, "var": var, "icc": null
-    });
-    let draft = records::RecordDraft {
-        study: "donor".into(),
+/// A record of study `study` for a box built by hand. `seq` keeps two records with one body
+/// apart: each has its own hash.
+pub fn record(study: &str, seq: u64, kind: &str, body: serde_json::Value) -> records::Record {
+    records::Record {
+        seq,
+        prev: "0".repeat(64),
+        study: study.into(),
         row: None,
-        kind: "estimate".into(),
+        kind: kind.into(),
         body,
+        ts: "2026-01-01T00:00:00Z".into(),
+    }
+}
+
+/// The template's outcome: `ppl-ratio`, measured as `ppl`, paired in percent.
+pub fn ppl_ratio() -> Outcome {
+    Outcome {
+        id: "ppl-ratio".into(),
+        unit: "ratio".into(),
+        direction: Direction::Lower,
+        measure: "ppl".into(),
+        paired: Paired::Percent,
+        registered: true,
+    }
+}
+
+/// A term of a contrast: condition id, weight and params.
+pub type Term<'a> = (&'a str, f64, serde_json::Value);
+
+/// The body of an estimate of the template outcome for the contrast `terms`, in `stratum`.
+pub fn estimate(terms: &[Term], stratum: &str, var: f64, icc: Option<f64>) -> serde_json::Value {
+    let terms: Vec<(String, f64, serde_json::Value)> = terms
+        .iter()
+        .map(|(c, w, p)| (c.to_string(), *w, p.clone()))
+        .collect();
+    let (key, key_hash) = derived::contrast_key(&ppl_ratio(), &terms);
+    serde_json::json!({
+        "hypothesis": "H1", "outcome": "ppl-ratio", "key": key, "key_hash": key_hash,
+        "stratum": stratum, "clusters": 4, "units": 20, "mean": 1.0, "var": var, "icc": icc
+    })
+}
+
+/// The pooled estimate of the template's contrast, `arm-a` alone: variance 4, icc 0.1.
+pub fn arm_a() -> serde_json::Value {
+    estimate(&[("arm-a", 1.0, serde_json::json!({}))], "", 4.0, Some(0.1))
+}
+
+/// The records of a finished study, as (kind, body): its register record, an analysis record
+/// that promises `estimates`, and the estimates.
+pub fn finished(estimates: Vec<serde_json::Value>) -> Vec<(&'static str, serde_json::Value)> {
+    let register = derived::Register {
+        spec_hash: format!("sha256:{}", "ab".repeat(32)),
+        leaf: 0,
+        log: "testlog".into(),
+        defaults: serde_json::json!([]),
+        root: "/work/pilot".into(),
+        payload: "cd".repeat(32),
+        inputs: vec![],
+        resolved: vec![],
+        timestamp: None,
     };
-    let path = home.study_dir("donor").join("records.jsonl");
-    records::hash(&records::append(&path, &key, draft).unwrap())
+    let analysis = derived::Analysis {
+        commit: "ef".repeat(32),
+        box_version: "0.1.0".into(),
+        estimates: estimates.len() as u64,
+        verdicts: 0,
+        slot: None,
+    };
+    let head = [
+        ("register", serde_json::to_value(register).unwrap()),
+        ("analysis", serde_json::to_value(analysis).unwrap()),
+    ];
+    head.into_iter()
+        .chain(estimates.into_iter().map(|e| ("estimate", e)))
+        .collect()
+}
+
+/// `bodies` as the records of study `id`, in order, for a hand-built box.
+pub fn records_for(id: &str, bodies: &[(&str, serde_json::Value)]) -> Vec<records::Record> {
+    bodies
+        .iter()
+        .enumerate()
+        .map(|(i, (kind, body))| record(id, i as u64, kind, body.clone()))
+        .collect()
+}
+
+/// A box built by hand: each study id with its records, or the error its log gives.
+pub struct Studies(pub Vec<(&'static str, Result<Vec<records::Record>, String>)>);
+
+impl BoxRecords for Studies {
+    fn study(&self, id: &str) -> Result<Option<Vec<records::Record>>, String> {
+        match self.0.iter().find(|(s, _)| *s == id) {
+            Some((_, found)) => found.clone().map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
+/// Sign `bodies` into the record log of study `id` in the box at `home`. Returns the hash of
+/// each record.
+pub fn plant(home: &Home, id: &str, bodies: &[(&str, serde_json::Value)]) -> Vec<String> {
+    let key = keys::load_or_create(home).unwrap();
+    std::fs::create_dir_all(home.study_dir(id)).unwrap();
+    let path = home.study_dir(id).join("records.jsonl");
+    bodies
+        .iter()
+        .map(|(kind, body)| {
+            let draft = records::RecordDraft {
+                study: id.into(),
+                row: None,
+                kind: kind.to_string(),
+                body: body.clone(),
+            };
+            records::hash(&records::append(&path, &key, draft).unwrap())
+        })
+        .collect()
+}
+
+/// A finished study `my-pilot`, the one the template's commented `estimates` names, with
+/// `estimates`. Returns the hash of each estimate record.
+pub fn pilot(home: &Home, estimates: Vec<serde_json::Value>) -> Vec<String> {
+    let n = estimates.len();
+    let hashes = plant(home, "my-pilot", &finished(estimates));
+    hashes[hashes.len() - n..].to_vec()
+}
+
+/// The template text as a confirmatory plan with its example claim, power_at, estimates and
+/// alpha share uncommented: below 0 by the median, sized at -1, with the sd and icc of
+/// `my-pilot`, at the whole level.
+pub fn confirmatory(t: String) -> String {
+    ["power_at", "estimates"]
+        .iter()
+        .fold(with_claim(t), |t, k| {
+            t.replace(&format!("# {k} = "), &format!("{k} = "))
+        })
+        .replace("mode = \"exploratory\"", "mode = \"confirmatory\"")
+        .replace("label = \"signal\"", "label = \"confirmed\"")
 }

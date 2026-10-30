@@ -20,7 +20,7 @@ strata = []                     # strata it must hold in, each with confirmation
 # claim = { below = 0.0 }       # { below = m } | { above = m } | { within = [a, b] }; none = descriptive
 # statistic = { quantile = 0.5 }  # per cluster: { mean = [lo, hi] } (the range of a cluster mean) | { quantile = q }; required with a claim
 # power_at = -1.0               # confirmatory: the true value of the statistic where the test must have its power
-# estimates = { from = "my-pilot" }  # confirmatory: the study whose records give the sd and icc
+# estimates = { from = "my-pilot" }  # confirmatory: the finished study in this box whose estimates give the sd and icc
 # alpha_share = 1.0             # confirmatory: share of the study's level; the shares sum to 1
 
 [[outcomes]]
@@ -51,13 +51,8 @@ repeats = 1
 row_seconds = 60.0              # estimate per row, until a record gives one
 alpha = 0.005
 power = 0.8
-sesoi = 0.0                     # smallest effect of interest, in outcome units
-icc = 0.0
 units_per_cluster = 1           # units each cluster gives the study, at most
 pick = "seeded"                 # seeded | first: which of a cluster's units the study takes
-[design.variance]
-value = 0.0                     # variance of the paired difference per unit
-source = "stated"               # stated | record:<sha256>
 [[design.conditions]]
 id = "exact"
 [[design.conditions]]

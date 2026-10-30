@@ -568,26 +568,8 @@ fn the_commitment_binds_the_authors_spec_not_the_defaulted_one() {
 #[test]
 fn a_confirmatory_plan_registers_with_a_pending_timestamp() {
     let (f, spec) = setup("numeric-ablation", same);
-    let source = common::plant_estimate(&f.home, "ppl-ratio", 4.0);
-    let t = std::fs::read_to_string(&spec).unwrap();
-    // The confirmation input gives 55 units, against 54 needed.
-    let edited = {
-        common::with_claim(t)
-            .replace("mode = \"exploratory\"", "mode = \"confirmatory\"")
-            .replace("label = \"signal\"", "label = \"confirmed\"")
-            .replace("sesoi = 0.0", "sesoi = 1.0")
-            .replace("value = 0.0", "value = 4.0")
-            .replace(
-                "source = \"stated\"",
-                &format!("source = \"record:{source}\""),
-            )
-            .replace("units_per_cluster = 1", "units_per_cluster = 55")
-            .replace("units = 3 ", "units = 55 ")
-            .replace(
-                "triggers = []",
-                "triggers = [{ id = \"T1\", metric = \"ppl-ratio\", threshold_e = 1.0 }]",
-            )
-    };
+    common::pilot(&f.home, vec![common::arm_a()]);
+    let edited = common::confirmatory(std::fs::read_to_string(&spec).unwrap());
     std::fs::write(&spec, edited).unwrap();
     let (r, out) = go(&f, &spec, &answer(&spec), true);
     assert_eq!(r.unwrap().code, 0, "{out}");
@@ -598,6 +580,92 @@ fn a_confirmatory_plan_registers_with_a_pending_timestamp() {
         leaves(&f.home.root.join("planlog"))[0].mode.as_deref(),
         Some("confirmatory")
     );
+}
+
+#[test]
+fn register_refuses_pending_values() {
+    let (f, spec) = setup("numeric-ablation", common::confirmatory);
+    // Not registered, then registered and not finished: no analysis record yet.
+    let unfinished = common::finished(vec![common::arm_a()]);
+    for planted in [&[][..], &unfinished[..1]] {
+        common::plant(&f.home, "my-pilot", planted);
+        let (r, out) = go(&f, &spec, &answer(&spec), true);
+        let e = r.unwrap_err();
+        assert_eq!(e.code, 1, "{out}");
+        assert_eq!(
+            e.msg,
+            "W-REF-001: a value waits on a study that has not finished; register after my-pilot finishes. See docs/rules/W-REF-001.md"
+        );
+        assert!(out.contains("warning[W-REF-001]"), "{out}");
+        // The refusal comes before the prompt, and nothing is written.
+        assert!(!out.contains(PROMPT), "{out}");
+        assert!(!f.home.study_dir("my-study").exists());
+        assert!(leaves(&f.home.root.join("planlog")).is_empty());
+    }
+}
+
+#[test]
+fn register_freezes_the_estimate_records_it_used() {
+    // A confirmation input in each of two more strata.
+    let input = |stratum: &str| {
+        format!(
+            "[[inputs]]
+path = \"data/{stratum}.txt\"
+sha256 = \"\"
+role = \"confirmation\"
+stratum = \"{stratum}\"
+units = 3
+[inputs.licence]
+spdx = \"\"
+type = \"unspecified\"
+source = \"\"
+creators = []
+
+"
+        )
+    };
+    let (f, spec) = setup("numeric-ablation", |t| {
+        common::confirmatory(t)
+            .replace(
+                "strata = []",
+                "strata = [\"fiction\", \"code\", \"article\"]",
+            )
+            .replacen(
+                "[pins]",
+                &format!("{}{}[pins]", input("code"), input("article")),
+                1,
+            )
+    });
+    let other = common::estimate(&[("arm-b", 1.0, serde_json::json!({}))], "", 1.0, Some(0.0));
+    let fiction = common::estimate(
+        &[("arm-a", 1.0, serde_json::json!({}))],
+        "fiction",
+        9.0,
+        Some(0.2),
+    );
+    let hashes = common::pilot(&f.home, vec![common::arm_a(), other, fiction]);
+    let (r, out) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap().code, 0, "{out}");
+    // A stratum's own estimate, else the pooled one, never another contrast's; each record
+    // is named once.
+    assert_eq!(
+        body_of(&f)["resolved"],
+        serde_json::json!([{
+            "path": "question.hypotheses[0].estimates",
+            "study": "my-pilot",
+            "records": [hashes[2], hashes[0]],
+            "value": {
+                "fiction": { "sd": 3.0, "icc": 0.2 },
+                "code": { "sd": 2.0, "icc": 0.1 },
+                "article": { "sd": 2.0, "icc": 0.1 }
+            }
+        }])
+    );
+    // An exploratory plan takes nothing from another study, claim or not.
+    let (g, spec) = setup("numeric-ablation", common::with_claim);
+    let (r, out) = go(&g, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap().code, 0, "{out}");
+    assert_eq!(body_of(&g)["resolved"], serde_json::json!([]));
 }
 
 #[test]

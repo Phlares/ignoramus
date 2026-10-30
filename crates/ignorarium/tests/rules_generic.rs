@@ -89,18 +89,17 @@ fn faults() -> Vec<Fault> {
             "design.conditions[1].id",
         ),
         (
-            "E-FMT-002",
-            "/design/variance/source",
-            Some(json!("record:xyz")),
-            "design.variance.source",
-        ),
-        (
             "E-FMT-003",
             "/inputs/0/sha256",
             Some(json!("ABC")),
             "inputs[0].sha256",
         ),
-        ("E-NUM-001", "/design/sesoi", nan(), "design.sesoi"),
+        (
+            "E-NUM-001",
+            "/design/row_seconds",
+            nan(),
+            "design.row_seconds",
+        ),
         (
             "E-KEY-001",
             "/study/surprise",
@@ -659,7 +658,7 @@ fn rng_codes(spec: &Value) -> Vec<String> {
 
 #[test]
 fn range_bounds_hold_on_both_sides() {
-    let cases: [(&[&str], Value, bool); 18] = [
+    let cases: [(&[&str], Value, bool); 14] = [
         (&["design", "alpha"], json!(0), true),
         (&["design", "alpha"], json!(0.0000001), false),
         (&["design", "alpha"], json!(0.5), false),
@@ -668,10 +667,6 @@ fn range_bounds_hold_on_both_sides() {
         (&["design", "power"], json!(0.5), false),
         (&["design", "power"], json!(0.999), false),
         (&["design", "power"], json!(0.9991), true),
-        (&["design", "icc"], json!(-0.0001), true),
-        (&["design", "icc"], json!(0), false),
-        (&["design", "icc"], json!(0.9999), false),
-        (&["design", "icc"], json!(1), true),
         (&["design", "repeats"], json!(0), true),
         (&["design", "repeats"], json!(1), false),
         (&["design", "repeats"], json!(1000000), false),
@@ -820,7 +815,7 @@ fn a_star_segment_selects_every_key_and_known_key_accepts_them() {
 fn a_key_holding_a_dot_or_bracket_is_unknown_and_never_printed() {
     let mut s = template();
     s["design.alpha"] = json!(0.1);
-    s["design"]["variance.value"] = json!(1.0);
+    s["design"]["units.per_cluster"] = json!(1.0);
     s["outcomes"][0]["a[0]"] = json!(1);
     let d = rules::check_generic(&s, &v0());
     let got: Vec<_> = d
@@ -1091,18 +1086,6 @@ fn cost_inputs_are_range_checked_at_their_edges() {
             vec!["design.units_per_cluster".into()],
         ),
         (vec!["design", "units_per_cluster"], json!(1), vec![]),
-        (
-            vec!["design", "variance", "value"],
-            json!(-1e-9),
-            vec!["design.variance.value".into()],
-        ),
-        (vec!["design", "variance", "value"], json!(0.0), vec![]),
-        (
-            vec!["design", "sesoi"],
-            json!(-1e-9),
-            vec!["design.sesoi".into()],
-        ),
-        (vec!["design", "sesoi"], json!(0.0), vec![]),
         (
             vec!["mutations", "depth_cap"],
             json!(-1),
@@ -1456,6 +1439,10 @@ fn hypothesis_fields_are_typed_and_ids_and_strata_have_their_form() {
     assert_eq!(
         h("estimates", json!({ "from": "My-Pilot" })),
         one("E-FMT-001", "estimates.from")
+    );
+    assert_eq!(
+        h("estimates", json!({})),
+        one("E-REQ-001", "estimates.from")
     );
 }
 

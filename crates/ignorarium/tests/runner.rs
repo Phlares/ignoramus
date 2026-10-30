@@ -1018,31 +1018,27 @@ fn late_confirmation_data_used_before_is_refused() {
     assert!(!a.join("schedule.json").exists());
 }
 
-/// `staged` as a confirmatory plan: the confirmation input gives 55 units, against 54 needed.
-fn confirmatory_staged(source: String) -> impl Fn(String) -> String {
-    move |t| {
-        common::with_claim(staged(t))
-            .replace("mode = \"exploratory\"", "mode = \"confirmatory\"")
-            .replace("label = \"signal\"", "label = \"confirmed\"")
-            .replace("sesoi = 0.0", "sesoi = 1.0")
-            .replace("value = 0.0", "value = 4.0")
-            .replace(
-                "source = \"stated\"",
-                &format!("source = \"record:{source}\""),
-            )
-            .replace("units_per_cluster = 3", "units_per_cluster = 55")
-            .replace("units = 3 ", "units = 55 ")
-            .replace(
-                "triggers = []",
-                "triggers = [{ id = \"T1\", metric = \"ppl-ratio\", threshold_e = 1.0 }]",
-            )
-    }
+/// `staged` as a confirmatory plan, with the sd and icc of each candidate from `my-pilot`.
+fn confirmatory_staged(t: String) -> String {
+    common::confirmatory(staged(t))
+}
+
+/// The pooled estimates `my-pilot` holds for the pick of `staged`: one per candidate.
+fn staged_pilot(lab: &common::Lab) {
+    let candidate = |id, params| common::estimate(&[(id, 1.0, params)], "", 4.0, Some(0.1));
+    common::pilot(
+        &lab.home,
+        vec![
+            candidate("arm-a", serde_json::json!({ "bits": 4, "mode": "fast" })),
+            candidate("arm-b", serde_json::json!({ "bits": 8 })),
+        ],
+    );
 }
 
 #[test]
 fn a_late_input_with_the_data_of_the_other_role_is_refused() {
     let lab = lab();
-    let source = common::plant_estimate(&lab.home, "ppl-ratio", 4.0);
+    staged_pilot(&lab);
     let (sel, conf) = ("data/select.txt", "data/confirm.txt");
     // (study, files at registration, files written after it). A late exact copy of a
     // registered file has a registered hash, so lateness by hash alone would miss it.
@@ -1060,13 +1056,7 @@ fn a_late_input_with_the_data_of_the_other_role_is_refused() {
         ("both-late", vec![], vec![(sel, "both"), (conf, "both")]),
     ];
     for (id, before, after) in cases {
-        let dir = register_study(
-            &lab,
-            id,
-            confirmatory_staged(source.clone()),
-            &before,
-            PAYLOAD,
-        );
+        let dir = register_study(&lab, id, confirmatory_staged, &before, PAYLOAD);
         for (p, text) in after {
             std::fs::write(common::work(&lab, id).join(p), text).unwrap();
         }
@@ -1084,7 +1074,7 @@ fn a_late_input_with_the_data_of_the_other_role_is_refused() {
     }
     // Other data passes, and so does an exploratory plan, which E-CNF-004 does not cover.
     let work = |id: &str| common::work(&lab, id);
-    register_study(&lab, "apart", confirmatory_staged(source), &[], PAYLOAD);
+    register_study(&lab, "apart", confirmatory_staged, &[], PAYLOAD);
     std::fs::write(work("apart").join(sel), "one text").unwrap();
     std::fs::write(work("apart").join(conf), "another text").unwrap();
     plan_of(&lab, "apart");

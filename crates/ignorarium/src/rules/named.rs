@@ -2,17 +2,20 @@
 //! `when` gates it like a generic rule. Each check gets the row's target pattern,
 //! selects its nodes with it, and reports only at those nodes. A check skips what
 //! is missing or mistyped: the generic rules report that.
-use super::generic::{applies, diagnostic, join, join_key, plain_key, select};
-use super::{BoxRecords, Check, NoRecords, Rule};
-use crate::derived::Estimate;
+use super::generic::{applies, diagnostic, join, join_key, plain_key, safe_key, select};
+use super::{BoxRecords, Check, NoRecords, Rule, is_study_id};
+use crate::derived::{Estimate, StudyState, contrast_key};
 use crate::diag::Diagnostic;
 use crate::inputs::{self, Found};
-use crate::power::required_units;
+use crate::power::required_clusters;
 use crate::prior::{PriorUse, same_data};
+use crate::records;
 use crate::schedule::ROW_CAP;
-use crate::spec::model::SELECTED;
+use crate::spec::model::{Claim, Outcome, SELECTED};
 use crate::store::Store;
-use serde_json::Value;
+use evidence::Tail;
+use evidence::claim::Bound;
+use serde_json::{Value, json};
 use std::path::{Component, Path, PathBuf};
 
 pub struct CheckCtx {
@@ -62,9 +65,11 @@ type NamedFn = fn(&Value, &CheckCtx, &str) -> Vec<Hit>;
 
 const NAMED: &[(&str, NamedFn)] = &[
     ("label-allowed-for-mode", label_allowed),
-    ("sesoi-required", sesoi_required),
+    ("power-at-side", power_at_side),
     ("power-met", power_met),
-    ("variance-from-record", variance_from_record),
+    ("estimates-from-record", estimates_from_record),
+    ("reference-finished", reference_finished),
+    ("reference-not-self", reference_not_self),
     (
         "selection-confirmation-disjoint",
         selection_confirmation_disjoint,
@@ -136,10 +141,6 @@ fn val<'a>(spec: &'a Value, path: &str) -> Option<&'a Value> {
 
 fn text<'a>(spec: &'a Value, path: &str) -> Option<&'a str> {
     val(spec, path)?.as_str()
-}
-
-fn num(spec: &Value, path: &str) -> Option<f64> {
-    val(spec, path)?.as_f64()
 }
 
 fn list<'a>(spec: &'a Value, path: &str) -> Option<&'a Vec<Value>> {
@@ -357,116 +358,442 @@ fn label_allowed(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
     flag(spec, pat, |v| v.as_str().is_some_and(|l| l != "signal"))
 }
 
-fn sesoi_required(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
-    flag(spec, pat, |v| v.as_f64().is_some_and(|x| x <= 0.0))
-}
-
 fn open_unit(x: f64) -> bool {
     x > 0.0 && x < 1.0
 }
 
-/// The confirmation units are each confirmation input's units, up to `units_per_cluster`.
-/// Alpha, power and icc come from the defaults step. If one is absent the gate
-/// cannot be computed, so it fails closed. A mistyped one is skipped: the type rule reports it.
-fn power_met(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
-    let (Some(variance), Some(sesoi), Some(per)) = (
-        num(spec, "design.variance.value"),
-        num(spec, "design.sesoi"),
-        val(spec, "design.units_per_cluster").and_then(Value::as_i64),
-    ) else {
-        return vec![];
-    };
-    let fields = ["alpha", "power", "icc"].map(|f| (f, val(spec, &format!("design.{f}"))));
-    if sesoi <= 0.0
-        || fields
-            .iter()
-            .any(|(_, v)| v.is_some_and(|v| !v.is_number()))
+/// E-CNF-002, at each hypothesis with a mean claim that E-CNF-001 and E-HYP-004 accept and
+/// whose estimates are found: in each group it is tested in, the clusters must reach the
+/// one-sided z count for every bound, at level `design.alpha` x `alpha_share` and power
+/// `design.power`. A cluster mean has sd `sd x sqrt(icc + (1 - icc) / m)`, m the mean units a
+/// cluster of the group gives. An absent alpha or power cannot be computed, so it fails
+/// closed; a mistyped or out-of-range one, or a units per cluster below 1, is the generic
+/// rules'. Quantile claims are not sized here.
+fn power_met(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let fields = ["alpha", "power"].map(|f| (f, val(spec, &format!("design.{f}"))));
+    if fields
+        .iter()
+        .any(|(_, v)| v.is_some_and(|v| !v.is_number()))
     {
         return vec![];
     }
-    let absent: Vec<_> = fields.iter().filter(|(_, v)| v.is_none()).collect();
+    let claimed: Vec<(String, &Value)> = nodes(spec, pat)
+        .into_iter()
+        .filter(|(_, h)| has_claim(h))
+        .collect();
+    let absent: Vec<&str> = fields
+        .iter()
+        .filter(|(_, v)| v.is_none())
+        .map(|(f, _)| *f)
+        .collect();
     if !absent.is_empty() {
-        return nodes(spec, pat)
-            .into_iter()
-            .filter(|(_, v)| v.is_array())
+        return claimed
+            .iter()
             .flat_map(|(path, _)| {
-                absent.iter().map(move |(f, _)| Hit {
+                absent.iter().map(move |f| Hit {
                     path: path.clone(),
                     detail: Some(format!("Cannot compute power: design.{f} is absent.")),
                 })
             })
             .collect();
     }
-    let [alpha, power, icc] = fields.map(|(_, v)| v.and_then(Value::as_f64).unwrap_or_default());
-    // The range rules report these.
-    if !open_unit(alpha) || !open_unit(power) || !(0.0..1.0).contains(&icc) {
+    let [alpha, power] = fields.map(|(_, v)| v.and_then(Value::as_f64).unwrap_or_default());
+    let per = val(spec, "design.units_per_cluster").and_then(Value::as_u64);
+    let Some(per) = per.filter(|n| *n >= 1) else {
+        return vec![];
+    };
+    if !open_unit(alpha) || !open_unit(power) {
         return vec![];
     }
-    let per = per.max(0);
-    let m = u32::try_from(per.max(1)).unwrap_or(u32::MAX);
     let mut out = vec![];
-    for (path, list) in nodes(spec, pat) {
-        let Some(list) = list.as_array() else {
+    for (path, h) in claimed {
+        let Some(sized) = sizing(h) else { continue };
+        let Some(Lookup::Found(groups)) = estimates_of(spec, h, ctx) else {
             continue;
         };
-        let detail = if variance <= 0.0 {
-            "The variance must be > 0.".to_string()
-        } else {
-            let have = list
-                .iter()
-                .filter(|i| role(i) == Some("confirmation"))
-                .filter_map(|i| i.get("units")?.as_u64())
-                .map(|u| u.min(per.unsigned_abs()))
-                .fold(0, u64::saturating_add);
-            let need = required_units(alpha, power, variance.sqrt(), sesoi, m, icc);
-            if have >= need {
+        for g in groups {
+            let sizes = cluster_sizes(spec, ctx, &g.stratum, per);
+            if sizes.is_empty() {
                 continue;
             }
-            format!("{have} confirmation units; the power gate needs {need}.")
-        };
-        out.push(Hit {
-            path,
-            detail: Some(detail),
-        });
+            let have = sizes.len() as u64;
+            let m = sizes.iter().sum::<u64>() as f64 / have as f64;
+            let sd = g.sd * (g.icc + (1.0 - g.icc) / m).sqrt();
+            let need = sized
+                .bounds
+                .iter()
+                .map(|b| {
+                    let distance = (b.margin - sized.at).abs();
+                    required_clusters(alpha * sized.share, power, sd, distance)
+                })
+                .max()
+                .unwrap_or(0);
+            if have < need {
+                let group = group_name(&g.stratum);
+                out.push(Hit {
+                    path: path.clone(),
+                    detail: Some(format!(
+                        "{}{} has {have} of the {need} clusters the power gate needs.",
+                        group[..1].to_ascii_uppercase(),
+                        &group[1..]
+                    )),
+                });
+            }
+        }
     }
     out
 }
 
-/// The source is `record:<hash>` of an estimate for a listed outcome that holds the stated variance.
-fn variance_from_record(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
-    let outcomes = texts(spec, "outcomes[*].id");
-    let stated = num(spec, "design.variance.value");
-    let mut out = Vec::new();
-    for (path, v) in nodes(spec, pat) {
-        let Some(source) = v.as_str() else { continue };
-        let Some(h) = source.strip_prefix("record:") else {
-            out.push(hit(path));
+/// What the power gate sizes a hypothesis at.
+struct Sizing {
+    bounds: Vec<Bound>,
+    at: f64,
+    share: f64,
+}
+
+/// `None` unless the claim is well formed, the statistic is a valid mean, `power_at` passes
+/// E-CNF-001 and `alpha_share` passes E-HYP-004.
+fn sizing(h: &Value) -> Option<Sizing> {
+    let claim = claim_of(h)?;
+    if !matches!(h.get("statistic").and_then(mean_range), Some(Ok(Some(_)))) {
+        return None;
+    }
+    let at = h
+        .get("power_at")?
+        .as_f64()
+        .filter(|p| sized_at(h, &claim, *p))?;
+    let share = h
+        .get("alpha_share")?
+        .as_f64()
+        .filter(|x| share_in_range(*x))?;
+    Some(Sizing {
+        bounds: claim.bounds(),
+        at,
+        share,
+    })
+}
+
+/// The units each confirmation cluster of `stratum` gives (every confirmation input for the
+/// pooled group `""`): its declared units, at most `per`. Inputs that hold the same data are
+/// one cluster; an input whose data cannot be read counts on its own. An input with no units
+/// is not counted: E-UNT-001 reports it.
+fn cluster_sizes(spec: &Value, ctx: &CheckCtx, stratum: &str, per: u64) -> Vec<u64> {
+    let mut seen: Vec<(String, String)> = vec![];
+    let mut sizes = vec![];
+    for (_, input) in nodes(spec, "inputs[*]") {
+        let in_group =
+            stratum.is_empty() || input.get("stratum").and_then(Value::as_str) == Some(stratum);
+        if role(input) != Some("confirmation") || !in_group {
+            continue;
+        }
+        let Some(units) = input
+            .get("units")
+            .and_then(Value::as_u64)
+            .filter(|u| *u >= 1)
+        else {
             continue;
         };
-        let fault = match ctx.records.find(h) {
-            Err(e) => Some(format!("The box cannot read its records: {e}")),
-            Ok(None) => Some("No record in this box has this hash.".to_string()),
-            Ok(Some(r)) => match Estimate::of(&r) {
-                None => Some("The record is not an estimate.".to_string()),
-                Some(e) if !outcomes.contains(&e.outcome.as_str()) => {
-                    Some("The record is for an outcome this plan does not list.".to_string())
-                }
-                Some(e) if stated.is_some_and(|s| s != e.var) => Some(format!(
-                    "The record holds variance {}, and the plan states {}.",
-                    e.var,
-                    stated.unwrap_or_default()
-                )),
-                Some(_) => None,
-            },
-        };
-        if let Some(detail) = fault {
-            out.push(Hit {
-                path,
-                detail: Some(detail),
-            });
+        if let Some(h) = input_hashes(ctx, input) {
+            if seen.iter().any(|s| same_data(s, &h)) {
+                continue;
+            }
+            seen.push(h);
         }
+        sizes.push(units.min(per));
     }
-    out
+    sizes
+}
+
+/// The claim of a hypothesis, when it is well formed.
+fn claim_of(h: &Value) -> Option<Claim> {
+    let claim = h.get("claim")?;
+    margins(claim)?.ok()?;
+    serde_json::from_value(claim.clone()).ok()
+}
+
+/// `p` lies strictly on the claimed side of every bound, and inside the statistic's range of
+/// a cluster mean when it has one.
+fn sized_at(h: &Value, claim: &Claim, p: f64) -> bool {
+    let side = claim.bounds().iter().all(|b| match b.tail {
+        Tail::Lower => p < b.margin,
+        Tail::Upper => p > b.margin,
+        Tail::Both => false,
+    });
+    let inside = match h.get("statistic").and_then(mean_range) {
+        Some(Ok(Some((lo, hi)))) => (lo..=hi).contains(&p),
+        _ => true,
+    };
+    side && inside
+}
+
+/// E-CNF-001, at `<h>.power_at` of a hypothesis with a well-formed claim: absent, or not
+/// where `sized_at` puts it. A mistyped value is the type rule's.
+fn power_at_side(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    children(spec, pat)
+        .into_iter()
+        .filter(|(_, h, v)| {
+            claim_of(h).is_some_and(|claim| match v {
+                None => true,
+                Some(v) => v.as_f64().is_some_and(|p| !sized_at(h, &claim, p)),
+            })
+        })
+        .map(|(p, _, _)| hit(p))
+        .collect()
+}
+
+// ---- values from earlier studies ----
+
+/// What a confirmatory hypothesis takes from the study its `estimates` names.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Lookup {
+    /// The study has not finished; the text says which way.
+    Pending(String),
+    /// No usable estimate; the text says why.
+    Missing(String),
+    /// One per group the hypothesis is tested in.
+    Found(Vec<StratumInput>),
+}
+
+/// The sd and icc the power gate uses in one group: the largest over the contrasts the
+/// hypothesis stands for, and the hashes of the estimate records they come from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StratumInput {
+    /// `""` for the pooled group.
+    pub stratum: String,
+    pub sd: f64,
+    pub icc: f64,
+    pub records: Vec<String>,
+}
+
+/// The sd and icc of hypothesis `h` (its index in `question.hypotheses`), from the study its
+/// `estimates` names. That study must have finished. For each stratum the hypothesis lists
+/// (the pooled group `""` when none) and each contrast it stands for (with `selected`, each
+/// candidate of this plan's selection stage, with its params), the estimate with that
+/// contrast's key and the stratum, else the pooled one; its icc must be known. The largest sd
+/// and icc over the candidates.
+pub fn estimate_inputs(spec: &Value, h: usize, ctx: &CheckCtx) -> Lookup {
+    estimates_of(spec, &spec["question"]["hypotheses"][h], ctx)
+        .unwrap_or_else(|| Lookup::Missing("The hypothesis is not well formed.".into()))
+}
+
+/// A contrast a hypothesis stands for: the candidate it takes as the pick, and its key hash.
+struct Concrete<'a> {
+    pick: Option<&'a str>,
+    key: String,
+}
+
+/// `estimate_inputs`, with `None` when a generic, shape or stage rule reports the hypothesis or
+/// its reference, so the rules that read estimates skip it.
+fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
+    let Some(reference) = hyp.get("estimates") else {
+        return Some(Lookup::Missing("The hypothesis names no study.".into()));
+    };
+    let from = study_ref(spec, reference)?;
+    let contrasts = contrasts(spec, hyp)?;
+    let groups = groups_of(hyp)?;
+    let records = match ctx.records.study(from).map(StudyState::of) {
+        Err(e) => {
+            return Some(Lookup::Missing(format!(
+                "The box cannot read the records of study {from}: {e}."
+            )));
+        }
+        Ok(StudyState::NotRegistered) => return Some(pending(from, "not registered")),
+        Ok(StudyState::NotFinished) => return Some(pending(from, "not finished")),
+        Ok(StudyState::Finished(records)) => records,
+    };
+    let estimates: Vec<(String, Estimate)> = records
+        .iter()
+        .filter_map(|r| Some((records::hash(r), Estimate::of(r)?)))
+        .collect();
+    let mut out = Vec::new();
+    for stratum in groups {
+        let mut input = StratumInput {
+            stratum: stratum.into(),
+            sd: 0.0,
+            icc: 0.0,
+            records: vec![],
+        };
+        for c in &contrasts {
+            let pick = c
+                .pick
+                .map(|p| format!(" with {} as the pick", shown(p)))
+                .unwrap_or_default();
+            let found = [stratum, ""].into_iter().find_map(|group| {
+                estimates
+                    .iter()
+                    .find(|(_, e)| e.key_hash == c.key && e.stratum == group)
+                    .map(|(hash, e)| (group, hash, e))
+            });
+            let Some((group, hash, e)) = found else {
+                let wanted = if stratum.is_empty() {
+                    group_name("")
+                } else {
+                    format!("{} or the pooled group", group_name(stratum))
+                };
+                return Some(Lookup::Missing(format!(
+                    "Study {from} has no estimate of this contrast{pick} in {wanted}."
+                )));
+            };
+            let Some(icc) = e.icc.filter(|_| e.var > 0.0) else {
+                return Some(Lookup::Missing(format!(
+                    "Study {from}'s estimate of this contrast{pick} in {} has no icc, or no variance above 0.",
+                    group_name(group)
+                )));
+            };
+            input.sd = input.sd.max(e.var.sqrt());
+            input.icc = input.icc.max(icc);
+            input.records.push(hash.clone());
+        }
+        out.push(input);
+    }
+    Some(Lookup::Found(out))
+}
+
+fn pending(study: &str, state: &str) -> Lookup {
+    Lookup::Pending(format!("Waits on study {study}, which is {state}."))
+}
+
+/// A group as a diagnostic names it: `stratum <name>`, or `the pooled group`.
+fn group_name(stratum: &str) -> String {
+    if stratum.is_empty() {
+        "the pooled group".into()
+    } else {
+        format!("stratum {}", shown(stratum))
+    }
+}
+
+/// A name read from the spec, as a diagnostic may print it.
+fn shown(name: &str) -> &str {
+    if safe_key(name) { name } else { "<name>" }
+}
+
+/// The study an `estimates` table names. `None` when it is not a table, its `from` is not a
+/// study id, or it names this study: the generic rules and E-REF-002 report those.
+fn study_ref<'a>(spec: &Value, reference: &'a Value) -> Option<&'a str> {
+    let from = reference.get("from")?.as_str()?;
+    (is_study_id(from) && Some(from) != text(spec, "study.id")).then_some(from)
+}
+
+/// The groups a hypothesis is tested in: each stratum it lists, or the pooled group `""`.
+fn groups_of(hyp: &Value) -> Option<Vec<&str>> {
+    let Some(strata) = hyp.get("strata") else {
+        return Some(vec![""]);
+    };
+    let names: Vec<&str> = strata
+        .as_array()?
+        .iter()
+        .map(Value::as_str)
+        .collect::<Option<_>>()?;
+    Some(if names.is_empty() { vec![""] } else { names })
+}
+
+/// The contrasts a hypothesis stands for, each with its key: one, or with `selected` one per
+/// candidate of the selection stage. `None` when its outcome, a weight, a term or a candidate
+/// is one that `hypothesis-shape`, `condition-declared` or `param-shape` refuses.
+fn contrasts<'a>(spec: &'a Value, hyp: &'a Value) -> Option<Vec<Concrete<'a>>> {
+    let id = hyp.get("outcome")?.as_str()?;
+    let outcome = nodes(spec, "outcomes[*]")
+        .into_iter()
+        .find(|(_, o)| o.get("id").and_then(Value::as_str) == Some(id))
+        .and_then(|(_, o)| serde_json::from_value::<Outcome>(o.clone()).ok())?;
+    let terms_ok = names_for(spec, CONTRAST_KEYS)?;
+    let terms: Vec<(&str, f64)> = hyp
+        .get("contrast")?
+        .as_object()?
+        .iter()
+        .map(|(k, w)| {
+            let w = w.as_f64().filter(|w| *w != 0.0)?;
+            terms_ok.may_name(k).then_some((k.as_str(), w))
+        })
+        .collect::<Option<_>>()?;
+    if terms.is_empty() {
+        return None;
+    }
+    let picks: Vec<Option<&str>> = if terms.iter().any(|(k, _)| *k == SELECTED) {
+        let candidates_ok = names_for(spec, SELECTION_LIST)?;
+        let list = list(spec, "design.selection.conditions")?;
+        let candidates: Vec<&str> = list
+            .iter()
+            .map(|c| c.as_str().filter(|c| candidates_ok.may_name(c)))
+            .collect::<Option<_>>()?;
+        if candidates.is_empty() {
+            return None;
+        }
+        candidates.into_iter().map(Some).collect()
+    } else {
+        vec![None]
+    };
+    picks
+        .into_iter()
+        .map(|pick| {
+            let concrete = terms
+                .iter()
+                .map(|&(k, w)| {
+                    let c = if k == SELECTED { pick? } else { k };
+                    Some((c.to_string(), w, params_of(spec, c)?))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let key = contrast_key(&outcome, &concrete).1;
+            Some(Concrete { pick, key })
+        })
+        .collect()
+}
+
+/// The params of declared condition `id`: its `params` table, `{}` when it has none. `None`
+/// when no condition has the id, or a param is not a scalar.
+fn params_of(spec: &Value, id: &str) -> Option<Value> {
+    let (_, condition) = nodes(spec, "design.conditions[*]")
+        .into_iter()
+        .find(|(_, c)| c.get("id").and_then(Value::as_str) == Some(id))?;
+    match condition.get("params") {
+        None => Some(json!({})),
+        Some(p) => p.as_object()?.values().all(is_scalar).then(|| p.clone()),
+    }
+}
+
+/// E-CNF-003, at `<h>.estimates` of a hypothesis with a claim: absent, or no usable estimate
+/// in the finished study it names.
+fn estimates_from_record(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    looked_up(spec, ctx, pat, |l| match l {
+        Lookup::Missing(why) => Some(why),
+        _ => None,
+    })
+}
+
+/// W-REF-001, at `<h>.estimates` of a hypothesis with a claim: the study it names has not
+/// finished.
+fn reference_finished(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    looked_up(spec, ctx, pat, |l| match l {
+        Lookup::Pending(why) => Some(why),
+        _ => None,
+    })
+}
+
+/// A hit with `pick`'s detail at each `<h>.estimates` of a hypothesis with a claim.
+fn looked_up(
+    spec: &Value,
+    ctx: &CheckCtx,
+    pat: &str,
+    pick: impl Fn(Lookup) -> Option<String>,
+) -> Vec<Hit> {
+    children(spec, pat)
+        .into_iter()
+        .filter(|(_, h, _)| has_claim(h))
+        .filter_map(|(path, h, _)| {
+            Some(Hit {
+                path,
+                detail: Some(pick(estimates_of(spec, h, ctx)?)?),
+            })
+        })
+        .collect()
+}
+
+/// E-REF-002: a reference names this study, whose values do not exist until it runs.
+fn reference_not_self(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let own = text(spec, "study.id");
+    flag(spec, pat, |v| {
+        v.as_str().is_some_and(|from| Some(from) == own)
+    })
 }
 
 /// At `inputs`: no confirmation input. At `inputs[*].<field>`: a confirmation input holds a
@@ -591,6 +918,45 @@ fn selection_stage(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
 }
 
 const CONTRAST_KEYS: &str = "question.hypotheses[*].contrast.*";
+const SELECTION_LIST: &str = "design.selection.conditions[*]";
+
+/// The condition names a place may use, and the reference, which it may not.
+struct Names<'a> {
+    usable: Vec<&'a str>,
+    reference: Option<&'a str>,
+}
+
+impl Names<'_> {
+    fn may_name(&self, c: &str) -> bool {
+        self.usable.contains(&c) && Some(c) != self.reference
+    }
+}
+
+/// The names the place `pat` may use (see `condition_declared`). `None` when there is nothing
+/// to check against: no confirmation list for a contrast key, no declared condition id for
+/// the others.
+fn names_for<'a>(spec: &'a Value, pat: &str) -> Option<Names<'a>> {
+    let staged = val(spec, "design.selection").is_some();
+    let usable: Vec<&str> = if pat == CONTRAST_KEYS {
+        list(spec, "design.confirmation.conditions")?;
+        let runs = texts(spec, "design.confirmation.conditions[*]");
+        runs.into_iter()
+            .filter(|c| *c != SELECTED || staged)
+            .collect()
+    } else {
+        let declared = texts(spec, "design.conditions[*].id");
+        if declared.is_empty() {
+            return None;
+        }
+        let pick = staged && pat == "design.confirmation.conditions[*]";
+        declared
+            .into_iter()
+            .chain(pick.then_some(SELECTED))
+            .collect()
+    };
+    let reference = text(spec, "design.reference").filter(|_| pat != "design.reference");
+    Some(Names { usable, reference })
+}
 
 /// A condition name its place may not use. The reference runs in every stage, so no stage
 /// list or contrast names it; `selected` names the selection stage's pick.
@@ -605,41 +971,28 @@ const CONTRAST_KEYS: &str = "question.hypotheses[*].contrast.*";
 /// With no declared condition ids, `non-empty` reports that; with no confirmation list, the
 /// generic rules do.
 fn condition_declared(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
-    let staged = val(spec, "design.selection").is_some();
-    let usable: Vec<&str> = if pat == CONTRAST_KEYS {
-        if list(spec, "design.confirmation.conditions").is_none() {
-            return vec![];
-        }
-        let runs = texts(spec, "design.confirmation.conditions[*]");
-        runs.into_iter()
-            .filter(|c| *c != SELECTED || staged)
-            .collect()
-    } else {
-        let declared = texts(spec, "design.conditions[*].id");
-        if declared.is_empty() {
-            return vec![];
-        }
-        let pick = staged && pat == "design.confirmation.conditions[*]";
-        declared
-            .into_iter()
-            .chain(pick.then_some(SELECTED))
-            .collect()
+    let Some(names) = names_for(spec, pat) else {
+        return vec![];
     };
-    let reference = text(spec, "design.reference").filter(|_| pat != "design.reference");
-    let bad = |c: &str| !usable.contains(&c) || Some(c) == reference;
     if pat == CONTRAST_KEYS {
         return keys(spec, pat)
             .into_iter()
-            .filter(|(_, k)| bad(k))
+            .filter(|(_, k)| !names.may_name(k))
             .map(|(p, _)| hit(p))
             .collect();
     }
-    flag(spec, pat, |v| v.as_str().is_some_and(bad))
+    flag(spec, pat, |v| {
+        v.as_str().is_some_and(|c| !names.may_name(c))
+    })
 }
 
 /// A param value is a string or a number.
+fn is_scalar(v: &Value) -> bool {
+    v.is_string() || v.is_number()
+}
+
 fn param_shape(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
-    flag(spec, pat, |v| !(v.is_string() || v.is_number()))
+    flag(spec, pat, |v| !is_scalar(v))
 }
 
 // ---- hypotheses ----

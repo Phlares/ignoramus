@@ -14,7 +14,7 @@ Decision:
 Fail closed:
 
 - If the plan log cannot be read, the data-reuse check reports a problem. It does not pass the plan.
-- If `design.alpha`, `design.power` or `design.icc` is missing, the power check reports a problem. It does not assume a default.
+- If `design.alpha` or `design.power` is missing, the power check reports a problem. It does not assume a default.
 
 Why:
 

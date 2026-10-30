@@ -1,9 +1,11 @@
 mod common;
 
 use assert_cmd::Command;
-use ignorarium::cli::check;
+use ignorarium::cli::check::{self, HomeRecords};
 use ignorarium::home::Home;
-use serde_json::Value;
+use ignorarium::keys;
+use ignorarium::rules::BoxRecords;
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
@@ -1259,95 +1261,178 @@ fn content_faults_that_break_the_model_exit_1_with_a_code() {
     }
 }
 
-#[test]
-fn check_refuses_a_made_up_variance_record() {
-    let (_d, home, spec) = setup(|t| {
-        t.replace("mode = \"exploratory\"", "mode = \"confirmatory\"")
-            .replace(
-                "source = \"stated\"",
-                &format!("source = \"record:{}\"", "0".repeat(64)),
-            )
-    });
-    let a = bin(&home).arg("check").arg(&spec).assert().code(1);
-    let out = stdout(&a);
-    assert!(out.contains("error[E-CNF-003]"), "{out}");
-    assert!(
-        out.contains("No record in this box has this hash."),
-        "{out}"
-    );
-}
-
-/// The template as a confirmatory plan that states variance 4 and takes it from `source`.
-fn confirmatory_from(source: &str) -> String {
-    std::fs::read_to_string(TEMPLATE)
-        .unwrap()
-        .replace("mode = \"exploratory\"", "mode = \"confirmatory\"")
-        .replace("value = 0.0", "value = 4.0")
-        .replace("source = \"stated\"", &format!("source = \"{source}\""))
-}
-
 fn check_out(home: &Path, spec: &Path, code: i32) -> String {
     stdout(&bin(home).arg("check").arg(spec).assert().code(code))
 }
 
-#[test]
-fn check_accepts_a_variance_record_that_holds_the_stated_value() {
-    let (_d, home, spec) = setup(|t| t);
-    let h = common::plant_estimate(&Home::open_at(&home).unwrap(), "ppl-ratio", 4.0);
-    std::fs::write(&spec, confirmatory_from(&format!("record:{h}"))).unwrap();
-    let out = check_out(&home, &spec, 1);
-    assert!(!out.contains("E-CNF-003"), "{out}");
+fn with_code<'a>(v: &'a Value, code: &str) -> Vec<&'a Value> {
+    v["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["code"] == code)
+        .collect()
 }
 
 #[test]
-fn check_refuses_a_variance_record_with_another_value() {
-    let (_d, home, spec) = setup(|t| t);
-    let h = common::plant_estimate(&Home::open_at(&home).unwrap(), "ppl-ratio", 5.0);
-    std::fs::write(&spec, confirmatory_from(&format!("record:{h}"))).unwrap();
-    let out = check_out(&home, &spec, 1);
-    assert!(out.contains("error[E-CNF-003]"), "{out}");
-    assert!(
-        out.contains("The record holds variance 5, and the plan states 4."),
-        "{out}"
+fn an_unfinished_study_is_pending_and_check_exits_3() {
+    let (_d, home, spec) = setup(common::confirmatory);
+    let box_home = Home::open_at(&home).unwrap();
+    // Not registered; registered with no analysis record; an analysis record that promises
+    // an estimate the log does not hold yet.
+    let all = common::finished(vec![common::arm_a()]);
+    for (planted, which) in [
+        (&all[..0], "not registered"),
+        (&all[..1], "not finished"),
+        (&all[1..2], "not finished"),
+    ] {
+        common::plant(&box_home, "my-pilot", planted);
+        let a = bin(&home)
+            .arg("check")
+            .arg(&spec)
+            .arg("--json")
+            .assert()
+            .code(3);
+        let v = json_out(&a);
+        assert_eq!(v["pending"], json!(["question.hypotheses[0].estimates"]));
+        let w = with_code(&v, "W-REF-001");
+        assert_eq!(w.len(), 1, "{v}");
+        assert_eq!(w[0]["severity"], "warning");
+        assert_eq!(
+            w[0]["problem"],
+            format!(
+                "A value waits on a study that has not finished. Waits on study my-pilot, which is {which}."
+            )
+        );
+        assert!(
+            !v["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d["severity"] == "error"),
+            "{v}"
+        );
+        // Values pending, no errors: the plan still gets its estimate and review.
+        assert!(v["estimate"].is_object());
+        let out = check_out(&home, &spec, 3);
+        assert!(out.contains("warning[W-REF-001]"), "{out}");
+        let a = bin(&home).arg("review").arg(&spec).assert().code(3);
+        assert!(stdout(&a).contains("W-REF-001"));
+    }
+    // The last estimate arrives: the study is finished, and the plan passes.
+    common::plant(&box_home, "my-pilot", &all[2..]);
+    let a = bin(&home)
+        .arg("check")
+        .arg(&spec)
+        .arg("--json")
+        .assert()
+        .code(0);
+    assert_eq!(json_out(&a)["pending"], json!([]));
+    // An error wins over a pending value.
+    std::fs::write(
+        &spec,
+        common::confirmatory(std::fs::read_to_string(TEMPLATE).unwrap())
+            .replace("from = \"my-pilot\"", "from = \"later\"")
+            .replace("unit = \"ratio\"", "unit = \"\""),
+    )
+    .unwrap();
+    let v = json_out(
+        &bin(&home)
+            .arg("check")
+            .arg(&spec)
+            .arg("--json")
+            .assert()
+            .code(1),
     );
+    assert_eq!(v["pending"], json!(["question.hypotheses[0].estimates"]));
 }
 
 #[test]
 fn a_broken_key_fails_only_the_checks_that_need_a_record() {
     let (_d, home, spec) = setup(|t| t);
-    Home::open_at(&home).unwrap();
+    let box_home = Home::open_at(&home).unwrap();
+    common::pilot(&box_home, vec![common::arm_a()]);
     std::fs::write(home.join("keys/box.ed25519"), b"short").unwrap();
     // An exploratory plan reads no record, so the key is never read.
     assert!(!check_out(&home, &spec, 0).contains("E-CNF-003"));
-    std::fs::write(
-        &spec,
-        confirmatory_from(&format!("record:{}", "0".repeat(64))),
-    )
-    .unwrap();
+    let text = common::confirmatory(std::fs::read_to_string(TEMPLATE).unwrap());
+    std::fs::write(&spec, &text).unwrap();
     let out = check_out(&home, &spec, 1);
     assert!(out.contains("error[E-CNF-003]"), "{out}");
     assert!(
-        out.contains("The box cannot read its records: key file has 5 bytes"),
+        out.contains(
+            "The box cannot read the records of study my-pilot: key file has 5 bytes, expected 32."
+        ),
+        "{out}"
+    );
+    // A study with no log in the box needs no key to be not registered.
+    std::fs::write(
+        &spec,
+        text.replace("from = \"my-pilot\"", "from = \"later\""),
+    )
+    .unwrap();
+    let out = check_out(&home, &spec, 3);
+    assert!(
+        out.contains("Waits on study later, which is not registered."),
         "{out}"
     );
 }
 
 #[test]
 fn logs_without_a_box_key_cannot_answer() {
-    let (_d, home, spec) = setup(|t| t);
+    let (_d, home, spec) = setup(common::confirmatory);
     Home::open_at(&home).unwrap();
-    std::fs::create_dir(home.join("studies/old")).unwrap();
-    std::fs::write(home.join("studies/old/records.jsonl"), "{}\n").unwrap();
-    std::fs::write(
-        &spec,
-        confirmatory_from(&format!("record:{}", "0".repeat(64))),
-    )
-    .unwrap();
+    std::fs::create_dir(home.join("studies/my-pilot")).unwrap();
+    std::fs::write(home.join("studies/my-pilot/records.jsonl"), "{}\n").unwrap();
     let out = check_out(&home, &spec, 1);
     assert!(
-        out.contains("The box cannot read its records: the box key is missing"),
+        out.contains("The box cannot read the records of study my-pilot: the box key is missing."),
         "{out}"
     );
+    // With a key, the same log is not a whole record.
+    keys::load_or_create(&Home::open_at(&home).unwrap()).unwrap();
+    let out = check_out(&home, &spec, 1);
+    assert!(
+        out.contains(
+            "The box cannot read the records of study my-pilot: line 1 is not a whole record."
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_log_without_a_register_record_is_not_a_registered_study() {
+    let (_d, home, spec) = setup(common::confirmatory);
+    let box_home = Home::open_at(&home).unwrap();
+    // A log whose only record does not parse as a register record.
+    common::plant(
+        &box_home,
+        "my-pilot",
+        &[("register", json!({ "spec_hash": "x" }))],
+    );
+    let out = check_out(&home, &spec, 3);
+    assert!(
+        out.contains("Waits on study my-pilot, which is not registered."),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_study_reference_never_names_a_path() {
+    let (d, home, _) = setup(|t| t);
+    let box_home = Home::open_at(&home).unwrap();
+    // A record log beside the studies folder, which `../outside` would reach.
+    let outside = home.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("records.jsonl"), "{}\n").unwrap();
+    let records = HomeRecords {
+        home: box_home,
+        key: Ok(None),
+    };
+    for id in ["../outside", "", "My-Pilot", "a/b"] {
+        assert_eq!(records.study(id), Ok(None), "{id}");
+    }
+    drop(d);
 }
 
 // ---- import ----

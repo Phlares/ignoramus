@@ -8,11 +8,11 @@ The confirmation sample is too small.
 
 ## Fix
 
-Add confirmation inputs, or raise design.units_per_cluster, until the count reaches the number the power gate needs. Each confirmation input gives at most its own units.
+Add confirmation inputs to each group the detail names, until it has the clusters the power gate needs. Raising design.units_per_cluster helps only as far as the icc allows, since the test takes one value per cluster. Two inputs that hold the same data are one cluster.
 
 ## Why
 
-A test with too few units misses real effects and exaggerates the ones it finds. The gate uses alpha, power, the variance, the smallest effect, and the cluster correlation.
+A test with too few clusters misses real effects and exaggerates the ones it finds. The test takes one value per cluster, so the gate counts the clusters of each stratum the claim lists, or of all confirmation inputs when it lists none. For a mean statistic it uses the hypothesis's share of design.alpha, design.power, the sd and icc from the study in estimates, the mean units a cluster gives, and the distance from power_at to each margin.
 
 ## Sources
 
@@ -21,4 +21,4 @@ A test with too few units misses real effects and exaggerates the ones it finds.
 
 ## Applies to
 
-- `inputs` (named:power-met), when mode = confirmatory
+- `question.hypotheses[*]` (named:power-met), when mode = confirmatory

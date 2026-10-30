@@ -3,8 +3,8 @@ mod common;
 use ignorarium::canon::sha256_hex;
 use ignorarium::diag::{Diagnostic, Severity};
 use ignorarium::prior::{NoPriorUse, PriorError, PriorUse, normalized_sha256};
-use ignorarium::records::Record;
-use ignorarium::rules::{self, BoxRecords, CheckCtx, Rule};
+use ignorarium::records;
+use ignorarium::rules::{self, CheckCtx, Lookup, Rule, StratumInput, estimate_inputs};
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -27,58 +27,38 @@ fn ctx(dir: &Path) -> CheckCtx {
 fn ctx_with(dir: &Path, prior: Box<dyn PriorUse>) -> CheckCtx {
     CheckCtx {
         prior,
-        records: Box::new(Lookup(Ok(Some(record(
-            "estimate",
-            estimate("ppl-ratio", 4.0),
-        ))))),
+        records: Box::new(holding(pilot_estimates())),
         ..CheckCtx::empty(dir)
     }
 }
 
-/// A box that answers every lookup the same way.
-struct Lookup(Result<Option<Record>, String>);
+/// The estimates of study `pilot`: a pooled one for each candidate of `ok()`'s selection
+/// stage, as the pick, with variance 4 and icc 0.
+fn pilot_estimates() -> Vec<Value> {
+    vec![
+        common::estimate(&[("arm-a", 1.0, json!({}))], "", 4.0, Some(0.0)),
+        common::estimate(&[("arm-b", 1.0, json!({ "bits": 4 }))], "", 4.0, Some(0.0)),
+    ]
+}
 
-impl BoxRecords for Lookup {
-    fn find(&self, _: &str) -> Result<Option<Record>, String> {
-        self.0.clone()
+/// A box whose study `pilot` has finished with `estimates`.
+fn holding(estimates: Vec<Value>) -> common::Studies {
+    common::Studies(vec![(
+        "pilot",
+        Ok(common::records_for("pilot", &common::finished(estimates))),
+    )])
+}
+
+/// `ok()`'s context with another box.
+fn with_box(dir: &Path, b: common::Studies) -> CheckCtx {
+    CheckCtx {
+        records: Box::new(b),
+        ..ctx(dir)
     }
-}
-
-fn record(kind: &str, body: Value) -> Record {
-    Record {
-        seq: 0,
-        prev: "0".repeat(64),
-        study: "donor".into(),
-        row: None,
-        kind: kind.into(),
-        body,
-        ts: "2026-01-01T00:00:00Z".into(),
-    }
-}
-
-fn estimate(outcome: &str, var: f64) -> Value {
-    json!({
-        "hypothesis": "H1", "outcome": outcome, "key": {}, "key_hash": "k", "stratum": "",
-        "clusters": 4, "units": 20, "mean": 1.0, "var": var, "icc": null
-    })
-}
-
-/// A box whose one estimate holds the variance the plan states, so only the plan's other
-/// faults show.
-fn holding(spec: &Value) -> Box<dyn BoxRecords> {
-    let var = spec["design"]["variance"]["value"].as_f64().unwrap_or(4.0);
-    Box::new(Lookup(Ok(Some(record(
-        "estimate",
-        estimate("ppl-ratio", var),
-    )))))
 }
 
 fn named(spec: &Value, dir: &Path) -> Vec<Diagnostic> {
-    let c = CheckCtx {
-        records: holding(spec),
-        ..ctx(dir)
-    };
-    rules::check_named(spec, v0(), &c)
+    rules::check_named(spec, v0(), &ctx(dir))
 }
 
 fn codes_paths(d: &[Diagnostic]) -> Vec<(&str, &str)> {
@@ -121,12 +101,14 @@ fn inputs(n: usize, units: u64) -> Value {
 }
 
 /// The base plan's one hypothesis: the pick's paired value is below 0 in stratum `fiction`, by
-/// the mean of each cluster, which lies in [-50, 50]. It takes the whole level.
+/// the mean of each cluster, which lies in [-50, 50]. Power must hold at -1, with the sd and
+/// icc of study `pilot`. It takes the whole level.
 fn h1() -> Value {
     json!({
         "id": "H1", "statement": "", "rival": "", "outcome": "ppl-ratio",
         "contrast": { "selected": 1.0 }, "strata": ["fiction"],
-        "claim": { "below": 0.0 }, "statistic": { "mean": [-50.0, 50.0] }, "alpha_share": 1.0
+        "claim": { "below": 0.0 }, "statistic": { "mean": [-50.0, 50.0] }, "power_at": -1.0,
+        "estimates": { "from": "pilot" }, "alpha_share": 1.0
     })
 }
 
@@ -134,13 +116,14 @@ fn h1() -> Value {
 fn descriptive(id: &str) -> Value {
     let mut h = h1();
     h["id"] = json!(id);
-    for k in ["claim", "statistic", "alpha_share"] {
+    for k in ["claim", "statistic", "power_at", "estimates", "alpha_share"] {
         h.as_object_mut().unwrap().remove(k);
     }
     h
 }
 
-/// `h1()` as `H<i>` for each share, in order.
+/// `h1()` as `H<i>` for each share, in order, sized 2 below the margin: far enough that 11
+/// clusters pass at each of these shares.
 fn shared(shares: &[f64]) -> Vec<Edit> {
     let list: Vec<Value> = shares
         .iter()
@@ -149,6 +132,7 @@ fn shared(shares: &[f64]) -> Vec<Edit> {
             let mut h = h1();
             h["id"] = json!(format!("H{}", i + 1));
             h["alpha_share"] = json!(s);
+            h["power_at"] = json!(-2.0);
             h
         })
         .collect();
@@ -161,9 +145,10 @@ fn hyp(field: &str, v: Option<Value>) -> Edit {
     (ptr, v)
 }
 
-/// A confirmatory plan that passes every named check: 11 confirmation inputs of 5 units,
-/// 55 confirmation units against 54 needed. A selection stage picks `arm-a` or `arm-b` on
-/// the selection input, and the confirmation stage runs the pick, which `h1()` tests.
+/// A confirmatory plan that passes every named check: 11 confirmation inputs of 5 units, 11
+/// clusters against the 10 the power gate needs at sd 2, icc 0, alpha 0.005 and power 0.8, 1
+/// below the margin. A selection stage picks `arm-a` or `arm-b` on the selection input, and
+/// the confirmation stage runs the pick, which `h1()` tests.
 fn ok() -> Value {
     let mut s = spec_at("../../templates/numeric-ablation.toml");
     let edits = [
@@ -181,12 +166,6 @@ fn ok() -> Value {
             json!({ "conditions": ["selected"] }),
         ),
         ("/study/mode", json!("confirmatory")),
-        ("/design/sesoi", json!(1.0)),
-        ("/design/variance/value", json!(4.0)),
-        (
-            "/design/variance/source",
-            json!(format!("record:{}", "a".repeat(64))),
-        ),
         ("/design/units_per_cluster", json!(5)),
         ("/inputs", inputs(11, 5)),
         (
@@ -264,12 +243,16 @@ fn exploring(extra: Vec<Edit>) -> Vec<Edit> {
     )
 }
 
-/// Two clusters of 5 units, and one edit: small enough that the gate fires if it computes.
+/// Two clusters of 5 units, 0.1 below the margin, and one edit: small enough that the gate
+/// fires if it computes.
 fn guard(ptr: &'static str, v: Value) -> Vec<Edit> {
     let mut e = power_edits(5, 2);
+    e.push(hyp("power_at", j(json!(-0.1))));
     e.push((ptr, j(v)));
     e
 }
+
+const POWER: (&str, &str) = ("E-CNF-002", "question.hypotheses[0]");
 
 fn faults() -> Vec<Fault> {
     // Built at run time: the leak gate rejects a drive prefix written in a source file.
@@ -288,52 +271,54 @@ fn faults() -> Vec<Fault> {
             ],
             vec![("E-LBL-001", "study.label")],
         ),
-        // Zero and negative: neither also fires the power gate.
+        // power_at lies strictly on the claimed side, inside the mean range; a mistyped one is
+        // the type rule's.
         f(
-            vec![("/design/sesoi", j(json!(0.0)))],
-            vec![("E-CNF-001", "design.sesoi")],
+            vec![hyp("power_at", None)],
+            vec![("E-CNF-001", "question.hypotheses[0].power_at")],
         ),
         f(
-            vec![("/design/sesoi", j(json!(-1.0)))],
-            vec![("E-CNF-001", "design.sesoi")],
-        ),
-        // 53 units against 54 needed; 51 against 54 with clusters of 3.
-        f(power_edits(1, 53), vec![("E-CNF-002", "inputs")]),
-        f(power_edits(3, 17), vec![("E-CNF-002", "inputs")]),
-        // Each input gives at most units_per_cluster, and at most its own units: 44 each time.
-        // Selection units do not count: 10 confirmation inputs are 50 units.
-        f(
-            vec![
-                ("/design/units_per_cluster", j(json!(4))),
-                ("/inputs", j(inputs(11, 9))),
-            ],
-            vec![("E-CNF-002", "inputs")],
+            vec![hyp("power_at", j(json!(0.0)))],
+            vec![("E-CNF-001", "question.hypotheses[0].power_at")],
         ),
         f(
-            vec![("/inputs", j(inputs(11, 4)))],
-            vec![("E-CNF-002", "inputs")],
+            vec![hyp("power_at", j(json!(-50.1)))],
+            vec![("E-CNF-001", "question.hypotheses[0].power_at")],
+        ),
+        f(vec![hyp("power_at", j(json!(-50.0)))], vec![]),
+        f(vec![hyp("power_at", j(json!("low")))], vec![]),
+        // 9 clusters against the 10 needed.
+        f(power_edits(5, 9), vec![POWER]),
+        // Each input gives at most units_per_cluster: 9 units count as 5. One unit per cluster
+        // needs 47 clusters. Selection inputs do not count: 10 confirmation inputs pass.
+        f(vec![("/inputs", j(inputs(9, 9)))], vec![POWER]),
+        f(vec![("/inputs", j(inputs(11, 1)))], vec![POWER]),
+        f(vec![("/inputs", j(inputs(10, 5)))], vec![]),
+        // The sd and icc come from a finished study's estimates.
+        f(
+            vec![hyp("estimates", None)],
+            vec![("E-CNF-003", "question.hypotheses[0].estimates")],
         ),
         f(
-            vec![("/inputs", j(inputs(10, 5)))],
-            vec![("E-CNF-002", "inputs")],
+            vec![hyp("estimates", j(json!({ "from": "nobody" })))],
+            vec![("W-REF-001", "question.hypotheses[0].estimates")],
         ),
         f(
-            vec![("/design/variance/value", j(json!(0.0)))],
-            vec![("E-CNF-002", "inputs")],
+            vec![hyp("estimates", j(json!({ "from": "my-study" })))],
+            vec![("E-REF-002", "question.hypotheses[0].estimates.from")],
         ),
+        // A mistyped or malformed reference is the generic rules'.
+        f(vec![hyp("estimates", j(json!("pilot")))], vec![]),
+        f(vec![hyp("estimates", j(json!({})))], vec![]),
         f(
-            vec![("/design/variance/value", j(json!(-4.0)))],
-            vec![("E-CNF-002", "inputs")],
+            vec![hyp("estimates", j(json!({ "from": "../pilot" })))],
+            vec![],
         ),
-        f(
-            vec![("/design/variance/source", j(json!("stated")))],
-            vec![("E-CNF-003", "design.variance.source")],
-        ),
-        // No confirmation input also fails the power gate, and leaves the stratum with no data.
+        f(vec![hyp("estimates", j(json!({ "from": 3 })))], vec![]),
+        // No confirmation input leaves the stratum with no data and the gate with no cluster.
         f(
             vec![("/inputs", j(inputs(0, 5)))],
             vec![
-                ("E-CNF-002", "inputs"),
                 ("E-CNF-004", "inputs"),
                 ("E-HYP-002", "question.hypotheses[0].strata[0]"),
             ],
@@ -342,7 +327,6 @@ fn faults() -> Vec<Fault> {
         f(
             unstaged(vec![("/inputs", j(json!([inputs(0, 5)[0]])))]),
             vec![
-                ("E-CNF-002", "inputs"),
                 ("E-CNF-004", "inputs"),
                 ("E-UNT-001", "inputs"),
                 ("E-HYP-002", "question.hypotheses[0].strata[0]"),
@@ -358,7 +342,7 @@ fn faults() -> Vec<Fault> {
                 ("E-HYP-002", "question.hypotheses[0].strata[0]"),
             ],
         ),
-        // A selection or confirmation input declares its units; 12 inputs keep the power gate quiet.
+        // A selection or confirmation input declares its units; one without them is not counted.
         f(
             vec![("/inputs", j(inputs(12, 5))), ("/inputs/2/units", None)],
             vec![("E-UNT-001", "inputs[2].units")],
@@ -397,19 +381,22 @@ fn faults() -> Vec<Fault> {
             vec![("/design/reference", j(json!("exakt")))],
             vec![("E-REF-001", "design.reference")],
         ),
-        // The reference may be any condition; an empty condition list is reported by non-empty alone.
+        // The reference may be any condition, here with exact as a candidate, whose estimate the
+        // pilot does not hold; an empty condition list is reported by non-empty alone.
         f(
             vec![
                 ("/design/reference", j(json!("arm-a"))),
                 ("/design/selection/conditions", j(json!(["exact", "arm-b"]))),
             ],
-            vec![],
+            vec![("E-CNF-003", "question.hypotheses[0].estimates")],
         ),
         f(vec![("/design/conditions", j(json!([])))], vec![]),
         f(
             vec![(
                 "/design/conditions",
-                j(json!([{ "id": "exakt" }, 5, { "id": "arm-a" }, { "id": "arm-b" }])),
+                j(
+                    json!([{ "id": "exakt" }, 5, { "id": "arm-a" }, { "id": "arm-b", "params": { "bits": 4 } }]),
+                ),
             )],
             vec![("E-REF-001", "design.reference")],
         ),
@@ -459,7 +446,7 @@ fn faults() -> Vec<Fault> {
             vec![(
                 "/design/conditions",
                 j(
-                    json!([{ "id": "exact" }, { "id": "arm-a" }, { "id": "arm-b" }, { "id": "selected" }]),
+                    json!([{ "id": "exact" }, { "id": "arm-a" }, { "id": "arm-b", "params": { "bits": 4 } }, { "id": "selected" }]),
                 ),
             )],
             vec![("E-SEL-001", "design.conditions[3].id")],
@@ -506,12 +493,13 @@ fn faults() -> Vec<Fault> {
             vec![("/design/conditions/2/params/Pasted Key", j(json!([])))],
             vec![("E-TYP-001", "design.conditions[2].params.<key>")],
         ),
+        // Other params are another contrast, which the pilot did not measure.
         f(
             vec![
                 ("/design/conditions/2/params/bits", j(json!("four"))),
                 ("/design/conditions/1/params", j(json!({ "rate": 0.5 }))),
             ],
-            vec![],
+            vec![("E-CNF-003", "question.hypotheses[0].estimates")],
         ),
         // A confirmatory hypothesis needs a claim; the rules that size and split a claim skip
         // it, so the one fault gives one diagnostic.
@@ -553,6 +541,7 @@ fn faults() -> Vec<Fault> {
             vec![hyp("contrast", j(json!({ "exact": 1.0 })))],
             vec![("E-HYP-001", "question.hypotheses[0].contrast.exact")],
         ),
+        // A well-formed contrast that the pilot did not measure has no estimate.
         f(
             vec![
                 (
@@ -561,7 +550,7 @@ fn faults() -> Vec<Fault> {
                 ),
                 hyp("contrast", j(json!({ "arm-a": 1.0, "selected": -1.0 }))),
             ],
-            vec![],
+            vec![("E-CNF-003", "question.hypotheses[0].estimates")],
         ),
         // A key from the spec is printed only when safe; a key with a dot is known-key's alone.
         f(
@@ -627,10 +616,10 @@ fn faults() -> Vec<Fault> {
             vec![("E-HYP-003", "question.hypotheses[0].claim")],
         ),
         f(
-            vec![hyp("claim", j(json!({ "within": [-1.0, 1.0] })))],
+            vec![hyp("claim", j(json!({ "within": [-2.0, 1.0] })))],
             vec![],
         ),
-        f(vec![hyp("claim", j(json!({ "above": -1.0 })))], vec![]),
+        f(vec![hyp("claim", j(json!({ "above": -2.0 })))], vec![]),
         // A mean range is [lo, hi] with lo < hi, and every margin lies strictly inside it.
         f(
             vec![hyp("statistic", j(json!({ "mean": [5.0, 4.0] })))],
@@ -705,10 +694,7 @@ fn faults() -> Vec<Fault> {
         // With no outcome list or no confirmation list, the generic rules report that.
         f(
             vec![("/outcomes", None)],
-            vec![
-                ("E-CNF-003", "design.variance.source"),
-                ("E-SEL-001", "design.selection.metric"),
-            ],
+            vec![("E-SEL-001", "design.selection.metric")],
         ),
         f(vec![("/design/confirmation", None)], vec![]),
         // Confirmatory shares lie in (0, 1] and sum to 1.
@@ -852,43 +838,47 @@ fn faults() -> Vec<Fault> {
             ],
             vec![("E-PTH-001", "inputs[0].path")],
         ),
-        // Overflow: the product of user integers saturates; the plan then passes.
+        // Overflow: the product of user integers saturates; the plan then passes. A units per
+        // cluster below 1 is the range rule's.
         f(
             vec![("/design/units_per_cluster", j(json!(i64::MAX)))],
             vec![],
         ),
-        f(
-            vec![("/design/units_per_cluster", j(json!(-5)))],
-            vec![("E-CNF-002", "inputs")],
-        ),
+        f(vec![("/design/units_per_cluster", j(json!(-5)))], vec![]),
+        f(vec![("/design/units_per_cluster", j(json!(0)))], vec![]),
         // Power-gate guards: with 2 clusters the gate fires if it computes, so [] means it skipped.
         f(guard("/design/alpha", json!(0.0)), vec![]),
         f(guard("/design/alpha", json!(1.0)), vec![]),
         f(guard("/design/power", json!(0.0)), vec![]),
         f(guard("/design/power", json!(1.0)), vec![]),
-        f(guard("/design/icc", json!(1.0)), vec![]),
-        f(guard("/design/icc", json!(-0.1)), vec![]),
         f(guard("/design/alpha", json!("x")), vec![]),
+        f(guard("/design/alpha", json!(0.45)), vec![POWER]),
+        f(guard("/design/power", json!(0.999)), vec![POWER]),
+        f(guard("/design/power", json!(0.5)), vec![POWER]),
         f(
-            guard("/design/alpha", json!(0.45)),
-            vec![("E-CNF-002", "inputs")],
+            guard("/question/hypotheses/0/alpha_share", json!(1.0)),
+            vec![POWER],
+        ),
+        // A share out of range, a claim that is not well formed, and a quantile statistic
+        // skip the gate; their own rules report the first two.
+        f(
+            guard("/question/hypotheses/0/alpha_share", json!(0.0)),
+            vec![("E-HYP-004", "question.hypotheses[0].alpha_share")],
         ),
         f(
-            guard("/design/power", json!(0.999)),
-            vec![("E-CNF-002", "inputs")],
+            guard("/question/hypotheses/0/claim", json!({})),
+            vec![("E-HYP-003", "question.hypotheses[0].claim")],
         ),
         f(
-            guard("/design/power", json!(0.5)),
-            vec![("E-CNF-002", "inputs")],
+            guard(
+                "/question/hypotheses/0/statistic",
+                json!({ "quantile": 0.5 }),
+            ),
+            vec![],
         ),
-        f(
-            guard("/design/icc", json!(0.0)),
-            vec![("E-CNF-002", "inputs")],
-        ),
-        // Fail closed: an absent alpha, power or icc cannot be computed.
-        f(vec![("/design/alpha", None)], vec![("E-CNF-002", "inputs")]),
-        f(vec![("/design/power", None)], vec![("E-CNF-002", "inputs")]),
-        f(vec![("/design/icc", None)], vec![("E-CNF-002", "inputs")]),
+        // Fail closed: an absent alpha or power cannot be computed.
+        f(vec![("/design/alpha", None)], vec![POWER]),
+        f(vec![("/design/power", None)], vec![POWER]),
         // An empty array as an element is no input, and no cluster.
         f(
             vec![(
@@ -964,46 +954,444 @@ fn the_base_plan_passes_every_named_check() {
     assert!(named(&ok(), dir.path()).is_empty());
 }
 
-#[test]
-fn a_variance_record_must_exist_and_hold_the_stated_value() {
+/// `estimate_inputs` of `ok()`'s hypothesis, edited, against a box whose `pilot` holds
+/// `estimates`.
+fn inputs_of(edits: &[Edit], estimates: Vec<Value>) -> Lookup {
     let dir = study_dir();
-    let cases = [
-        (Ok(None), "No record in this box has this hash."),
+    estimate_inputs(&edited(edits), 0, &with_box(dir.path(), holding(estimates)))
+}
+
+/// The hash of each record of `pilot` with `estimates`, in order: register, analysis, then
+/// one per estimate.
+fn hashes(estimates: Vec<Value>) -> Vec<String> {
+    common::records_for("pilot", &common::finished(estimates))
+        .iter()
+        .map(records::hash)
+        .collect()
+}
+
+fn stratum(name: &str, sd: f64, icc: f64, records: &[&String]) -> StratumInput {
+    StratumInput {
+        stratum: name.into(),
+        sd,
+        icc,
+        records: records.iter().map(|h| h.to_string()).collect(),
+    }
+}
+
+/// The E-CNF-003 diagnostics, as (code and path, problem), for `ok()` edited, against `b`.
+fn missing(edits: &[Edit], b: common::Studies) -> Vec<(String, String)> {
+    let dir = study_dir();
+    rules::check_named(&edited(edits), v0(), &with_box(dir.path(), b))
+        .into_iter()
+        .filter(|d| d.code == "E-CNF-003")
+        .map(|d| (format!("{} {}", d.code, d.path), d.problem))
+        .collect()
+}
+
+const ESTIMATES: &str = "E-CNF-003 question.hypotheses[0].estimates";
+const NO_MATCH: &str =
+    "A confirmatory hypothesis takes its sd and icc from no matching estimate of a finished study.";
+
+#[test]
+fn the_base_plan_reads_each_candidates_estimate() {
+    let h = hashes(pilot_estimates());
+    assert_eq!(
+        inputs_of(&[], pilot_estimates()),
+        Lookup::Found(vec![stratum("fiction", 2.0, 0.0, &[&h[2], &h[3]])])
+    );
+}
+
+#[test]
+fn a_finished_study_without_a_match_is_refused() {
+    let arm = |id: &str, w: f64, params: Value, stratum: &str| {
+        common::estimate(&[(id, w, params)], stratum, 4.0, Some(0.0))
+    };
+    let a = arm("arm-a", 1.0, json!({}), "");
+    let b = arm("arm-b", 1.0, json!({ "bits": 4 }), "");
+    let detail = |pick: &str| {
+        format!(
+            "{NO_MATCH} Study pilot has no estimate of this contrast with {pick} as the pick in stratum fiction or the pooled group."
+        )
+    };
+    // Another weight, other params, another stratum: each is not this contrast's estimate.
+    for (held, pick) in [
+        (vec![a.clone()], "arm-b"),
+        (vec![b.clone()], "arm-a"),
+        (vec![arm("arm-a", 2.0, json!({}), ""), b.clone()], "arm-a"),
         (
-            Ok(Some(record("row", estimate("ppl-ratio", 4.0)))),
-            "The record is not an estimate.",
+            vec![a.clone(), arm("arm-b", 1.0, json!({ "bits": 8 }), "")],
+            "arm-b",
         ),
         (
-            Ok(Some(record("estimate", estimate("other", 4.0)))),
-            "The record is for an outcome this plan does not list.",
+            vec![a.clone(), arm("arm-b", 1.0, json!({ "bits": 4 }), "code")],
+            "arm-b",
         ),
+    ] {
+        assert_eq!(
+            missing(&[], holding(held)),
+            [(ESTIMATES.to_string(), detail(pick))]
+        );
+    }
+    // Without a selection stage the contrast is the one condition; pooled, the pooled group.
+    let alone = unstaged(vec![hyp("strata", j(json!([])))]);
+    assert_eq!(
+        missing(&alone, holding(vec![b.clone()])),
+        [(
+            ESTIMATES.to_string(),
+            format!("{NO_MATCH} Study pilot has no estimate of this contrast in the pooled group.")
+        )]
+    );
+    assert!(missing(&alone, holding(vec![a.clone()])).is_empty());
+    // Another measure or paired rule is another key, too.
+    let mut other = a.clone();
+    other["key_hash"] = json!("0".repeat(64));
+    assert_eq!(missing(&alone, holding(vec![other])).len(), 1);
+    // No study named at all.
+    assert_eq!(
+        missing(&[hyp("estimates", None)], holding(vec![a, b])),
+        [(
+            ESTIMATES.to_string(),
+            format!("{NO_MATCH} The hypothesis names no study.")
+        )]
+    );
+}
+
+#[test]
+fn an_unreadable_box_fails_closed() {
+    let torn = common::Studies(vec![("pilot", Err("line 2 is not a whole record".into()))]);
+    assert_eq!(
+        missing(&[], torn),
+        [(
+            ESTIMATES.to_string(),
+            format!(
+                "{NO_MATCH} The box cannot read the records of study pilot: line 2 is not a whole record."
+            )
+        )]
+    );
+}
+
+#[test]
+fn selected_takes_the_worst_candidate_estimate() {
+    // arm-a has the larger icc, arm-b the larger sd: the gate takes both.
+    let held = vec![
+        common::estimate(&[("arm-a", 1.0, json!({}))], "", 4.0, Some(0.3)),
+        common::estimate(&[("arm-b", 1.0, json!({ "bits": 4 }))], "", 9.0, Some(0.1)),
+    ];
+    let h = hashes(held.clone());
+    assert_eq!(
+        inputs_of(&[], held.clone()),
+        Lookup::Found(vec![stratum("fiction", 3.0, 0.3, &[&h[2], &h[3]])])
+    );
+    // The other way round: arm-a has the larger sd, arm-b the larger icc.
+    let swapped = vec![
+        common::estimate(&[("arm-a", 1.0, json!({}))], "", 9.0, Some(0.1)),
+        common::estimate(&[("arm-b", 1.0, json!({ "bits": 4 }))], "", 4.0, Some(0.3)),
+    ];
+    let s = hashes(swapped.clone());
+    assert_eq!(
+        inputs_of(&[], swapped),
+        Lookup::Found(vec![stratum("fiction", 3.0, 0.3, &[&s[2], &s[3]])])
+    );
+    // At sd 3 and icc 0.3 with 5 units per cluster, 1 below the margin, the gate needs 47.
+    let dir = study_dir();
+    let d = rules::check_named(&ok(), v0(), &with_box(dir.path(), holding(held)));
+    assert_eq!(
+        d.iter().map(|x| x.problem.as_str()).collect::<Vec<_>>(),
+        [
+            "The confirmation sample is too small. Stratum fiction has 11 of the 47 clusters the power gate needs."
+        ]
+    );
+}
+
+#[test]
+fn a_stratum_falls_back_to_the_pooled_estimate() {
+    let a = |stratum: &str, var: f64| {
+        common::estimate(&[("arm-a", 1.0, json!({}))], stratum, var, Some(0.1))
+    };
+    let held = vec![a("", 4.0), a("fiction", 9.0), a("code", 16.0)];
+    let h = hashes(held.clone());
+    let edits = unstaged(vec![hyp("strata", j(json!(["fiction", "article"])))]);
+    assert_eq!(
+        inputs_of(&edits, held.clone()),
+        Lookup::Found(vec![
+            stratum("fiction", 3.0, 0.1, &[&h[3]]),
+            stratum("article", 2.0, 0.1, &[&h[2]]),
+        ])
+    );
+    // No strata: the pooled group, and only its estimate.
+    let pooled = unstaged(vec![hyp("strata", j(json!([])))]);
+    assert_eq!(
+        inputs_of(&pooled, held),
+        Lookup::Found(vec![stratum("", 2.0, 0.1, &[&h[2]])])
+    );
+}
+
+#[test]
+fn an_estimate_without_icc_is_refused() {
+    let pooled = unstaged(vec![hyp("strata", j(json!([])))]);
+    let a = |var: f64, icc: Option<f64>| {
+        holding(vec![common::estimate(
+            &[("arm-a", 1.0, json!({}))],
+            "",
+            var,
+            icc,
+        )])
+    };
+    let detail = format!(
+        "{NO_MATCH} Study pilot's estimate of this contrast in the pooled group has no icc, or no variance above 0."
+    );
+    for b in [a(4.0, None), a(0.0, Some(0.1))] {
+        assert_eq!(
+            missing(&pooled, b),
+            [(ESTIMATES.to_string(), detail.clone())]
+        );
+    }
+    assert!(missing(&pooled, a(4.0, Some(0.0))).is_empty());
+    assert!(missing(&pooled, a(1e-9, Some(1.0))).is_empty());
+    // The stratum's own estimate is used even when it lacks an icc that the pooled one has.
+    let held = vec![
+        common::estimate(&[("arm-a", 1.0, json!({}))], "fiction", 4.0, None),
+        common::estimate(&[("arm-a", 1.0, json!({}))], "", 4.0, Some(0.1)),
+    ];
+    assert_eq!(
+        missing(&unstaged(vec![]), holding(held)),
+        [(
+            ESTIMATES.to_string(),
+            format!(
+                "{NO_MATCH} Study pilot's estimate of this contrast in stratum fiction has no icc, or no variance above 0."
+            )
+        )]
+    );
+}
+
+#[test]
+fn an_unfinished_study_is_pending() {
+    let detail = |which: &str| {
+        format!(
+            "A value waits on a study that has not finished. Waits on study pilot, which is {which}."
+        )
+    };
+    let finished = common::finished(pilot_estimates());
+    let unfinished = [
+        (common::Studies(vec![]), "not registered"),
         (
-            Ok(Some(record("estimate", estimate("ppl-ratio", 5.0)))),
-            "The record holds variance 5, and the plan states 4.",
+            common::Studies(vec![(
+                "pilot",
+                Ok(common::records_for("pilot", &finished[..1])),
+            )]),
+            "not finished",
         ),
+        // The analysis record promises two estimates, and one is there.
         (
-            Err("line 2 is not a whole record".to_string()),
-            "The box cannot read its records: line 2 is not a whole record",
+            common::Studies(vec![(
+                "pilot",
+                Ok(common::records_for("pilot", &finished[..3])),
+            )]),
+            "not finished",
         ),
     ];
-    for (found, detail) in cases {
-        let c = CheckCtx {
-            records: Box::new(Lookup(found)),
-            ..CheckCtx::empty(dir.path())
-        };
-        let d = rules::check_named(&ok(), v0(), &c);
-        assert_eq!(codes_paths(&d), [("E-CNF-003", "design.variance.source")]);
-        let want = "The variance record is missing, is not an estimate for an outcome of this plan, or holds another value.";
-        assert_eq!(d[0].problem, format!("{want} {detail}"));
+    let dir = study_dir();
+    for (b, which) in unfinished {
+        let d = rules::check_named(&ok(), v0(), &with_box(dir.path(), b));
+        assert_eq!(
+            codes_paths(&d),
+            [("W-REF-001", "question.hypotheses[0].estimates")],
+            "{which}"
+        );
+        assert_eq!(d[0].severity, Severity::Warning);
+        assert_eq!(d[0].problem, detail(which));
     }
-    let same = CheckCtx {
-        records: Box::new(Lookup(Ok(Some(record(
-            "estimate",
-            estimate("ppl-ratio", 4.0),
-        ))))),
-        ..CheckCtx::empty(dir.path())
+    assert_eq!(
+        inputs_of(
+            &[hyp("estimates", j(json!({ "from": "later" })))],
+            pilot_estimates()
+        ),
+        Lookup::Pending("Waits on study later, which is not registered.".into())
+    );
+}
+
+#[test]
+fn a_reference_to_itself_is_refused() {
+    let dir = study_dir();
+    let d = named(
+        &edited(&[hyp("estimates", j(json!({ "from": "my-study" })))]),
+        dir.path(),
+    );
+    assert_eq!(
+        codes_paths(&d),
+        [("E-REF-002", "question.hypotheses[0].estimates.from")]
+    );
+    assert_eq!(d[0].problem, "A reference names this study.");
+    // In a study with another id, the same reference names a study that has not run.
+    let mut s = edited(&[hyp("estimates", j(json!({ "from": "my-study" })))]);
+    s["study"]["id"] = json!("other-study");
+    assert_eq!(
+        codes_paths(&named(&s, dir.path())),
+        [("W-REF-001", "question.hypotheses[0].estimates")]
+    );
+}
+
+#[test]
+fn power_at_must_be_on_the_claimed_side() {
+    let dir = study_dir();
+    let at = |claim: Value, statistic: Value, power_at: f64| {
+        let s = edited(&[
+            hyp("claim", j(claim)),
+            hyp("statistic", j(statistic)),
+            hyp("power_at", j(json!(power_at))),
+        ]);
+        codes_paths(&named(&s, dir.path()))
+            .iter()
+            .any(|(c, _)| *c == "E-CNF-001")
     };
-    assert!(rules::check_named(&ok(), v0(), &same).is_empty());
+    let mean = json!({ "mean": [-50.0, 50.0] });
+    let median = json!({ "quantile": 0.5 });
+    for (claim, power_at, refused) in [
+        (json!({ "below": 4.0 }), 5.0, true),
+        (json!({ "below": 4.0 }), 4.0, true),
+        (json!({ "below": 4.0 }), 2.0, false),
+        (json!({ "above": 4.0 }), 4.0, true),
+        (json!({ "above": 4.0 }), 2.0, true),
+        (json!({ "above": 4.0 }), 6.0, false),
+        (json!({ "within": [-1.0, 1.0] }), -1.0, true),
+        (json!({ "within": [-1.0, 1.0] }), 1.0, true),
+        (json!({ "within": [-1.0, 1.0] }), -2.0, true),
+        (json!({ "within": [-1.0, 1.0] }), 0.0, false),
+        // Inside the range of a cluster mean, ends included; a quantile has no range.
+        (json!({ "below": 0.0 }), -50.0, false),
+        (json!({ "below": 0.0 }), -50.1, true),
+        (json!({ "above": 0.0 }), 50.0, false),
+        (json!({ "above": 0.0 }), 50.1, true),
+    ] {
+        assert_eq!(
+            at(claim.clone(), mean.clone(), power_at),
+            refused,
+            "{claim} at {power_at}"
+        );
+    }
+    assert!(!at(json!({ "below": 0.0 }), median.clone(), -500.0));
+    assert!(at(json!({ "below": 0.0 }), median, 0.0));
+    let rule = v0().iter().find(|r| r.code == "E-CNF-001").unwrap();
+    assert_eq!(
+        rule.problem,
+        "A confirmatory hypothesis has no power_at strictly on its claimed side, or power_at lies outside the range of its mean statistic."
+    );
+}
+
+#[test]
+fn each_stratum_needs_its_own_clusters() {
+    // 26 clusters of one unit in each of two strata. At sd 2 the gate needs 47 per stratum.
+    let mut list = inputs(0, 1).as_array().unwrap().clone();
+    for (i, stratum) in (0..52).map(|i| (i, if i < 26 { "code" } else { "article" })) {
+        let mut c = input(&format!("texts/c{i:02}.txt"), "confirmation", 1);
+        c["stratum"] = json!(stratum);
+        list.push(c);
+    }
+    list[1]["stratum"] = json!("code");
+    let base = [
+        ("/inputs", j(Value::Array(list))),
+        ("/design/units_per_cluster", j(json!(1))),
+    ];
+    let dir = study_dir();
+    let run = |strata: Value| {
+        let mut e = base.to_vec();
+        e.push(hyp("strata", j(strata)));
+        named(&edited(&e), dir.path())
+            .into_iter()
+            .map(|d| (d.path, d.problem))
+            .collect::<Vec<_>>()
+    };
+    let short = |s: &str| {
+        (
+            "question.hypotheses[0]".to_string(),
+            format!(
+                "The confirmation sample is too small. Stratum {s} has 26 of the 47 clusters the power gate needs."
+            ),
+        )
+    };
+    assert_eq!(
+        run(json!(["code", "article"])),
+        [short("code"), short("article")]
+    );
+    assert_eq!(run(json!(["article"])), [short("article")]);
+    // Pooled, the same 52 clusters pass.
+    assert!(run(json!([])).is_empty());
+}
+
+#[test]
+fn two_confirmation_inputs_with_the_same_data_count_once() {
+    // 10 clusters pass where 10 are needed; a copy of one, in other case and spacing, is the
+    // same cluster.
+    let dir = study_dir();
+    write(dir.path(), "texts/s00.txt", b"selection text");
+    for i in 0..10 {
+        write(
+            dir.path(),
+            &format!("texts/c{i:02}.txt"),
+            format!("text {i}").as_bytes(),
+        );
+    }
+    let spec = edited(&power_edits(5, 10));
+    assert!(named(&spec, dir.path()).is_empty());
+    write(dir.path(), "texts/c09.txt", b"TEXT   8");
+    assert_eq!(
+        named(&spec, dir.path())
+            .iter()
+            .map(|d| d.problem.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "The confirmation sample is too small. Stratum fiction has 9 of the 10 clusters the power gate needs."
+        ]
+    );
+}
+
+#[test]
+fn the_power_gate_uses_the_mean_picked_units_per_cluster() {
+    // 11 clusters of 5 units; k of them hold 1 unit. The mean size sets the cluster sd.
+    let dir = study_dir();
+    let with_small = |k: usize| {
+        let mut list = inputs(11, 5);
+        for i in 0..k {
+            list[2 + i]["units"] = json!(1);
+        }
+        named(&edited(&[("/inputs", j(list))]), dir.path())
+    };
+    assert!(with_small(2).is_empty());
+    assert_eq!(
+        with_small(3)[0].problem,
+        "The confirmation sample is too small. Stratum fiction has 11 of the 12 clusters the power gate needs."
+    );
+    // An input with 0 units is no cluster: the range rule reports it.
+    let mut list = inputs(10, 5);
+    list[2]["units"] = json!(0);
+    assert_eq!(
+        named(&edited(&[("/inputs", j(list))]), dir.path())[0].problem,
+        "The confirmation sample is too small. Stratum fiction has 9 of the 10 clusters the power gate needs."
+    );
+}
+
+#[test]
+fn the_gate_takes_the_largest_need_over_the_bounds() {
+    let dir = study_dir();
+    let within = |power_at: f64| {
+        let s = edited(&[
+            hyp("claim", j(json!({ "within": [-2.0, 2.0] }))),
+            hyp("power_at", j(json!(power_at))),
+        ]);
+        named(&s, dir.path())
+            .into_iter()
+            .map(|d| d.problem)
+            .collect::<Vec<_>>()
+    };
+    // 2 from each margin needs 3 clusters; 0.5 from the upper margin needs 38.
+    assert!(within(0.0).is_empty());
+    assert_eq!(
+        within(1.5),
+        [
+            "The confirmation sample is too small. Stratum fiction has 11 of the 38 clusters the power gate needs."
+        ]
+    );
 }
 
 #[test]
@@ -1024,6 +1412,8 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
         .collect();
     let want: BTreeSet<String> = [
         "E-LBL-001",
+        "E-REF-002",
+        "W-REF-001",
         "E-CNF-001",
         "E-CNF-002",
         "E-CNF-003",
@@ -1108,47 +1498,70 @@ fn boundaries_hold_on_both_sides() {
 #[test]
 fn power_gate_problem_states_both_numbers() {
     let dir = study_dir();
-    let d = named(&edited(&power_edits(1, 10)), dir.path());
-    assert_eq!(d.len(), 1);
+    let d = named(&edited(&power_edits(5, 9)), dir.path());
+    assert_eq!(codes_paths(&d), [POWER]);
     assert_eq!(
         d[0].problem,
-        "The confirmation sample is too small. 10 confirmation units; the power gate needs 54."
+        "The confirmation sample is too small. Stratum fiction has 9 of the 10 clusters the power gate needs."
     );
-    let d = named(
-        &edited(&[("/design/variance/value", j(json!(0.0)))]),
+    let pooled = named(
+        &edited(&[hyp("strata", j(json!([]))), ("/inputs", j(inputs(9, 5)))]),
         dir.path(),
     );
     assert_eq!(
-        d[0].problem,
-        "The confirmation sample is too small. The variance must be > 0."
+        pooled[0].problem,
+        "The confirmation sample is too small. The pooled group has 9 of the 10 clusters the power gate needs."
     );
 }
 
 #[test]
-fn power_gate_uses_alpha_power_icc_and_defaults() {
+fn power_gate_uses_alpha_power_share_and_defaults() {
     let dir = study_dir();
-    // alpha 0.05, sd 1, sesoi 0.5 needs 32 units.
-    let mut e = power_edits(1, 32);
-    e.extend([
-        ("/design/alpha", j(json!(0.05))),
-        ("/design/variance/value", j(json!(1.0))),
-        ("/design/sesoi", j(json!(0.5))),
-    ]);
-    assert!(named(&edited(&e), dir.path()).is_empty());
-    e[1] = ("/inputs", j(inputs(31, 1)));
+    let detail = |edits: Vec<Edit>| -> Vec<String> {
+        named(&edited(&edits), dir.path())
+            .into_iter()
+            .map(|d| d.problem.rsplit_once(". ").unwrap().1.to_string())
+            .collect()
+    };
+    // alpha 0.05 needs 5 clusters.
+    let mut e = power_edits(5, 5);
+    e.push(("/design/alpha", j(json!(0.05))));
+    assert!(detail(e.clone()).is_empty());
+    e[1] = ("/inputs", j(inputs(4, 5)));
     assert_eq!(
-        codes_paths(&named(&edited(&e), dir.path())),
-        [("E-CNF-002", "inputs")]
+        detail(e),
+        ["Stratum fiction has 4 of the 5 clusters the power gate needs."]
     );
-    // Higher power needs more units.
-    let mut e = power_edits(1, 54);
-    e.push(("/design/power", j(json!(0.9))));
-    assert_eq!(named(&edited(&e), dir.path()).len(), 1);
-    // An intra-cluster correlation of 0.1 raises the need to 75; the plan has 55.
-    let d = named(&edited(&[("/design/icc", j(json!(0.1)))]), dir.path());
+    // Higher power needs more clusters.
+    assert_eq!(
+        detail(vec![("/design/power", j(json!(0.9)))]),
+        ["Stratum fiction has 11 of the 12 clusters the power gate needs."]
+    );
+    // A share of 0.5 halves the level: 11 clusters, each hypothesis.
+    let mut halves = shared(&[0.5, 0.5]);
+    for i in 0..2 {
+        let ptr: &'static str =
+            Box::leak(format!("/question/hypotheses/{i}/power_at").into_boxed_str());
+        halves.push((ptr, j(json!(-1.0))));
+    }
+    assert!(detail(halves.clone()).is_empty());
+    halves.extend(power_edits(5, 10));
+    assert_eq!(
+        detail(halves),
+        [
+            "Stratum fiction has 10 of the 11 clusters the power gate needs.",
+            "Stratum fiction has 10 of the 11 clusters the power gate needs."
+        ]
+    );
+    // An icc of 0.1 raises the need to 14.
+    let icc = holding(vec![
+        common::estimate(&[("arm-a", 1.0, json!({}))], "", 4.0, Some(0.1)),
+        common::estimate(&[("arm-b", 1.0, json!({ "bits": 4 }))], "", 4.0, Some(0.1)),
+    ]);
+    let d = rules::check_named(&ok(), v0(), &with_box(dir.path(), icc));
     assert!(
         d[0].problem
-            .ends_with("55 confirmation units; the power gate needs 75."),
+            .ends_with("Stratum fiction has 11 of the 14 clusters the power gate needs."),
         "{}",
         d[0].problem
     );
@@ -1159,13 +1572,23 @@ fn confirmatory_rules_do_not_fire_in_exploratory_mode() {
     let dir = study_dir();
     let s = edited(&[
         ("/study/mode", j(json!("exploratory"))),
-        ("/design/sesoi", j(json!(0.0))),
         hyp("claim", None),
         hyp("alpha_share", j(json!(0.0))),
         hyp("strata", j(json!([]))),
-        ("/design/variance/source", j(json!("stated"))),
         ("/inputs", j(inputs(0, 5))),
     ]);
+    assert!(named(&s, dir.path()).is_empty());
+    // A claim with its power_at on the wrong side, too few clusters, and a reference to this
+    // study or to one that has not run: none of it is read in an exploratory study.
+    for estimates in ["my-study", "later"] {
+        let s = edited(&exploring(vec![
+            hyp("power_at", j(json!(1.0))),
+            hyp("estimates", j(json!({ "from": estimates }))),
+            ("/inputs", j(inputs(2, 5))),
+        ]));
+        assert!(named(&s, dir.path()).is_empty(), "{estimates}");
+    }
+    let s = edited(&exploring(vec![("/inputs", j(inputs(2, 5)))]));
     assert!(named(&s, dir.path()).is_empty());
     assert!(named(&edited(&exploring(shared(&[0.5, 0.4]))), dir.path()).is_empty());
     // And E-LBL-001 does not fire in confirmatory mode.
@@ -1458,11 +1881,7 @@ fn fake(exact: Option<&str>, normalized: Option<&str>) -> (Box<dyn PriorUse>, Se
 }
 
 fn fresh(spec: &Value, dir: &Path, prior: Box<dyn PriorUse>) -> Vec<Diagnostic> {
-    let c = CheckCtx {
-        records: holding(spec),
-        ..ctx_with(dir, prior)
-    };
-    rules::check_named(spec, v0(), &c)
+    rules::check_named(spec, v0(), &ctx_with(dir, prior))
 }
 
 #[test]
@@ -1584,7 +2003,7 @@ fn symlinks_under_the_study_folder_are_refused_and_never_read() {
 #[test]
 fn absent_power_fields_say_which_is_missing() {
     let dir = study_dir();
-    for field in ["alpha", "power", "icc"] {
+    for field in ["alpha", "power"] {
         let ptr: &'static str = Box::leak(format!("/design/{field}").into_boxed_str());
         let d = named(&edited(&[(ptr, None)]), dir.path());
         assert_eq!(d.len(), 1, "{field}");
@@ -1597,16 +2016,31 @@ fn absent_power_fields_say_which_is_missing() {
     }
     // Two absent fields give two diagnostics; a mistyped one among them skips the gate.
     let d = named(
-        &edited(&[("/design/alpha", None), ("/design/icc", None)]),
+        &edited(&[("/design/alpha", None), ("/design/power", None)]),
         dir.path(),
     );
-    assert_eq!(d.len(), 2);
+    assert_eq!(codes_paths(&d), [POWER, POWER]);
     assert!(
         named(
             &edited(&[("/design/alpha", None), ("/design/power", j(json!("x")))]),
             dir.path()
         )
         .is_empty()
+    );
+    // Only a hypothesis the gate sizes is reported.
+    let d = named(
+        &edited(&[
+            ("/design/alpha", None),
+            ("/question/hypotheses", j(json!([descriptive("P1"), h1()]))),
+        ]),
+        dir.path(),
+    );
+    assert_eq!(
+        codes_paths(&d),
+        [
+            ("E-CNF-002", "question.hypotheses[1]"),
+            ("E-CNF-006", "question.hypotheses[0].claim")
+        ]
     );
 }
 
@@ -1682,7 +2116,20 @@ fn bal_brief_is_refused_with_three_codes() {
     let s = spec_at("tests/fixtures/specs/bal-brief.toml");
     let confirm = std::fs::read(dir.join("bal-confirm.txt")).unwrap();
     let (prior, _) = fake(Some(&sha256_hex(&confirm)), None);
-    let d = fresh(&s, dir, prior);
+    let pilot = common::finished(vec![common::estimate(
+        &[("arm-a", 1.0, json!({}))],
+        "",
+        4.0,
+        Some(0.0),
+    )]);
+    let c = CheckCtx {
+        records: Box::new(common::Studies(vec![(
+            "bal-pilot",
+            Ok(common::records_for("bal-pilot", &pilot)),
+        )])),
+        ..ctx_with(dir, prior)
+    };
+    let d = rules::check_named(&s, v0(), &c);
     let codes: BTreeSet<_> = d.iter().map(|x| x.code.as_str()).collect();
     for want in ["E-CNF-002", "E-CNF-005", "E-CNF-006"] {
         assert!(codes.contains(want), "{want}: {codes:?}");
@@ -1691,7 +2138,7 @@ fn bal_brief_is_refused_with_three_codes() {
     assert!(
         power
             .problem
-            .ends_with("5 confirmation units; the power gate needs 54."),
+            .ends_with("The pooled group has 1 of the 10 clusters the power gate needs."),
         "{}",
         power.problem
     );
@@ -1700,33 +2147,34 @@ fn bal_brief_is_refused_with_three_codes() {
 #[test]
 fn power_gate_numbers_at_the_guard_edges() {
     let dir = study_dir();
-    let detail = |edits: Vec<Edit>| {
-        let d = named(&edited(&edits), dir.path());
+    let detail = |edits: Vec<Edit>, b: common::Studies| {
+        let d = rules::check_named(&edited(&edits), v0(), &with_box(dir.path(), b));
         assert_eq!(d.len(), 1, "{edits:?}");
         d[0].problem.rsplit_once(". ").unwrap().1.to_string()
     };
-    // power 0.999 needs 140 units at sd 2, sesoi 1.
-    let mut e = power_edits(1, 139);
-    e.push(("/design/power", j(json!(0.999))));
+    // power 0.999 needs 26 clusters at sd 2 and 5 units per cluster.
     assert_eq!(
-        detail(e),
-        "139 confirmation units; the power gate needs 140."
+        detail(
+            vec![("/design/power", j(json!(0.999)))],
+            holding(pilot_estimates())
+        ),
+        "Stratum fiction has 11 of the 26 clusters the power gate needs."
     );
-    // icc just under 1 with 5 units per cluster: the design effect is about 5.
-    let mut e = power_edits(5, 11);
-    e.push(("/design/icc", j(json!(0.999999))));
+    // An icc of 1: a cluster is worth one unit, whatever its size.
+    let one = |icc| {
+        holding(vec![
+            common::estimate(&[("arm-a", 1.0, json!({}))], "", 4.0, Some(icc)),
+            common::estimate(&[("arm-b", 1.0, json!({ "bits": 4 }))], "", 4.0, Some(icc)),
+        ])
+    };
     assert_eq!(
-        detail(e),
-        "55 confirmation units; the power gate needs 267."
+        detail(vec![], one(1.0)),
+        "Stratum fiction has 11 of the 47 clusters the power gate needs."
     );
-    // No units per cluster: zero units, sized as if there were one.
-    let mut e = power_edits(0, 11);
-    e.push(("/design/icc", j(json!(0.1))));
-    assert_eq!(detail(e), "0 confirmation units; the power gate needs 54.");
     // The largest integer saturates instead of overflowing.
-    let mut e = power_edits(1, 54);
-    e.push(("/design/units_per_cluster", j(json!(i64::MAX))));
-    assert!(named(&edited(&e), dir.path()).is_empty());
+    let e = vec![("/design/units_per_cluster", j(json!(i64::MAX)))];
+    let d = rules::check_named(&edited(&e), v0(), &with_box(dir.path(), one(0.0)));
+    assert!(d.is_empty(), "{d:?}");
 }
 
 /// `inputs[0].path` matches `inputs[*].path`, and `params.bits` matches `params.*`.
@@ -1995,7 +2443,8 @@ fn a_confirmation_input_without_units_is_refused() {
 #[test]
 fn a_stratum_is_required_when_the_design_names_strata() {
     let dir = study_dir();
-    let mut s = ok();
+    // 13 clusters, so the 11 left in stratum fiction pass the power gate.
+    let mut s = edited(&[("/inputs", j(inputs(13, 5)))]);
     set(&mut s, "/inputs/4/stratum", j(json!("")));
     set(&mut s, "/inputs/6/stratum", None);
     let want = [
@@ -2044,6 +2493,14 @@ fn the_row_cap_counts_units_conditions_and_repeats_per_stage() {
     assert!(named(&at(4_000_000_000, 20_000, 1), dir.path()).is_empty());
     // Repeats and each stage's conditions multiply; a condition no stage runs adds no row.
     assert_eq!(codes_paths(&named(&at(20_000, 20_000, 2), dir.path())), cap);
+    // The pilot also measured arm-c as the pick.
+    let mut measured = pilot_estimates();
+    measured.push(common::estimate(
+        &[("arm-c", 1.0, json!({}))],
+        "",
+        4.0,
+        Some(0.0),
+    ));
     let grow = |stage: Option<&str>| {
         let mut s = at(20_000, 20_000, 1);
         let ids = s["design"]["conditions"].as_array_mut().unwrap();
@@ -2052,7 +2509,8 @@ fn the_row_cap_counts_units_conditions_and_repeats_per_stage() {
             let list = s["design"][stage]["conditions"].as_array_mut().unwrap();
             list.push(json!("arm-c"));
         }
-        named(&s, dir.path())
+        let c = with_box(dir.path(), holding(measured.clone()));
+        rules::check_named(&s, v0(), &c)
     };
     assert_eq!(codes_paths(&grow(Some("selection"))), cap);
     assert_eq!(codes_paths(&grow(Some("confirmation"))), cap);
