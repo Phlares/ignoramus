@@ -298,3 +298,21 @@ pub fn no_level1() -> Option<String> {
         Err(e) => Some(format!("cannot run bwrap: {e}")),
     }
 }
+
+/// Plant an `estimate` record for `outcome` in a donor study log and return its hash.
+pub fn plant_estimate(home: &Home, outcome: &str, var: f64) -> String {
+    let key = keys::load_or_create(home).unwrap();
+    std::fs::create_dir_all(home.study_dir("donor")).unwrap();
+    let body = serde_json::json!({
+        "hypothesis": "H1", "outcome": outcome, "key": {}, "key_hash": "k", "stratum": "",
+        "clusters": 4, "units": 20, "mean": 1.0, "var": var, "icc": null
+    });
+    let draft = records::RecordDraft {
+        study: "donor".into(),
+        row: None,
+        kind: "estimate".into(),
+        body,
+    };
+    let path = home.study_dir("donor").join("records.jsonl");
+    records::hash(&records::append(&path, &key, draft).unwrap())
+}

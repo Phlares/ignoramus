@@ -1,6 +1,7 @@
 //! Signed, hash-chained record log: one JSON line per record.
 use crate::canon::{canonical_of, sha256_hex};
 use crate::files::{Tail, locked_append};
+use crate::home::Home;
 use crate::keys::{sign_hex, verify_hex};
 use crate::time::now_rfc3339;
 use ed25519_dalek::{SigningKey, VerifyingKey};
@@ -174,4 +175,36 @@ pub fn read_all(path: &Path, key: &VerifyingKey) -> Result<Vec<Record>, VerifyEr
         out.push(s.record);
     }
     Ok(out)
+}
+
+/// Hex SHA-256 of the record's canonical bytes: the `hash` that `append` stores.
+pub fn hash(r: &Record) -> String {
+    // A record is plain data, so canonical serialization cannot fail.
+    sha256_hex(&canonical_of(r).unwrap_or_default())
+}
+
+/// The record with this hash, from any study log in the box, read in sorted folder order.
+/// A log that fails verification is an error, never skipped.
+pub fn find(home: &Home, key: &VerifyingKey, hash: &str) -> Result<Option<Record>, VerifyError> {
+    let mut dirs = Vec::new();
+    match std::fs::read_dir(home.root.join("studies")) {
+        Ok(rd) => {
+            for e in rd {
+                dirs.push(e?.path());
+            }
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    dirs.sort();
+    // Every log is verified, even after a match: a box with a damaged log answers nothing.
+    let mut found = None;
+    for d in dirs {
+        for r in read_all(&d.join("records.jsonl"), key)? {
+            if found.is_none() && self::hash(&r) == hash {
+                found = Some(r);
+            }
+        }
+    }
+    Ok(found)
 }

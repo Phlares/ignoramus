@@ -2,10 +2,14 @@
 use super::{CliError, Ctx, Done, Run, out};
 use crate::diag::{Diagnostic, Severity, render_human};
 use crate::estimate::{Estimate, defaults_json, estimate, units};
+use crate::home::Home;
+use crate::keys;
 use crate::planlog::store::PlanLog;
 use crate::prior::{PriorError, PriorUse, file_hashes};
-use crate::rules::{self, CheckCtx, input_bytes};
+use crate::records;
+use crate::rules::{self, BoxRecords, CheckCtx, input_bytes};
 use crate::spec::{self, LoadError, model::Spec};
+use ed25519_dalek::VerifyingKey;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
@@ -40,6 +44,21 @@ struct Unreadable(String);
 impl PriorUse for Unreadable {
     fn used(&self, _: &str, _: &str) -> Result<Option<String>, PriorError> {
         Err(PriorError(self.0.clone()))
+    }
+}
+
+/// The records of the box in `home`. With no box key there are none.
+pub struct HomeRecords {
+    pub home: Home,
+    pub key: Option<VerifyingKey>,
+}
+
+impl BoxRecords for HomeRecords {
+    fn find(&self, hash: &str) -> Result<Option<records::Record>, String> {
+        let Some(key) = &self.key else {
+            return Ok(None);
+        };
+        records::find(&self.home, key, hash).map_err(|e| e.to_string())
     }
 }
 
@@ -78,11 +97,18 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         Ok(log) => Box::new(log),
         Err(e) => Box::new(Unreadable(e.to_string())),
     };
+    let key = keys::load(home)
+        .map_err(|e| CliError::usage(e.to_string()))?
+        .map(|k| k.verifying_key());
     let cc = CheckCtx {
         study_dir: study_dir(spec_path),
         prior,
         machine_max_level: machine.max_level,
         spec_text: raw.text,
+        records: Box::new(HomeRecords {
+            home: home.clone(),
+            key,
+        }),
     };
     let (value, filled, diags) = rules::check_all(&raw.value, rules::builtin(), &cc);
     let mut a = Assessed {

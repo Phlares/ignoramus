@@ -1,5 +1,4 @@
 use ignorarium::diag::{Diagnostic, render_human};
-use ignorarium::prior::NoPriorUse;
 use ignorarium::rules::{self, CheckCtx, Rule};
 use ignorarium::scan::{self, Pattern, ScanError};
 use serde_json::{Value, json};
@@ -42,10 +41,8 @@ fn run(spec: &Value) -> Vec<Diagnostic> {
 /// `text` is the spec source the comment scan reads.
 fn run_text(spec: &Value, text: &str) -> Vec<Diagnostic> {
     let ctx = CheckCtx {
-        study_dir: ".".into(),
-        prior: Box::new(NoPriorUse),
-        machine_max_level: 2,
         spec_text: text.into(),
+        ..CheckCtx::empty(".".as_ref())
     };
     let (_, _, d) = rules::check_all(spec, v0(), &ctx);
     d.into_iter().filter(|d| d.code == "E-SEC-001").collect()

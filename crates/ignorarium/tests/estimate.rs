@@ -1,7 +1,6 @@
 use ignorarium::diag::Severity;
 use ignorarium::estimate::{Estimate, apply_defaults, estimate, units};
 use ignorarium::machine::{self, Machine};
-use ignorarium::prior::NoPriorUse;
 use ignorarium::rules::{self, CheckCtx, Rule};
 use ignorarium::spec::model::Spec;
 use serde_json::{Value, json};
@@ -320,12 +319,7 @@ fn v0() -> Vec<Rule> {
 }
 
 fn ctx(dir: &Path) -> CheckCtx {
-    CheckCtx {
-        study_dir: dir.to_path_buf(),
-        prior: Box::new(NoPriorUse),
-        machine_max_level: 2,
-        spec_text: String::new(),
-    }
+    CheckCtx::empty(dir)
 }
 
 /// Confirmatory, alpha and power absent, 10 confirmation units against 54 needed.

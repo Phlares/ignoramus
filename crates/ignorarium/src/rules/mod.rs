@@ -10,6 +10,20 @@ mod named;
 pub use generic::{check_generic, safe_key};
 pub use named::{CheckCtx, check_named, input_bytes};
 
+/// The records of a box, found by hash. An `Err` is a log that cannot be read or trusted.
+pub trait BoxRecords {
+    fn find(&self, hash: &str) -> Result<Option<crate::records::Record>, String>;
+}
+
+/// An empty box.
+pub struct NoRecords;
+
+impl BoxRecords for NoRecords {
+    fn find(&self, _: &str) -> Result<Option<crate::records::Record>, String> {
+        Ok(None)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Rule {
     pub code: String,

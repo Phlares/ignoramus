@@ -990,3 +990,21 @@ clusters = [1]",
         assert!(stdout(&a).contains(code), "{}", stdout(&a));
     }
 }
+
+#[test]
+fn check_refuses_a_made_up_variance_record() {
+    let (_d, home, spec) = setup(|t| {
+        t.replace("mode = \"exploratory\"", "mode = \"confirmatory\"")
+            .replace(
+                "source = \"stated\"",
+                &format!("source = \"record:{}\"", "0".repeat(64)),
+            )
+    });
+    let a = bin(&home).arg("check").arg(&spec).assert().code(1);
+    let out = stdout(&a);
+    assert!(out.contains("error[E-CNF-003]"), "{out}");
+    assert!(
+        out.contains("No record in this box has this hash."),
+        "{out}"
+    );
+}

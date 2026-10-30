@@ -3,8 +3,9 @@
 //! selects its nodes with it, and reports only at those nodes. A check skips what
 //! is missing or mistyped: the generic rules report that.
 use super::generic::{applies, diagnostic, join, select};
-use super::{Check, Rule};
+use super::{BoxRecords, Check, NoRecords, Rule};
 use crate::canon::sha256_hex;
+use crate::derived::Estimate;
 use crate::diag::Diagnostic;
 use crate::estimate::distinct;
 use crate::power::required_units;
@@ -20,6 +21,20 @@ pub struct CheckCtx {
     pub machine_max_level: u8,
     /// The spec text the loader parsed, for checks that read comments.
     pub spec_text: String,
+    pub records: Box<dyn BoxRecords>,
+}
+
+impl CheckCtx {
+    /// A context with no prior use and no records, for the folder `root`.
+    pub fn empty(root: &Path) -> CheckCtx {
+        CheckCtx {
+            study_dir: root.to_path_buf(),
+            prior: Box::new(crate::prior::NoPriorUse),
+            machine_max_level: 2,
+            spec_text: String::new(),
+            records: Box::new(NoRecords),
+        }
+    }
 }
 
 /// Where a check fired, and text for the end of the rule's problem sentence.
@@ -326,10 +341,41 @@ fn power_met(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
     out
 }
 
-fn variance_from_record(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
-    flag(spec, pat, |v| {
-        v.as_str().is_some_and(|s| !s.starts_with("record:"))
-    })
+/// The source is `record:<hash>` of an estimate for a listed outcome that holds the stated variance.
+fn variance_from_record(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let outcomes = texts(spec, "outcomes[*].id");
+    let stated = num(spec, "design.variance.value");
+    let mut out = Vec::new();
+    for (path, v) in nodes(spec, pat) {
+        let Some(source) = v.as_str() else { continue };
+        let Some(h) = source.strip_prefix("record:") else {
+            out.push(hit(path));
+            continue;
+        };
+        let fault = match ctx.records.find(h) {
+            Err(e) => Some(format!("The box cannot read its records: {e}")),
+            Ok(None) => Some("No record in this box has this hash.".to_string()),
+            Ok(Some(r)) => match Estimate::of(&r) {
+                None => Some("The record is not an estimate.".to_string()),
+                Some(e) if !outcomes.contains(&e.outcome.as_str()) => {
+                    Some("The record is for an outcome this plan does not list.".to_string())
+                }
+                Some(e) if stated.is_some_and(|s| s != e.var) => Some(format!(
+                    "The record holds variance {}, and the plan states {}.",
+                    e.var,
+                    stated.unwrap_or_default()
+                )),
+                Some(_) => None,
+            },
+        };
+        if let Some(detail) = fault {
+            out.push(Hit {
+                path,
+                detail: Some(detail),
+            });
+        }
+    }
+    out
 }
 
 /// The array is empty, or one element is also a selection cluster.

@@ -1,3 +1,5 @@
+mod common;
+
 use ignorarium::canon::{sha256_hex, to_canonical};
 use ignorarium::cli::register::{self, approve};
 use ignorarium::cli::{CliError, Done};
@@ -383,7 +385,10 @@ fn the_commitment_binds_the_authors_spec_not_the_defaulted_one() {
 
 #[test]
 fn a_confirmatory_plan_registers_with_a_pending_timestamp() {
-    let (f, spec) = setup("numeric-ablation", |t| {
+    let (f, spec) = setup("numeric-ablation", same);
+    let source = common::plant_estimate(&f.home, "ppl-ratio", 4.0);
+    let t = std::fs::read_to_string(&spec).unwrap();
+    let edited = {
         let ids = |p: &str, n: usize| {
             format!(
                 "clusters = [{}]",
@@ -399,7 +404,7 @@ fn a_confirmatory_plan_registers_with_a_pending_timestamp() {
             .replace("value = 0.0", "value = 4.0")
             .replace(
                 "source = \"stated\"",
-                &format!("source = \"record:{}\"", "a".repeat(64)),
+                &format!("source = \"record:{source}\""),
             )
             .replace("units_per_cluster = 1", "units_per_cluster = 5")
             .replacen("clusters = []", &ids("s", 3), 1)
@@ -408,7 +413,8 @@ fn a_confirmatory_plan_registers_with_a_pending_timestamp() {
                 "triggers = []",
                 "triggers = [{ id = \"T1\", metric = \"ppl-ratio\", threshold_e = 1.0 }]",
             )
-    });
+    };
+    std::fs::write(&spec, edited).unwrap();
     let (r, out) = go(&f, &spec, &answer(&spec), true);
     assert_eq!(r.unwrap().code, 0, "{out}");
     let rp = f.home.study_dir("my-study").join("records.jsonl");

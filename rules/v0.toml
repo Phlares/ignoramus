@@ -413,8 +413,8 @@ target = [
 [[rule]]
 code = "E-CNF-003"
 severity = "error"
-problem = "The variance is not taken from a record."
-instruction = "Measure the variance in an earlier run and set design.variance.source to record:<sha256> of that record."
+problem = "The variance record is missing, is not an estimate for an outcome of this plan, or holds another value."
+instruction = "Measure the variance in an earlier run. Set design.variance.source to record:<sha256> of its estimate record, and design.variance.value to the variance that record holds."
 why = "A variance guessed by hand can be too small, which makes the power gate pass a study that is too small."
 sources = ["https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661"]
 when = { mode = "confirmatory" }

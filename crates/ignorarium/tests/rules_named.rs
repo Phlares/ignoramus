@@ -1,7 +1,8 @@
 use ignorarium::canon::sha256_hex;
 use ignorarium::diag::{Diagnostic, Severity};
 use ignorarium::prior::{NoPriorUse, PriorError, PriorUse, normalized_sha256};
-use ignorarium::rules::{self, CheckCtx, Rule};
+use ignorarium::records::Record;
+use ignorarium::rules::{self, BoxRecords, CheckCtx, Rule};
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -23,15 +24,59 @@ fn ctx(dir: &Path) -> CheckCtx {
 
 fn ctx_with(dir: &Path, prior: Box<dyn PriorUse>) -> CheckCtx {
     CheckCtx {
-        study_dir: dir.to_path_buf(),
         prior,
-        machine_max_level: 2,
-        spec_text: String::new(),
+        records: Box::new(Lookup(Ok(Some(record(
+            "estimate",
+            estimate("ppl-ratio", 4.0),
+        ))))),
+        ..CheckCtx::empty(dir)
     }
 }
 
+/// A box that answers every lookup the same way.
+struct Lookup(Result<Option<Record>, String>);
+
+impl BoxRecords for Lookup {
+    fn find(&self, _: &str) -> Result<Option<Record>, String> {
+        self.0.clone()
+    }
+}
+
+fn record(kind: &str, body: Value) -> Record {
+    Record {
+        seq: 0,
+        prev: "0".repeat(64),
+        study: "donor".into(),
+        row: None,
+        kind: kind.into(),
+        body,
+        ts: "2026-01-01T00:00:00Z".into(),
+    }
+}
+
+fn estimate(outcome: &str, var: f64) -> Value {
+    json!({
+        "hypothesis": "H1", "outcome": outcome, "key": {}, "key_hash": "k", "stratum": "",
+        "clusters": 4, "units": 20, "mean": 1.0, "var": var, "icc": null
+    })
+}
+
+/// A box whose one estimate holds the variance the plan states, so only the plan's other
+/// faults show.
+fn holding(spec: &Value) -> Box<dyn BoxRecords> {
+    let var = spec["design"]["variance"]["value"].as_f64().unwrap_or(4.0);
+    Box::new(Lookup(Ok(Some(record(
+        "estimate",
+        estimate("ppl-ratio", var),
+    )))))
+}
+
 fn named(spec: &Value, dir: &Path) -> Vec<Diagnostic> {
-    rules::check_named(spec, v0(), &ctx(dir))
+    let c = CheckCtx {
+        records: holding(spec),
+        ..ctx(dir)
+    };
+    rules::check_named(spec, v0(), &c)
 }
 
 fn codes_paths(d: &[Diagnostic]) -> Vec<(&str, &str)> {
@@ -415,6 +460,48 @@ fn the_base_plan_passes_every_named_check() {
 }
 
 #[test]
+fn a_variance_record_must_exist_and_hold_the_stated_value() {
+    let dir = study_dir();
+    let cases = [
+        (Ok(None), "No record in this box has this hash."),
+        (
+            Ok(Some(record("row", json!({})))),
+            "The record is not an estimate.",
+        ),
+        (
+            Ok(Some(record("estimate", estimate("other", 4.0)))),
+            "The record is for an outcome this plan does not list.",
+        ),
+        (
+            Ok(Some(record("estimate", estimate("ppl-ratio", 5.0)))),
+            "The record holds variance 5, and the plan states 4.",
+        ),
+        (
+            Err("line 2 is not a whole record".to_string()),
+            "The box cannot read its records: line 2 is not a whole record",
+        ),
+    ];
+    for (found, detail) in cases {
+        let c = CheckCtx {
+            records: Box::new(Lookup(found)),
+            ..CheckCtx::empty(dir.path())
+        };
+        let d = rules::check_named(&ok(), v0(), &c);
+        assert_eq!(codes_paths(&d), [("E-CNF-003", "design.variance.source")]);
+        let want = "The variance record is missing, is not an estimate for an outcome of this plan, or holds another value.";
+        assert_eq!(d[0].problem, format!("{want} {detail}"));
+    }
+    let same = CheckCtx {
+        records: Box::new(Lookup(Ok(Some(record(
+            "estimate",
+            estimate("ppl-ratio", 4.0),
+        ))))),
+        ..CheckCtx::empty(dir.path())
+    };
+    assert!(rules::check_named(&ok(), v0(), &same).is_empty());
+}
+
+#[test]
 fn each_fault_row_yields_exactly_its_codes_and_paths() {
     let dir = study_dir();
     for row in faults() {
@@ -767,7 +854,11 @@ fn fake(exact: Option<&str>, normalized: Option<&str>) -> (Box<dyn PriorUse>, Se
 }
 
 fn fresh(spec: &Value, dir: &Path, prior: Box<dyn PriorUse>) -> Vec<Diagnostic> {
-    rules::check_named(spec, v0(), &ctx_with(dir, prior))
+    let c = CheckCtx {
+        records: holding(spec),
+        ..ctx_with(dir, prior)
+    };
+    rules::check_named(spec, v0(), &c)
 }
 
 #[test]

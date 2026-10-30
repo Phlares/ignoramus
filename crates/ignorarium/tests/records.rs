@@ -760,3 +760,66 @@ fn a_record_with_long_floats_verifies_after_a_write_and_read() {
     records::append(&p, &k, body(many)).unwrap();
     assert_eq!(records::verify(&p, &k.verifying_key()).unwrap(), 2);
 }
+
+/// A box home with one record in each of the studies `a` and `b`.
+fn two_studies(k: &SigningKey) -> (tempfile::TempDir, Home, Record, Record) {
+    let d = tempfile::tempdir().unwrap();
+    let home = Home::open_at(&d.path().join("home")).unwrap();
+    let mut made = Vec::new();
+    for (study, n) in [("a", 1), ("b", 2)] {
+        std::fs::create_dir(home.study_dir(study)).unwrap();
+        let p = home.study_dir(study).join("records.jsonl");
+        made.push(records::append(&p, k, draft(n)).unwrap());
+    }
+    let (second, first) = (made.pop().unwrap(), made.pop().unwrap());
+    (d, home, first, second)
+}
+
+#[test]
+fn hash_equals_the_stored_hash() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("log.jsonl");
+    let r = records::append(&p, &key(1), draft(0)).unwrap();
+    let line: Value = serde_json::from_str(&lines(&p)[0]).unwrap();
+    assert_eq!(records::hash(&r), line["hash"].as_str().unwrap());
+    assert_eq!(records::hash(&r).len(), 64);
+}
+
+#[test]
+fn find_returns_the_record_with_that_hash_from_any_study() {
+    let k = key(1);
+    let (_d, home, first, second) = two_studies(&k);
+    let v = k.verifying_key();
+    assert_eq!(
+        records::find(&home, &v, &records::hash(&second)).unwrap(),
+        Some(second)
+    );
+    assert_eq!(
+        records::find(&home, &v, &records::hash(&first)).unwrap(),
+        Some(first)
+    );
+}
+
+#[test]
+fn find_returns_none_for_an_unknown_hash() {
+    let k = key(1);
+    let (_d, home, ..) = two_studies(&k);
+    assert_eq!(
+        records::find(&home, &k.verifying_key(), &"0".repeat(64)).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn find_fails_on_a_log_that_does_not_verify() {
+    let k = key(1);
+    let (_d, home, first, _) = two_studies(&k);
+    // The wanted record sits in `a`; the damaged log `b` is read all the same.
+    let p = home.study_dir("b").join("records.jsonl");
+    let damaged = std::fs::read_to_string(&p)
+        .unwrap()
+        .replace("\"n\":2", "\"n\":9");
+    std::fs::write(&p, damaged).unwrap();
+    let err = records::find(&home, &k.verifying_key(), &records::hash(&first)).unwrap_err();
+    assert!(matches!(err, VerifyError::BadHash { seq: 0 }), "{err}");
+}

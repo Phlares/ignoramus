@@ -4,11 +4,11 @@ Severity: error
 
 ## Problem
 
-The variance is not taken from a record.
+The variance record is missing, is not an estimate for an outcome of this plan, or holds another value.
 
 ## Fix
 
-Measure the variance in an earlier run and set design.variance.source to record:<sha256> of that record.
+Measure the variance in an earlier run. Set design.variance.source to record:<sha256> of its estimate record, and design.variance.value to the variance that record holds.
 
 ## Why
 

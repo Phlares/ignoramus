@@ -2,7 +2,7 @@ mod common;
 
 use common::{
     Lab, PAYLOAD, boxed_study, events_of, indices, kill_box_at, kind_of, lab, lines_of, named,
-    plain, proc_state, register_study, rows_of, with_payload,
+    plain, plant_estimate, proc_state, register_study, rows_of, with_payload,
 };
 use ignorarium::backend::level0::Level0;
 use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome, Watch};
@@ -461,32 +461,35 @@ fn control_signals_keep_the_last_request_and_a_stop_stays() {
     assert!(RunLock::try_take(&lab.home, "ghost").is_err());
 }
 
-fn confirmatory(t: String) -> String {
-    let ids = |p: &str, n: usize| {
-        let all: Vec<String> = (0..n).map(|i| format!("\"{p}{i:02}\"")).collect();
-        format!("clusters = [{}]", all.join(", "))
-    };
-    t.replace("mode = \"exploratory\"", "mode = \"confirmatory\"")
-        .replace("label = \"signal\"", "label = \"confirmed\"")
-        .replace("sesoi = 0.0", "sesoi = 1.0")
-        .replace("value = 0.0", "value = 4.0")
-        .replace(
-            "source = \"stated\"",
-            &format!("source = \"record:{}\"", "a".repeat(64)),
-        )
-        .replace("units_per_cluster = 3", "units_per_cluster = 5")
-        .replacen("clusters = []", &ids("s", 3), 1)
-        .replacen("clusters = []", &ids("c", 11), 1)
-        .replace(
-            "triggers = []",
-            "triggers = [{ id = \"T1\", metric = \"ppl-ratio\", threshold_e = 1.0 }]",
-        )
+fn confirmatory(source: String) -> impl Fn(String) -> String {
+    move |t| {
+        let ids = |p: &str, n: usize| {
+            let all: Vec<String> = (0..n).map(|i| format!("\"{p}{i:02}\"")).collect();
+            format!("clusters = [{}]", all.join(", "))
+        };
+        t.replace("mode = \"exploratory\"", "mode = \"confirmatory\"")
+            .replace("label = \"signal\"", "label = \"confirmed\"")
+            .replace("sesoi = 0.0", "sesoi = 1.0")
+            .replace("value = 0.0", "value = 4.0")
+            .replace(
+                "source = \"stated\"",
+                &format!("source = \"record:{source}\""),
+            )
+            .replace("units_per_cluster = 3", "units_per_cluster = 5")
+            .replacen("clusters = []", &ids("s", 3), 1)
+            .replacen("clusters = []", &ids("c", 11), 1)
+            .replace(
+                "triggers = []",
+                "triggers = [{ id = \"T1\", metric = \"ppl-ratio\", threshold_e = 1.0 }]",
+            )
+    }
 }
 
 #[test]
 fn stop_lowers_the_label_to_signal() {
     let lab = lab();
-    register_study(&lab, "conf", confirmatory, &[], PAYLOAD);
+    let source = plant_estimate(&lab.home, "ppl-ratio", 4.0);
+    register_study(&lab, "conf", confirmatory(source), &[], PAYLOAD);
     let rec = send_stop(&lab.home, "conf", "manual").unwrap();
     assert_eq!(rec.body["label_before"], "confirmed");
     assert_eq!(rec.body["label_after"], "signal");
