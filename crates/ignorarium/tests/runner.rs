@@ -2555,7 +2555,8 @@ fn a_void_row_in_scope_fails_the_claim() {
     assert!(finished(&lab, "void"));
 
     // Two repeats: row 0, the first unit's reference row of repeat 0, is void. Its repeat 1
-    // still pairs, so the unit has a value, and it is still incomplete.
+    // still pairs, so the unit has a value, and it is still incomplete: it leaves the test
+    // with its cluster.
     let lab = common::lab();
     let (b, _) = fake(vec![Exit::Payload(1)]);
     let plan = tested(&lab, "void2", 2, |t| t, &arm_a_at(6), Box::new(b));
@@ -2568,7 +2569,7 @@ fn a_void_row_in_scope_fails_the_claim() {
         ("fail", Some(0.0), 1)
     );
     assert_eq!(v.reason.as_deref(), Some("incomplete units in scope: 1"));
-    assert_eq!(v.bounds[0].clusters, 15);
+    assert_eq!(v.bounds[0].clusters, 14);
     let stream = stream_of(&lab, LogName::Plan);
     assert_eq!(stream.last(), Some(&close_of("void2", 0.0, false)));
 }

@@ -583,6 +583,8 @@ fn the_key_carries_the_repeats() {
     let terms = [("arm-a".to_string(), 1.0, json!({}))];
     let want = contrast_key(&spec.outcomes[0], 3, &("base".into(), json!({})), &terms);
     assert_eq!((e[0].key.clone(), e[0].key_hash.clone()), want);
+    // An estimate counts a unit that pairs in any repeat.
+    assert_eq!(e[0].units, 2);
 }
 
 #[test]
@@ -953,6 +955,37 @@ fn an_exploratory_quantile_claim_passes_on_its_point_estimate() {
         (vs[0].verdict.as_str(), vs[0].bounds[0].value),
         ("fail", Some(43.0 / 48.0))
     );
+}
+
+#[test]
+fn an_exploratory_claim_leaves_out_a_unit_short_of_a_repeat() {
+    // Two repeats, one cluster of 10 units: 9 pair to -1 in both repeats; m#9 pairs to +1 in
+    // repeat 0, and its arm-a row of repeat 1 is void. The claim, below -0.9 on the mean, sees
+    // the 9 complete units (mean -1) and passes; with m#9 the mean would be -0.8.
+    let v = claimed_value(
+        "exploratory",
+        &[],
+        json!({ "below": -0.9 }),
+        json!({ "mean": [-1.0, 1.0] }),
+    );
+    let mut spec = Spec::from_value(&v).unwrap();
+    spec.design.repeats = 2;
+    let mut rows = Vec::new();
+    for i in 0..10 {
+        let u = format!("m#{i}");
+        let x = if i == 9 { 11.0 } else { 9.0 };
+        rows.extend([ok(&u, "base", 0, 10.0), ok(&u, "arm-a", 0, x)]);
+        rows.push(ok(&u, "base", 1, 10.0));
+        let exit = if i == 9 { "payload:1" } else { "ok" };
+        rows.push(row(&u, "arm-a", 1, exit, Some(x)));
+    }
+    let (vs, study) = decided(&spec, &paired(&spec, &rows), &[cluster("m", "", 10)], None);
+    let v = &vs[0];
+    assert_eq!(
+        (v.verdict.as_str(), v.incomplete_units, study),
+        ("pass", 1, None)
+    );
+    assert_eq!(v.bounds, [bound("", "below", -0.9, 1, -1.0)]);
 }
 
 #[test]

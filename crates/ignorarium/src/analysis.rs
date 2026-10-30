@@ -218,9 +218,9 @@ pub fn estimates(
         if !groups.contains(&"") {
             groups.push("");
         }
-        let repeats = spec.design.repeats;
         for stratum in groups {
-            let (samples, _) = group(clusters, stratum, &outcome.id, &h.contrast, paired, repeats);
+            // An estimate takes a unit that pairs in any repeat.
+            let (samples, _) = group(clusters, stratum, &outcome.id, &h.contrast, paired, 1);
             if let Some(f) = fit(&samples) {
                 out.push(Estimate {
                     hypothesis: h.id.clone(),
@@ -240,9 +240,10 @@ pub fn estimates(
     out
 }
 
-/// The confirmation clusters of `stratum` (every one for the pooled group `""`) that have a
-/// unit with a value, each as the contrast's values over those units, and the count of picked
-/// units that are incomplete: some term pairs in fewer than `repeats` repeats.
+/// The confirmation clusters of `stratum` (every one for the pooled group `""`), each as the
+/// contrast's value for each picked unit that counts, and the count of picked units that do
+/// not. A unit counts when every term pairs in at least `repeats` repeats; its value is the
+/// weighted sum of the terms' means. A cluster with no unit that counts is left out.
 fn group(
     clusters: &[Cluster],
     stratum: &str,
@@ -256,33 +257,24 @@ fn group(
         .filter(|c| c.role == Role::Confirmation)
         .filter(|c| stratum.is_empty() || c.stratum == stratum)
         .map(|c| {
-            let short = |&i: &u32| {
+            let mut xs = Vec::new();
+            for &i in &c.picked {
                 let unit = units::key(&c.path, i);
-                (contrast.keys()).any(|cond| paired.repeats(&unit, cond, outcome) < repeats)
-            };
-            incomplete += c.picked.iter().filter(|i| short(i)).count() as u64;
-            cluster_values(c, outcome, contrast, paired)
+                let whole =
+                    (contrast.keys()).all(|cond| paired.repeats(&unit, cond, outcome) >= repeats);
+                let x = (contrast.iter())
+                    .map(|(cond, w)| Some(w * paired.get(&unit, cond, outcome)?))
+                    .sum::<Option<f64>>();
+                match x.filter(|_| whole) {
+                    Some(x) => xs.push(x),
+                    None => incomplete += 1,
+                }
+            }
+            xs
         })
         .filter(|xs| !xs.is_empty())
         .collect();
     (samples, incomplete)
-}
-
-/// The contrast's value for each picked unit of `c` that has a paired value for every term.
-fn cluster_values(
-    c: &Cluster,
-    outcome: &str,
-    contrast: &BTreeMap<String, f64>,
-    paired: &Paired,
-) -> Vec<f64> {
-    (c.picked.iter())
-        .filter_map(|&i| {
-            let unit = units::key(&c.path, i);
-            (contrast.iter())
-                .map(|(cond, w)| Some(w * paired.get(&unit, cond, outcome)?))
-                .sum::<Option<f64>>()
-        })
-        .collect()
 }
 
 struct Fit {
@@ -329,9 +321,9 @@ fn fit(samples: &[Vec<f64>]) -> Option<Fit> {
 
 /// One verdict per hypothesis, in spec order. A hypothesis with no claim gets `none`. A claim
 /// is held in each stratum it lists, or in the pooled group `""` when it lists none. There
-/// each confirmation cluster gives one observation per bound (`claim::observation`), from its
-/// units with a value for every term (the mean over the repeats that pair). A unit is
-/// complete when every term pairs in all `design.repeats` repeats.
+/// each confirmation cluster with a complete unit gives one observation per bound
+/// (`claim::observation`), from its complete units only. A unit is complete when every term of
+/// the contrast pairs in all `design.repeats` repeats.
 /// - Confirmatory: per stratum, the observations in the order `claim::order` draws from
 ///   `seed(spec_hash, "test/<id>/<stratum>")`, then each bound's `claim::e_value`. The
 ///   hypothesis takes the least of them, an e-value under the union of the bounds' nulls, or 0
