@@ -135,13 +135,20 @@ fn with_kvm(kvm: &Path, vmm: &Path, kernel: &Path, agent: &Path) -> Level2 {
     b
 }
 
-/// The probe's faults, without the one for `mkfs.ext4`, which depends on the host.
+/// The probe's faults, without the ones for `mkfs.ext4` and `debugfs`, which depend on the
+/// host.
 fn faults(b: &Level2) -> Vec<String> {
     let Probe::Unavailable(why) = b.probe() else {
         panic!("probed available")
     };
+    let by_host = |f: &&str| {
+        let tools = ["mkfs.ext4", "debugfs"];
+        tools
+            .iter()
+            .any(|t| f.starts_with(&format!("{t} cannot run: ")))
+    };
     why.split("; ")
-        .filter(|f| !f.starts_with("mkfs.ext4 cannot run: "))
+        .filter(|f| !by_host(f))
         .map(str::to_string)
         .collect()
 }
@@ -162,7 +169,8 @@ fn probe_lists_every_fault() {
          IGNORARIUM_VM_VMM is not set; point it at cloud-hypervisor-static v54.0; \
          IGNORARIUM_VM_KERNEL is not set; point it at vmlinux-x86_64 ch-release-v7.2.8-20261009; \
          IGNORARIUM_VM_AGENT is not set; point it at a static build of ignorarium-guest; \
-         mkfs.ext4 cannot run: No such file or directory (os error 2)",
+         mkfs.ext4 cannot run: No such file or directory (os error 2); \
+         debugfs cannot run: No such file or directory (os error 2)",
         kvm.display()
     );
     assert_eq!(b.probe(), Probe::Unavailable(want));

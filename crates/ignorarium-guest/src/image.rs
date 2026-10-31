@@ -137,15 +137,16 @@ pub fn size_mib(dir: &Path) -> io::Result<u64> {
     Ok((tree_bytes(dir)? * 5 / 4).div_ceil(1 << 20) + 16)
 }
 
-fn run(cmd: &mut Command) -> io::Result<()> {
+/// Runs `cmd` to its end and returns what it wrote on stderr.
+fn run(cmd: &mut Command) -> io::Result<String> {
     let out = cmd
         .stdin(Stdio::null())
         .output()
         .map_err(|e| io::Error::new(e.kind(), format!("{:?}: {e}", cmd.get_program())))?;
-    if out.status.success() {
-        return Ok(());
-    }
     let err = String::from_utf8_lossy(&out.stderr);
+    if out.status.success() {
+        return Ok(err.into_owned());
+    }
     let lines: Vec<&str> = err.lines().collect();
     let tail = lines[lines.len().saturating_sub(10)..].join("\n");
     Err(io::Error::other(format!(
@@ -155,8 +156,19 @@ fn run(cmd: &mut Command) -> io::Result<()> {
     )))
 }
 
+/// The end of a debugfs request that wrote `stderr`. debugfs exits 0 when its request fails,
+/// so any stderr line but its version banner is the failure.
+fn debugfs_end(stderr: &str) -> io::Result<()> {
+    match stderr.lines().find(|l| !l.starts_with("debugfs ")) {
+        None => Ok(()),
+        Some(why) => Err(io::Error::other(format!("debugfs failed: {why}"))),
+    }
+}
+
 /// Makes an ext4 image of `size_mib` MiB at `dest`, filled from `src`. It has no journal,
-/// so reading it on the host never needs a replay.
+/// so reading it on the host never needs a replay. Its root holds what `src` holds and no
+/// more: mke2fs always makes `lost+found` (mode 0700, owned by root), which the guest's user
+/// could not read, so it goes unless `src` has its own.
 pub fn ext4(src: Option<&Path>, dest: &Path, size_mib: u64) -> io::Result<()> {
     File::create(dest)?.set_len(size_mib << 20)?;
     let mut cmd = Command::new("mkfs.ext4");
@@ -174,5 +186,29 @@ pub fn ext4(src: Option<&Path>, dest: &Path, size_mib: u64) -> io::Result<()> {
     if let Some(src) = src {
         cmd.arg("-d").arg(src);
     }
-    run(cmd.arg(dest))
+    run(cmd.arg(dest))?;
+    if src.is_some_and(|s| fs::symlink_metadata(s.join(LOST_FOUND)).is_ok()) {
+        return Ok(());
+    }
+    let mut rmdir = Command::new("debugfs");
+    rmdir.args(["-w", "-R", &format!("rmdir {LOST_FOUND}")]);
+    debugfs_end(&run(rmdir.arg(dest))?)
+}
+
+const LOST_FOUND: &str = "lost+found";
+
+#[cfg(test)]
+mod tests {
+    use super::debugfs_end;
+
+    #[test]
+    fn a_debugfs_request_fails_on_any_line_but_the_banner() {
+        assert!(debugfs_end("").is_ok());
+        assert!(debugfs_end("debugfs 1.47.0 (5-Feb-2023)\n").is_ok());
+        let e = debugfs_end("debugfs 1.47.0 (5-Feb-2023)\nrmdir: directory not empty\n");
+        assert_eq!(
+            e.unwrap_err().to_string(),
+            "debugfs failed: rmdir: directory not empty"
+        );
+    }
 }

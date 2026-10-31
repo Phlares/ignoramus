@@ -17,7 +17,7 @@ The binary `ignorarium-guest` is the agent. It runs only as PID 1 inside the mac
 ## Host requirements
 
 - Linux with `/dev/kvm`, and the user in the `kvm` group.
-- `mkfs.ext4` (e2fsprogs) on `PATH`.
+- `mkfs.ext4` and `debugfs` (e2fsprogs) on `PATH`.
 - Cloud Hypervisor and the guest kernel, pinned in `src/image.rs`:
 
 ```sh

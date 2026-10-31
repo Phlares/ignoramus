@@ -123,14 +123,17 @@ impl Level2 {
         }));
         let agent = "a static build of ignorarium-guest";
         faults.extend(file(AGENT_VAR, &self.agent, agent, &static_agent));
-        let mkfs = Command::new("mkfs.ext4")
-            .arg("-V")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        if let Err(e) = mkfs {
-            faults.push(format!("mkfs.ext4 cannot run: {e}"));
+        // The disks are built with e2fsprogs.
+        for tool in ["mkfs.ext4", "debugfs"] {
+            let ran = Command::new(tool)
+                .arg("-V")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            if let Err(e) = ran {
+                faults.push(format!("{tool} cannot run: {e}"));
+            }
         }
         faults
     }

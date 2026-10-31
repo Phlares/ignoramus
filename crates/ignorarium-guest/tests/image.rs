@@ -155,10 +155,24 @@ fn root_names(img: &Path) -> Vec<String> {
     let mut names: Vec<String> = debugfs(img, "ls -p /")
         .lines()
         .filter_map(|l| l.split('/').nth(5).map(str::to_string))
-        .filter(|n| !matches!(n.as_str(), "." | ".." | "lost+found"))
+        .filter(|n| !matches!(n.as_str(), "." | ".."))
         .collect();
     names.sort();
     names
+}
+
+#[test]
+fn ext4_keeps_a_lost_and_found_of_the_source() {
+    // The image root holds the source and nothing more: mke2fs's own `lost+found` (mode 0700,
+    // owned by root) goes, and one the source holds stays with what it holds.
+    let d = tempfile::tempdir().unwrap();
+    let src = d.path().join("src");
+    fs::create_dir_all(src.join("lost+found")).unwrap();
+    fs::write(src.join("lost+found/f"), "kept\n").unwrap();
+    let img = d.path().join("i.ext4");
+    ext4(Some(&src), &img, size_mib(&src).unwrap()).unwrap();
+    assert_eq!(root_names(&img), ["lost+found"]);
+    assert_eq!(debugfs(&img, "cat /lost+found/f"), "kept\n");
 }
 
 #[test]
