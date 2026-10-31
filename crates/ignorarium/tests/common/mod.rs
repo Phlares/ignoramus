@@ -422,15 +422,16 @@ pub fn instrument() -> derived::Instrument {
     }
 }
 
-/// `finished_with` the common `instrument`.
+/// `finished_with` the common `instrument` and no recheck.
 pub fn finished(estimates: Vec<serde_json::Value>) -> Vec<(&'static str, serde_json::Value)> {
-    finished_with(instrument(), estimates)
+    finished_with(instrument(), None, estimates)
 }
 
 /// The records of a finished study, as (kind, body): its register record, an analysis record
-/// that names `instrument` and promises `estimates`, and the estimates.
+/// that names `instrument` and `recheck` and promises `estimates`, and the estimates.
 pub fn finished_with(
     instrument: derived::Instrument,
+    recheck: Option<derived::Recheck>,
     estimates: Vec<serde_json::Value>,
 ) -> Vec<(&'static str, serde_json::Value)> {
     let register = derived::Register {
@@ -453,6 +454,7 @@ pub fn finished_with(
         verdicts: 0,
         slot: None,
         instrument,
+        recheck,
     };
     let head = [
         ("register", serde_json::to_value(register).unwrap()),

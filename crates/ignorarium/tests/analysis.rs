@@ -405,6 +405,41 @@ fn a_repeat_with_a_zero_reference_drops_out_of_the_percent_mean() {
     assert!((got - 20.0).abs() < 1e-9, "{got}");
 }
 
+/// `r` as the record of a recheck copy of row `of`.
+fn copy_of(of: u64, mut r: Record) -> Record {
+    r.body["recheck_of"] = json!(of);
+    r.body["same"] = json!(false);
+    r
+}
+
+#[test]
+fn recheck_rows_add_no_paired_values() {
+    // Each copy comes after its original, with other values.
+    let rows = [
+        ok("a#0", "base", 0, 100.0),
+        ok("a#0", "new", 0, 110.0),
+        copy_of(1, ok("a#0", "new", 0, 500.0)),
+        copy_of(0, ok("a#0", "base", 0, 1.0)),
+    ];
+    let p = paired(&spec("percent"), &rows);
+    assert_eq!(p, paired(&spec("percent"), &rows[..2]));
+    let got = p.get("a#0", "new", "ppl-ratio").unwrap();
+    assert!((got - 10.0).abs() < 1e-9, "{got}");
+    // Nor do they count in the pick: neither by their values nor as units.
+    let staged = staged(&["a", "b"], "lower");
+    let rows = [
+        sel("s#0", "base", 100.0),
+        sel("s#0", "a", 110.0),
+        sel("s#0", "b", 105.0),
+        copy_of(1, sel("s#0", "a", 0.0)),
+        copy_of(2, sel("s#9", "base", 1.0)),
+    ];
+    let s = select(&staged, &rows).unwrap();
+    assert_eq!(s, select(&staged, &rows[..3]).unwrap());
+    assert_eq!(candidates(&s), [("a", 10.0), ("b", 5.0)]);
+    assert_eq!((s.complete_units, s.incomplete_units), (1, 0));
+}
+
 // ---- estimates ----
 
 /// The template's spec, reference `base`, difference-paired, with `strata` on its hypothesis.

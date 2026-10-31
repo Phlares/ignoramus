@@ -2,7 +2,7 @@
 //! condition's value for the same unit and repeat.
 use crate::canon::{sha256_hex, to_canonical};
 use crate::derived::{
-    ANALYSIS, Analysis, BoundResult, Candidate, ESTIMATE, Estimate, Instrument, Register,
+    ANALYSIS, Analysis, BoundResult, Candidate, ESTIMATE, Estimate, Instrument, Recheck, Register,
     Selection, VERDICT, Verdict, contrast_key,
 };
 use crate::prior::same_data;
@@ -52,14 +52,25 @@ impl Paired {
     }
 }
 
+/// The row records of the schedule's own rows: a recheck copy repeats a row to compare its
+/// output, and adds no value.
+fn own_rows(records: &[Record]) -> impl Iterator<Item = &Record> {
+    (records.iter()).filter(|r| r.kind == "row" && !is_recheck(r))
+}
+
+fn is_recheck(r: &Record) -> bool {
+    r.body.get("recheck_of").is_some()
+}
+
 /// Pair every `ok` row record's values with the reference condition's row for the same
-/// unit and repeat. `Difference` is condition minus reference; `Percent` is
-/// 100 x (condition / reference - 1), and no pair when the reference is not above zero;
-/// `LogRatio` is ln(condition / reference), and no pair when either side is not above zero.
+/// unit and repeat; recheck copies add none. `Difference` is condition minus reference;
+/// `Percent` is 100 x (condition / reference - 1), and no pair when the reference is not above
+/// zero; `LogRatio` is ln(condition / reference), and no pair when either side is not above
+/// zero.
 pub fn paired(spec: &Spec, rows: &[Record]) -> Paired {
     // (unit, repeat, condition) -> the row's values
     let mut cells: BTreeMap<(&str, u64, &str), &serde_json::Value> = BTreeMap::new();
-    for r in rows.iter().filter(|r| r.kind == "row") {
+    for r in own_rows(rows) {
         let b = &r.body;
         if b["exit"] != "ok" {
             continue;
@@ -110,18 +121,17 @@ pub fn paired(spec: &Spec, rows: &[Record]) -> Paired {
     }
 }
 
-/// The selection stage's pick. A selection unit (a unit of a `selection` row record) is
-/// complete when it has a paired metric value for every candidate. Each candidate's mean is
-/// over the complete units; the best mean in the metric outcome's direction wins, and a tie
-/// goes to the first listed. `Err` when the plan has no stage or candidate, its metric is not
+/// The selection stage's pick. A selection unit (a unit of a `selection` row record, recheck
+/// copies aside) is complete when it has a paired metric value for every candidate. Each
+/// candidate's mean is over the complete units; the best mean in the metric outcome's
+/// direction wins, and a tie goes to the first listed. `Err` when the plan has no stage or candidate, its metric is not
 /// an outcome, no unit is complete, or a mean is not finite.
 pub fn select(spec: &Spec, rows: &[Record]) -> Result<Selection, String> {
     let stage = (spec.design.selection.as_ref()).ok_or("the plan has no selection stage")?;
     let outcome = (spec.outcomes.iter().find(|o| o.id == stage.metric))
         .ok_or("the selection metric is not an outcome of the plan")?;
-    let units: BTreeSet<&str> = rows
-        .iter()
-        .filter(|r| r.kind == "row" && r.body["stage"] == SELECTION_STAGE)
+    let units: BTreeSet<&str> = own_rows(rows)
+        .filter(|r| r.body["stage"] == SELECTION_STAGE)
         .filter_map(|r| r.body["unit"].as_str())
         .collect();
     let pairs = paired(spec, rows);
@@ -556,10 +566,26 @@ pub fn instrument(spec: &Spec, payload: &str, inputs: &InputHashes, rows: &[Reco
     }
 }
 
+/// The `Recheck` of a run of `spec` from its records; `None` unless the plan declares
+/// `pins.deterministic`. A copy counts as compared when its record's `same` is not `null`.
+fn recheck(spec: &Spec, records: &[Record]) -> Option<Recheck> {
+    let copies: Vec<&Record> = (records.iter())
+        .filter(|r| r.kind == "row" && is_recheck(r))
+        .collect();
+    spec.pins.deterministic.then(|| Recheck {
+        rows: copies.iter().filter(|r| !r.body["same"].is_null()).count() as u64,
+        mismatched: (copies.iter())
+            .filter(|r| r.body["same"] == false)
+            .filter_map(|r| r.row)
+            .collect(),
+        carried_from: None,
+    })
+}
+
 /// When every scheduled row has a record, add what the study's results still lack: the
-/// `analysis` record first, which names the `instrument` and states how many records follow
-/// it, then each estimate and each verdict it promises, and last, for a study that holds a
-/// stream slot, the close of that slot with the e-value its verdict records give
+/// `analysis` record first, which names the `instrument` and the `recheck` and states how many
+/// records follow it, then each estimate and each verdict it promises, and last, for a study
+/// that holds a stream slot, the close of that slot with the e-value its verdict records give
 /// (`study_e_value`). A call after a crash adds only what is missing; a complete study gets
 /// nothing. A log whose analysis record another box version wrote is refused when it lacks an
 /// estimate or a verdict. The close takes its e-value from the signed records alone, so it is
@@ -622,6 +648,7 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
                 verdicts: judged.len() as u64,
                 slot: alpha.as_ref().map(|a| a.slot),
                 instrument: instrument(&plan.spec, payload, &plan.inputs, &all),
+                recheck: recheck(&plan.spec, &all),
             };
             append(plan, &log, ANALYSIS, &body)?;
         }

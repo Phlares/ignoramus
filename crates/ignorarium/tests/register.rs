@@ -1175,7 +1175,7 @@ fn register_records_each_deviation_with_what_differs() {
                 calibration.clone(),
             )],
         };
-        let source = common::finished_with(instrument, vec![common::arm_a()]);
+        let source = common::finished_with(instrument, None, vec![common::arm_a()]);
         common::plant(&f.home, "my-pilot", &source);
         let (r, out) = go(&f, &spec, &answer(&spec), true);
         assert_eq!(r.unwrap().code, 0, "{out}");

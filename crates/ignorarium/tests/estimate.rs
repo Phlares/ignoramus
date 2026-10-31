@@ -75,7 +75,48 @@ fn close(a: f64, b: f64) {
 const H: [u8; 32] = [7; 32];
 
 fn rows_of(spec: &Spec) -> Vec<Row> {
-    schedule::rows(spec, &H).unwrap()
+    schedule::rows(spec, &H, false).unwrap()
+}
+
+/// The rows `ignorarium check --json` counts for the template text changed by `edit`.
+fn checked_rows(edit: impl Fn(String) -> String) -> Value {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(home.join("machine.toml"), "max_level = 1\n").unwrap();
+    let spec = dir.path().join("spec.toml");
+    let text = std::fs::read_to_string("../../templates/numeric-ablation.toml").unwrap();
+    std::fs::write(&spec, edit(text)).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_ignorarium"))
+        .env("IGNORARIUM_HOME", &home)
+        .arg("check")
+        .arg(&spec)
+        .arg("--json")
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    v["estimate"]["rows"].clone()
+}
+
+#[test]
+fn recheck_rows_count_in_the_estimate() {
+    let mut v = sized();
+    v["pins"]["deterministic"] = json!(true);
+    let spec = spec_of(&v);
+    assert!(spec.pins.deterministic);
+    let rows = schedule::rows(&spec, &H, spec.pins.deterministic).unwrap();
+    let e = estimate(&spec, &machine(4, 0.5), &rows);
+    // The 120 rows and one copy for each of the 3 conditions.
+    assert_eq!(e.rows, 123);
+    close(e.cpu_hours, 123.0 * 36.0 / 3600.0);
+    assert_eq!(
+        e.rows_per_condition,
+        vec![("a".into(), 41), ("b".into(), 41), ("c".into(), 41)]
+    );
+    // `check` counts them: the template's 2 rows, and a copy for each of its 2 conditions.
+    assert_eq!(checked_rows(|t| t), json!(2));
+    let deterministic = |t: String| t.replace("# deterministic = true", "deterministic = true");
+    assert_eq!(checked_rows(deterministic), json!(4));
 }
 
 #[test]

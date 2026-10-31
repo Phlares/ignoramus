@@ -3481,7 +3481,7 @@ fn the_row_cap_counts_units_conditions_and_repeats_per_stage() {
     );
     // The count is the count of the schedule `run` would write.
     let spec = ignorarium::spec::model::Spec::from_value(&over).unwrap();
-    let rows = ignorarium::schedule::rows(&spec, &[0; 32]).unwrap();
+    let rows = ignorarium::schedule::rows(&spec, &[0; 32], false).unwrap();
     assert_eq!(rows.len(), 100_005);
     // A cluster gives at most units_per_cluster, and at most its own units.
     assert!(named(&at(20_000, 4_000_000_000, 1), dir.path()).is_empty());
@@ -3790,7 +3790,7 @@ fn ran(i: &Instrument, parts: &str) -> String {
 
 /// A box whose finished study `pilot` ran `instrument`.
 fn ran_with(instrument: Instrument) -> common::Studies {
-    let records = common::finished_with(instrument, pilot_estimates());
+    let records = common::finished_with(instrument, None, pilot_estimates());
     common::Studies(vec![("pilot", Ok(common::records_for("pilot", &records)))])
 }
 
@@ -4100,7 +4100,7 @@ fn the_studies_borrowed_from_are_the_finished_ones_each_once_first_mention_first
         ..common::instrument()
     };
     let run = |id: &'static str, i: Instrument| {
-        let records = common::records_for(id, &common::finished_with(i, pilot_estimates()));
+        let records = common::records_for(id, &common::finished_with(i, None, pilot_estimates()));
         let analysis = records::hash(&records[1]);
         ((id, Ok::<_, String>(records)), analysis)
     };

@@ -357,6 +357,10 @@ pub struct Pins {
     /// One per study the plan takes estimates from without pinning that study's code.
     #[serde(default)]
     pub deviations: Vec<PinDeviation>,
+    /// The payload gives the same output for the same job, so the box reruns one row per
+    /// condition and compares.
+    #[serde(default)]
+    pub deterministic: bool,
 }
 
 /// A plan's departure from the code of a study it takes estimates from: why, and when.

@@ -1,6 +1,6 @@
 use ignorarium::canon::{sha256_hex, to_canonical};
 use ignorarium::derived::{
-    Alpha, Analysis, Estimate, Instrument, PinDeviated, Register, Selection, StudyState,
+    Alpha, Analysis, Estimate, Instrument, PinDeviated, Recheck, Register, Selection, StudyState,
     contrast_key,
 };
 use ignorarium::records::Record;
@@ -257,7 +257,8 @@ fn analysis_body() -> Value {
         "instrument": {
             "payload": "p".repeat(64), "environment": "host",
             "inputs": [["data/m.bin", "model", "d".repeat(64)]]
-        }
+        },
+        "recheck": { "rows": 2, "mismatched": [7], "carried_from": null }
     })
 }
 
@@ -277,6 +278,11 @@ fn an_analysis_record_states_what_follows_it() {
                 environment: "host".into(),
                 inputs: vec![("data/m.bin".into(), "model".into(), "d".repeat(64))],
             },
+            recheck: Some(Recheck {
+                rows: 2,
+                mismatched: vec![7],
+                carried_from: None,
+            }),
         }
     );
     assert_eq!(serde_json::to_value(&a).unwrap(), analysis_body());
@@ -296,10 +302,37 @@ fn an_analysis_record_states_what_follows_it() {
 }
 
 #[test]
+fn a_recheck_passes_with_rows_compared_or_carried_and_no_mismatch() {
+    let recheck = |rows, mismatched: &[u64], carried_from: Option<&str>| Recheck {
+        rows,
+        mismatched: mismatched.to_vec(),
+        carried_from: carried_from.map(String::from),
+    };
+    assert!(recheck(1, &[], None).passed());
+    assert!(recheck(0, &[], Some("pilot")).passed());
+    assert!(!recheck(0, &[], None).passed(), "nothing compared");
+    assert!(!recheck(2, &[7], None).passed());
+    assert!(!recheck(0, &[7], Some("pilot")).passed());
+    // A study without determinism writes `null`; a recheck that is there must be whole.
+    let mut b = analysis_body();
+    b["recheck"] = Value::Null;
+    assert_eq!(Analysis::of(&rec("analysis", b)).unwrap().recheck, None);
+    for field in ["rows", "mismatched", "carried_from"] {
+        let mut b = analysis_body();
+        b["recheck"].as_object_mut().unwrap().remove(field);
+        assert_eq!(Analysis::of(&rec("analysis", b)), None, "{field}");
+    }
+    let mut b = analysis_body();
+    b["recheck"]["extra"] = json!(1);
+    assert_eq!(Analysis::of(&rec("analysis", b)), None);
+}
+
+#[test]
 fn an_analysis_record_from_before_the_instrument_names_an_empty_one() {
     // A box that wrote no instrument still leaves a finished study.
     let mut b = analysis_body();
     b.as_object_mut().unwrap().remove("instrument");
+    b.as_object_mut().unwrap().remove("recheck");
     b["estimates"] = json!(0);
     b["verdicts"] = json!(0);
     b["slot"] = Value::Null;
@@ -310,6 +343,7 @@ fn an_analysis_record_from_before_the_instrument_names_an_empty_one() {
         inputs: vec![],
     };
     assert_eq!(a.instrument, empty);
+    assert_eq!(a.recheck, None);
     let all = vec![at(0, "register", register_body()), at(1, "analysis", b)];
     assert_eq!(
         StudyState::of(Some(all), |_, _| panic!("no slot to ask for")),

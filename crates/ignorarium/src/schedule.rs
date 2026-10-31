@@ -2,9 +2,10 @@
 use crate::canon;
 use crate::files::{self, WriteOnceError};
 use crate::seed::seed;
-use crate::spec::model::{Role, Spec};
+use crate::spec::model::{Pick, Role, Spec};
 use crate::units::{self, Cluster};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 
@@ -24,6 +25,10 @@ pub struct Row {
     pub repeat: u32,
     pub shard: u32,
     pub seed_hex: String,
+    /// The index of the row this one repeats, for a recheck copy. Left out of the schedule
+    /// file otherwise, so a schedule without copies keeps its bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recheck_of: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -123,6 +128,7 @@ pub fn expand(
                         repeat,
                         shard: 0,
                         seed_hex: hex::encode(seed(spec_hash, &format!("row/{index}"))),
+                        recheck_of: None,
                     });
                     index = index.saturating_add(1);
                 }
@@ -132,9 +138,52 @@ pub fn expand(
     Ok(rows)
 }
 
-/// The schedule `run` writes for `spec`: its clusters' picked units, expanded.
-pub fn rows(spec: &Spec, spec_hash: &[u8; 32]) -> Result<Vec<Row>, ExpandError> {
-    expand(spec, spec_hash, &units::clusters(spec, spec_hash))
+/// The schedule `run` writes for `spec`: its clusters' picked units, expanded, and with
+/// `rechecks`, a recheck copy per condition (`with_rechecks`).
+pub fn rows(spec: &Spec, spec_hash: &[u8; 32], rechecks: bool) -> Result<Vec<Row>, ExpandError> {
+    let rows = expand(spec, spec_hash, &units::clusters(spec, spec_hash))?;
+    Ok(if rechecks {
+        with_rechecks(rows, spec_hash)
+    } else {
+        rows
+    })
+}
+
+/// `rows` with one copy of a row of each condition id, which repeats that row's job so the
+/// two outputs can be compared. The j-th condition id, in order of first appearance, has its
+/// row drawn from `seed(spec_hash, "recheck/<condition>")`; the copy takes index
+/// `rows.len() + j` and `recheck_of` the original's index, keeps every other field, and runs
+/// right after the original.
+pub fn with_rechecks(rows: Vec<Row>, spec_hash: &[u8; 32]) -> Vec<Row> {
+    // Each condition id with the positions of its rows, in order of first appearance.
+    let mut conditions: Vec<(&str, Vec<usize>)> = Vec::new();
+    for (at, r) in rows.iter().enumerate() {
+        match conditions.iter_mut().find(|(c, _)| *c == r.condition) {
+            Some((_, of)) => of.push(at),
+            None => conditions.push((&r.condition, vec![at])),
+        }
+    }
+    // Each copy by the position of its original.
+    let mut copies: BTreeMap<usize, Row> = BTreeMap::new();
+    for (j, (condition, of)) in conditions.iter().enumerate() {
+        let draw = seed(spec_hash, &format!("recheck/{condition}"));
+        let n = u32::try_from(of.len()).unwrap_or(u32::MAX);
+        for i in units::pick(1, n, Pick::Seeded, draw) {
+            let at = of[i as usize];
+            let copy = Row {
+                index: (rows.len() + j) as u64,
+                recheck_of: Some(rows[at].index),
+                ..rows[at].clone()
+            };
+            copies.insert(at, copy);
+        }
+    }
+    let mut out = Vec::with_capacity(rows.len() + copies.len());
+    for (at, r) in rows.into_iter().enumerate() {
+        out.push(r);
+        out.extend(copies.remove(&at));
+    }
+    out
 }
 
 #[derive(Debug)]

@@ -9,7 +9,7 @@ use ignorarium::budget::{Cost, FakeMeter, MeterError};
 use ignorarium::canon::sha256_hex;
 use ignorarium::control::State;
 use ignorarium::derived::{
-    Analysis, BoundResult, Estimate, Register, StudyState, Verdict, contrast_key,
+    Analysis, BoundResult, Estimate, Recheck, Register, StudyState, Verdict, contrast_key,
 };
 use ignorarium::planlog::store::PlanLog;
 use ignorarium::prior::{PriorUse, file_hashes};
@@ -412,6 +412,10 @@ fn run_writes_one_record_per_row_in_order() {
     let events = events_of(&dir);
     assert!(!events.is_empty());
     assert!(events.iter().all(|e| e["trace_id"] == trace));
+    // A plan that declares no determinism runs no recheck, and its analysis says so.
+    assert!(plan.schedule.rows.iter().all(|r| r.recheck_of.is_none()));
+    let analysis = &kind_of(&lab, "s1", "analysis")[0].body;
+    assert_eq!(analysis.get("recheck"), Some(&serde_json::Value::Null));
     // A second run has nothing left to do.
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
     assert_eq!(rows_of(&lab, "s1").len(), 6);
@@ -1572,7 +1576,10 @@ fn the_schedule_runs_the_picked_units_of_the_confirmation_input() {
     plain(&lab, "units");
     let plan = plan_of(&lab, "units");
     let rows = &plan.schedule.rows;
-    assert_eq!(rows, &schedule::rows(&plan.spec, &plan.spec_hash).unwrap());
+    assert_eq!(
+        rows,
+        &schedule::rows(&plan.spec, &plan.spec_hash, false).unwrap()
+    );
     let got: Vec<_> = rows
         .iter()
         .map(|r| {
@@ -3075,4 +3082,283 @@ fn verdicts_and_the_close_are_written_once() {
     let stream = stream_of(&lab, LogName::Plan);
     assert_eq!(stream.last(), Some(&close_of("once", 250.0, true)));
     assert!(finished(&lab, "once"));
+}
+
+// ---- a payload that declares determinism is rechecked ----
+
+/// The template text with `pins.deterministic = true`.
+fn deterministic(t: String) -> String {
+    t.replace("# deterministic = true", "deterministic = true")
+}
+
+/// Writes its row, its seed and its arguments, and the template's measure.
+const JOB: &str = "#!/bin/sh
+printf '%s %s %s' \"$IGNORARIUM_ROW\" \"$IGNORARIUM_SEED\" \"$*\" > \"$IGNORARIUM_OUT/job\"
+printf '{\"ppl\": 1.5}' > \"$IGNORARIUM_OUT/values.json\"
+";
+
+/// Writes the time in nanoseconds, and the template's measure.
+const CLOCK: &str = "#!/bin/sh
+date +%s%N > \"$IGNORARIUM_OUT/time\"
+printf '{\"ppl\": 1.5}' > \"$IGNORARIUM_OUT/values.json\"
+";
+
+/// (copy index, original index) of each recheck copy, in schedule order.
+fn copies(plan: &RunPlan) -> Vec<(u64, u64)> {
+    (plan.schedule.rows.iter())
+        .filter_map(|r| Some((r.index, r.recheck_of?)))
+        .collect()
+}
+
+/// The record of row `i`.
+fn row_record(lab: &Lab, id: &str, i: u64) -> records::Record {
+    (rows_of(lab, id).into_iter())
+        .find(|r| r.row == Some(i))
+        .unwrap()
+}
+
+/// What `run/rows/<i>/out/job` holds.
+fn job_of(dir: &std::path::Path, i: u64) -> String {
+    std::fs::read_to_string(dir.join(format!("run/rows/{i}/out/job"))).unwrap()
+}
+
+/// The `recheck` of the study's analysis record.
+fn recheck_in(lab: &Lab, id: &str) -> Option<Recheck> {
+    Analysis::of(&kind_of(lab, id, "analysis")[0])
+        .unwrap()
+        .recheck
+}
+
+/// The level and attrs of each `row.recheck` event.
+fn rechecks(dir: &std::path::Path) -> Vec<(String, serde_json::Value)> {
+    let ev = events_of(dir);
+    (named(&ev, "row.recheck").iter())
+        .map(|e| (e["level"].as_str().unwrap().to_string(), e["attrs"].clone()))
+        .collect()
+}
+
+#[test]
+fn a_recheck_gets_the_original_job() {
+    let lab = lab();
+    let dir = common::edited(&lab, "same", deterministic, JOB);
+    let plan = plan_of(&lab, "same");
+    assert_eq!(plan.schedule.rows.len(), 8);
+    let pairs = copies(&plan);
+    let mut numbers: Vec<u64> = pairs.iter().map(|p| p.0).collect();
+    numbers.sort_unstable();
+    assert_eq!(numbers, [6, 7]);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    for &(c, o) in &pairs {
+        let row = (plan.schedule.rows.iter()).find(|r| r.index == o).unwrap();
+        let job = format!(
+            "{o} {} --condition {} --unit {} --repeat {}",
+            row.seed_hex, row.condition, row.unit, row.repeat
+        );
+        assert_eq!(job_of(&dir, o), job);
+        assert_eq!(job_of(&dir, c), job);
+        let (copy, original) = (row_record(&lab, "same", c), row_record(&lab, "same", o));
+        assert_eq!(copy.body["recheck_of"], o);
+        assert_eq!(copy.body["same"], true);
+        assert_eq!(copy.body["output_hash"], original.body["output_hash"]);
+        assert_eq!(copy.body["seed"], original.body["seed"]);
+        assert_eq!(original.body.get("recheck_of"), None);
+        assert_eq!(original.body.get("same"), None);
+    }
+    let want: Vec<_> = (pairs.iter())
+        .map(|&(c, o)| {
+            let attrs = serde_json::json!({ "row": c, "of": o, "same": true });
+            ("info".to_string(), attrs)
+        })
+        .collect();
+    assert_eq!(rechecks(&dir), want);
+    let r = recheck_in(&lab, "same").unwrap();
+    let passed = Recheck {
+        rows: 2,
+        mismatched: vec![],
+        carried_from: None,
+    };
+    assert_eq!(r, passed);
+    assert!(r.passed());
+}
+
+#[test]
+fn a_mismatch_flags_an_exploratory_run() {
+    let lab = lab();
+    let dir = common::edited(&lab, "clock", deterministic, CLOCK);
+    let plan = plan_of(&lab, "clock");
+    let pairs = copies(&plan);
+    assert_eq!(pairs.len(), 2);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(rows_of(&lab, "clock").len(), 8);
+    for &(c, o) in &pairs {
+        let (copy, original) = (row_record(&lab, "clock", c), row_record(&lab, "clock", o));
+        assert_eq!(
+            (&copy.body["exit"], &original.body["exit"]),
+            (&"ok".into(), &"ok".into())
+        );
+        assert_ne!(copy.body["output_hash"], original.body["output_hash"]);
+        assert_eq!(copy.body["same"], false);
+    }
+    let want: Vec<_> = (pairs.iter())
+        .map(|&(c, o)| {
+            let attrs = serde_json::json!({ "row": c, "of": o, "same": false });
+            ("warn".to_string(), attrs)
+        })
+        .collect();
+    assert_eq!(rechecks(&dir), want);
+    let r = recheck_in(&lab, "clock").unwrap();
+    let flagged = Recheck {
+        rows: 2,
+        mismatched: pairs.iter().map(|p| p.0).collect(),
+        carried_from: None,
+    };
+    assert_eq!(r, flagged);
+    assert!(!r.passed());
+}
+
+#[test]
+fn a_mismatch_stops_a_confirmatory_run() {
+    let lab = lab();
+    // The source holds no recheck, and the plan declares a deviation from it.
+    common::pilot(&lab.home, vec![common::arm_a()]);
+    let edit = |t: String| deterministic(one_unit_each(t));
+    let dir = register_study(&lab, "strict", edit, &[], CLOCK);
+    let plan = plan_of(&lab, "strict");
+    let first = (plan.schedule.rows.iter())
+        .position(|r| r.recheck_of.is_some())
+        .unwrap();
+    let copy = &plan.schedule.rows[first];
+    let (c, o) = (copy.index, copy.recheck_of.unwrap());
+    let status = run(&plan).unwrap();
+    let hash = |i: u64| {
+        let r = row_record(&lab, "strict", i);
+        r.body["output_hash"].as_str().unwrap().to_string()
+    };
+    let (a, b) = (hash(o), hash(c));
+    assert_ne!(a, b);
+    let why = format!(
+        "row {o} gave output {a} and its recheck row {c} gave {b}; the payload is not deterministic"
+    );
+    assert_eq!(status, RunStatus::Stopped(why.clone()));
+    let stop = kind_of(&lab, "strict", "stop");
+    assert_eq!(stop.len(), 1);
+    assert_eq!(stop[0].body["why"], why.as_str());
+    assert_eq!(row_record(&lab, "strict", c).body["same"], false);
+    // The run ends at the copy: no later row runs, and no analysis is written.
+    let ran: Vec<u64> = plan.schedule.rows[..=first]
+        .iter()
+        .map(|r| r.index)
+        .collect();
+    assert_eq!(indices(&lab, "strict"), ran);
+    assert!(kind_of(&lab, "strict", "analysis").is_empty());
+    assert!(rechecks(&dir).is_empty());
+    assert_eq!(run(&plan).unwrap(), RunStatus::Stopped(why));
+    assert_eq!(indices(&lab, "strict"), ran);
+}
+
+/// Marks each row in `marks` on its first call, and writes the template's measure on a later
+/// call when `later`, else on the first.
+fn marking(marks: &std::path::Path, later: bool) -> String {
+    let want = u8::from(later);
+    format!(
+        "#!/bin/sh
+mark=\"{}/$IGNORARIUM_ROW\"
+if [ -e \"$mark\" ]; then seen=1; else seen=0; : > \"$mark\"; fi
+if [ \"$seen\" = {want} ]; then printf '{{\"ppl\": 1.5}}' > \"$IGNORARIUM_OUT/values.json\"; fi
+",
+        marks.display()
+    )
+}
+
+#[test]
+fn a_void_row_is_not_compared() {
+    // The original is void and its copy ok, then the other way round.
+    for (id, later, exits) in [
+        ("void-first", true, ("void:output", "ok")),
+        ("void-copy", false, ("ok", "void:output")),
+    ] {
+        let lab = lab();
+        let marks = lab.root.join("marks");
+        std::fs::create_dir(&marks).unwrap();
+        let dir = common::edited(&lab, id, deterministic, &marking(&marks, later));
+        let plan = plan_of(&lab, id);
+        let pairs = copies(&plan);
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(run(&plan).unwrap(), RunStatus::Done, "{id}");
+        for &(c, o) in &pairs {
+            let (copy, original) = (row_record(&lab, id, c), row_record(&lab, id, o));
+            let got = (&original.body["exit"], &copy.body["exit"]);
+            assert_eq!(got, (&exits.0.into(), &exits.1.into()), "{id}");
+            assert_eq!(copy.body["recheck_of"], o, "{id}");
+            let null = serde_json::Value::Null;
+            assert_eq!(copy.body.get("same"), Some(&null), "{id}");
+        }
+        assert!(rechecks(&dir).is_empty(), "{id}");
+        let r = recheck_in(&lab, id).unwrap();
+        let none = Recheck {
+            rows: 0,
+            mismatched: vec![],
+            carried_from: None,
+        };
+        assert_eq!(r, none, "{id}");
+        assert!(!r.passed(), "{id}");
+    }
+}
+
+/// Level 0, asking for a pause while a row runs whose `IGNORARIUM_ROW` is `row`.
+struct PauseAt {
+    control: ignorarium::control::ControlFile,
+    row: u64,
+}
+
+impl Backend for PauseAt {
+    fn cpus(&self) -> u32 {
+        1
+    }
+    fn launcher(&self) -> String {
+        "process".into()
+    }
+    fn level(&self) -> u8 {
+        0
+    }
+    fn probe(&self) -> Probe {
+        Probe::Available
+    }
+    fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> std::io::Result<RowOutcome> {
+        let row = job.env.iter().find(|(k, _)| k == "IGNORARIUM_ROW").unwrap();
+        if row.1 == self.row.to_string() {
+            self.control.request_pause().unwrap();
+        }
+        Level0.run_row(job, watch)
+    }
+}
+
+#[test]
+fn a_resumed_run_rechecks_with_the_original_job() {
+    let lab = lab();
+    let dir = common::edited(&lab, "resumed", deterministic, JOB);
+    let mut plan = plan_of(&lab, "resumed");
+    let (c, o) = copies(&plan)[0];
+    let control = || ignorarium::control::ControlFile::of(&lab.home, "resumed");
+    plan.backend = Box::new(PauseAt {
+        control: control(),
+        row: o,
+    });
+    let paused = RunStatus::Paused("a pause was requested".into());
+    assert_eq!(run(&plan).unwrap(), paused);
+    // The pause lands between the original and its copy.
+    let done = indices(&lab, "resumed");
+    assert_eq!(done.last(), Some(&o));
+    assert!(!done.contains(&c));
+    control().request_resume().unwrap();
+    assert_eq!(run(&plan_of(&lab, "resumed")).unwrap(), RunStatus::Done);
+    let copy = row_record(&lab, "resumed", c);
+    assert_eq!(copy.body["recheck_of"], o);
+    assert_eq!(copy.body["same"], true);
+    assert_eq!(job_of(&dir, c), job_of(&dir, o));
+    assert!(job_of(&dir, c).starts_with(&format!("{o} ")));
+    let done = indices(&lab, "resumed");
+    assert_eq!(done.iter().filter(|i| **i == o).count(), 1);
+    assert_eq!(done.len(), 8);
+    assert_eq!(recheck_in(&lab, "resumed").unwrap().rows, 2);
 }

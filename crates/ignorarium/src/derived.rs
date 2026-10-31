@@ -205,6 +205,29 @@ pub struct Analysis {
     /// an empty one, so its study stays finished.
     #[serde(default)]
     pub instrument: Instrument,
+    /// The determinism check of a plan that declares `pins.deterministic`; `None` for one
+    /// that does not, and in a record written before the field existed. Written as `null`.
+    #[serde(default)]
+    pub recheck: Option<Recheck>,
+}
+
+/// What the recheck copies of a run found: `rows` counts the copies compared with their
+/// originals, `mismatched` lists the copies whose exit or output differed, in the order they
+/// ran, and `carried_from` names the study whose passed check this one takes instead.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Recheck {
+    pub rows: u64,
+    pub mismatched: Vec<u64>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub carried_from: Option<String>,
+}
+
+impl Recheck {
+    /// No copy differed, and some copy was compared or the check was carried.
+    pub fn passed(&self) -> bool {
+        self.mismatched.is_empty() && (self.rows > 0 || self.carried_from.is_some())
+    }
 }
 
 /// The code a finished run measured with: the payload folder's tree hash, the environment

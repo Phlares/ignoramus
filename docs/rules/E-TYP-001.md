@@ -116,6 +116,7 @@ A wrong type changes what the value means, and later checks cannot read it.
 - `pins.environment` (type)
 - `pins.payload` (type)
 - `pins.rule_base` (type)
+- `pins.deterministic` (type)
 - `pins.deviations` (type)
 - `pins.deviations[*]` (type)
 - `pins.deviations[*].from` (type)

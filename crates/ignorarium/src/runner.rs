@@ -687,7 +687,7 @@ pub(crate) fn stored_spec(dir: &Path) -> Result<(Spec, Value, [u8; 32], String),
 }
 
 fn expand_rows(spec: &Spec, hash: &[u8; 32]) -> Result<Vec<Row>, RunError> {
-    schedule::rows(spec, hash).map_err(|e| RunError::Spec(e.to_string()))
+    schedule::rows(spec, hash, spec.pins.deterministic).map_err(|e| RunError::Spec(e.to_string()))
 }
 
 /// How far a study has run, from its signed records and its stored spec.
@@ -1349,7 +1349,9 @@ fn run_row(
 
 /// A row's attempts, retries included, then its record. Returns the recorded exit, or
 /// `stopped` or `paused` for a row that ends the run with only spend records. The row
-/// record holds the last attempt's spend; each earlier attempt has its own spend record.
+/// record holds the last attempt's spend; each earlier attempt has its own spend record. A
+/// recheck copy's record also holds `recheck_of` and `same`, its comparison with the row it
+/// repeats, and `rechecked` acts on it.
 fn attempt_row(
     plan: &RunPlan,
     row: &Row,
@@ -1467,6 +1469,9 @@ fn attempt_row(
         Exit::Void(why) => ("void:output".to_string(), Some(why)),
         Exit::Infra(_) | Exit::Stopped => ("void:infra".to_string(), None),
     };
+    let compared = (row.recheck_of)
+        .map(|of| compare(plan, log, of, &exit, &outcome.output_hash))
+        .transpose()?;
     let mut body = json!({
         "stage": row.stage,
         "condition": row.condition,
@@ -1486,6 +1491,10 @@ fn attempt_row(
         "attempts": attempts,
     });
     agent(&mut body, plan);
+    if let Some(c) = &compared {
+        body["recheck_of"] = json!(c.of);
+        body["same"] = json!(c.same);
+    }
     if let Some(why) = reason {
         body["reason"] = json!(why);
     }
@@ -1520,9 +1529,70 @@ fn attempt_row(
             "row {} voided by infrastructure faults: {why}",
             row.index
         ))),
-        _ => unknown.then(|| unknown_cpu(row)),
+        _ => (compared.and_then(|c| rechecked(watch, &span, row, c, &outcome.output_hash)))
+            .or_else(|| unknown.then(|| unknown_cpu(row))),
     };
     Ok((exit, halt))
+}
+
+/// A recheck copy's comparison with the row it repeats.
+struct Compared {
+    of: u64,
+    /// Whether the copy gave the original's exit and output hash; `None` when the original
+    /// has no record or either row is void, since a void row is a fault of the box, not
+    /// behaviour of the payload.
+    same: Option<bool>,
+    /// The original's output hash.
+    theirs: String,
+}
+
+/// Compare a copy's `exit` and `output_hash` with the record of row `of`.
+fn compare(
+    plan: &RunPlan,
+    log: &Path,
+    of: u64,
+    exit: &str,
+    output_hash: &str,
+) -> Result<Compared, RunError> {
+    let all = records::read_all(log, &plan.key.verifying_key())?;
+    let original = (all.iter()).find(|r| r.kind == "row" && r.row == Some(of));
+    let theirs = |k: &str| original.and_then(|r| r.body[k].as_str());
+    let void = |e: &str| e.starts_with("void:");
+    let same = theirs("exit")
+        .filter(|e| !void(e) && !void(exit))
+        .map(|e| e == exit && theirs("output_hash") == Some(output_hash));
+    Ok(Compared {
+        of,
+        same,
+        theirs: theirs("output_hash").unwrap_or_default().into(),
+    })
+}
+
+/// After a compared copy's record: a mismatch stops a confirmatory run; otherwise one
+/// `row.recheck` event, `warn` for a mismatch and `info` for a match.
+fn rechecked(watch: &RunWatch, span: &str, row: &Row, c: Compared, ours: &str) -> Option<Halt> {
+    let same = c.same?;
+    if !same && watch.plan.spec.study.mode == Mode::Confirmatory {
+        let why = format!(
+            "row {} gave output {} and its recheck row {} gave {ours}; the payload is not deterministic",
+            c.of, c.theirs, row.index
+        );
+        return Some(Halt::Stop {
+            why,
+            in_flight: None,
+        });
+    }
+    let level = if same { "info" } else { "warn" };
+    let attrs = json!({ "row": row.index, "of": c.of, "same": same });
+    watch.keep(log_event(
+        watch.plan,
+        watch.dir,
+        Some(span),
+        "row.recheck",
+        level,
+        attrs,
+    ));
+    None
 }
 
 /// `o` with the host paths in its texts replaced.
@@ -1644,7 +1714,8 @@ fn params_json(plan: &RunPlan, condition: &str) -> Result<String, RunError> {
 }
 
 /// The job for one attempt of `row`, running `condition`, with a fresh output dir. An old one
-/// is renamed, never deleted.
+/// is renamed, never deleted. A recheck copy gets its original's job: the copy holds the
+/// original's seed, unit and repeat, and here its row index.
 fn job_for(plan: &RunPlan, row: &Row, condition: &str, dir: &Path) -> Result<RowJob, RunError> {
     let index = row.index.to_string();
     no_links(dir, &["run", "rows", &index])?;
@@ -1675,7 +1746,10 @@ fn job_for(plan: &RunPlan, row: &Row, condition: &str, dir: &Path) -> Result<Row
         env: vec![
             ("PATH".into(), PATH_ENV.into()),
             ("IGNORARIUM_SEED".into(), row.seed_hex.clone()),
-            ("IGNORARIUM_ROW".into(), row.index.to_string()),
+            (
+                "IGNORARIUM_ROW".into(),
+                row.recheck_of.unwrap_or(row.index).to_string(),
+            ),
             ("IGNORARIUM_PARAMS".into(), params_json(plan, condition)?),
         ],
         input_dir: plan.view.clone(),

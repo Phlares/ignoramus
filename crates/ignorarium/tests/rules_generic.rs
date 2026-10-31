@@ -353,6 +353,7 @@ fn fat_templates() -> Vec<Value> {
             second["id"] = json!("second");
             second["measure"] = json!("second-measure");
             s["inputs"][0]["licence"]["creators"] = json!(["x", "y"]);
+            s["pins"]["deterministic"] = json!(true);
             s["pins"]["deviations"] = json!([
                 { "from": "pilot", "reason": "r", "timing": "before-collection" },
                 { "from": "early", "reason": "r", "timing": "after-results" },
@@ -733,6 +734,8 @@ fn type_rules_accept_and_reject_the_right_values() {
     assert!(!bad(&["design", "repeats"], json!(-1))); // negative and
     assert!(!bad(&["design", "repeats"], json!(u64::MAX))); // > i64::MAX are still ints
     assert!(bad(&["study", "test_log"], json!("no")));
+    assert!(bad(&["pins", "deterministic"], json!("yes")));
+    assert!(!bad(&["pins", "deterministic"], json!(true)));
     assert!(bad(&["study", "id"], json!(3)));
     assert!(bad(&["design", "pick"], json!([])));
     assert!(bad(&["design", "conditions"], json!({})));

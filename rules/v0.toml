@@ -198,6 +198,7 @@ target = [
   { path = "pins.environment", check = "type", kind = "string" },
   { path = "pins.payload", check = "type", kind = "string" },
   { path = "pins.rule_base", check = "type", kind = "string" },
+  { path = "pins.deterministic", check = "type", kind = "bool" },
   { path = "pins.deviations", check = "type", kind = "array" },
   { path = "pins.deviations[*]", check = "type", kind = "table" },
   { path = "pins.deviations[*].from", check = "type", kind = "string" },

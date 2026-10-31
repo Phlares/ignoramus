@@ -327,3 +327,15 @@ fn pins_list_deviations_each_with_one_of_five_timings() {
         assert!(Spec::from_value(&v).is_err(), "{bad}");
     }
 }
+
+#[test]
+fn pins_declare_determinism_off_unless_set() {
+    let mut v = template_value();
+    assert!(!Spec::from_value(&v).unwrap().pins.deterministic);
+    v["pins"]["deterministic"] = json!(true);
+    assert!(Spec::from_value(&v).unwrap().pins.deterministic);
+    v["pins"]["deterministic"] = json!(false);
+    assert!(!Spec::from_value(&v).unwrap().pins.deterministic);
+    v["pins"]["deterministic"] = json!("yes");
+    assert!(Spec::from_value(&v).is_err());
+}

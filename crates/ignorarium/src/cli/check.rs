@@ -296,7 +296,7 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
     if !a.has_errors() {
         let rows = Spec::from_value(&a.value).ok().and_then(|s| {
             let hash = spec::hash_bytes(&a.hash)?;
-            Some((schedule::rows(&s, &hash).ok()?, s))
+            Some((schedule::rows(&s, &hash, s.pins.deterministic).ok()?, s))
         });
         match rows {
             Some((rows, s)) => a.estimate = Some(estimate(&s, &machine, &rows)),
