@@ -315,7 +315,7 @@ pub fn prepare_with(
 
     let have: Vec<u8> = backends.iter().map(|b| b.level()).collect();
     let need = spec.scope.min_isolation;
-    let mut fit: Vec<_> = backends.into_iter().filter(|b| b.level() >= need).collect();
+    let fit: Vec<_> = backends.into_iter().filter(|b| b.level() >= need).collect();
     let top = fit.iter().map(|b| b.level()).max();
     let top = top.ok_or(RunError::NoBackend { need, have })?;
 
@@ -342,13 +342,9 @@ pub fn prepare_with(
         (None, HOST.into())
     };
     // Level 2 and up run rows only in an environment image.
-    let mut skipped = Vec::new();
-    if rootfs.is_none() {
-        skipped = (fit.iter().map(|b| b.level()))
-            .filter(|&l| l >= IMAGE_LEVEL)
-            .collect();
-        fit.retain(|b| b.level() < IMAGE_LEVEL);
-    }
+    let (skipped, fit): (Vec<_>, Vec<_>) =
+        (fit.into_iter()).partition(|b| rootfs.is_none() && b.level() >= IMAGE_LEVEL);
+    let skipped: Vec<u8> = skipped.iter().map(|b| b.level()).collect();
     let backend = fit.into_iter().max_by_key(|b| b.level()).ok_or_else(|| {
         RunError::Environment(format!("{NO_IMAGE}; add env/ or set pins.environment"))
     })?;
