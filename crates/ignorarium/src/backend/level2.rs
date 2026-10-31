@@ -482,9 +482,9 @@ fn sweep(temp: &Path) {
             .and_then(|n| n.strip_prefix(SCRATCH)?.split_once('-'))
             .and_then(|(pid, _)| pid.parse::<i32>().ok())
             .and_then(Pid::from_raw);
-        let mine = entry.metadata().is_ok_and(|m| m.is_dir() && m.uid() == me);
+        // Only a scratch name costs a stat: the temp folder can hold many other entries.
         if let Some(pid) = pid
-            && mine
+            && entry.metadata().is_ok_and(|m| m.is_dir() && m.uid() == me)
             && test_kill_process(pid) == Err(Errno::SRCH)
         {
             let _ = fs::remove_dir_all(entry.path());
