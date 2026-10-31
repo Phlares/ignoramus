@@ -2090,6 +2090,31 @@ fn priced(lab: &Lab, id: &str) {
 }
 
 #[test]
+fn the_gate_counts_a_rows_whole_time_against_the_wall_cap() {
+    let lab = lab();
+    // Rows run one at a time: a 60 s row needs 60 s of wall time, whatever the cpu count.
+    // The wall cap is 30 s; the old estimate divided by 4 cpus and charged 15 s a row.
+    let edit = |t: String| {
+        t.replace("cpu_hours = 1.0", "cpu_hours = 0.0").replace(
+            "wall_hours = 1.0",
+            &format!("wall_hours = {}", 30.0 / 3600.0),
+        )
+    };
+    common::edited(&lab, "wall-whole", edit, PAYLOAD);
+    std::fs::write(
+        lab.home.root.join("machine.toml"),
+        "max_level = 1
+cpus = 4
+",
+    )
+    .unwrap();
+    let plan = plan_of(&lab, "wall-whole");
+    let why = "the next row would reach the wall cap";
+    assert_eq!(run(&plan).unwrap(), RunStatus::Paused(why.into()));
+    assert!(rows_of(&lab, "wall-whole").is_empty());
+}
+
+#[test]
 fn the_first_row_is_held_to_its_share_of_the_spec_estimate() {
     let lab = lab();
     // Each dimension just under and just over its cap minus one row's estimate.

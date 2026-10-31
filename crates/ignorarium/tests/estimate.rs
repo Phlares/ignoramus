@@ -84,9 +84,10 @@ fn estimate_matches_the_brief() {
     let e = estimate(&spec, &machine(4, 0.5), &rows_of(&spec));
     assert_eq!(e.rows, 120);
     close(e.cpu_hours, 1.2);
-    close(e.wall_hours, 0.3);
-    close(e.money_usd, 0.15);
-    assert!(!e.is_long_job);
+    close(e.wall_hours, 1.2);
+    close(e.money_usd, 0.6);
+    // 4320 s of one-at-a-time work is over the 30 minute limit.
+    assert!(e.is_long_job);
     assert_eq!(
         e.rows_per_condition,
         vec![("a".into(), 40), ("b".into(), 40), ("c".into(), 40)]
@@ -118,11 +119,15 @@ fn the_estimate_counts_the_schedule_rows() {
 }
 
 #[test]
-fn zero_cpus_count_as_one() {
+fn the_cpu_count_does_not_change_the_estimate() {
     let spec = spec_of(&sized());
-    let e = estimate(&spec, &machine(0, 1.0), &rows_of(&spec));
-    close(e.wall_hours, 1.2);
-    close(e.money_usd, 1.2);
+    let rows = rows_of(&spec);
+    let one = estimate(&spec, &machine(1, 1.0), &rows);
+    close(one.wall_hours, 1.2);
+    close(one.money_usd, 1.2);
+    for cpus in [0, 8] {
+        assert_eq!(estimate(&spec, &machine(cpus, 1.0), &rows), one, "{cpus}");
+    }
 }
 
 #[test]
