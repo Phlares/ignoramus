@@ -166,16 +166,20 @@ impl Level2 {
             Ok(j) => j,
             Err(why) => return infra(why),
         };
-        // The first row of an environment builds its disk, which can take long.
+        // prepare builds the disk; a row builds it again only when it went since.
         if !watch.tick() {
             return ended(Err(VmError::Stopped));
         }
+        let cannot = |why: &dyn std::fmt::Display| {
+            let name = rootfs::name_of(root);
+            infra(format!(
+                "cannot build the disk of environment {name}: {why}"
+            ))
+        };
         let rootfs = match rootfs_disk(root) {
-            Ok(d) => d,
-            Err(e) => {
-                let name = rootfs::name_of(root);
-                return infra(format!("cannot build the disk of environment {name}: {e}"));
-            }
+            Ok(Ok(d)) => d,
+            Ok(Err(why)) => return cannot(&why),
+            Err(e) => return cannot(&e),
         };
         if !watch.tick() {
             return ended(Err(VmError::Stopped));
@@ -424,23 +428,28 @@ pub fn outcome_of(res: Result<VmOutcome, VmError>, wall_seconds: f64, cpus: u32)
 }
 
 /// The rootfs disk of the environment at `root`: `<root>.ext4`, built on the first call. A
-/// published root never changes, so the disk never goes stale. A failed build leaves nothing
-/// beside the root.
-pub fn rootfs_disk(root: &Path) -> io::Result<PathBuf> {
+/// published root never changes, so the disk never goes stale. `Ok(Err(why))` when the image
+/// holds a file mkfs.ext4 cannot read: it copies each file as the box's user, and the root
+/// keeps the image's modes. A failed build leaves nothing beside the root.
+pub fn rootfs_disk(root: &Path) -> io::Result<Result<PathBuf, String>> {
     let mut disk = root.as_os_str().to_owned();
     disk.push(".ext4");
     let disk = PathBuf::from(disk);
     if disk.is_file() {
-        return Ok(disk);
+        return Ok(Ok(disk));
     }
     let tmp = temp_beside(&disk)?;
-    let built = image::size_mib(root)
-        .and_then(|mib| image::ext4(Some(root), &tmp, mib))
-        .and_then(|()| fs::rename(&tmp, &disk));
-    if built.is_err() {
+    let built = image::unreadable(root).and_then(|found| match found {
+        Some(file) => Ok(Err(format!("{file}, so mkfs.ext4 cannot read it"))),
+        None => {
+            image::ext4(Some(root), &tmp, image::size_mib(root)?)?;
+            fs::rename(&tmp, &disk).map(|()| Ok(disk))
+        }
+    });
+    if !matches!(built, Ok(Ok(_))) {
         let _ = fs::remove_file(&tmp);
     }
-    built.map(|()| disk)
+    built
 }
 
 /// A row's scratch folder, `<temp>/ignorarium-vm-<pid>-<n>` (mode 0700): the initramfs and

@@ -1,7 +1,6 @@
 //! The run engine: writes the schedule, runs each row on a backend, records each row.
 //! A row is done when its signed record exists. A crash before the record reruns the row.
-use crate::backend::rootfs;
-use crate::backend::{self, Backend, Exit, Probe, RowJob, RowOutcome, Watch};
+use crate::backend::{self, Backend, Exit, Probe, RowJob, RowOutcome, Watch, level2, rootfs};
 use crate::budget::{Alerts, Cost, CostMeter, Decision, HostMeter, decide, dimension_name};
 use crate::control::{self, ControlError, ControlFile, RunLock, Signal, State};
 use crate::derived::{INPUTS, Inputs, REGISTER, Register, SELECTION, Selection};
@@ -349,13 +348,18 @@ pub fn prepare_with(
     } else {
         (None, HOST.into())
     };
-    // Level 2 and up run rows only in an environment image.
+    let unfit = if fit.iter().any(|b| b.level() >= IMAGE_LEVEL) {
+        image_unfit(rootfs.as_deref())?
+    } else {
+        None
+    };
     let (skipped, fit): (Vec<_>, Vec<_>) =
-        (fit.into_iter()).partition(|b| rootfs.is_none() && b.level() >= IMAGE_LEVEL);
+        (fit.into_iter()).partition(|b| unfit.is_some() && b.level() >= IMAGE_LEVEL);
     let skipped: Vec<u8> = skipped.iter().map(|b| b.level()).collect();
-    let backend = fit.into_iter().max_by_key(|b| b.level()).ok_or_else(|| {
-        RunError::Environment(format!("{NO_IMAGE}; add env/ or set pins.environment"))
-    })?;
+    // Only the image rule can empty the list.
+    let Some(backend) = fit.into_iter().max_by_key(|b| b.level()) else {
+        return Err(RunError::Environment(unfit.unwrap_or_default().1));
+    };
 
     let leaf = register.leaf;
     let log = LogName::parse(&register.log)
@@ -396,12 +400,8 @@ pub fn prepare_with(
         let draft = RecordDraft::new(study_id, INPUTS, body);
         records::append(&dir.join("records.jsonl"), &key, draft)?;
     }
-    if !skipped.is_empty() {
-        let attrs = json!({
-            "level": backend.level(),
-            "skipped": skipped,
-            "reason": format!("{NO_IMAGE}; the study has no env/ and no pins.environment"),
-        });
+    if let Some((reason, _)) = unfit {
+        let attrs = json!({ "level": backend.level(), "skipped": skipped, "reason": reason });
         emit_event(&dir, &spec_hash, None, "run.isolation", "warn", attrs)?;
     }
     let user = std::env::home_dir().unwrap_or_default();
@@ -426,6 +426,29 @@ pub fn prepare_with(
         heartbeat: HEARTBEAT,
         redact,
     })
+}
+
+/// Why levels 2 and up cannot run the study, when they cannot: the `run.isolation` reason, and
+/// the refusal when no lower level is left. They run rows only in an environment image, from
+/// its disk, which this builds once. A disk that cannot be built for a fault of the host
+/// refuses the run: the box never falls back to a lower level by itself.
+fn image_unfit(rootfs: Option<&Path>) -> Result<Option<(String, String)>, RunError> {
+    let Some(root) = rootfs else {
+        let why = format!("{NO_IMAGE}; the study has no env/ and no pins.environment");
+        return Ok(Some((
+            why,
+            format!("{NO_IMAGE}; add env/ or set pins.environment"),
+        )));
+    };
+    let cannot = |why: &dyn fmt::Display| {
+        let name = rootfs::name_of(root);
+        format!("level 2 cannot build the disk of environment {name}: {why}")
+    };
+    match level2::rootfs_disk(root) {
+        Ok(Ok(_)) => Ok(None),
+        Ok(Err(why)) => Ok(Some((cannot(&why), cannot(&why)))),
+        Err(e) => Err(RunError::Environment(cannot(&e))),
+    }
 }
 
 /// Each condition's params by condition id. A reference takes the value `register` froze for it,

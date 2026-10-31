@@ -1,7 +1,10 @@
 //! Host-side parts of a guest image: pinned downloads, the initramfs and the ext4 disks.
 use crate::tree::{sha256_hex, walk};
+use rustix::fs::{Access, access};
+use rustix::io::Errno;
 use std::fs::{self, File};
 use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -199,6 +202,21 @@ pub fn ext4(src: Option<&Path>, dest: &Path, size_mib: u64) -> io::Result<()> {
 }
 
 const LOST_FOUND: &str = "lost+found";
+
+/// The first regular file below `dir` that this process cannot read, as its path below `dir`
+/// and its mode. mkfs.ext4 opens each file it copies.
+pub fn unreadable(dir: &Path) -> io::Result<Option<String>> {
+    let mut found = None;
+    walk(dir, &mut |rel, path, ty| {
+        if found.is_none() && ty.is_file() && access(path, Access::READ_OK) == Err(Errno::ACCESS) {
+            let mode = fs::symlink_metadata(path)?.mode() & 0o7777;
+            let rel = String::from_utf8_lossy(rel);
+            found = Some(format!("{rel} has mode {mode:o}"));
+        }
+        Ok(())
+    })?;
+    Ok(found)
+}
 
 /// Refuses a folder `ext4` cannot copy whole: one whose top holds a `lost+found` that is not
 /// a folder, a name ext4 keeps for one.

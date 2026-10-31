@@ -80,7 +80,7 @@ fn environment(image: &Path) -> PathBuf {
     let store = Store::open(&std::env::temp_dir().join("ignorarium-test-env")).unwrap();
     let digest = store.put_reader(&mut File::open(image).unwrap()).unwrap();
     let root = rootfs::from_store(&store, &digest).unwrap();
-    rootfs_disk(&root).unwrap();
+    rootfs_disk(&root).unwrap().unwrap();
     root
 }
 
@@ -729,13 +729,13 @@ fn rootfs_disk_is_built_once() {
     let root = d.path().join("root");
     fs::create_dir_all(root.join("usr/bin")).unwrap();
     fs::write(root.join("usr/bin/tool"), "x").unwrap();
-    let disk = rootfs_disk(&root).unwrap();
+    let disk = rootfs_disk(&root).unwrap().unwrap();
     assert_eq!(disk, d.path().join("root.ext4"));
     // The ext4 superblock starts at byte 1024; its magic 0xEF53 sits 56 bytes in.
     assert_eq!(fs::read(&disk).unwrap()[1080..1082], [0x53, 0xef]);
     let built = fs::metadata(&disk).unwrap().modified().unwrap();
     std::thread::sleep(Duration::from_millis(20));
-    assert_eq!(rootfs_disk(&root).unwrap(), disk);
+    assert_eq!(rootfs_disk(&root).unwrap(), Ok(disk.clone()));
     assert_eq!(fs::metadata(&disk).unwrap().modified().unwrap(), built);
     let names = || {
         let mut v: Vec<String> = fs::read_dir(d.path())
@@ -746,18 +746,24 @@ fn rootfs_disk_is_built_once() {
         v
     };
     assert_eq!(names(), ["root", "root.ext4"]);
-    // A failed build leaves nothing beside the root: before mkfs runs, or in it.
+    // A failed build leaves nothing beside the root.
     assert!(rootfs_disk(&d.path().join("absent")).is_err());
     assert_eq!(names(), ["root", "root.ext4"]);
+    // A file mkfs.ext4 cannot read is a fact of the image, found before mkfs runs.
     let bad = d.path().join("bad");
-    fs::create_dir(&bad).unwrap();
-    fs::write(bad.join("secret"), "x").unwrap();
-    fs::set_permissions(bad.join("secret"), Permissions::from_mode(0o000)).unwrap();
-    if File::open(bad.join("secret")).is_ok() {
-        println!("skipped the mkfs failure: this user reads a mode-000 file");
+    fs::create_dir_all(bad.join("etc")).unwrap();
+    for f in ["etc/a", "etc/shadow", "etc/z"] {
+        fs::write(bad.join(f), "x").unwrap();
+    }
+    for f in ["etc/shadow", "etc/z"] {
+        fs::set_permissions(bad.join(f), Permissions::from_mode(0o200)).unwrap();
+    }
+    if File::open(bad.join("etc/shadow")).is_ok() {
+        println!("skipped the unreadable file: this user reads a mode-200 file");
         return;
     }
-    assert!(rootfs_disk(&bad).is_err());
+    let why = "etc/shadow has mode 200, so mkfs.ext4 cannot read it";
+    assert_eq!(rootfs_disk(&bad).unwrap(), Err(why.to_string()));
     assert_eq!(names(), ["bad", "root", "root.ext4"]);
 }
 

@@ -660,6 +660,77 @@ fn level2_refuses_a_lost_and_found_that_is_not_a_folder() {
     }
 }
 
+/// A two-layer image whose `etc/shadow` its owner cannot read, as the `setup` package of the
+/// Fedora family ships it.
+fn shadowed_image(store: &Store) -> String {
+    let (a, b, t) = (
+        TempDir::new().unwrap(),
+        TempDir::new().unwrap(),
+        TempDir::new().unwrap(),
+    );
+    put(a.path(), "usr/a", "A", None);
+    put(b.path(), "etc/shadow", "root:!::0:::::", None);
+    let (t1, t2) = (t.path().join("1.tar"), t.path().join("2.tar"));
+    layer(a.path(), &t1, &[], &["."]);
+    // tar reads the file as it is and stores it at mode 0.
+    layer(b.path(), &t2, &["--mode=0000"], &["etc"]);
+    image(store, &[t1, t2], None)
+}
+
+#[test]
+fn an_image_file_its_owner_cannot_read_keeps_level_2_out() {
+    // mkfs.ext4 copies each file as the box's user, and the root keeps the image's modes, so
+    // this image cannot become a level 2 disk. prepare finds that once, before any row.
+    let lab = lab();
+    let store = store_of(&lab);
+    let digest = shadowed_image(&store);
+    let root = from_store(&store, &digest).unwrap();
+    let shadow = root.join("etc/shadow");
+    if fs::File::open(&shadow).is_ok() {
+        println!("skipped: this user reads a mode-000 file");
+        return;
+    }
+    let data = [("data/example.txt", "calibration")];
+    // The machine reaches level 2, so a study may ask for it.
+    fs::write(lab.home.root.join("machine.toml"), "max_level = 2\n").unwrap();
+    pinned_with(&lab, "shadow0", &digest, &data, |t| t);
+    let at2 = |t: String| t.replace("min_isolation = 0", "min_isolation = 2");
+    pinned_with(&lab, "shadow2", &digest, &data, at2);
+    let both = || -> Vec<Box<dyn Backend>> { vec![Box::new(Stub(1)), Box::new(Stub(2))] };
+    let prepare = |id: &str| prepare_with(&lab.home, id, &common::work_of(&lab.home, id), both());
+    let why = format!(
+        "level 2 cannot build the disk of environment {digest}: \
+         etc/shadow has mode 0, so mkfs.ext4 cannot read it"
+    );
+    let err = prepare("shadow2").err().unwrap();
+    assert!(matches!(&err, RunError::Environment(_)), "{err}");
+    assert_eq!(err.to_string(), format!("environment: {why}"));
+    assert!(!lab.home.study_dir("shadow2").join("schedule.json").exists());
+    // A lower minimum runs at level 1, which binds the root as it is, and says why.
+    let plan = prepare("shadow0").unwrap();
+    assert_eq!(plan.backend.level(), 1);
+    assert_eq!(
+        (plan.rootfs, plan.environment),
+        (Some(root.clone()), digest.clone())
+    );
+    let events = common::events_of(&lab.home.study_dir("shadow0"));
+    let chosen = named(&events, "run.isolation");
+    assert_eq!(chosen.len(), 1);
+    let want = serde_json::json!({ "level": 1, "skipped": [2], "reason": why });
+    assert_eq!(chosen[0]["attrs"], want);
+    // The store keeps the image's modes, and no disk or temp file is left beside the root.
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        fs::metadata(&shadow).unwrap().permissions().mode() & 0o7777,
+        0
+    );
+    let beside: Vec<_> = fs::read_dir(root.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(beside, [std::ffi::OsString::from(&digest)]);
+}
+
 #[test]
 fn level0_ignores_the_environment() {
     let lab = lab();
