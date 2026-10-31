@@ -259,13 +259,24 @@ fn fake(script: Vec<Exit>) -> (Fake, Rc<RefCell<Vec<u64>>>) {
 }
 
 fn plan_of(lab: &Lab, id: &str) -> RunPlan {
-    prepare_with(&lab.home, id, &common::work_of(&lab.home, id), vec![Box::new(Level0)]).unwrap()
+    prepare_with(
+        &lab.home,
+        id,
+        &common::work_of(&lab.home, id),
+        vec![Box::new(Level0)],
+    )
+    .unwrap()
 }
 
 fn err_of(lab: &Lab, id: &str) -> RunError {
-    prepare_with(&lab.home, id, &common::work_of(&lab.home, id), vec![Box::new(Level0)])
-        .err()
-        .expect("prepare should refuse")
+    prepare_with(
+        &lab.home,
+        id,
+        &common::work_of(&lab.home, id),
+        vec![Box::new(Level0)],
+    )
+    .err()
+    .expect("prepare should refuse")
 }
 
 #[test]
@@ -711,29 +722,14 @@ fn the_first_prepare_freezes_every_input_and_a_resume_on_other_bytes_is_refused(
     // before the view or the plan log change.
     let view = std::fs::read(dir.join("in/data/conf.txt")).unwrap();
     let example = common::work(&lab, "frozen").join("data/example.txt");
-    let changes: [(&str, &dyn Fn(), &dyn Fn()); 3] = [
-        (
-            "data/conf.txt",
-            &|| std::fs::write(&conf, "second text").unwrap(),
-            &|| std::fs::write(&conf, "first text").unwrap(),
-        ),
-        (
-            "data/conf.txt",
-            &|| std::fs::remove_file(&conf).unwrap(),
-            &|| std::fs::write(&conf, "first text").unwrap(),
-        ),
-        (
-            "data/example.txt",
-            &|| std::fs::write(&example, "new file").unwrap(),
-            &|| std::fs::remove_file(&example).unwrap(),
-        ),
-    ];
     let log = PlanLog::open(&lab.home.root.join("planlog")).unwrap();
     let second = file_hashes(b"second text");
-    for (path, change, undo) in changes {
-        change();
+    let refused = |path: &str| {
         let err = err_of(&lab, "frozen");
-        assert!(matches!(&err, RunError::InputFrozen(p) if p == path), "{err}");
+        assert!(
+            matches!(&err, RunError::InputFrozen(p) if p == path),
+            "{err}"
+        );
         assert_eq!(
             err.to_string(),
             format!(
@@ -743,9 +739,19 @@ fn the_first_prepare_freezes_every_input_and_a_resume_on_other_bytes_is_refused(
         );
         assert_eq!(std::fs::read(dir.join("in/data/conf.txt")).unwrap(), view);
         assert!(log.uses(&second.0, &second.1).unwrap().is_empty());
-        undo();
-        plan_of(&lab, "frozen");
-    }
+    };
+    std::fs::write(&conf, "second text").unwrap();
+    refused("data/conf.txt");
+    std::fs::write(&conf, "first text").unwrap();
+    plan_of(&lab, "frozen");
+    std::fs::remove_file(&conf).unwrap();
+    refused("data/conf.txt");
+    std::fs::write(&conf, "first text").unwrap();
+    plan_of(&lab, "frozen");
+    std::fs::write(&example, "new file").unwrap();
+    refused("data/example.txt");
+    std::fs::remove_file(&example).unwrap();
+    plan_of(&lab, "frozen");
     assert_eq!(kind_of(&lab, "frozen", "inputs").len(), 1);
 }
 
@@ -792,10 +798,7 @@ fn a_refused_first_prepare_freezes_nothing() {
         std::fs::write(common::work(&lab, id).join("data/conf.txt"), "shared").unwrap();
     }
     plan_of(&lab, "early");
-    assert!(matches!(
-        err_of(&lab, "later"),
-        RunError::DataReused { .. }
-    ));
+    assert!(matches!(err_of(&lab, "later"), RunError::DataReused { .. }));
     assert!(kind_of(&lab, "later", "inputs").is_empty());
     std::fs::write(common::work(&lab, "later").join("data/conf.txt"), "own").unwrap();
     plan_of(&lab, "later");
@@ -1048,7 +1051,13 @@ fn sigchld_ignored_child() {
         return;
     };
     let home = ignorarium::home::Home::open_at(std::path::Path::new(&root)).unwrap();
-    let plan = prepare_with(&home, &id, &common::work_of(&home, &id), vec![Box::new(Level0)]).unwrap();
+    let plan = prepare_with(
+        &home,
+        &id,
+        &common::work_of(&home, &id),
+        vec![Box::new(Level0)],
+    )
+    .unwrap();
     assert_eq!(run(&plan).unwrap(), RunStatus::Paused(REAPED.into()));
 }
 
@@ -1182,9 +1191,14 @@ fn a_late_input_with_the_data_of_the_other_role_is_refused() {
         for (p, text) in after {
             std::fs::write(common::work(&lab, id).join(p), text).unwrap();
         }
-        let err = prepare_with(&lab.home, id, &common::work_of(&lab.home, id), vec![Box::new(Level0)])
-            .err()
-            .unwrap_or_else(|| panic!("{id}: prepare should refuse"));
+        let err = prepare_with(
+            &lab.home,
+            id,
+            &common::work_of(&lab.home, id),
+            vec![Box::new(Level0)],
+        )
+        .err()
+        .unwrap_or_else(|| panic!("{id}: prepare should refuse"));
         assert_eq!(
             err.to_string(),
             format!(
@@ -1309,7 +1323,14 @@ fn data_present_at_registration_is_not_late() {
 fn prepare_refuses_a_missing_backend_an_unknown_study_and_a_changed_spec() {
     let lab = lab();
     let dir = plain(&lab, "guard");
-    let none = prepare_with(&lab.home, "guard", &common::work_of(&lab.home, "guard"), vec![]).err().unwrap();
+    let none = prepare_with(
+        &lab.home,
+        "guard",
+        &common::work_of(&lab.home, "guard"),
+        vec![],
+    )
+    .err()
+    .unwrap();
     assert!(
         matches!(none, RunError::NoBackend { need: 0, .. }),
         "{none}"
@@ -1436,7 +1457,10 @@ fn the_highest_backend_that_meets_min_isolation_runs() {
     register_study(&lab, "lvl1", need_isolation, &[], PAYLOAD);
     let pick = |id: &str, levels: &[u8]| {
         let all = levels.iter().map(|&l| fake_at(l)).collect();
-        prepare_with(&lab.home, id, &common::work_of(&lab.home, id), all).unwrap().backend.level()
+        prepare_with(&lab.home, id, &common::work_of(&lab.home, id), all)
+            .unwrap()
+            .backend
+            .level()
     };
     assert_eq!(pick("lvl0", &[2, 0, 1]), 2);
     assert_eq!(pick("lvl0", &[0, 1]), 1);
@@ -1444,9 +1468,14 @@ fn the_highest_backend_that_meets_min_isolation_runs() {
     assert_eq!(pick("lvl0", &[0]), 0);
     assert_eq!(pick("lvl1", &[2, 0, 1]), 2);
     assert_eq!(pick("lvl1", &[0, 1]), 1);
-    let only0 = prepare_with(&lab.home, "lvl1", &common::work_of(&lab.home, "lvl1"), vec![fake_at(0)])
-        .err()
-        .unwrap();
+    let only0 = prepare_with(
+        &lab.home,
+        "lvl1",
+        &common::work_of(&lab.home, "lvl1"),
+        vec![fake_at(0)],
+    )
+    .err()
+    .unwrap();
     assert!(
         matches!(&only0, RunError::NoBackend { need: 1, have } if *have == [0]),
         "{only0}"
@@ -1466,9 +1495,17 @@ fn backend_max_filters_out_higher_levels() {
     assert_eq!(levels(2), vec![0, 1, 2]);
     let lab = lab();
     plain(&lab, "reg");
-    assert_eq!(prepare(&lab.home, "reg", &common::work_of(&lab.home, "reg"), 0).unwrap().backend.level(), 0);
+    assert_eq!(
+        prepare(&lab.home, "reg", &common::work_of(&lab.home, "reg"), 0)
+            .unwrap()
+            .backend
+            .level(),
+        0
+    );
     register_study(&lab, "reg1", need_isolation, &[], PAYLOAD);
-    let err = prepare(&lab.home, "reg1", &common::work_of(&lab.home, "reg1"), 0).err().unwrap();
+    let err = prepare(&lab.home, "reg1", &common::work_of(&lab.home, "reg1"), 0)
+        .err()
+        .unwrap();
     assert!(matches!(err, RunError::NoBackend { need: 1, .. }), "{err}");
 }
 

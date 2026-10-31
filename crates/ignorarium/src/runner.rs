@@ -258,7 +258,12 @@ pub fn prepare(
     root: &Path,
     backend_max: u8,
 ) -> Result<RunPlan, RunError> {
-    prepare_with(home, study_id, root, up_to(backend::registered(), backend_max))
+    prepare_with(
+        home,
+        study_id,
+        root,
+        up_to(backend::registered(), backend_max),
+    )
 }
 
 /// The backends at or below `max`.

@@ -161,7 +161,10 @@ fn editing_the_working_payload_after_register_does_not_reach_the_run() {
         &work,
         "#!/bin/sh\necho edited > \"$IGNORARIUM_OUT/result\"\nprintf '{\"ppl\": 1.5}' > \"$IGNORARIUM_OUT/values.json\"\n",
     );
-    bin_at(&lab, "frozen").args(["run", "frozen"]).assert().code(0);
+    bin_at(&lab, "frozen")
+        .args(["run", "frozen"])
+        .assert()
+        .code(0);
     let rows = kind_of(&lab, "frozen", "row");
     assert_eq!(rows.len(), 6);
     for r in &rows {
@@ -399,7 +402,10 @@ fn resume_and_stop_during_a_live_run() {
     // A resume while the run is live clears the pause and starts nothing.
     bin(&lab).args(["pause", "live"]).assert().code(0);
     assert_eq!(status(&lab, "live")["request"], "pause");
-    let a = bin_at(&lab, "live").args(["resume", "live"]).assert().code(0);
+    let a = bin_at(&lab, "live")
+        .args(["resume", "live"])
+        .assert()
+        .code(0);
     assert_eq!(text(&a), "the live run continues\n");
     assert_eq!(status(&lab, "live")["request"], "resume");
     let start = std::time::Instant::now();
@@ -1089,7 +1095,13 @@ fn pilot_run(lab: &Lab, id: &str, payload: &str) {
     use ignorarium::backend::level0::Level0;
     use ignorarium::runner::{RunStatus, prepare_with, run};
     register_study(lab, id, two_clusters, &[], payload);
-    let plan = prepare_with(&lab.home, id, &common::work_of(&lab.home, id), vec![Box::new(Level0)]).unwrap();
+    let plan = prepare_with(
+        &lab.home,
+        id,
+        &common::work_of(&lab.home, id),
+        vec![Box::new(Level0)],
+    )
+    .unwrap();
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
 }
 

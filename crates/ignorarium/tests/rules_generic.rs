@@ -894,10 +894,19 @@ fn a_confirmatory_plan_needs_a_hypothesis() {
             .collect::<Vec<_>>()
     };
     // No hypothesis has nothing to test, and its slot could never give a discovery.
-    assert_eq!(cnf006("confirmatory", Some(json!([]))), ["question.hypotheses"]);
+    assert_eq!(
+        cnf006("confirmatory", Some(json!([]))),
+        ["question.hypotheses"]
+    );
     assert_eq!(cnf006("confirmatory", None), ["question.hypotheses"]);
     assert!(cnf006("exploratory", Some(json!([]))).is_empty());
-    assert!(cnf006("confirmatory", Some(template()["question"]["hypotheses"].clone())).is_empty());
+    assert!(
+        cnf006(
+            "confirmatory",
+            Some(template()["question"]["hypotheses"].clone())
+        )
+        .is_empty()
+    );
 }
 
 #[test]

@@ -636,7 +636,13 @@ fn level1_dead_box_child() {
     let Some((home, id)) = common::boxed_study() else {
         return;
     };
-    let plan = prepare_with(&home, &id, &common::work_of(&home, &id), vec![Box::new(backend())]).unwrap();
+    let plan = prepare_with(
+        &home,
+        &id,
+        &common::work_of(&home, &id),
+        vec![Box::new(backend())],
+    )
+    .unwrap();
     let _ = runner::run(&plan);
 }
 
@@ -892,7 +898,10 @@ fn an_unknown_cpu_row_is_charged_the_estimate_warned_about_and_pauses_the_run() 
     let lab = lab();
     let dir = plain(&lab, "unk");
     let d = TempDir::new().unwrap();
-    let plan = prepare_with(&lab.home, "unk", &common::work_of(&lab.home, "unk"),
+    let plan = prepare_with(
+        &lab.home,
+        "unk",
+        &common::work_of(&lab.home, "unk"),
         vec![Box::new(stuck_bwrap(d.path(), true, false))],
     )
     .unwrap();
@@ -938,7 +947,10 @@ fn an_unknown_cpu_attempt_that_is_retried_leaves_a_spend_record_and_still_pauses
     let dir = plain(&lab, "unk2");
     let d = TempDir::new().unwrap();
     // The first attempt is a fault with a stuck PID 1; the retry runs clean.
-    let plan = prepare_with(&lab.home, "unk2", &common::work_of(&lab.home, "unk2"),
+    let plan = prepare_with(
+        &lab.home,
+        "unk2",
+        &common::work_of(&lab.home, "unk2"),
         vec![Box::new(stuck_bwrap(d.path(), false, true))],
     )
     .unwrap();
@@ -1270,14 +1282,21 @@ fn need_isolation(t: String) -> String {
 fn min_isolation_1_is_refused_without_level1() {
     let lab = lab();
     register_study(&lab, "need1", need_isolation, &[], PAYLOAD);
-    let err = prepare_with(&lab.home, "need1", &common::work_of(&lab.home, "need1"), vec![Box::new(Level0)])
-        .err()
-        .unwrap();
+    let err = prepare_with(
+        &lab.home,
+        "need1",
+        &common::work_of(&lab.home, "need1"),
+        vec![Box::new(Level0)],
+    )
+    .err()
+    .unwrap();
     assert!(
         matches!(&err, RunError::NoBackend { need: 1, have } if *have == [0]),
         "{err}"
     );
-    let err = prepare(&lab.home, "need1", &common::work_of(&lab.home, "need1"), 0).err().unwrap();
+    let err = prepare(&lab.home, "need1", &common::work_of(&lab.home, "need1"), 0)
+        .err()
+        .unwrap();
     assert!(
         matches!(&err, RunError::NoBackend { need: 1, have } if *have == [0]),
         "{err}"
@@ -1293,8 +1312,20 @@ fn prepare_prefers_the_highest_backend() {
     let both: Vec<Box<dyn Backend>> = vec![Box::new(b), Box::new(Level0)];
     let plan = prepare_with(&lab.home, "hi", &common::work_of(&lab.home, "hi"), both).unwrap();
     assert_eq!(plan.backend.level(), 1);
-    assert_eq!(prepare(&lab.home, "hi", &common::work_of(&lab.home, "hi"), 1).unwrap().backend.level(), 1);
-    assert_eq!(prepare(&lab.home, "hi", &common::work_of(&lab.home, "hi"), 0).unwrap().backend.level(), 0);
+    assert_eq!(
+        prepare(&lab.home, "hi", &common::work_of(&lab.home, "hi"), 1)
+            .unwrap()
+            .backend
+            .level(),
+        1
+    );
+    assert_eq!(
+        prepare(&lab.home, "hi", &common::work_of(&lab.home, "hi"), 0)
+            .unwrap()
+            .backend
+            .level(),
+        0
+    );
     // The whole study runs at level 1, and every record says so.
     assert_eq!(runner::run(&plan).unwrap(), RunStatus::Done);
     let rows = rows_of(&lab, "hi");

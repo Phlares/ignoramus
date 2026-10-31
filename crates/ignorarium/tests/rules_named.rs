@@ -1486,10 +1486,13 @@ fn a_copy_in_another_stratum_is_not_a_cluster_of_that_stratum() {
         c["stratum"] = json!(stratum);
         list.push(c);
     }
-    let mut e = and(near(), vec![
-        ("/inputs", j(Value::Array(list))),
-        ("/design/units_per_cluster", j(json!(1))),
-    ]);
+    let mut e = and(
+        near(),
+        vec![
+            ("/inputs", j(Value::Array(list))),
+            ("/design/units_per_cluster", j(json!(1))),
+        ],
+    );
     e.push(hyp("strata", j(json!(["code", "article"]))));
     let got: Vec<String> = (named(&edited(&e), dir.path()).into_iter())
         .map(|d| d.problem)
@@ -3087,8 +3090,16 @@ fn an_input_inside_another_inputs_path_is_refused() {
     assert!(with_second("data/a", "data/b/a").is_empty());
     // Another spelling of the same path names the same file: the later input is flagged.
     for other in ["data//a", "data/a/", "data//a//"] {
-        assert_eq!(codes_paths(&with_second("data/a", other)), nested, "{other}");
-        assert_eq!(codes_paths(&with_second(other, "data/a")), nested, "{other}");
+        assert_eq!(
+            codes_paths(&with_second("data/a", other)),
+            nested,
+            "{other}"
+        );
+        assert_eq!(
+            codes_paths(&with_second(other, "data/a")),
+            nested,
+            "{other}"
+        );
     }
 }
 
