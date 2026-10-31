@@ -6,7 +6,7 @@ use super::generic::{applies, diagnostic, join, join_key, plain_key, safe_key, s
 use super::{BoxRecords, Check, NoRecords, Rule, has_format, is_study_id};
 use crate::derived::{Alpha, Estimate, Selection, StudyState, contrast_key};
 use crate::diag::Diagnostic;
-use crate::inputs::{self, Found};
+use crate::inputs::{self, Found, input_path};
 use crate::power::{required_clusters, z};
 use crate::prior::{PriorUse, same_data};
 use crate::records;
@@ -20,7 +20,7 @@ use evidence::power::{Plan, Stratum, WORK, clusters_needed, mean_sd, simulate};
 use evidence::rng::Rng;
 use evidence::{Error, Tail};
 use serde_json::{Value, json};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 pub struct CheckCtx {
     /// The study root. Every file the checks read lives under this folder.
@@ -232,58 +232,10 @@ fn input_hashes(ctx: &CheckCtx, input: &Value) -> Option<(String, String)> {
     inputs::hashes(&inputs::resolve(&ctx.store, &ctx.root, path, sha))
 }
 
-// ---- files: one primitive guards every read ----
-
-/// `rel` under the study root, or `None` when it could leave the folder. Every
-/// segment must be one plain name; empty segments (`a//b`) are skipped. A `:`, a
-/// backslash, a leading `/`, a segment ending in `.` or a space (Windows trims
-/// them), or any symlink on the way makes it unsafe.
-fn resolve(root: &Path, rel: &str) -> Option<PathBuf> {
-    if rel.starts_with('/') || rel.contains(['\\', ':']) {
-        return None;
-    }
-    let mut path = root.to_path_buf();
-    let mut any = false;
-    for part in rel.split('/').filter(|c| !c.is_empty()) {
-        let mut parts = Path::new(part).components();
-        // One Normal component per segment: no `..`, root or prefix, so the result stays inside.
-        let plain = matches!(
-            (parts.next(), parts.next()),
-            (Some(Component::Normal(_)), None)
-        );
-        if !plain || part.ends_with(['.', ' ']) {
-            return None;
-        }
-        path.push(part);
-        any = true;
-        if path.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
-            return None;
-        }
-    }
-    any.then_some(path)
-}
-
-/// The bytes of a regular file; never opens a pipe or device.
-pub fn read_regular(path: &Path) -> Option<Vec<u8>> {
-    read_file(path)
-}
-
-fn read_file(path: &Path) -> Option<Vec<u8>> {
-    path.metadata()
-        .ok()
-        .filter(std::fs::Metadata::is_file)
-        .and_then(|_| std::fs::read(path).ok())
-}
-
-/// `rel` under `root` when it stays inside the folder; see `resolve`.
-pub fn input_path(root: &Path, rel: &str) -> Option<PathBuf> {
-    resolve(root, rel)
-}
-
 fn input_path_safe(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     flag(spec, pat, |v| {
         v.as_str()
-            .is_some_and(|rel| resolve(&ctx.root, rel).is_none())
+            .is_some_and(|rel| input_path(&ctx.root, rel).is_none())
     })
 }
 
@@ -334,7 +286,7 @@ fn input_hash_matches(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
 fn follow_on_exists(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     flag(spec, pat, |v| {
         v.as_str()
-            .and_then(|rel| resolve(&ctx.root, rel))
+            .and_then(|rel| input_path(&ctx.root, rel))
             .is_some_and(|p| !p.is_file())
     })
 }

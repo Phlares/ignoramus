@@ -1,10 +1,10 @@
 //! Where an input comes from: the content store when the spec pins a stored digest, else
 //! the file under the study root. Every reader of an input goes through this module:
-//! `resolve` to hash it in place, `stored` and `regular_file` to bring it into the store.
+//! `input_path` to guard its path, `resolve` to hash it in place, `stored` and
+//! `regular_file` to bring it into the store.
 use crate::prior::file_hashes;
-use crate::rules::{input_path, read_regular};
 use crate::store::{Meta, Store, StoreError};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Found {
@@ -19,6 +19,43 @@ pub enum Found {
     /// The store has a record for the pin, but it cannot be read, or its blob is gone or
     /// has another size. The text says which.
     Damaged(String),
+}
+
+/// `rel` under `root`, or `None` when it could leave the folder. Every
+/// segment must be one plain name; empty segments (`a//b`) are skipped. A `:`, a
+/// backslash, a leading `/`, a segment ending in `.` or a space (Windows trims
+/// them), or any symlink on the way makes it unsafe.
+pub fn input_path(root: &Path, rel: &str) -> Option<PathBuf> {
+    if rel.starts_with('/') || rel.contains(['\\', ':']) {
+        return None;
+    }
+    let mut path = root.to_path_buf();
+    let mut any = false;
+    for part in rel.split('/').filter(|c| !c.is_empty()) {
+        let mut parts = Path::new(part).components();
+        // One Normal component per segment: no `..`, root or prefix, so the result stays inside.
+        let plain = matches!(
+            (parts.next(), parts.next()),
+            (Some(Component::Normal(_)), None)
+        );
+        if !plain || part.ends_with(['.', ' ']) {
+            return None;
+        }
+        path.push(part);
+        any = true;
+        if path.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
+            return None;
+        }
+    }
+    any.then_some(path)
+}
+
+/// The bytes of a regular file; never opens a pipe or device.
+fn read_regular(path: &Path) -> Option<Vec<u8>> {
+    path.metadata()
+        .ok()
+        .filter(std::fs::Metadata::is_file)
+        .and_then(|_| std::fs::read(path).ok())
 }
 
 /// `Stored` when `sha256` is set and the store has its meta and a blob of that size

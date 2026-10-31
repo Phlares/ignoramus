@@ -3,7 +3,7 @@
 //! read-only mode; the view's folders are read-only too.
 use crate::backend::output::file_digest;
 use crate::files;
-use crate::rules::input_path;
+use crate::inputs::input_path;
 use crate::store::Store;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
