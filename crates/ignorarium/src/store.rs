@@ -1,4 +1,5 @@
 //! Content-addressed store: `store/<sha256>` holds the bytes with that hash.
+use crate::backend::output::file_digest;
 use crate::canon::sha256_hex;
 use crate::files::{self, WriteOnceError};
 use crate::home::{HomeError, make_private_dir};
@@ -120,9 +121,7 @@ impl Store {
                     return Err(StoreError::Link);
                 }
                 // The blob was there before: its bytes must still be the digest's.
-                let mut hasher = Sha256::new();
-                io::copy(&mut fs::File::open(&path)?, &mut hasher)?;
-                if hex::encode(hasher.finalize()) != digest {
+                if file_digest(&path)?.as_deref() != Some(digest.as_str()) {
                     return Err(io::Error::other("stored blob differs").into());
                 }
             }
