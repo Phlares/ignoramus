@@ -45,11 +45,8 @@ fn non_finite_extra_or_missing_values_are_refused() {
     bad(r#"{"ppl": 1e999}"#, &["ppl"], "number");
     bad(r#"{"ppl": NaN}"#, &["ppl"], "JSON");
     bad(r#"{"ppl": Infinity}"#, &["ppl"], "JSON");
-    bad(
-        r#"[1]"#,
-        &["ppl"],
-        "invalid type: sequence, expected an object",
-    );
+    // The part of serde's message the box's visitor writes.
+    bad(r#"[1]"#, &["ppl"], "expected an object");
     bad(r#"{"ppl": 1} x"#, &["ppl"], "JSON");
     bad("", &["ppl"], "JSON");
     // A missing file is a refusal too; a file that cannot be opened says why.

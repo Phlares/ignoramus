@@ -53,7 +53,7 @@ pub fn read_covered(
 ) -> Result<BTreeMap<String, f64>, String> {
     let (values, digest) = read(out_dir, measures)?;
     let rows = tree_rows(out_dir).map_err(|e| format!("cannot hash output: {e}"))?;
-    let covered = rows.iter().any(|r| r.path == FILE && r.digest == digest);
+    let covered = (rows.iter().find(|r| r.path == FILE)).is_some_and(|r| r.digest == digest);
     let same = hash_rows(&rows).is_ok_and(|h| h == output_hash);
     if covered && same {
         Ok(values)
