@@ -1,0 +1,12 @@
+{
+  "key": "b.zip",
+  "mimetype": "application/zip",
+  "checksum": "md5:5eb63bbbe01eeed093cb22bb8f5acdc3",
+  "size": 11,
+  "version_id": "38a724d3-7b0d-4e03-9fd4-1b1c2a1d4b0e",
+  "links": {
+    "self": "https://sandbox.zenodo.org/api/files/568377dd-daf8-4a0d-9d9d-c1c1d8b3c2c1/b.zip",
+    "version": "https://sandbox.zenodo.org/api/files/568377dd-daf8-4a0d-9d9d-c1c1d8b3c2c1/b.zip?versionId=38a724d3-7b0d-4e03-9fd4-1b1c2a1d4b0e",
+    "uploads": "https://sandbox.zenodo.org/api/files/568377dd-daf8-4a0d-9d9d-c1c1d8b3c2c1/b.zip?uploads"
+  }
+}

@@ -1,0 +1,17 @@
+[package]
+name = "deposit"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.89"
+license = "Apache-2.0"
+description = "Deposits files with DataCite metadata to a research archive."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+sha2 = "0.10"
+hex = "0.4"
+
+[dev-dependencies]
+bundle = { path = "../bundle" }
+tempfile = "3"

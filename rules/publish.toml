@@ -1,0 +1,85 @@
+# Publication steps per profile. The bundle build reads this file.
+# Level words: required (the bundle must leave the step's file), optional,
+# choice (pick one of the choice steps), opt-in (the author asks for it),
+# listed (the step is listed under the original study), none (no step).
+# `file` names the bundle file a required step leaves.
+# Sources:
+#   https://www.cos.io/initiatives/top-guidelines
+#   https://www.acm.org/publications/policies/artifact-review-and-badging-current
+#   https://dphep.web.cern.ch/
+#   https://reforms.cs.princeton.edu/
+#   https://journals.plos.org/plosone/s/data-availability
+
+[labels]
+signal = "exploratory"
+confirmed = "confirmatory"
+replicated = "confirmatory"
+generalized = "confirmatory"
+
+[bytes]
+exploratory = "Records, summaries and hashes (DPHEP preservation levels 1 and 2)."
+replay = "No new bytes."
+confirmatory = "Analysis code and data (DPHEP level 3); raw data when the claim needs it (DPHEP level 4)."
+
+[[step]]
+id = "manifest"
+exploratory = "required"
+replay = "required"
+confirmatory = "required"
+file = "MANIFEST.sha256"
+
+[[step]]
+id = "plan-log-head"
+exploratory = "required"
+replay = "required"
+confirmatory = "required"
+note = "the latest signed tree head and a consistency proof to the last public head"
+file = "records/planlog-head.json"
+
+[[step]]
+id = "ro-crate"
+exploratory = "required"
+replay = "required"
+confirmatory = "required"
+file = "ro-crate-metadata.json"
+
+[[step]]
+id = "licence-check"
+exploratory = "required"
+replay = "required"
+confirmatory = "required"
+file = "LICENSE.md"
+
+[[step]]
+id = "archive-doi"
+exploratory = "choice"
+replay = "none"
+confirmatory = "required"
+
+[[step]]
+id = "software-heritage"
+exploratory = "optional"
+replay = "none"
+confirmatory = "required"
+note = "when the study has public code"
+
+[[step]]
+id = "internet-archive"
+exploratory = "optional"
+replay = "none"
+confirmatory = "required"
+note = "the study page only, never data"
+
+[[step]]
+id = "preprint"
+exploratory = "optional"
+replay = "none"
+confirmatory = "choice"
+note = "arXiv for papers, TD Commons for other disclosures; a person submits it"
+
+[[step]]
+id = "index-entry"
+exploratory = "opt-in"
+replay = "listed"
+confirmatory = "opt-in"
+note = "replay checks are listed under the original study"

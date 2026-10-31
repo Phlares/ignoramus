@@ -1,0 +1,31 @@
+abstract: "A fixture for the bundle tests. Two conditions, one outcome."
+authors:
+  - affiliation: "Example Lab"
+    family-names: "Example"
+    given-names: "Ada"
+    orcid: "https://orcid.org/0000-0002-1825-0097"
+  - name: "The ignorarium fixture team"
+cff-version: "1.2.0"
+commit: "0123456789abcdef0123456789abcdef01234567"
+date-released: "2026-10-29"
+doi: "10.5072/zenodo.123456"
+keywords:
+  - "fixture"
+  - "lookup tables"
+license: "CC0-1.0"
+message: "If you use these data, please cite them using these metadata."
+references:
+  - authors:
+      - name: "The ignorarium contributors"
+    title: "ignorarium"
+    type: "software"
+    url: "https://github.com/Phlares/ignoramus"
+    version: "0.0.1"
+  - authors:
+      - name: "Example Creator"
+    doi: "10.5072/zenodo.1"
+    title: "Example input texts"
+    type: "data"
+title: "Fixture study: lookup tables in place of multiplication"
+type: "dataset"
+version: "1.0.0"
