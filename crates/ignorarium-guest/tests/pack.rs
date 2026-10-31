@@ -7,7 +7,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt, symlink};
 use std::path::Path;
 use std::process::Command;
 
@@ -44,6 +44,10 @@ fn pack_round_trip_keeps_the_tree() {
     );
     let out = round_trip(p);
     assert!(out.path().join("empty").is_dir());
+    // An "other" entry comes back as a FIFO that only its owner may open.
+    let fifo = fs::symlink_metadata(out.path().join("f")).unwrap();
+    assert!(fifo.file_type().is_fifo());
+    assert_eq!(fifo.permissions().mode() & 0o7777, 0o600);
 }
 
 #[test]

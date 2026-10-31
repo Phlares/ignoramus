@@ -269,6 +269,46 @@ fn selftest_tries_io_uring_setup() {
     );
 }
 
+const NO_FDS: &str = "IGNORARIUM_TEST_NO_FDS";
+
+/// Outside a guest the answer is the host kernel's. Where io_uring is on, the call works,
+/// and a process with no descriptor left gets `EMFILE`.
+#[test]
+fn io_uring_setup_errno_is_the_kernels_answer() {
+    use ignorarium_guest::sys::io_uring_setup_errno;
+    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+    if std::env::var_os(NO_FDS).is_some() {
+        let max = getrlimit(Resource::Nofile).maximum;
+        setrlimit(
+            Resource::Nofile,
+            Rlimit {
+                current: Some(0),
+                maximum: max,
+            },
+        )
+        .unwrap();
+        assert_eq!(io_uring_setup_errno(), Some(libc::EMFILE));
+        return;
+    }
+    let switch = fs::read_to_string("/proc/sys/kernel/io_uring_disabled");
+    if !switch.is_ok_and(|v| v.trim() == "0") {
+        println!("skip: io_uring is off or absent on this kernel");
+        return;
+    }
+    assert_eq!(io_uring_setup_errno(), None);
+    let me = std::env::current_exe().unwrap();
+    let child = std::process::Command::new(me)
+        .args(["--exact", "io_uring_setup_errno_is_the_kernels_answer"])
+        .env(NO_FDS, "1")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&child.stdout);
+    assert!(
+        child.status.success() && text.contains("1 passed"),
+        "{text}"
+    );
+}
+
 #[test]
 fn the_guest_counts_io_uring_as_blocked_only_when_refused() {
     // The filter's answer, or a kernel without the call; any other errno leaves it open.

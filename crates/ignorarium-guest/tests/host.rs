@@ -561,6 +561,42 @@ fn a_closed_channel_is_a_guest_error() {
 }
 
 #[test]
+fn a_channel_closed_while_the_job_is_sent_is_a_guest_error_at_once() {
+    let mut rig = Rig::sleeper();
+    // Larger than the socket buffers, so the host still writes when the guest hangs up.
+    rig.job.argv = vec!["a".repeat(900_000)];
+    let h = rig.guest(|s, _| {
+        hello(s);
+        thread::sleep(ms(200));
+    });
+    let t = Instant::now();
+    let res = rig.run();
+    // The report deadline is 15 s away: a broken pipe ends the row, not the deadline.
+    assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+    h.join().unwrap();
+    match res {
+        Err(VmError::Guest(m)) => assert!(m.contains("closed while sending the job"), "{m}"),
+        other => panic!("{:?}", other),
+    }
+    rig.pid_gone();
+}
+
+#[test]
+fn a_vmm_that_left_its_group_is_reaped_without_a_kill_fault() {
+    // The VMM moves to its parent's group and exits, so its own group is gone (ESRCH) by
+    // the time the host kills it.
+    let rig = Rig::new(concat!(
+        "echo $$ > $PIDFILE\n",
+        "exec python3 -c 'import os; os.setpgid(0, os.getpgid(os.getppid())); os._exit(3)'\n",
+    ));
+    match rig.run() {
+        Err(VmError::Boot(m)) => assert!(m.contains("exit status: 3"), "{m}"),
+        other => panic!("{:?}", other),
+    }
+    rig.pid_gone();
+}
+
+#[test]
 fn the_vmm_is_killed_when_it_outlives_the_report() {
     let mut rig = Rig::sleeper();
     rig.vm.exit_timeout = ms(100);
