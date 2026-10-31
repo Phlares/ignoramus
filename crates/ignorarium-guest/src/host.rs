@@ -460,15 +460,20 @@ fn check_inputs(vm: &Vm, job: &HostJob, work: &Path) -> io::Result<()> {
             "work dir is too deep for a Unix socket: {listen_len} bytes, at most {SOCKET_PATH_MAX}"
         )));
     }
-    // A comma would split a Cloud Hypervisor option.
+    // Cloud Hypervisor v54 splits an option at a comma and fails on a bracket or a quote.
     let paths = [&vm.kernel, &vm.initramfs, &vm.rootfs]
         .into_iter()
         .chain(vm.serial_log.as_ref())
         .map(PathBuf::as_path)
         .chain([work]);
     for p in paths {
-        if p.as_os_str().as_bytes().contains(&b',') {
-            return Err(invalid(format!("path {} holds a comma", p.display())));
+        let bytes = p.as_os_str().as_bytes();
+        if let Some(&c) = bytes.iter().find(|b| b",[]\"".contains(b)) {
+            return Err(invalid(format!(
+                "path {} holds {:?}, which Cloud Hypervisor cannot parse in an option",
+                p.display(),
+                char::from(c)
+            )));
         }
     }
     for (what, dir) in [("work dir", work), ("output dir", &job.output_dir)] {

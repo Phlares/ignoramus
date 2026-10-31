@@ -791,27 +791,43 @@ fn a_non_empty_output_dir_is_refused_before_boot() {
 }
 
 #[test]
-fn a_comma_in_a_path_is_refused_before_boot() {
+fn a_path_cloud_hypervisor_cannot_parse_is_refused_before_boot() {
+    // Cloud Hypervisor v54 splits an option at a comma and fails on a bracket or a quote.
     let mut rig = Rig::new(&format!("touch $PIDFILE\n{SLEEPER}"));
-    let comma = rig.root.path().join("w,x");
-    fs::create_dir(&comma).unwrap();
-    refused_before_boot(&rig, &comma);
-    let set: [fn(&mut Vm); 4] = [
-        |v| v.kernel = "k,x".into(),
-        |v| v.initramfs = "i,x".into(),
-        |v| v.rootfs = "r,x".into(),
-        |v| v.serial_log = Some("s,x".into()),
-    ];
-    for f in set {
-        let saved = (
-            rig.vm.kernel.clone(),
-            rig.vm.initramfs.clone(),
-            rig.vm.rootfs.clone(),
-        );
-        f(&mut rig.vm);
-        refused_before_boot(&rig, &rig.work);
-        (rig.vm.kernel, rig.vm.initramfs, rig.vm.rootfs) = saved;
-        rig.vm.serial_log = None;
+    let why = |p: &Path, c: char| {
+        let shown = p.display();
+        format!("path {shown} holds {c:?}, which Cloud Hypervisor cannot parse in an option")
+    };
+    for c in [',', '[', ']', '"'] {
+        let work = rig.root.path().join(format!("w{c}x"));
+        fs::create_dir(&work).unwrap();
+        assert_eq!(refused_before_boot(&rig, &work), why(&work, c));
+        let set: [fn(&mut Vm, PathBuf); 4] = [
+            |v, p| v.kernel = p,
+            |v, p| v.initramfs = p,
+            |v, p| v.rootfs = p,
+            |v, p| v.serial_log = Some(p),
+        ];
+        for f in set {
+            let saved = (
+                rig.vm.kernel.clone(),
+                rig.vm.initramfs.clone(),
+                rig.vm.rootfs.clone(),
+            );
+            let bad = PathBuf::from(format!("f{c}x"));
+            f(&mut rig.vm, bad.clone());
+            assert_eq!(refused_before_boot(&rig, &rig.work), why(&bad, c));
+            (rig.vm.kernel, rig.vm.initramfs, rig.vm.rootfs) = saved;
+            rig.vm.serial_log = None;
+        }
+    }
+    // An equals sign and a space parse: the VMM starts, and here exits at once.
+    let rig = Rig::new("exit 3\n");
+    for c in ['=', ' '] {
+        let work = rig.root.path().join(format!("w{c}x"));
+        fs::create_dir(&work).unwrap();
+        let res = run_row(&rig.vm, &rig.job, &work, &|| true);
+        assert!(matches!(res, Err(VmError::Boot(_))), "{res:?}");
     }
 }
 
