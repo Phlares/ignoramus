@@ -246,13 +246,7 @@ impl RunLock {
                     "in_flight": in_flight.or(left),
                     "note": note,
                 });
-                let draft = RecordDraft {
-                    study: id.into(),
-                    row: None,
-                    kind: "stop".into(),
-                    body,
-                };
-                records::append(&log, key, draft)?
+                records::append(&log, key, RecordDraft::new(id, "stop", body))?
             }
         };
         let why = record.body["why"].as_str().unwrap_or(reason);

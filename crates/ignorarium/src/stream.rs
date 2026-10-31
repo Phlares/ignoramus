@@ -319,15 +319,6 @@ pub fn next_of(
     })
 }
 
-fn draft(study: &str, kind: &str, body: Value) -> RecordDraft {
-    RecordDraft {
-        study: study.into(),
-        row: None,
-        kind: kind.into(),
-        body,
-    }
-}
-
 /// The stream of one log.
 pub struct Log {
     path: PathBuf,
@@ -382,14 +373,18 @@ impl Log {
             }
             let mut drafts = Vec::new();
             if all.is_empty() {
-                drafts.push(draft("", CONFIG, config()));
+                drafts.push(RecordDraft::new("", CONFIG, config()));
             }
             if epoch {
-                drafts.push(draft("", EPOCH, json!({ "epoch": r.epochs.len() })));
+                drafts.push(RecordDraft::new(
+                    "",
+                    EPOCH,
+                    json!({ "epoch": r.epochs.len() }),
+                ));
             }
             let log = self.log.as_str();
             let body = json!({ "log": log, "study": study, "slot": index, "level": level });
-            drafts.push(draft(study, OPEN, body));
+            drafts.push(RecordDraft::new(study, OPEN, body));
             opened = Some(Next { slot: index, level });
             Ok(drafts)
         })?;
@@ -421,7 +416,7 @@ impl Log {
             let body =
                 json!({ "slot": slot, "study": study, "e_value": e, "discovery": discovery });
             decided = Some(discovery);
-            Ok(vec![draft(study, CLOSE, body)])
+            Ok(vec![RecordDraft::new(study, CLOSE, body)])
         })?;
         Ok(decided.expect("a decision is made whenever the append succeeds"))
     }

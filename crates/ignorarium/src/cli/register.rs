@@ -507,23 +507,19 @@ fn store(
             key,
         )
         .map_err(|e| io(log, e))?;
+    let body = record_body(
+        &a.hash,
+        leaf,
+        log,
+        &a.filled,
+        &a.root,
+        frozen,
+        alpha.clone(),
+    )?;
     records::append(
         &dir.join("records.jsonl"),
         key,
-        RecordDraft {
-            study: id.into(),
-            row: None,
-            kind: REGISTER.into(),
-            body: record_body(
-                &a.hash,
-                leaf,
-                log,
-                &a.filled,
-                &a.root,
-                frozen,
-                alpha.clone(),
-            )?,
-        },
+        RecordDraft::new(id, REGISTER, body),
     )
     .map_err(|e| io("records.jsonl", e))?;
     Ok((leaf, alpha))

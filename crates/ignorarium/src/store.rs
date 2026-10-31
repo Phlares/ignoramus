@@ -213,12 +213,7 @@ impl Store {
             "normalized_sha256": meta.normalized_sha256,
             "source": source, "file": record_name(file),
         });
-        let draft = RecordDraft {
-            study: "store".into(),
-            row: None,
-            kind: "import".into(),
-            body,
-        };
+        let draft = RecordDraft::new("store", "import", body);
         records::append(&self.root.join("imports.jsonl"), key, draft)
             .map_err(|e| io::Error::other(format!("imports.jsonl: {e}")))?;
         Ok(())

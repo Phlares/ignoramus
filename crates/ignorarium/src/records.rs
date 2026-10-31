@@ -32,6 +32,18 @@ pub struct RecordDraft {
     pub body: serde_json::Value,
 }
 
+impl RecordDraft {
+    /// A record of `study` that belongs to no row.
+    pub fn new(study: &str, kind: &str, body: serde_json::Value) -> RecordDraft {
+        RecordDraft {
+            study: study.into(),
+            row: None,
+            kind: kind.into(),
+            body,
+        }
+    }
+}
+
 /// One stored line.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
