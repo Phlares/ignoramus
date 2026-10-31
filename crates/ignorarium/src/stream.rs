@@ -222,6 +222,17 @@ impl Replay {
         (self.opened, slot)
     }
 
+    /// Open the slot a study would get now, after starting the epoch that is due, if one is:
+    /// whether an epoch started, the slot's number over the log, and the slot.
+    fn open_next(&mut self) -> (bool, u64, Slot) {
+        let epoch = self.epoch_due();
+        if epoch {
+            self.start_epoch();
+        }
+        let (n, slot) = self.open();
+        (epoch, n, slot)
+    }
+
     /// True when `study` holds or held slot `slot` at `level`.
     fn gave(&self, study: &str, slot: u64, level: f64) -> bool {
         (self.given.get(&slot)).is_some_and(|(s, l)| s == study && l.to_bits() == level.to_bits())
@@ -309,10 +320,7 @@ pub fn next_of(
             level: a.level,
         });
     }
-    if r.epoch_due() {
-        r.start_epoch();
-    }
-    let (slot, s) = r.open();
+    let (_, slot, s) = r.open_next();
     Ok(Next {
         slot,
         level: s.level(),
@@ -358,11 +366,7 @@ impl Log {
         let mut opened = None;
         records::append_with(&self.path, key, |all| -> Result<_, StreamError> {
             let mut r = replay(self.log, all)?;
-            let epoch = r.epoch_due();
-            if epoch {
-                r.start_epoch();
-            }
-            let (index, slot) = r.open();
+            let (epoch, index, slot) = r.open_next();
             let level = slot.level();
             if !(level > 0.0 && level >= at_least) {
                 return Err(StreamError::Lower {
