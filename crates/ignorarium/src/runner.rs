@@ -465,9 +465,9 @@ pub fn prepare_with(
 }
 
 /// Why levels 2 and up cannot run the study's image, when they cannot: the `run.isolation`
-/// reason, and the refusal when no lower level is left. They run rows only in an environment image, from
-/// its disk, which this builds once. A disk that cannot be built for a fault of the host
-/// refuses the run: the box never falls back to a lower level by itself.
+/// reason, and the refusal when no lower level is left. They run rows only in an environment
+/// image, from its disk, which this builds once. A disk that cannot be built for a fault of
+/// the host refuses the run: the box never falls back to a lower level by itself.
 fn image_unfit(rootfs: Option<&Path>) -> Result<Option<(String, String)>, RunError> {
     let Some(root) = rootfs else {
         let why = format!("{NO_IMAGE}; the study has no env/ and no pins.environment");
@@ -775,11 +775,12 @@ pub fn progress(
 }
 
 /// In a confirmatory plan, refuse a confirmation input that holds the same data as a selection
-/// or calibration input (E-CNF-004): `check` cannot compare a file that was absent at registration, and a
-/// late copy of a registered file has a registered hash. Then a selection or confirmation
-/// input that the registered plan leaf did not hold is late: refuse it if another study used
-/// it, else record it under this study's id once. The study's own leaves, its plan leaf and
-/// its late-data leaves, are no earlier use. `all` are the inputs' hashes in spec order.
+/// or calibration input (E-CNF-004): `check` cannot compare a file that was absent at
+/// registration, and a late copy of a registered file has a registered hash. Then a selection
+/// or confirmation input that the registered plan leaf did not hold is late: refuse it if
+/// another study used it, else record it under this study's id once. The study's own leaves,
+/// its plan leaf and its late-data leaves, are no earlier use. `all` are the inputs' hashes in
+/// spec order.
 /// Every lookup finishes before the append takes its lock.
 fn gate_late_data(
     home: &Home,

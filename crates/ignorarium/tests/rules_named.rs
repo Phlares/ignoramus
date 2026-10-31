@@ -3364,6 +3364,41 @@ fn a_calibration_input_with_the_confirmation_data_is_not_disjoint() {
 }
 
 #[test]
+fn a_folder_input_holds_no_data_to_share() {
+    // The box never reads or links a folder as an input, so a folder that holds a copy of
+    // the other input's text shares nothing with it. One that holds the confirmation input
+    // itself is nested, which the path rule reports.
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data/s.txt", b"selection text");
+    write(dir.path(), "data/c.txt", b"one text");
+    write(dir.path(), "cal/c.txt", b"one text");
+    write(dir.path(), "data/k.txt", b"one text");
+    let mut s = pair("data/s.txt", "data/c.txt");
+    set(&mut s, "/inputs/0/path", j(json!("data/k.txt")));
+    assert_eq!(
+        codes_paths(&named(&s, dir.path())),
+        [("E-CNF-004", "inputs[2].sha256")]
+    );
+    // The calibration input is a folder with the confirmation text inside.
+    set(&mut s, "/inputs/0/path", j(json!("cal")));
+    assert!(named(&s, dir.path()).is_empty());
+    // The confirmation input is a folder with the calibration text inside.
+    set(&mut s, "/inputs/0/path", j(json!("data/c.txt")));
+    set(&mut s, "/inputs/2/path", j(json!("cal")));
+    assert!(named(&s, dir.path()).is_empty());
+    // The calibration input is the folder that holds the confirmation input.
+    let mut s = pair("data/s.txt", "data/c.txt");
+    set(&mut s, "/inputs/0/path", j(json!("data")));
+    assert_eq!(
+        codes_paths(&named(&s, dir.path())),
+        [
+            ("E-PTH-001", "inputs[1].path"),
+            ("E-PTH-001", "inputs[2].path")
+        ]
+    );
+}
+
+#[test]
 fn an_exploratory_plan_may_calibrate_on_its_confirmation_text() {
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "data/s.txt", b"selection text");
