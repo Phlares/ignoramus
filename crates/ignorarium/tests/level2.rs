@@ -1297,18 +1297,18 @@ fn the_vm_holds_the_cap_the_out_disk_and_the_guest() {
     // No declared memory: today's machine.
     assert_eq!(b.vm_mem_mib(&job(None)), 1024);
     // The cap, /out (half the 256 MiB output disk), /tmp (all of it) and the guest's own,
-    // over the 63/64 of the machine that the kernel's page data leaves.
+    // over the 39/40 of the machine that the kernel's own reserve leaves.
     assert_eq!(GUEST_MIB, 256);
-    // (2048 + 128 + 256 + 256) x 64 / 63 = 2730.7
-    assert_eq!(b.vm_mem_mib(&job(Some(2048))), 2731);
-    // (64 + 640) x 64 / 63 = 715.2
-    assert_eq!(b.vm_mem_mib(&job(Some(64))), 716);
+    // (2048 + 128 + 256 + 256) x 40 / 39 = 2756.9
+    assert_eq!(b.vm_mem_mib(&job(Some(2048))), 2757);
+    // (64 + 640) x 40 / 39 = 722.05
+    assert_eq!(b.vm_mem_mib(&job(Some(64))), 723);
     b.out_mib = 16;
-    // (2048 + 8 + 16 + 256) x 64 / 63 = 2364.95
-    assert_eq!(b.vm_mem_mib(&job(Some(2048))), 2365);
-    // /out of an odd disk takes a part of a MiB: (2048 + 1.5 + 3 + 256) x 64 / 63 = 2345.1
+    // (2048 + 8 + 16 + 256) x 40 / 39 = 2387.7
+    assert_eq!(b.vm_mem_mib(&job(Some(2048))), 2388);
+    // /out of an odd disk takes a part of a MiB: (2048 + 1.5 + 3 + 256) x 40 / 39 = 2367.7
     b.out_mib = 3;
-    assert_eq!(b.vm_mem_mib(&job(Some(2048))), 2346);
+    assert_eq!(b.vm_mem_mib(&job(Some(2048))), 2368);
     b.mem_mib = 4096;
     assert_eq!(b.vm_mem_mib(&job(None)), 4096);
     // No machine has that much; the host refuses the largest size there is.
@@ -1327,21 +1327,22 @@ fn level2_is_unfit_for_a_machine_larger_than_the_host() {
             format!("MemTotal: {kb:>14} kB\nMemFree: 1 kB\n"),
         )
     };
-    // A cap of 2048 MiB needs a 2731 MiB machine: 2796544 kB.
-    host(2796544).unwrap();
+    // A cap of 2048 MiB needs a 2757 MiB machine: 2823168 kB.
+    host(2823168).unwrap();
     assert_eq!(b.unfit(Some(2048)), None);
     assert_eq!(b.unfit(None), None);
-    host(2796543).unwrap();
+    host(2823167).unwrap();
     assert_eq!(
         b.unfit(Some(2048)).unwrap(),
-        "a level 2 machine for rows of 2048 MiB needs 2731 MiB, more than the host's 2730 MiB"
+        "a level 2 machine for rows of 2048 MiB needs 2757 MiB, more than the host's MemTotal \
+         of 2756 MiB"
     );
     // Without a cap the machine is 1024 MiB.
     host(1024 * 1024 - 1).unwrap();
     assert_eq!(
         b.unfit(None).unwrap(),
         "a level 2 machine for rows of no declared memory needs 1024 MiB, more than the \
-         host's 1023 MiB"
+         host's MemTotal of 1023 MiB"
     );
     fs::write(&b.meminfo, "MemFree: 1 kB\n").unwrap();
     let path = b.meminfo.display();
@@ -1454,9 +1455,10 @@ with open(os.environ["IGNORARIUM_OUT"] + "/load", "r+") as f:
 
 /// Runs `FULL_LOAD` under a cap of `cap_mib` and checks what the guest kept for itself: the
 /// machine less what was still available and what the payload and both tmpfs held. The
-/// formula gives the guest `GUEST_MIB` and the kernel's page data, 1/64 of the machine; a
-/// guest that needs more kills the payload (137) or sends no report.
-fn full_load(r: &Ready, cap_mib: u32, timeout: Duration) {
+/// formula gives the guest `GUEST_MIB` and the kernel's reserve, 1/40 of the machine; a
+/// guest that needs more kills the payload (137) or the agent refuses the row at boot. One
+/// line of what it measured, `Err` when the row failed or a check did not hold.
+fn full_load(r: &Ready, cap_mib: u32, timeout: Duration) -> Result<String, String> {
     let (_d, job) = row(r, FULL_LOAD, timeout);
     let mut env = job.env.clone();
     env.push(("CAP_MIB".into(), cap_mib.to_string()));
@@ -1467,7 +1469,12 @@ fn full_load(r: &Ready, cap_mib: u32, timeout: Duration) {
     };
     let size = r.level2.vm_mem_mib(&job);
     let o = r.level2.run_row(&job, &|| true).unwrap();
-    assert_eq!(o.exit, Exit::Ok, "{o:?}");
+    if o.exit != Exit::Ok {
+        return Err(format!(
+            "a {size} MiB guest, cap {cap_mib} MiB: {:?}",
+            o.exit
+        ));
+    }
     let out_fill = fs::metadata(job.output_dir.join("fill")).unwrap().len() >> 10;
     let note = read(&job, "load");
     let note: Vec<u64> = note
@@ -1477,36 +1484,44 @@ fn full_load(r: &Ready, cap_mib: u32, timeout: Duration) {
     let [available, anon, tmp_fill] = note[..] else {
         panic!("{note:?}")
     };
-    // Both tmpfs full, within a page per file of the cap, and the data near its cap.
-    assert!(tmp_fill >= (256 << 10) - 4, "{tmp_fill} kB in /tmp");
-    assert!(out_fill >= (128 << 10) - 8, "{out_fill} kB in /out");
-    assert!(anon >= u64::from(cap_mib - 32) << 10, "{anon} kB of data");
     let start = read(&job, "meminfo");
     let machine = u64::from(size) << 10;
     let held = anon + tmp_fill + out_fill + 8;
     let own = machine.saturating_sub(available + held);
-    println!(
-        "a {size} MiB guest, cap {cap_mib} MiB: MemTotal {} kB, MemAvailable {} kB at the start \
-         and {available} kB at full load; the guest kept {own} kB for itself",
+    let share = u64::from(GUEST_MIB << 10) + machine / 40;
+    // What the row may hold: the cap and both tmpfs.
+    let row_kb = u64::from(cap_mib + 128 + 256) << 10;
+    let at_boot = meminfo_kb(&start, "MemAvailable");
+    let line = format!(
+        "a {size} MiB guest, cap {cap_mib} MiB: MemTotal {} kB; MemAvailable {at_boot} kB at \
+         the start, {} kB over the cap and both tmpfs; {available} kB at full load; the guest \
+         kept {own} kB of its {share} kB share",
         meminfo_kb(&start, "MemTotal"),
-        meminfo_kb(&start, "MemAvailable"),
+        at_boot as i64 - row_kb as i64,
     );
-    assert!(
-        own <= u64::from(GUEST_MIB << 10) + machine / 64,
-        "the guest kept {own} kB"
-    );
+    // Both tmpfs full, within a page per file of the cap, and the data near its cap.
+    let full = tmp_fill >= (256 << 10) - 4 && out_fill >= (128 << 10) - 8;
+    let near = anon >= u64::from(cap_mib - 32) << 10;
+    if full && near && own <= share {
+        Ok(line)
+    } else {
+        Err(format!(
+            "{line} ({tmp_fill} kB in /tmp, {out_fill} in /out, {anon} of data)"
+        ))
+    }
 }
 
 #[test]
 fn a_row_near_its_memory_with_full_tmpfs_runs_at_level_2() {
     let Some(r) = ready() else { return };
-    // (256 + 128 + 256 + 256) x 64 / 63 = 910.2
+    // (256 + 128 + 256 + 256) x 40 / 39 = 918.97
     let job = RowJob {
         memory_mib: Some(256),
         ..RowJob::default()
     };
-    assert_eq!(r.level2.vm_mem_mib(&job), 911);
-    full_load(&r, 256, LONG);
+    assert_eq!(r.level2.vm_mem_mib(&job), 919);
+    let line = full_load(&r, 256, LONG).unwrap();
+    println!("{line}");
 }
 
 /// The host's `MemAvailable`, in MiB.
@@ -1517,18 +1532,29 @@ fn host_available_mib() -> u64 {
     ) >> 10
 }
 
-/// The kernel's page data grows with the machine, 1/64 of it; past about a 5 GiB machine it
-/// would eat the 256 MiB base. The largest cap up to 8 GiB this host can back with a fifth
-/// of its available memory to spare; under 6 GiB the test shows nothing and fails. Alone,
-/// on a KVM host: `cargo test --test level2 a_large_row -- --ignored`.
+/// The kernel's reserve grows with the machine, and past 4 GiB a bounce buffer would take
+/// 64 MiB more. Rows at their cap with both tmpfs full, in machines of about 1, 3 and 7 GiB,
+/// or the largest this host backs with a fifth of its available memory to spare; a host that
+/// cannot back a machine past 4 GiB fails the test. Alone, on a KVM host:
+/// `cargo test --test level2 large_rows -- --ignored --nocapture`.
 #[test]
-#[ignore = "boots a machine of up to 9 GiB"]
-fn a_large_row_at_its_cap_with_full_tmpfs_leaves_the_guest_its_base() {
+#[ignore = "boots machines of up to 7 GiB"]
+fn large_rows_at_their_cap_with_full_tmpfs_run_at_1_3_and_7_gib() {
     let Some(r) = ready() else { return };
-    let room = host_available_mib() * 4 / 5 * 63 / 64;
-    let cap = (room.saturating_sub(640) / 256 * 256).min(8192);
-    assert!(cap >= 6144, "this host backs a cap of only {cap} MiB");
-    full_load(&r, u32::try_from(cap).unwrap(), Duration::from_secs(600));
+    let room = host_available_mib() * 4 / 5 * 39 / 40;
+    let largest = room.saturating_sub(640) / 256 * 256;
+    assert!(
+        largest >= 4096,
+        "this host backs a cap of only {largest} MiB"
+    );
+    let runs: Vec<_> = [384, 2304, 6144]
+        .map(|cap: u64| full_load(&r, u32::try_from(cap.min(largest)).unwrap(), LONG * 10))
+        .into_iter()
+        .collect();
+    for run in &runs {
+        println!("{}", run.as_ref().unwrap_or_else(|e| e));
+    }
+    assert!(runs.iter().all(Result::is_ok), "{runs:#?}");
 }
 
 #[test]

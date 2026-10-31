@@ -25,7 +25,10 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::thread::sleep;
 use std::time::Duration;
-use steps::{disable_io_uring, disk_by_serial, disk_bytes, mix_seed, now_nanos, set_clock};
+use steps::{
+    disable_io_uring, disk_by_serial, disk_bytes, mem_available, mix_seed, now_nanos, room,
+    set_clock,
+};
 
 /// The payload's user and group: `nobody` and `nogroup` in Debian-based images.
 pub const PAYLOAD_UID: u32 = 65534;
@@ -117,6 +120,11 @@ fn connect() -> io::Result<OwnedFd> {
 /// packs `/out` onto the output disk.
 fn row(chan: &mut File, out_disk: &mut File, out_bytes: u64) -> io::Result<Report> {
     let job: Job = read_frame(chan)?;
+    room(
+        mem_available(Path::new("/proc/meminfo"))?,
+        job.data_limit,
+        out_bytes,
+    )?;
     let seed = seed_from_hex(&job.seed_hex)?;
     mix_seed(&seed, &OpenOptions::new().write(true).open("/dev/urandom")?)?;
     set_clock(job.unix_nanos)?;

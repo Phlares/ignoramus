@@ -4,9 +4,10 @@
 //! unreaped, so a caller must keep SIGCHLD at its default action: an ignored SIGCHLD lets the
 //! kernel reap the VMM first.
 use crate::agent::payload::exited;
+use crate::agent::sandbox::tmpfs_bytes;
 use crate::agent::steps::now_nanos;
 use crate::image::{ext4, size_mib};
-use crate::pack::{self, Link, Unpacked, out_caps};
+use crate::pack::{self, Link, Unpacked};
 use crate::proto::{
     CONTROL_PORT, GUEST_CID, Job, MAX_FRAME, Report, SERIAL_IN, SERIAL_OUT, SERIAL_PAYLOAD,
     SERIAL_ROOTFS, ToHost, read_frame, write_frame,
@@ -34,16 +35,14 @@ pub const GUEST_MIB: u32 = 256;
 
 /// The guest memory, in MiB, that a row needs: the payload's data limit in bytes (none
 /// counts 0), the `/out` and `/tmp` tmpfs of an output disk of `out_mib` (their pages live in
-/// guest memory, outside the data limit) and `GUEST_MIB`, over 63/64 of the machine: the
-/// kernel keeps 64 bytes of page data for each 4 KiB page. A part of a MiB counts as a whole.
+/// guest memory, outside the data limit) and `GUEST_MIB`, over 39/40 of the machine: the
+/// kernel's page data, reserves and page tables grow with it, about 1/43 as measured. A part
+/// of a MiB counts as a whole. The agent checks the guest it boots against the same parts.
 pub fn needed_mem_mib(data_limit: Option<u64>, out_mib: u64) -> u64 {
-    let out_bytes = out_mib.saturating_mul(1 << 20);
-    // The agent caps /out at `out_caps` of the disk and /tmp at the whole disk.
     let held = (data_limit.unwrap_or(0))
-        .saturating_add(out_caps(out_bytes).0)
-        .saturating_add(out_bytes)
+        .saturating_add(tmpfs_bytes(out_mib.saturating_mul(1 << 20)))
         .saturating_add(u64::from(GUEST_MIB) << 20);
-    held.saturating_mul(64).div_ceil(63 << 20)
+    held.saturating_mul(40).div_ceil(39 << 20)
 }
 
 /// What the caller hears while a row runs.
@@ -196,9 +195,11 @@ fn disk(path: &Path, readonly: bool, serial: &str) -> OsString {
 
 /// Cloud Hypervisor arguments for one row. No network device, no API socket.
 pub fn vmm_args(vm: &Vm, work: &Path) -> Vec<OsString> {
+    // Virtio devices without an IOMMU need no bounce buffer, which would take 64 MiB of a
+    // guest past 4 GiB.
     let (cmdline, serial) = match &vm.serial_log {
-        Some(log) => ("console=ttyS0 quiet", kv("file=", log)),
-        None => ("quiet", OsString::from("off")),
+        Some(log) => ("console=ttyS0 quiet swiotlb=noforce", kv("file=", log)),
+        None => ("quiet swiotlb=noforce", OsString::from("off")),
     };
     let mut vsock = OsString::from(format!("cid={GUEST_CID},"));
     vsock.push(kv("socket=", &work.join(VSOCK_SOCKET)));
@@ -510,8 +511,8 @@ fn check_inputs(vm: &Vm, job: &HostJob, work: &Path) -> io::Result<()> {
     if u64::from(vm.mem_mib) < need {
         return Err(invalid(format!(
             "a guest memory of {} MiB cannot hold the row: its data limit, /out and /tmp of \
-             the {} MiB output disk, {GUEST_MIB} MiB for the guest and the kernel's page \
-             data need {need} MiB",
+             the {} MiB output disk, {GUEST_MIB} MiB for the guest and the kernel's reserve \
+             need {need} MiB",
             vm.mem_mib, vm.out_mib
         )));
     }

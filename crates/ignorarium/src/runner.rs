@@ -129,6 +129,9 @@ pub enum RunError {
     EnvironmentPin(String),
     /// The environment cannot be built or extracted.
     Environment(String),
+    /// Level 2's machine for the study's rows is larger than the host's memory, and no lower
+    /// level may run the study.
+    Machine(String),
     /// A folder of the study cannot become a level 2 disk as it is: what, and why.
     Disk(String),
     NoKey,
@@ -197,6 +200,7 @@ impl fmt::Display for RunError {
                 write!(f, "pins.environment {p:?} is not a store digest")
             }
             RunError::Environment(e) => write!(f, "environment: {e}"),
+            RunError::Machine(e) => write!(f, "{e}"),
             RunError::Disk(e) => write!(f, "level 2 cannot make a disk of {e}; rename it"),
             RunError::NoKey => write!(f, "the box key does not exist"),
             RunError::Busy => write!(f, "another run of this study is in progress"),
@@ -364,15 +368,17 @@ pub fn prepare_with(
     } else {
         None
     };
-    // Levels 2 and up: the image first, then the machine the rows' memory needs.
+    // Levels 2 and up: the image first, then the machine the rows' memory needs. Each reason
+    // comes with the refusal it becomes when no lower level is left.
     let memory = spec.design.row_memory_mib;
     let mut unfit = None;
     let (skipped, fit): (Vec<_>, Vec<_>) = (fit.into_iter()).partition(|b| {
         let why = (b.level() >= IMAGE_LEVEL)
-            .then(|| {
-                image
-                    .clone()
-                    .or_else(|| b.unfit(memory).map(|w| (w.clone(), w)))
+            .then(|| match &image {
+                Some((reason, refusal)) => {
+                    Some((reason.clone(), RunError::Environment(refusal.clone())))
+                }
+                None => b.unfit(memory).map(|w| (w.clone(), RunError::Machine(w))),
             })
             .flatten();
         let skip = why.is_some();
@@ -382,7 +388,7 @@ pub fn prepare_with(
     let skipped: Vec<u8> = skipped.iter().map(|b| b.level()).collect();
     // Only these rules can empty the list.
     let Some(backend) = fit.into_iter().max_by_key(|b| b.level()) else {
-        return Err(RunError::Environment(unfit.unwrap_or_default().1));
+        return Err(unfit.map_or(RunError::Environment(String::new()), |(_, e)| e));
     };
 
     let leaf = register.leaf;

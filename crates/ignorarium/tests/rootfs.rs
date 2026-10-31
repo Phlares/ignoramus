@@ -772,10 +772,10 @@ fn a_machine_larger_than_the_host_keeps_level_2_out() {
     let both = || -> Vec<Box<dyn Backend>> { vec![Box::new(Stub(1)), Box::new(Cramped)] };
     let prepare = |id: &str| prepare_with(&lab.home, id, &common::work_of(&lab.home, id), both());
     let why = "a machine for rows of 1024 MiB does not fit";
-    // Only level 2 would do, so the run is refused before any row.
+    // Only level 2 would do, so the run is refused before any row, in the backend's words.
     let err = prepare("big2").err().unwrap();
-    assert!(matches!(&err, RunError::Environment(_)), "{err}");
-    assert_eq!(err.to_string(), format!("environment: {why}"));
+    assert!(matches!(&err, RunError::Machine(_)), "{err}");
+    assert_eq!(err.to_string(), why);
     assert!(!lab.home.study_dir("big2").join("schedule.json").exists());
     // A lower minimum runs at level 1 and says why.
     let plan = prepare("big0").unwrap();

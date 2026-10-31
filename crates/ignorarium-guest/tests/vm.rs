@@ -6,7 +6,9 @@
 mod common;
 use common::write_exec;
 use ignorarium_guest::agent::steps::now_nanos;
-use ignorarium_guest::host::{HostJob, REPORT_SLACK, Vm, VmError, VmOutcome, run_row};
+use ignorarium_guest::host::{
+    HostJob, REPORT_SLACK, Vm, VmError, VmOutcome, needed_mem_mib, run_row,
+};
 use ignorarium_guest::image::{has_interp, initramfs};
 use ignorarium_guest::proto::End;
 use std::fs;
@@ -101,6 +103,47 @@ impl Row {
     fn out(&self, name: &str) -> String {
         fs::read_to_string(self.dir.path().join("out").join(name)).unwrap()
     }
+}
+
+/// One more newc cpio archive, holding `pad` as a file of `bytes` zero bytes. The kernel
+/// unpacks every archive in the initramfs, so the file takes guest memory that the host's
+/// size check does not count.
+fn padding(bytes: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (ino, name, mode, size) in [(9, "pad", 0o100644, bytes), (0, "TRAILER!!!", 0, 0)] {
+        let fields = [ino, mode, 0, 0, 1, 0, size, 0, 0, 0, 0, name.len() + 1, 0];
+        out.extend(b"070701");
+        for f in fields {
+            out.extend(format!("{f:08x}").bytes());
+        }
+        out.extend(name.bytes().chain([0]));
+        out.resize(out.len().next_multiple_of(4), 0);
+        out.resize(out.len() + size, 0);
+        out.resize(out.len().next_multiple_of(4), 0);
+    }
+    out
+}
+
+#[test]
+#[ignore = "boots a VM; see the top of the file"]
+fn a_guest_without_room_for_the_row_refuses_it_before_the_payload() {
+    let mut row = Row::sh("touch /out/ran");
+    row.job.data_limit = Some(640 << 20);
+    // The least machine the host accepts for this row, with 256 MiB more held by the guest.
+    let need = needed_mem_mib(row.job.data_limit, row.vm.out_mib);
+    row.vm.mem_mib = u32::try_from(need).unwrap();
+    let mut cpio = fs::read(&row.vm.initramfs).unwrap();
+    cpio.extend(padding(256 << 20));
+    fs::write(&row.vm.initramfs, cpio).unwrap();
+    match row.try_run() {
+        Err(VmError::Guest(m)) => {
+            let want = "MiB available at boot, under the 792 MiB the row needs: a data limit \
+                        of 640 MiB, 24 MiB for /out and /tmp, and a 128 MiB floor";
+            assert!(m.contains(want), "{m}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(!row.dir.path().join("out/ran").exists());
 }
 
 #[test]

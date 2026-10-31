@@ -1,4 +1,5 @@
 //! Boot steps: seed the kernel random pool, set the clock, find the disks.
+use super::sandbox::tmpfs_bytes;
 use crate::sys;
 use rustix::time::{ClockId, Timespec, clock_settime};
 use std::fs::{self, File};
@@ -75,6 +76,44 @@ pub fn disk_by_serial(sys_block: &Path, serial: &str) -> io::Result<PathBuf> {
         io::ErrorKind::NotFound,
         format!("no disk with serial {serial}"),
     ))
+}
+
+/// Memory, in bytes, the guest must still have free at boot beyond what the row may hold: for
+/// the payload's page tables and processes and the page cache.
+pub const FLOOR: u64 = 128 << 20;
+
+/// `MemAvailable` of the `/proc/meminfo` text at `meminfo`, in bytes.
+pub fn mem_available(meminfo: &Path) -> io::Result<u64> {
+    let text = fs::read_to_string(meminfo)?;
+    let value = text.lines().find_map(|l| l.strip_prefix("MemAvailable:"));
+    let kb = value.and_then(|v| v.trim().strip_suffix("kB")?.trim().parse::<u64>().ok());
+    kb.map(|kb| kb << 10).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} names no MemAvailable", meminfo.display()),
+        )
+    })
+}
+
+/// Refuses a row the guest cannot hold: `available` bytes at boot against the payload's data
+/// limit, the `/out` and `/tmp` tmpfs of an output disk of `out_bytes`, and `FLOOR`. The
+/// host sizes the machine by a model of the kernel's own needs; this turns a model that
+/// falls short into a named fault before the payload, never an out-of-memory kill.
+pub fn room(available: u64, data_limit: Option<u64>, out_bytes: u64) -> io::Result<()> {
+    let (data, tmpfs) = (data_limit.unwrap_or(0), tmpfs_bytes(out_bytes));
+    let need = data.saturating_add(tmpfs).saturating_add(FLOOR);
+    if available >= need {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "the guest has {} MiB available at boot, under the {} MiB the row needs: a data limit \
+         of {} MiB, {} MiB for /out and /tmp, and a {} MiB floor",
+        available >> 20,
+        need.div_ceil(1 << 20),
+        data >> 20,
+        tmpfs >> 20,
+        FLOOR >> 20
+    )))
 }
 
 #[cfg(test)]

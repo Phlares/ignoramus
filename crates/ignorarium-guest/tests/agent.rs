@@ -4,7 +4,8 @@ use common::write_exec;
 use ignorarium_guest::agent::payload::{self, Ran};
 use ignorarium_guest::agent::selftest::{self, route_blocked};
 use ignorarium_guest::agent::steps::{
-    disable_io_uring, disk_by_serial, disk_bytes, mix_seed, now_nanos, set_clock,
+    FLOOR, disable_io_uring, disk_by_serial, disk_bytes, mem_available, mix_seed, now_nanos, room,
+    set_clock,
 };
 use ignorarium_guest::agent::{gate, sandbox};
 use ignorarium_guest::pack;
@@ -93,6 +94,40 @@ fn disk_bytes_counts_512_byte_sectors() {
         16384 * 512
     );
     assert!(disk_bytes(d.path(), Path::new("/dev/vdd")).is_err());
+}
+
+#[test]
+fn mem_available_reads_meminfo_in_bytes() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("meminfo");
+    fs::write(&path, "MemTotal:  2000 kB\nMemAvailable:    1500 kB\n").unwrap();
+    assert_eq!(mem_available(&path).unwrap(), 1500 << 10);
+    fs::write(&path, "MemTotal:  2000 kB\n").unwrap();
+    let e = mem_available(&path).unwrap_err();
+    assert_eq!(
+        e.to_string(),
+        format!("{} names no MemAvailable", path.display())
+    );
+    assert!(mem_available(Path::new("/proc/meminfo")).unwrap() > 0);
+}
+
+#[test]
+fn the_guest_refuses_a_row_it_has_no_room_for() {
+    let mib = |m: u64| m << 20;
+    assert_eq!(FLOOR, mib(128));
+    // A 256 MiB cap, /out and /tmp of a 256 MiB disk (128 + 256 MiB) and the floor.
+    let need = mib(256 + 384 + 128);
+    assert!(room(need, Some(mib(256)), mib(256)).is_ok());
+    let e = room(need - 1, Some(mib(256)), mib(256)).unwrap_err();
+    assert_eq!(
+        e.to_string(),
+        "the guest has 767 MiB available at boot, under the 768 MiB the row needs: a data \
+         limit of 256 MiB, 384 MiB for /out and /tmp, and a 128 MiB floor"
+    );
+    // Without a limit: the tmpfs and the floor.
+    assert!(room(mib(384 + 128), None, mib(256)).is_ok());
+    let e = room(mib(384 + 128) - 1, None, mib(256)).unwrap_err();
+    assert!(e.to_string().contains("a data limit of 0 MiB"), "{e}");
 }
 
 fn net_with(names: &[&str]) -> tempfile::TempDir {

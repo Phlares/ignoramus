@@ -359,7 +359,8 @@ impl Backend for Level2 {
         let rows = memory_mib.map_or("no declared memory".into(), |m| format!("{m} MiB"));
         (u64::from(need) << 10 > have_kb).then(|| {
             format!(
-                "a level 2 machine for rows of {rows} needs {need} MiB, more than the host's {} MiB",
+                "a level 2 machine for rows of {rows} needs {need} MiB, more than the host's \
+                 MemTotal of {} MiB",
                 have_kb >> 10
             )
         })

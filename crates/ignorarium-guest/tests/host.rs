@@ -363,7 +363,9 @@ fn vmm_args_have_no_network_and_read_only_inputs() {
     assert_eq!(after(&a, "--vsock"), "cid=3,socket=/w/vsock.sock");
     assert_eq!(after(&a, "--serial"), "off");
     assert_eq!(after(&a, "--console"), "off");
-    assert_eq!(after(&a, "--cmdline"), "quiet");
+    // Virtio devices without an IOMMU need no bounce buffer, which would take 64 MiB of a
+    // guest past 4 GiB.
+    assert_eq!(after(&a, "--cmdline"), "quiet swiotlb=noforce");
     assert_eq!(after(&a, "--kernel"), "kernel");
     assert_eq!(after(&a, "--initramfs"), "initramfs");
     assert_eq!(after(&a, "--cpus"), "boot=2");
@@ -390,7 +392,10 @@ fn vmm_args_log_the_serial_console_on_request() {
     rig.vm.serial_log = Some("/logs/serial.txt".into());
     let a = args_of(&rig.vm, Path::new("/w"));
     assert_eq!(after(&a, "--serial"), "file=/logs/serial.txt");
-    assert!(after(&a, "--cmdline").contains("console=ttyS0"));
+    assert_eq!(
+        after(&a, "--cmdline"),
+        "console=ttyS0 quiet swiotlb=noforce"
+    );
 }
 
 #[test]
@@ -962,16 +967,17 @@ fn channel_errors_hold_no_raw_guest_bytes() {
 
 /// (output disk, data limit, the least guest memory that holds them): `/out` takes half the
 /// disk and `/tmp` all of it, both in guest memory, beside the payload's data and the
-/// guest's own 256 MiB, and the kernel keeps 1/64 of the memory for its page data, so the
-/// sum is over 63/64 of the machine. A part of a MiB counts as a whole one.
+/// guest's own 256 MiB, and the kernel keeps about 1/40 of the memory (its page data,
+/// reserves and page tables), so the sum is over 39/40 of the machine. A part of a MiB counts
+/// as a whole one.
 const SIZES: [(u64, Option<u64>, u32); 4] = [
-    // (32 + 64 + 256) x 64 / 63 = 357.6
-    (64, None, 358),
-    // (26 + 32 + 64 + 256) x 64 / 63 = 384 exactly, and one byte more needs one MiB more.
-    (64, Some(26 << 20), 384),
-    (64, Some((26 << 20) + 1), 385),
-    // (1.5 + 3 + 256) x 64 / 63 = 264.6
-    (3, None, 265),
+    // (32 + 64 + 256) x 40 / 39 = 361.03
+    (64, None, 362),
+    // (38 + 32 + 64 + 256) x 40 / 39 = 400 exactly, and one byte more needs one MiB more.
+    (64, Some(38 << 20), 400),
+    (64, Some((38 << 20) + 1), 401),
+    // (1.5 + 3 + 256) x 40 / 39 = 267.2
+    (3, None, 268),
 ];
 
 #[test]
@@ -989,8 +995,8 @@ fn a_vm_smaller_than_what_its_guest_holds_is_refused_before_boot() {
         let msg = refused_before_boot(&rig, &rig.work);
         let want = format!(
             "a guest memory of {} MiB cannot hold the row: its data limit, /out and /tmp of \
-             the {out_mib} MiB output disk, 256 MiB for the guest and the kernel's page \
-             data need {need} MiB",
+             the {out_mib} MiB output disk, 256 MiB for the guest and the kernel's reserve \
+             need {need} MiB",
             need - 1
         );
         assert_eq!(msg, want);

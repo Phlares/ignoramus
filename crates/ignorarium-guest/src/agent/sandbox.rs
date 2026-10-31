@@ -106,6 +106,12 @@ pub fn build(
     mount_remount(sandbox, ro, "").map_err(|e| named(e, "remount read-only", sandbox))
 }
 
+/// The bytes the view's `/out` and `/tmp` may hold in guest memory, for an output disk of
+/// `out_bytes`: `/out` takes `out_caps` of it and `/tmp` all of it.
+pub fn tmpfs_bytes(out_bytes: u64) -> u64 {
+    out_caps(out_bytes).0.saturating_add(out_bytes)
+}
+
 fn tmpfs(at: &Path, flags: MountFlags, data: &str) -> io::Result<()> {
     mount_fs("tmpfs", at, "tmpfs", flags, data)
 }
