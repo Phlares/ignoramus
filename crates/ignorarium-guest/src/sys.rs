@@ -44,14 +44,68 @@ pub fn reseed_crng(fd: BorrowedFd) -> io::Result<()> {
     check(unsafe { libc::ioctl(fd.as_raw_fd(), RNDRESEEDCRNG) }).map(drop)
 }
 
+fn secs(t: libc::timeval) -> f64 {
+    t.tv_sec as f64 + t.tv_usec as f64 / 1e6
+}
+
 /// User plus system CPU seconds of all children this process has reaped so far.
 pub fn children_cpu_seconds() -> io::Result<f64> {
     // SAFETY: an all-zero rusage is a valid value.
     let mut ru: libc::rusage = unsafe { mem::zeroed() };
     // SAFETY: `ru` is a live rusage that getrusage fills.
     check(unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut ru) })?;
-    let secs = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 / 1e6;
     Ok(secs(ru.ru_utime) + secs(ru.ru_stime))
+}
+
+/// How a child ended, worded as `std::process::ExitStatus` words it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ended {
+    Code(i32),
+    Signal(i32),
+}
+
+impl std::fmt::Display for Ended {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Ended::Code(c) => write!(f, "exit status: {c}"),
+            Ended::Signal(s) => write!(f, "signal: {s}"),
+        }
+    }
+}
+
+/// A reaped child: how it ended, and the user plus system CPU seconds it used, its threads and
+/// the children it reaped included.
+pub struct Reaped {
+    pub ended: Ended,
+    pub cpu_seconds: f64,
+}
+
+/// Waits for child `pid` to end and reaps it. `std::process::Child::wait` drops the resource
+/// usage this reads.
+pub fn wait4(pid: u32) -> io::Result<Reaped> {
+    let mut status: libc::c_int = 0;
+    // SAFETY: an all-zero `rusage` is a valid value for this plain C struct.
+    let mut ru: libc::rusage = unsafe { mem::zeroed() };
+    loop {
+        // SAFETY: `status` and `ru` are live, writable locals of the types wait4 expects.
+        let r = unsafe { libc::wait4(pid as libc::pid_t, &mut status, 0, &mut ru) };
+        if r >= 0 {
+            break;
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+    let ended = if libc::WIFEXITED(status) {
+        Ended::Code(libc::WEXITSTATUS(status))
+    } else {
+        Ended::Signal(libc::WTERMSIG(status))
+    };
+    Ok(Reaped {
+        ended,
+        cpu_seconds: secs(ru.ru_utime) + secs(ru.ru_stime),
+    })
 }
 
 /// The errno of `io_uring_setup`, or `None` when it succeeds (its descriptor is closed

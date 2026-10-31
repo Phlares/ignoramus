@@ -36,6 +36,7 @@ impl Backend for Fake {
             cpu_unknown: None,
             ended: false,
             output_links: Vec::new(),
+            box_cpu_seconds: 0.0,
         })
     }
 }

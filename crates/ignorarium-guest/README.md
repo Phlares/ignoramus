@@ -10,7 +10,7 @@ Runs one experiment row inside a fresh virtual machine (isolation level 2). The 
 | `image` | host | Pinned kernel and hypervisor, the initramfs with the agent, ext4 disks. |
 | `host` | host | `run_row`: build the input and payload disks, start Cloud Hypervisor as the leader of its own process group, serve the one connection, read the outputs back. |
 | `agent` | guest | PID 1: disks, the payload's view, seed, clock, self-test, payload, pack, report. |
-| `sys` | guest | The only `unsafe` code: vsock, the kernel reseed, child CPU time, the io_uring check (the box's level 1 self-test calls it too), killing every process. |
+| `sys` | both | The only `unsafe` code: vsock, the kernel reseed, child CPU time, the reap of one child with its CPU time and the io_uring check (the box calls both too), killing every process. |
 
 The binary `ignorarium-guest` is the agent. It runs only as PID 1 inside the machine.
 
@@ -18,7 +18,7 @@ The binary `ignorarium-guest` is the agent. It runs only as PID 1 inside the mac
 
 Each machine gets four disks: the environment rootfs, the inputs and the payload's folder, as read-only ext4, and a raw output disk that the agent writes the pack to. The payload sees the rootfs's `usr bin lib lib64 etc`, the inputs at `/in` and its own folder at `/payload`. `run_row` builds the input and payload disks for each row; the caller builds the rootfs disk. The payload's `argv[0]` is a path under `/payload`.
 
-`run_row` takes a `host::Watch`. Its `tick` runs between the disk steps and every 5 ms while the host waits on the VMM or the guest; `false` stops the row, and the host kills the VMM's process group. Its `started` names that group once per row, so a caller can kill it after a crash.
+`run_row` takes a `host::Watch`. Its `tick` runs between the disk steps and every 5 ms while the host waits on the VMM or the guest; `false` stops the row, and the host kills the VMM's process group. Its `started` names that group once per row, so a caller can kill it after a crash, and its `reaped` gives the VMM's CPU time once the host has reaped it.
 
 ## In the box
 

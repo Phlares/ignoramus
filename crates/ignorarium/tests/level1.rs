@@ -1047,6 +1047,7 @@ impl Backend for BreakEvents {
             cpu_unknown: self.unknown.then(|| UNKNOWN.into()),
             ended: false,
             output_links: Vec::new(),
+            box_cpu_seconds: 0.0,
         })
     }
 }
@@ -1177,6 +1178,7 @@ impl Backend for BreakAtRetry {
             cpu_unknown: Some(UNKNOWN.into()),
             ended: false,
             output_links: Vec::new(),
+            box_cpu_seconds: 0.0,
         })
     }
 }

@@ -220,6 +220,8 @@ struct Seen {
     stop_on: Option<Arc<AtomicBool>>,
     /// When the watch first said stop.
     stopped_at: Cell<Option<Instant>>,
+    /// Each `reaped` CPU figure.
+    reaped: RefCell<Vec<f64>>,
 }
 
 impl Watch for Seen {
@@ -246,6 +248,10 @@ impl Watch for Seen {
         let group = group.as_raw_nonzero().get() as u32;
         self.started.borrow_mut().push((pid, group));
         self.started_at.set(Some(Instant::now()));
+    }
+
+    fn reaped(&self, cpu_seconds: f64) {
+        self.reaped.borrow_mut().push(cpu_seconds);
     }
 }
 
@@ -594,6 +600,37 @@ fn a_vmm_that_left_its_group_is_reaped_without_a_kill_fault() {
         other => panic!("{:?}", other),
     }
     rig.pid_gone();
+}
+
+#[test]
+fn the_watch_hears_the_cpu_of_the_reaped_vmm() {
+    // A VMM that burns half a second of CPU, then exits before a guest connects. The host
+    // reaps it when it sees the exit and again on the way out; the watch hears it once.
+    let rig = Rig::new(concat!(
+        "echo $$ > $PIDFILE
+",
+        "exec python3 -c 'import time
+t = time.process_time()
+",
+        "while time.process_time() - t < 0.5: pass'
+",
+    ));
+    let watch = Seen::default();
+    let res = rig.run_watched(&watch);
+    assert!(matches!(res, Err(VmError::Boot(_))), "{res:?}");
+    let reaped = watch.reaped.borrow().clone();
+    assert_eq!(reaped.len(), 1, "{reaped:?}");
+    assert!((0.45..2.0).contains(&reaped[0]), "{reaped:?}");
+    // A row that ends with a report: the VMM, killed after it, used next to none.
+    let rig = Rig::sleeper();
+    let h = good_guest(&rig);
+    let watch = Seen::default();
+    let res = rig.run_watched(&watch);
+    h.join().unwrap();
+    assert!(res.is_ok(), "{res:?}");
+    let reaped = watch.reaped.borrow().clone();
+    assert_eq!(reaped.len(), 1, "{reaped:?}");
+    assert!((0.0..0.45).contains(&reaped[0]), "{reaped:?}");
 }
 
 #[test]

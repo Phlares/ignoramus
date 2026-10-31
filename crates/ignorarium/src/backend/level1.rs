@@ -548,10 +548,7 @@ fn reap(pid: u32, limit: Duration) -> Option<f64> {
         match sys::has_exited(pid) {
             Err(_) => return Some(0.0),
             Ok(true) => {
-                return Some(match sys::wait4(pid, true) {
-                    Ok(Some(r)) => r.cpu_seconds,
-                    _ => 0.0,
-                });
+                return Some(sys::wait4(pid).map_or(0.0, |r| r.cpu_seconds));
             }
             Ok(false) if Instant::now() < deadline => std::thread::sleep(REAP_POLL),
             Ok(false) => return None,

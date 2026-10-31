@@ -68,54 +68,7 @@ fn set_action(sig: libc::c_int, handler: libc::sighandler_t, flags: libc::c_int)
     Ok(())
 }
 
-/// How a child ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Ended {
-    Code(i32),
-    Signal(i32),
-}
-
-/// Result of a non-blocking `wait4`.
-pub struct Reaped {
-    pub ended: Ended,
-    pub cpu_seconds: f64,
-}
-
-fn secs(t: libc::timeval) -> f64 {
-    t.tv_sec as f64 + t.tv_usec as f64 / 1e6
-}
-
-/// Reap child `pid`. With `block` false, returns `None` while it still runs.
-/// CPU time is user plus system time from the child's resource usage.
-pub fn wait4(pid: u32, block: bool) -> io::Result<Option<Reaped>> {
-    let mut status: libc::c_int = 0;
-    // SAFETY: an all-zero `rusage` is a valid value for this plain C struct.
-    let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
-    let flags = if block { 0 } else { libc::WNOHANG };
-    let r = loop {
-        // SAFETY: `status` and `ru` are live, writable locals of the types wait4 expects.
-        let r = unsafe { libc::wait4(pid as libc::pid_t, &mut status, flags, &mut ru) };
-        if r >= 0 {
-            break r;
-        }
-        let e = io::Error::last_os_error();
-        if e.kind() != io::ErrorKind::Interrupted {
-            return Err(e);
-        }
-    };
-    if r == 0 {
-        return Ok(None);
-    }
-    let ended = if libc::WIFEXITED(status) {
-        Ended::Code(libc::WEXITSTATUS(status))
-    } else {
-        Ended::Signal(libc::WTERMSIG(status))
-    };
-    Ok(Some(Reaped {
-        ended,
-        cpu_seconds: secs(ru.ru_utime) + secs(ru.ru_stime),
-    }))
-}
+pub use ignorarium_guest::sys::{Ended, Reaped, wait4};
 
 /// Make the child that `cmd` starts inherit, besides stdin, stdout and stderr, only the
 /// descriptors in `keep`, at the same numbers. The box's own descriptors are close-on-exec,
@@ -249,7 +202,7 @@ mod tests {
             .spawn()
             .unwrap();
         let pid = child.id();
-        let waiter = std::thread::spawn(move || wait4(pid, true));
+        let waiter = std::thread::spawn(move || wait4(pid));
         // The waiter blocks in wait4 well before this; the signal lands mid-wait.
         std::thread::sleep(Duration::from_millis(300));
         // SAFETY: the waiter thread is alive until it is joined below.
@@ -257,7 +210,7 @@ mod tests {
             unsafe { libc::pthread_kill(waiter.as_pthread_t(), libc::SIGUSR1) },
             0
         );
-        let reaped = waiter.join().unwrap().unwrap().unwrap();
+        let reaped = waiter.join().unwrap().unwrap();
         assert_eq!(reaped.ended, Ended::Code(0));
     }
 }

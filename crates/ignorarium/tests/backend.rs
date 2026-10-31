@@ -388,7 +388,7 @@ fn within<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
 #[test]
 fn waits_on_a_process_that_is_not_a_child_fail_at_once() {
     let me = std::process::id();
-    assert!(within(move || sys::wait4(me, true)).is_err());
+    assert!(within(move || sys::wait4(me)).is_err());
     assert!(within(move || sys::has_exited(me)).is_err());
 }
 

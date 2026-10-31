@@ -66,6 +66,9 @@ pub struct RowOutcome {
     /// level 2 records each link its guest packed and makes none. Empty at levels 0 and 1,
     /// whose output folders hold their links.
     pub output_links: Vec<output::TreeRow>,
+    /// CPU the box spent on the row outside `cpu_seconds`: level 2's VMM, its boot included.
+    /// The host meter and the records count it as the box's spend. Zero at levels 0 and 1.
+    pub box_cpu_seconds: f64,
 }
 
 impl RowOutcome {
@@ -81,6 +84,7 @@ impl RowOutcome {
             cpu_unknown: None,
             ended: false,
             output_links: Vec::new(),
+            box_cpu_seconds: 0.0,
         }
     }
 }
@@ -92,10 +96,11 @@ pub enum Probe {
 }
 
 /// What a backend tells the box while a row runs: the guest crate's watch, so level 2 hands
-/// the runner's watch to `host::run_row` as it is. `tick` runs over and over while the row
-/// runs. `started` runs once for every supervised process group, in order: a level 1 row
-/// starts its self-test group and then its own. Each call replaces the last; the earlier
-/// group is already killed and reaped.
+/// the runner's watch to `host::run_row`. `tick` runs over and over while the row runs.
+/// `started` runs once for every supervised process group, in order: a level 1 row starts
+/// its self-test group and then its own. Each call replaces the last; the earlier group is
+/// already killed and reaped. Level 2 keeps `reaped` for itself, to fill
+/// `RowOutcome::box_cpu_seconds`.
 pub use ignorarium_guest::host::Watch;
 
 pub trait Backend {
@@ -173,6 +178,7 @@ pub fn outcome(
         cpu_unknown: None,
         ended,
         output_links: Vec::new(),
+        box_cpu_seconds: 0.0,
     }
 }
 
@@ -219,9 +225,8 @@ pub fn supervise(mut cmd: Command, job: &RowJob, start: Instant, watch: &dyn Wat
         // Kill the leader alone so the reap below cannot hang.
         let _ = child.kill();
     }
-    let reaped = match sys::wait4(pid, true) {
-        Ok(Some(r)) => r,
-        Ok(None) => return Supervised::failed("wait returned early".into()),
+    let reaped = match sys::wait4(pid) {
+        Ok(r) => r,
         Err(e) => return Supervised::failed(format!("wait failed: {e}")),
     };
     let ended = ended_by_box.is_some();

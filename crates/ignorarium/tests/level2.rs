@@ -920,6 +920,36 @@ fn a_disk_that_cannot_be_built_names_the_environment_by_its_digest() {
     assert_eq!(o.exit, Exit::Infra(why));
 }
 
+#[test]
+fn the_vmm_s_cpu_is_box_spend_in_the_meter_and_the_records_not_in_the_row() {
+    let lab = common::lab();
+    let id = "vmm-cpu";
+    common::plain(&lab, id);
+    let work = common::work_of(&lab.home, id);
+    let mut plan = runner::prepare_with(&lab.home, id, &work, vec![Box::new(Level0)]).unwrap();
+    let d = TempDir::new().unwrap();
+    let (b, job) = fake_box(d.path());
+    // The VMM burns half a second of CPU, then exits before a guest connects.
+    let burn = "#!/bin/sh\nexec python3 -c 'import time\nt = time.process_time()\n\
+                while time.process_time() - t < 0.5: pass'\n";
+    write_exec(&b.vmm, burn);
+    (plan.backend, plan.rootfs) = (Box::new(b), job.rootfs);
+    // The boot fails; before the retry, the probe finds the fake VMM off its pin.
+    let status = runner::run(&plan).unwrap();
+    let paused = matches!(&status, RunStatus::Paused(w) if w.starts_with("backend unavailable: "));
+    assert!(paused, "{status:?}");
+    let spend = common::kind_of(&lab, id, "spend");
+    assert_eq!(spend.len(), 1);
+    assert_eq!(spend[0].body["cpu_seconds"], 0.0);
+    let vmm = spend[0].body["box_cpu_seconds"].as_f64().unwrap();
+    assert!((0.45..2.0).contains(&vmm), "{vmm}");
+    assert_eq!(plan.meter.sample().unwrap().cpu_seconds, vmm);
+    // A later session starts from the records, which hold it.
+    let all = common::records_of(&lab, id);
+    let spent = runner::progress(&lab.home, id, &all).unwrap().cost;
+    assert_eq!(spent.cpu_seconds, vmm);
+}
+
 fn boot_failed(exit: &Exit) -> bool {
     matches!(exit, Exit::Infra(why) if why.starts_with("boot failed: the VMM exited (exit status: 0)"))
 }

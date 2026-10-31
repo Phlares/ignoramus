@@ -48,6 +48,8 @@ const HOST: &str = "host";
 /// The lowest level that runs rows only in the study's environment image.
 const IMAGE_LEVEL: u8 = 2;
 const NO_IMAGE: &str = "level 2 runs rows in the study's environment image";
+/// The record field of the box's CPU for an attempt: level 2's VMM.
+const BOX_CPU: &str = "box_cpu_seconds";
 
 pub struct RunPlan {
     pub home: Home,
@@ -1008,10 +1010,12 @@ impl Books {
         })
     }
 
-    /// An attempt's spend; `completed` when its row record holds it.
+    /// An attempt's spend, the box's CPU for it included; `completed` when its row record
+    /// holds it.
     fn add(&mut self, plan: &RunPlan, o: &RowOutcome, completed: bool) {
-        self.tally.add(o.cpu_seconds, o.wall_seconds, completed);
-        plan.meter.add_row(o.cpu_seconds);
+        let cpu = o.cpu_seconds + o.box_cpu_seconds;
+        self.tally.add(cpu, o.wall_seconds, completed);
+        plan.meter.add_row(cpu);
     }
 }
 
@@ -1207,8 +1211,8 @@ fn row_estimate(plan: &RunPlan, machine: &Machine) -> Cost {
     }
 }
 
-/// Cost in the signed records: every attempt's spend, from `row` and `spend` records.
-/// `rows` counts completed rows only, so the mean stays per completed row.
+/// Cost in the signed records: every attempt's spend, the box's CPU included, from `row` and
+/// `spend` records. `rows` counts completed rows only, so the mean stays per completed row.
 #[derive(Default)]
 struct Tally {
     rows: u64,
@@ -1227,7 +1231,7 @@ impl Tally {
             .filter(|r| r.kind == "row" || r.kind == "spend")
         {
             let num = |k: &str| r.body[k].as_f64().unwrap_or(0.0);
-            t.cpu += num("cpu_seconds");
+            t.cpu += num("cpu_seconds") + num(BOX_CPU);
             t.wall += num("wall_seconds");
             t.rows += u64::from(r.kind == "row");
             t.unknown_cpu += u64::from(r.body.get("cpu_unknown").is_some());
@@ -1480,6 +1484,7 @@ fn attempt_row(
     if bound {
         body["cpu_bound"] = json!(true);
     }
+    box_cpu(&mut body, &outcome);
     records::append(
         log,
         &plan.key,
@@ -1584,6 +1589,7 @@ fn unrecorded(
     if bound {
         body["cpu_bound"] = json!(true);
     }
+    box_cpu(&mut body, o);
     records::append(
         log,
         &plan.key,
@@ -1596,6 +1602,13 @@ fn unrecorded(
     )?;
     books.add(plan, o, false);
     Ok(())
+}
+
+/// The box's CPU for an attempt, beside the row's own, when it spent any.
+fn box_cpu(body: &mut Value, o: &RowOutcome) {
+    if o.box_cpu_seconds > 0.0 {
+        body[BOX_CPU] = json!(o.box_cpu_seconds);
+    }
 }
 
 /// The canonical JSON of the params of `condition`; `{}` when it has none.

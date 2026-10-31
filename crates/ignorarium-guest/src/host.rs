@@ -11,9 +11,10 @@ use crate::proto::{
     CONTROL_PORT, GUEST_CID, Job, MAX_FRAME, Report, SERIAL_IN, SERIAL_OUT, SERIAL_PAYLOAD,
     SERIAL_ROOTFS, ToHost, read_frame, write_frame,
 };
+use crate::sys::{Ended, wait4};
 use crate::tree::walk;
 use rustix::io::Errno;
-use rustix::process::{Pid, Signal, kill_process_group};
+use rustix::process::{Pid, Signal, kill_process, kill_process_group};
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, BufReader, Read, Write};
@@ -22,7 +23,7 @@ use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Command, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -35,6 +36,9 @@ pub trait Watch {
     fn tick(&self) -> bool;
     /// The VMM now runs as the leader of its own process group, `pid`. Called once per row.
     fn started(&self, _pid: u32) {}
+    /// The VMM's group is killed and its leader reaped, after `cpu_seconds` of user and system
+    /// time: its threads and the children it reaped. Called once for each `started`.
+    fn reaped(&self, _cpu_seconds: f64) {}
 }
 
 impl<F: Fn() -> bool> Watch for F {
@@ -218,21 +222,25 @@ fn with_log(msg: String, work: &Path) -> String {
 
 /// Owns the VMM, which leads its own process group. Every way out, a drop included, kills
 /// the group before it reaps the leader: until the reap, the leader's pid names the group,
-/// so no unrelated group can take that id.
-struct Vmm {
-    child: Child,
+/// so no unrelated group can take that id. The watch hears the group start, and the leader's
+/// CPU once it is reaped.
+struct Vmm<'a> {
     pid: Pid,
+    watch: &'a dyn Watch,
     killed: bool,
+    /// How the leader ended, once reaped.
+    ended: Option<Ended>,
 }
 
-impl Vmm {
-    fn spawn(cmd: &mut Command) -> io::Result<Vmm> {
+impl<'a> Vmm<'a> {
+    fn spawn(cmd: &mut Command, watch: &'a dyn Watch) -> io::Result<Vmm<'a>> {
         let child = cmd.process_group(0).spawn()?;
-        let pid = Pid::from_child(&child);
+        watch.started(child.id());
         Ok(Vmm {
-            child,
-            pid,
+            pid: Pid::from_child(&child),
+            watch,
             killed: false,
+            ended: None,
         })
     }
 
@@ -246,8 +254,11 @@ impl Vmm {
     }
 
     /// Kills the group, then reaps the leader. A group kill that fails for any reason but a
-    /// group already gone is an error, after the reap. A later call returns the same status.
-    fn end(&mut self) -> io::Result<ExitStatus> {
+    /// group already gone is an error, after the reap. A later call returns the same ending.
+    fn end(&mut self) -> io::Result<Ended> {
+        if let Some(ended) = self.ended {
+            return Ok(ended);
+        }
         let mut fault = None;
         if !self.killed {
             self.killed = true;
@@ -255,14 +266,16 @@ impl Vmm {
                 .err()
                 .filter(|&e| e != Errno::SRCH);
             // A leader that moved to another group is not in this one.
-            let _ = self.child.kill();
+            let _ = kill_process(self.pid, Signal::KILL);
         }
-        let status = self.child.wait()?;
-        fault.map_or(Ok(status), |e| Err(e.into()))
+        let reaped = wait4(self.pid.as_raw_nonzero().get() as u32)?;
+        self.ended = Some(reaped.ended);
+        self.watch.reaped(reaped.cpu_seconds);
+        fault.map_or(Ok(reaped.ended), |e| Err(e.into()))
     }
 }
 
-impl Drop for Vmm {
+impl Drop for Vmm<'_> {
     fn drop(&mut self) {
         let _ = self.end();
     }
@@ -279,7 +292,7 @@ fn go_on(watch: &dyn Watch) -> Result<(), VmError> {
 /// Waits for the one guest connection; fails early if the VMM dies first.
 fn accept(
     listener: &UnixListener,
-    vmm: &mut Vmm,
+    vmm: &mut Vmm<'_>,
     started: Instant,
     vm: &Vm,
     work: &Path,
@@ -548,9 +561,8 @@ pub fn run_row(
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log);
-    let mut vmm = Vmm::spawn(&mut cmd)
+    let mut vmm = Vmm::spawn(&mut cmd, watch)
         .map_err(|e| VmError::Boot(format!("cannot start {}: {e}", vm.vmm.display())))?;
-    watch.started(vmm.child.id());
 
     let mut chan = accept(&listener, &mut vmm, started, vm, work, watch)?;
     // Later connects must fail: the self-test checks that no host path is left.

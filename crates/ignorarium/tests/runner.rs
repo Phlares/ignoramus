@@ -2238,6 +2238,7 @@ fn outcome(cpu: f64, wall: f64, ended: bool, unknown: bool) -> RowOutcome {
         cpu_unknown: unknown.then(|| "unreadable".to_string()),
         ended,
         output_links: Vec::new(),
+        box_cpu_seconds: 0.0,
     }
 }
 

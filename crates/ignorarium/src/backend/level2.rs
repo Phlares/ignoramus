@@ -12,6 +12,7 @@ use ignorarium_guest::proto::{self, End, GUEST_IN, GUEST_OUT, GUEST_PAYLOAD};
 use ignorarium_guest::tree;
 use rustix::io::Errno;
 use rustix::process::{Pid, geteuid, test_kill_process};
+use std::cell::Cell;
 use std::fs;
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
@@ -205,12 +206,32 @@ impl Level2 {
             report_slack: self.report_slack,
             serial_log: None,
         };
-        ended(host::run_row(
-            &vm,
-            &host_job,
-            &scratch.0.join("work"),
+        let counted = Counted {
             watch,
-        ))
+            cpu: Cell::new(0.0),
+        };
+        let res = host::run_row(&vm, &host_job, &scratch.0.join("work"), &counted);
+        let (mut o, timings) = ended(res);
+        o.box_cpu_seconds = counted.cpu.get();
+        (o, timings)
+    }
+}
+
+/// The runner's watch, and the CPU of the VMM once it is reaped.
+struct Counted<'a> {
+    watch: &'a dyn Watch,
+    cpu: Cell<f64>,
+}
+
+impl Watch for Counted<'_> {
+    fn tick(&self) -> bool {
+        self.watch.tick()
+    }
+    fn started(&self, pid: u32) {
+        self.watch.started(pid);
+    }
+    fn reaped(&self, cpu_seconds: f64) {
+        self.cpu.set(self.cpu.get() + cpu_seconds);
     }
 }
 
@@ -424,6 +445,7 @@ pub fn outcome_of(res: Result<VmOutcome, VmError>, wall_seconds: f64, cpus: u32)
         cpu_unknown: None,
         ended,
         output_links,
+        box_cpu_seconds: 0.0,
     }
 }
 

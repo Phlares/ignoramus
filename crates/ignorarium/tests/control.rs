@@ -652,6 +652,7 @@ impl Backend for StopThenFail {
             cpu_unknown: None,
             ended: false,
             output_links: Vec::new(),
+            box_cpu_seconds: 0.0,
         })
     }
 }
@@ -1037,6 +1038,7 @@ impl Backend for StopThenBlind {
             cpu_unknown: None,
             ended: false,
             output_links: Vec::new(),
+            box_cpu_seconds: 0.0,
         })
     }
 }
