@@ -74,21 +74,12 @@ pub enum Probe {
     Unavailable(String),
 }
 
-/// What a backend tells the box while a row runs.
-pub trait Watch {
-    /// Called over and over while the row runs. `false` means stop the row now.
-    fn tick(&self) -> bool;
-    /// A supervised process group now runs, led by `pid`. Called once for every group, in
-    /// order: a level 1 row starts its self-test group and then its own. Each call replaces
-    /// the last; the earlier group is already killed and reaped.
-    fn started(&self, _pid: u32) {}
-}
-
-impl<F: Fn() -> bool> Watch for F {
-    fn tick(&self) -> bool {
-        self()
-    }
-}
+/// What a backend tells the box while a row runs: the guest crate's watch, so level 2 hands
+/// the runner's watch to `host::run_row` as it is. `tick` runs over and over while the row
+/// runs. `started` runs once for every supervised process group, in order: a level 1 row
+/// starts its self-test group and then its own. Each call replaces the last; the earlier
+/// group is already killed and reaped.
+pub use ignorarium_guest::host::Watch;
 
 pub trait Backend {
     fn level(&self) -> u8;

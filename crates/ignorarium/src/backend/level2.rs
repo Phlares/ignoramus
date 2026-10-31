@@ -217,12 +217,7 @@ impl Level2 {
             report_slack: self.report_slack,
             serial_log: None,
         };
-        ended(host::run_row(
-            &vm,
-            &host_job,
-            &scratch.0.join("work"),
-            &Relay(watch),
-        ))
+        ended(host::run_row(&vm, &host_job, &scratch.0.join("work"), watch))
     }
 }
 
@@ -515,18 +510,5 @@ fn sweep(temp: &Path) {
         {
             let _ = fs::remove_dir_all(entry.path());
         }
-    }
-}
-
-/// The runner's watch, as the host side hears it.
-struct Relay<'a>(&'a dyn Watch);
-
-impl host::Watch for Relay<'_> {
-    fn tick(&self) -> bool {
-        self.0.tick()
-    }
-
-    fn started(&self, pid: u32) {
-        self.0.started(pid);
     }
 }
