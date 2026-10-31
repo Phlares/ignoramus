@@ -1,7 +1,13 @@
 //! Content-addressed store: `store/<sha256>` holds the bytes with that hash.
+use crate::backend::output::file_digest;
 use crate::canon::sha256_hex;
 use crate::files::{self, WriteOnceError};
 use crate::home::{HomeError, make_private_dir};
+use crate::prior::file_hashes_within;
+use crate::records::{self, RecordDraft};
+use ed25519_dalek::SigningKey;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{self, Read, Write};
@@ -9,12 +15,25 @@ use std::path::{Path, PathBuf};
 
 const MODE: u32 = 0o444;
 
+pub use crate::prior::NORMALIZE_LIMIT;
+
+/// What the store knows about one blob besides its bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Meta {
+    pub size: u64,
+    /// Empty when the blob has no normalized hash.
+    pub normalized_sha256: String,
+}
+
 #[derive(Debug)]
 pub enum StoreError {
     /// Not 64 lowercase hex characters.
     BadDigest,
     /// The store folder or a blob path is a symbolic link.
     Link,
+    /// An import source is not a regular file.
+    NotRegular,
     Io(io::Error),
 }
 
@@ -23,6 +42,7 @@ impl std::fmt::Display for StoreError {
         match self {
             StoreError::BadDigest => write!(f, "digest is not 64 lowercase hex characters"),
             StoreError::Link => write!(f, "store path is a symbolic link"),
+            StoreError::NotRegular => write!(f, "not a regular file"),
             StoreError::Io(e) => write!(f, "I/O failed: {e}"),
         }
     }
@@ -96,16 +116,135 @@ impl Store {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 // `hard_link` also reports AlreadyExists for a symlink at the path.
-                if fs::symlink_metadata(self.root.join(&digest))?
-                    .file_type()
-                    .is_symlink()
-                {
+                let path = self.root.join(&digest);
+                if fs::symlink_metadata(&path)?.file_type().is_symlink() {
                     return Err(StoreError::Link);
+                }
+                // The blob was there before: its bytes must still be the digest's.
+                if file_digest(&path)?.as_deref() != Some(digest.as_str()) {
+                    return Err(io::Error::other("stored blob differs").into());
                 }
             }
             Err(e) => return Err(e.into()),
         }
         Ok(digest)
+    }
+
+    /// Add the regular file `file` to the store: stream it under its digest and write its
+    /// `Meta` once. A link or a file of another kind is refused, and so is a stored blob
+    /// that does not hash to its digest.
+    pub fn import(&self, file: &Path) -> Result<(String, Meta), StoreError> {
+        self.import_within(file, NORMALIZE_LIMIT)
+    }
+
+    /// `import` with another limit for the normalized hash.
+    pub fn import_within(&self, file: &Path, limit: u64) -> Result<(String, Meta), StoreError> {
+        let (digest, meta) = self.stream_in(file, limit)?;
+        self.write_meta(&digest, &meta)?;
+        Ok((digest, meta))
+    }
+
+    /// The blob of `file` in the store, and its `Meta`, not yet written.
+    fn stream_in(&self, file: &Path, limit: u64) -> Result<(String, Meta), StoreError> {
+        let kind = fs::symlink_metadata(file)?.file_type();
+        if kind.is_symlink() {
+            return Err(StoreError::Link);
+        }
+        if !kind.is_file() {
+            return Err(StoreError::NotRegular);
+        }
+        let mut f = fs::File::open(file)?;
+        if !f.metadata()?.is_file() {
+            return Err(StoreError::NotRegular);
+        }
+        // One read: the stream feeds the blob, the size and the normalized hash.
+        let mut seen = Seen {
+            inner: &mut f,
+            size: 0,
+            head: Vec::new(),
+            limit,
+        };
+        let digest = self.put_reader(&mut seen)?;
+        let meta = Meta {
+            size: seen.size,
+            normalized_sha256: file_hashes_within(&seen.head, limit).1,
+        };
+        Ok((digest, meta))
+    }
+
+    fn write_meta(&self, digest: &str, meta: &Meta) -> Result<(), StoreError> {
+        let dir = self.root.join("meta");
+        make_private_dir(&dir, false, true)?;
+        let bytes = serde_json::to_vec(meta).map_err(io::Error::other)?;
+        files::write_once(&dir.join(format!("{digest}.json")), &bytes, MODE)?;
+        Ok(())
+    }
+
+    /// `import`, signing one `import` record (see `sign_import`) when the store did not
+    /// know the blob as an input yet, so every stored input has the record of how it came
+    /// in, and a resume that imports the same file again adds none. The record is signed
+    /// before the meta is written: a crash between the two signs it again, never not at all.
+    pub fn import_signed(
+        &self,
+        file: &Path,
+        key: &SigningKey,
+        source: &str,
+    ) -> Result<(String, Meta), StoreError> {
+        let (digest, meta) = self.stream_in(file, NORMALIZE_LIMIT)?;
+        if self.meta(&digest)?.is_none() {
+            self.sign_import(key, &digest, &meta, source, file)?;
+        }
+        self.write_meta(&digest, &meta)?;
+        Ok((digest, meta))
+    }
+
+    /// `import`, with one signed `import` record (see `sign_import`) for this call whether the
+    /// store knew the blob or not: each call is its own provenance. As in `import_signed`, the
+    /// record is signed before the meta is written.
+    pub fn import_recorded(
+        &self,
+        file: &Path,
+        key: &SigningKey,
+        source: &str,
+    ) -> Result<(String, Meta), StoreError> {
+        let (digest, meta) = self.stream_in(file, NORMALIZE_LIMIT)?;
+        self.sign_import(key, &digest, &meta, source, file)?;
+        self.write_meta(&digest, &meta)?;
+        Ok((digest, meta))
+    }
+
+    /// One signed `import` record in `imports.jsonl` that names `source` and the file's
+    /// name, never its path.
+    fn sign_import(
+        &self,
+        key: &SigningKey,
+        digest: &str,
+        meta: &Meta,
+        source: &str,
+        file: &Path,
+    ) -> Result<(), StoreError> {
+        let body = json!({
+            "digest": digest, "size": meta.size,
+            "normalized_sha256": meta.normalized_sha256,
+            "source": source, "file": record_name(file),
+        });
+        let draft = RecordDraft::new("store", "import", body);
+        records::append(&self.root.join("imports.jsonl"), key, draft)
+            .map_err(|e| io::Error::other(format!("imports.jsonl: {e}")))?;
+        Ok(())
+    }
+
+    /// The `Meta` of an imported blob, or `None` when the store has none for `digest`.
+    pub fn meta(&self, digest: &str) -> Result<Option<Meta>, StoreError> {
+        self.path(digest)?;
+        let path = self.root.join("meta").join(format!("{digest}.json"));
+        match fs::read(&path) {
+            Ok(bytes) => Ok(Some(
+                serde_json::from_slice(&bytes).map_err(io::Error::other)?,
+            )),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// The blob path for `digest`. Refuses anything but 64 lowercase hex characters.
@@ -127,6 +266,12 @@ impl Store {
     }
 }
 
+/// The name an import record keeps for `file`: its last component.
+pub fn record_name(file: &Path) -> String {
+    file.file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+}
+
 /// A writer that hashes what it writes.
 struct Tee {
     file: fs::File,
@@ -142,5 +287,24 @@ impl Write for Tee {
 
     fn flush(&mut self) -> io::Result<()> {
         self.file.flush()
+    }
+}
+
+/// A reader that counts what passes and keeps the first `limit + 1` bytes: enough to
+/// normalize a file within the limit, and to see that a larger one is over it.
+struct Seen<'a, R> {
+    inner: &'a mut R,
+    size: u64,
+    head: Vec<u8>,
+    limit: u64,
+}
+
+impl<R: Read> Read for Seen<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.size += n as u64;
+        let room = (self.limit + 1).saturating_sub(self.head.len() as u64) as usize;
+        self.head.extend_from_slice(&buf[..n.min(room)]);
+        Ok(n)
     }
 }

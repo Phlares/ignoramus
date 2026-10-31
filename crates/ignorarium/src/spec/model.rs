@@ -1,6 +1,12 @@
 //! Typed spec schema. Shape only: value checks live in the rules.
-use serde::Deserialize;
+use evidence::Tail;
+use evidence::claim::{Bound, Statistic};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
+
+/// The condition id that stands for the selection stage's pick.
+pub const SELECTED: &str = "selected";
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -73,6 +79,70 @@ pub struct Hypothesis {
     pub id: String,
     pub statement: String,
     pub rival: String,
+    /// The outcome id whose paired values the contrast weighs.
+    pub outcome: String,
+    /// Condition id to weight: per unit, the weighted sum of the conditions' paired values.
+    /// `selected` names the selection stage's pick.
+    pub contrast: BTreeMap<String, f64>,
+    /// The strata the claim must hold in, each on its own clusters; empty: every confirmation
+    /// unit as one pooled group.
+    #[serde(default)]
+    pub strata: Vec<String>,
+    /// `None`: a descriptive hypothesis, which gives estimates and no verdict.
+    pub claim: Option<Claim>,
+    pub statistic: Option<StatisticSpec>,
+    /// The true value of the statistic where the test must have its power.
+    pub power_at: Option<f64>,
+    /// The study whose estimate records give the contrast's sd and icc.
+    pub estimates: Option<Reference>,
+    /// This hypothesis's share of the study's level.
+    pub alpha_share: Option<f64>,
+}
+
+/// A one-key table: `{ below = m }`, `{ above = m }` or `{ within = [a, b] }`.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Claim {
+    Below(f64),
+    Above(f64),
+    Within([f64; 2]),
+}
+
+impl Claim {
+    /// The one-sided bounds that must all hold: `within [a, b]` is above `a` and below `b`.
+    pub fn bounds(&self) -> Vec<Bound> {
+        let bound = |tail, margin| Bound { tail, margin };
+        match *self {
+            Claim::Below(m) => vec![bound(Tail::Lower, m)],
+            Claim::Above(m) => vec![bound(Tail::Upper, m)],
+            Claim::Within([a, b]) => vec![bound(Tail::Upper, a), bound(Tail::Lower, b)],
+        }
+    }
+}
+
+/// A one-key table: `{ mean = [lo, hi] }`, the range each unit is clipped to before a cluster
+/// mean is taken, or `{ quantile = q }`.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StatisticSpec {
+    Mean([f64; 2]),
+    Quantile(f64),
+}
+
+impl StatisticSpec {
+    pub fn to_evidence(&self) -> Statistic {
+        match *self {
+            StatisticSpec::Mean([lo, hi]) => Statistic::Mean { lo, hi },
+            StatisticSpec::Quantile(q) => Statistic::Quantile(q),
+        }
+    }
+}
+
+/// A value another study gives: `{ from = "<study id>" }`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reference {
+    pub from: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -81,10 +151,25 @@ pub struct Outcome {
     pub id: String,
     pub unit: String,
     pub direction: Direction,
+    /// The key the payload writes this outcome's value under in `values.json`.
+    pub measure: String,
+    /// How the box pairs a condition's value with the reference condition's.
+    pub paired: Paired,
     pub registered: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Paired {
+    /// Condition minus reference.
+    Difference,
+    /// 100 x (condition / reference - 1).
+    Percent,
+    /// ln(condition / reference).
+    LogRatio,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Direction {
     Lower,
@@ -148,43 +233,77 @@ pub struct Design {
     pub reference: String,
     pub repeats: u32,
     pub row_seconds: f64,
-    pub test: TestKind,
-    pub alpha: f64,
     pub power: f64,
-    pub sesoi: f64,
-    pub icc: f64,
+    /// Units each cluster gives the study, at most.
     pub units_per_cluster: u32,
-    pub variance: Variance,
+    pub pick: Pick,
     pub conditions: Vec<Condition>,
-    pub selection: ClusterSet,
-    pub confirmation: ClusterSet,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum TestKind {
-    PairedMean,
-    Descriptive,
+    /// The stage that picks one candidate on the selection inputs; `None` when there is none.
+    pub selection: Option<Selection>,
+    pub confirmation: Stage,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Variance {
-    pub value: f64,
-    /// "stated" or "record:<sha256>"; the rules check the format.
-    pub source: String,
+pub struct Selection {
+    /// The outcome whose mean paired value ranks the candidates.
+    pub metric: String,
+    /// The candidates; a tie goes to the first listed.
+    pub conditions: Vec<String>,
+    pub rule: SelectionRule,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SelectionRule {
+    /// The best mean, in the metric outcome's direction.
+    BestMean,
+}
+
+/// The conditions a stage runs besides the reference, which runs in every stage.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Stage {
+    pub conditions: Vec<String>,
+}
+
+impl Stage {
+    /// The stage runs the selection stage's pick.
+    pub fn runs_pick(&self) -> bool {
+        self.conditions.iter().any(|c| c == SELECTED)
+    }
+}
+
+/// Which of a cluster's units the study takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Pick {
+    /// Drawn without replacement from the seed `units/<input path>`.
+    Seeded,
+    /// Indices 0, 1, 2, …
+    First,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Condition {
     pub id: String,
+    /// What the payload gets, as JSON, in `IGNORARIUM_PARAMS`.
+    #[serde(default)]
+    pub params: BTreeMap<String, Param>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClusterSet {
-    pub clusters: Vec<String>,
+/// Where a condition's param is named in the plan: the path `register` freezes its value under.
+pub fn param_path(condition: usize, key: &str) -> String {
+    format!("design.conditions[{condition}].params.{key}")
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Param {
+    /// The condition the named study selected, frozen at register.
+    Ref(Reference),
+    Value(Scalar),
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -193,6 +312,11 @@ pub struct Input {
     pub path: String,
     pub sha256: String,
     pub role: Role,
+    /// The stratum of this cluster; "" when the design names none.
+    #[serde(default)]
+    pub stratum: String,
+    /// The units the file holds. Selection and confirmation inputs declare it.
+    pub units: Option<u32>,
     pub licence: Licence,
 }
 
@@ -260,7 +384,7 @@ pub enum OperatorType {
 }
 
 /// Integers come first so whole numbers stay integers.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Scalar {
     Int(i64),

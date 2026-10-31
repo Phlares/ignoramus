@@ -32,6 +32,7 @@ if [ "$IGNORARIUM_ROW" = 1 ]; then
   sleep 0.5
 fi
 echo ok > "$IGNORARIUM_OUT/result"
+printf '{"ppl": 1.5}' > "$IGNORARIUM_OUT/values.json"
 "#;
 
 /// Row `i` marks itself started, leaves a child that writes `late` after 1.5 s, and sleeps
@@ -45,12 +46,19 @@ if [ "$IGNORARIUM_ROW" = {i} ] && [ ! -e "$IGNORARIUM_OUT/../out.crashed-0" ]; t
   sleep 30
 fi
 echo ok > "$IGNORARIUM_OUT/result"
+printf '{{"ppl": 1.5}}' > "$IGNORARIUM_OUT/values.json"
 "#
     )
 }
 
 fn plan_of(lab: &Lab, id: &str) -> RunPlan {
-    prepare_with(&lab.home, id, vec![Box::new(Level0)]).unwrap()
+    prepare_with(
+        &lab.home,
+        id,
+        &common::work_of(&lab.home, id),
+        vec![Box::new(Level0)],
+    )
+    .unwrap()
 }
 
 fn control_of(lab: &Lab, id: &str) -> ControlFile {
@@ -157,7 +165,11 @@ fn heartbeat_is_fifteen_seconds() {
 #[test]
 fn heartbeat_fires_on_the_cadence() {
     let lab = lab();
-    let dir = with_payload(&lab, "hb", "#!/bin/sh\nsleep 0.3\n");
+    let dir = with_payload(
+        &lab,
+        "hb",
+        &format!("#!/bin/sh\nsleep 0.3\n{}\n", common::VALUES),
+    );
     let mut plan = plan_of(&lab, "hb");
     plan.heartbeat = Duration::from_millis(50);
     assert_eq!(go(&plan).unwrap(), RunStatus::Done);
@@ -461,32 +473,11 @@ fn control_signals_keep_the_last_request_and_a_stop_stays() {
     assert!(RunLock::try_take(&lab.home, "ghost").is_err());
 }
 
-fn confirmatory(t: String) -> String {
-    let ids = |p: &str, n: usize| {
-        let all: Vec<String> = (0..n).map(|i| format!("\"{p}{i:02}\"")).collect();
-        format!("clusters = [{}]", all.join(", "))
-    };
-    t.replace("mode = \"exploratory\"", "mode = \"confirmatory\"")
-        .replace("label = \"signal\"", "label = \"confirmed\"")
-        .replace("sesoi = 0.0", "sesoi = 1.0")
-        .replace("value = 0.0", "value = 4.0")
-        .replace(
-            "source = \"stated\"",
-            &format!("source = \"record:{}\"", "a".repeat(64)),
-        )
-        .replace("units_per_cluster = 3", "units_per_cluster = 5")
-        .replacen("clusters = []", &ids("s", 3), 1)
-        .replacen("clusters = []", &ids("c", 11), 1)
-        .replace(
-            "triggers = []",
-            "triggers = [{ id = \"T1\", metric = \"ppl-ratio\", threshold_e = 1.0 }]",
-        )
-}
-
 #[test]
 fn stop_lowers_the_label_to_signal() {
     let lab = lab();
-    register_study(&lab, "conf", confirmatory, &[], PAYLOAD);
+    common::pilot(&lab.home, vec![common::arm_a()]);
+    register_study(&lab, "conf", common::confirmatory, &[], PAYLOAD);
     let rec = send_stop(&lab.home, "conf", "manual").unwrap();
     assert_eq!(rec.body["label_before"], "confirmed");
     assert_eq!(rec.body["label_after"], "signal");
@@ -589,6 +580,9 @@ struct Peek {
 }
 
 impl Backend for Peek {
+    fn cpus(&self) -> u32 {
+        1
+    }
     fn launcher(&self) -> String {
         "process".into()
     }
@@ -630,6 +624,9 @@ struct StopThenFail {
 }
 
 impl Backend for StopThenFail {
+    fn cpus(&self) -> u32 {
+        1
+    }
     fn launcher(&self) -> String {
         "process".into()
     }
@@ -653,6 +650,7 @@ impl Backend for StopThenFail {
             output_hash: String::new(),
             selftest: None,
             cpu_unknown: None,
+            ended: false,
         })
     }
 }
@@ -679,6 +677,9 @@ struct LateStop {
 }
 
 impl Backend for LateStop {
+    fn cpus(&self) -> u32 {
+        1
+    }
     fn launcher(&self) -> String {
         "process".into()
     }
@@ -766,6 +767,9 @@ struct StopThenBreakEvents {
 }
 
 impl Backend for StopThenBreakEvents {
+    fn cpus(&self) -> u32 {
+        1
+    }
     fn launcher(&self) -> String {
         "process".into()
     }
@@ -811,7 +815,13 @@ fn dead_box_child() {
     let Some((home, id)) = boxed_study() else {
         return;
     };
-    let plan = prepare_with(&home, &id, vec![Box::new(Level0)]).unwrap();
+    let plan = prepare_with(
+        &home,
+        &id,
+        &common::work_of(&home, &id),
+        vec![Box::new(Level0)],
+    )
+    .unwrap();
     let _ = runner::run(&plan);
 }
 
@@ -921,6 +931,9 @@ struct NoRowFile {
 }
 
 impl Backend for NoRowFile {
+    fn cpus(&self) -> u32 {
+        1
+    }
     fn launcher(&self) -> String {
         "process".into()
     }
@@ -996,6 +1009,9 @@ struct StopThenBlind {
 }
 
 impl Backend for StopThenBlind {
+    fn cpus(&self) -> u32 {
+        1
+    }
     fn launcher(&self) -> String {
         "process".into()
     }
@@ -1018,6 +1034,7 @@ impl Backend for StopThenBlind {
             output_hash: String::new(),
             selftest: None,
             cpu_unknown: None,
+            ended: false,
         })
     }
 }
@@ -1077,6 +1094,9 @@ struct PauseThenLook {
 }
 
 impl Backend for PauseThenLook {
+    fn cpus(&self) -> u32 {
+        1
+    }
     fn launcher(&self) -> String {
         "process".into()
     }

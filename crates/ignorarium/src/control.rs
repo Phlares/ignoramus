@@ -3,6 +3,7 @@
 //! `deviations.jsonl` in the study folder. A stop is final: no later request replaces it,
 //! and a study with a stop record runs no further row.
 use crate::canon::canonical_line;
+use crate::derived::Register;
 use crate::events::{self, Event};
 use crate::files::{append_line, open_log, replace_atomic};
 use crate::home::Home;
@@ -245,13 +246,7 @@ impl RunLock {
                     "in_flight": in_flight.or(left),
                     "note": note,
                 });
-                let draft = RecordDraft {
-                    study: id.into(),
-                    row: None,
-                    kind: "stop".into(),
-                    body,
-                };
-                records::append(&log, key, draft)?
+                records::append(&log, key, RecordDraft::new(id, "stop", body))?
             }
         };
         let why = record.body["why"].as_str().unwrap_or(reason);
@@ -262,9 +257,8 @@ impl RunLock {
         if !logged(&dir.join("events.jsonl"), "name", "run.stop")? {
             let hash = all
                 .iter()
-                .find(|r| r.kind == "register")
-                .and_then(|r| r.body["spec_hash"].as_str())
-                .and_then(spec::hash_bytes)
+                .find_map(Register::of)
+                .and_then(|r| spec::hash_bytes(&r.spec_hash))
                 .ok_or_else(|| {
                     ControlError::Records("no register record names a spec hash".into())
                 })?;

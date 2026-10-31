@@ -1,4 +1,5 @@
 //! xoshiro256** (Blackman and Vigna, ACM TOMS 2021), seeded from 32 bytes.
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
 pub struct Rng {
@@ -36,6 +37,33 @@ impl Rng {
     /// Uniform on (0, 1]. Zero is excluded so `ln` is always finite.
     pub fn uniform(&mut self) -> f64 {
         ((self.next_u64() >> 11) + 1) as f64 * (1.0 / (1u64 << 53) as f64)
+    }
+
+    /// Uniform on `0..n` by rejection: draw x, draw again while x ≥ 2^64 − (2^64 mod n),
+    /// then return x mod n. `n = 0` stands for 2^64, so the draw comes back as it is.
+    pub fn below(&mut self, n: u64) -> u64 {
+        // 2^64 mod n is (2^64 − n) mod n.
+        let zone = n.wrapping_neg().checked_rem(n).unwrap_or(0);
+        loop {
+            let x = self.next_u64();
+            if x <= u64::MAX - zone {
+                return x.checked_rem(n).unwrap_or(x);
+            }
+        }
+    }
+
+    /// `min(k, available)` distinct values of `0..available`: the first positions of a forward
+    /// Fisher-Yates shuffle, where step i swaps position i with i + below(available − i).
+    /// Only moved positions are stored, so memory grows with k, not with `available`.
+    pub fn sample(&mut self, available: u64, k: u64) -> Vec<u64> {
+        let mut moved = BTreeMap::new();
+        (0..k.min(available))
+            .map(|i| {
+                let j = i + self.below(available - i);
+                let at_i = moved.get(&i).copied().unwrap_or(i);
+                moved.insert(j, at_i).unwrap_or(j)
+            })
+            .collect()
     }
 
     /// Standard normal by Box-Muller; one value per call.

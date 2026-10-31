@@ -1,4 +1,4 @@
-use ignorarium::power::{required_units, z};
+use ignorarium::power::{required_clusters, z};
 use ignorarium::prior::normalized_sha256;
 
 #[test]
@@ -47,18 +47,16 @@ fn z_edges_are_infinite_or_nan() {
 }
 
 #[test]
-fn required_units_matches_hand_values() {
-    assert_eq!(required_units(0.005, 0.8, 2.0, 1.0, 1, 0.0), 54);
-    assert_eq!(required_units(0.005, 0.8, 2.0, 1.0, 10, 0.1), 102);
-    assert_eq!(required_units(0.05, 0.8, 1.0, 0.5, 1, 0.0), 32);
-}
-
-#[test]
-fn required_units_grows_with_icc_and_cluster_size() {
-    let base = required_units(0.005, 0.8, 2.0, 1.0, 5, 0.0);
-    assert_eq!(base, 54);
-    assert_eq!(required_units(0.005, 0.8, 2.0, 1.0, 5, 0.1), 75);
-    assert_eq!(required_units(0.005, 0.8, 2.0, 1.0, 1, 0.5), 54);
+fn required_clusters_matches_the_one_sided_formula() {
+    // ceil(((2.5758 + 0.8416) x 2.76 / 2.0)^2) = ceil(22.24).
+    assert_eq!(required_clusters(0.005, 0.8, 2.76, 2.0), 23);
+    // One-sided: alpha is not halved. A two-sided test would need 54 and 32 here.
+    assert_eq!(required_clusters(0.005, 0.8, 2.0, 1.0), 47);
+    assert_eq!(required_clusters(0.05, 0.8, 1.0, 0.5), 25);
+    // Half the distance needs about four times the clusters; more power or less alpha, more.
+    assert_eq!(required_clusters(0.05, 0.8, 1.0, 0.25), 99);
+    assert_eq!(required_clusters(0.005, 0.9, 2.0, 1.0), 60);
+    assert_eq!(required_clusters(0.0025, 0.8, 2.0, 1.0), 54);
 }
 
 #[test]

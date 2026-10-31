@@ -1,18 +1,22 @@
 //! ignorarium library crate.
 #![deny(unsafe_code)]
+pub mod analysis;
 pub mod backend;
 pub mod budget;
 pub mod canon;
 pub mod cli;
 pub mod control;
+pub mod derived;
 pub mod diag;
 pub mod environ;
 pub mod estimate;
 pub mod events;
 pub mod files;
 pub mod home;
+pub mod inputs;
 pub mod keys;
 pub mod machine;
+pub mod payload;
 pub mod planlog;
 pub mod power;
 pub mod prior;
@@ -24,5 +28,9 @@ pub mod schedule;
 pub mod seed;
 pub mod spec;
 pub mod store;
+pub mod stream;
 pub mod sys;
 pub mod time;
+pub mod units;
+pub mod values;
+pub mod view;

@@ -11,14 +11,24 @@ intervention = ""
 comparator = ""
 negative_control = ""
 [[question.hypotheses]]
-id = "H1"
+id = "H1"                       # ASCII letters and digits, joined by single hyphens
 statement = ""
 rival = ""
+outcome = "ppl-ratio"           # the outcome id the hypothesis is about
+contrast = { arm-a = 1.0 }      # condition id -> weight, over values paired with the reference; "selected" is the pick
+strata = []                     # strata it must hold in, each with confirmation inputs; [] = all units as one group
+# claim = { below = 0.0 }       # { below = m } | { above = m } | { within = [a, b] }; none = descriptive
+# statistic = { quantile = 0.5 }  # per cluster: { mean = [lo, hi] } (each unit is clipped to it) | { quantile = q }; required with a claim
+# power_at = -1.0               # confirmatory: the true value of the statistic where the test must have its power
+# estimates = { from = "my-pilot" }  # confirmatory: the finished study in this box whose estimates give the sd and icc
+# alpha_share = 1.0             # confirmatory: share of the study's level; the shares sum to 1
 
 [[outcomes]]
 id = "ppl-ratio"
 unit = "ratio"                  # required
 direction = "lower"             # lower | higher (which is better)
+measure = "ppl"                 # the key the payload writes in values.json
+paired = "percent"              # difference | percent | log-ratio (against the reference condition)
 registered = true
 
 [scope]
@@ -30,7 +40,7 @@ wall_hours = 1.0
 money_usd = 0.0
 [scope.end_of_run]
 route = "report"                # report | follow-on | share
-follow_on = []                  # [{ when = "H1.pass", spec = "follow/next.toml" }]
+follow_on = []                  # [{ when = "done", spec = "follow/next.toml" }]; when: done | <id>.pass | <id>.fail, for a hypothesis with a claim
 
 [design]
 unit = "window"
@@ -39,26 +49,25 @@ stratum = "genre"               # optional; "" if none
 reference = "exact"             # condition id of the reference arm
 repeats = 1
 row_seconds = 60.0              # estimate per row, until a record gives one
-test = "paired-mean"            # paired-mean | descriptive (exploratory only)
-alpha = 0.005
 power = 0.8
-sesoi = 0.0                     # smallest effect of interest, in outcome units
-icc = 0.0
-units_per_cluster = 1
-[design.variance]
-value = 0.0                     # variance of the paired difference per unit
-source = "stated"               # stated | record:<sha256>
+units_per_cluster = 1           # units each cluster gives the study, at most
+pick = "seeded"                 # seeded | first: which of a cluster's units the study takes
 [[design.conditions]]
 id = "exact"
 [[design.conditions]]
 id = "arm-a"
-[design.selection]
-clusters = []                   # cluster ids used to pick a winner
+# params = { bits = 4 }        # optional; the payload gets them as JSON in IGNORARIUM_PARAMS; { from = "<study id>" } takes the condition that study selected
+# [[design.conditions]]        # a second candidate for the selection stage below
+# id = "arm-b"
+# [design.selection]           # optional: a stage that picks one candidate on the selection inputs first
+# metric = "ppl-ratio"         # the outcome whose mean paired value ranks the candidates
+# conditions = ["arm-a", "arm-b"]  # two or more candidates, not the reference; a tie goes to the first
+# rule = "best-mean"           # best mean in the outcome's direction, over units with a value for every candidate
 [design.confirmation]
-clusters = []                   # cluster ids used to confirm; disjoint from selection
+conditions = ["arm-a"]          # run after the reference on the confirmation inputs; "selected" runs the pick
 
 [[inputs]]
-path = "data/example.txt"       # relative to the study folder
+path = "data/example.txt"       # from the study root (the folder with ignorarium.toml; without one, the spec's folder)
 sha256 = ""
 role = "calibration"            # calibration | selection | confirmation | model
 [inputs.licence]
@@ -67,9 +76,21 @@ type = "unspecified"            # common | custom | request-form | unspecified
 source = ""
 creators = []
 
+[[inputs]]
+path = "data/confirm.txt"       # each selection or confirmation input is one cluster
+sha256 = ""
+role = "confirmation"
+stratum = "fiction"             # its stratum; required when design.stratum is set
+units = 3                       # the units the file holds (the box does not count them)
+[inputs.licence]
+spdx = ""
+type = "unspecified"
+source = ""
+creators = []
+
 [pins]
 environment = ""
-payload = ""
+payload = ""                    # "", or the hash of payload/ under the study root that register prints
 rule_base = ""
 
 [mutations]

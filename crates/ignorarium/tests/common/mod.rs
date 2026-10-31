@@ -1,14 +1,29 @@
 //! A registered study in a temp home, shared by the run tests.
 #![allow(dead_code)]
 use ignorarium::cli::register;
+use ignorarium::derived;
 use ignorarium::home::Home;
-use ignorarium::{keys, records, spec};
+use ignorarium::rules::BoxRecords;
+use ignorarium::spec::model::{Direction, Outcome, Paired, SelectionRule};
+use ignorarium::{keys, records, spec, stream};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
-pub const PAYLOAD: &str =
-    "#!/bin/sh\nprintf '%s %s %s' \"$2\" \"$4\" \"$6\" > \"$IGNORARIUM_OUT/result\"\n";
+/// The shell line that writes the template's one measure.
+pub const VALUES: &str = "printf '{\"ppl\": 1.5}' > \"$IGNORARIUM_OUT/values.json\"";
+
+pub const PAYLOAD: &str = "#!/bin/sh\nprintf '%s %s %s' \"$2\" \"$4\" \"$6\" > \"$IGNORARIUM_OUT/result\"\nprintf '{\"ppl\": 1.5}' > \"$IGNORARIUM_OUT/values.json\"\n";
+
+/// The template text with its example claim, statistic and alpha share uncommented: below 0
+/// by the median, with the whole level.
+pub fn with_claim(t: String) -> String {
+    ["claim", "statistic", "alpha_share"]
+        .iter()
+        .fold(t, |t, k| {
+            t.replace(&format!("# {k} = "), &format!("{k} = "))
+        })
+}
 
 pub struct Lab {
     pub _dir: TempDir,
@@ -28,8 +43,42 @@ pub fn lab() -> Lab {
     }
 }
 
-/// Register a study with `register::run`, then give it a payload.
-/// `before` lists files (relative to the study folder) present at registration.
+impl Drop for Lab {
+    fn drop(&mut self) {
+        unseal(&self.root);
+    }
+}
+
+/// Give the owner write access to `dir` and every folder below it again, so a test can
+/// change a read-only copy and its temp folder can be removed. Links are not followed.
+pub fn unseal(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(m) = dir.symlink_metadata() else {
+        return;
+    };
+    if !m.is_dir() {
+        return;
+    }
+    let mode = m.permissions().mode() | 0o700;
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode));
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        unseal(&e.path());
+    }
+}
+
+/// The study root that `register_study` registers `id` from.
+pub fn work(lab: &Lab, id: &str) -> PathBuf {
+    work_of(&lab.home, id)
+}
+
+/// `work` for the box at `home`, a lab's `home` folder.
+pub fn work_of(home: &Home, id: &str) -> PathBuf {
+    let lab = home.root.parent().expect("a lab's home has a parent");
+    lab.join(format!("work-{id}"))
+}
+
+/// Register a study with `register::run` from its own root, which holds `payload/run` and
+/// the files in `before` (paths relative to the root). Returns the study folder in the box.
 pub fn register_study(
     lab: &Lab,
     id: &str,
@@ -37,8 +86,10 @@ pub fn register_study(
     before: &[(&str, &str)],
     payload: &str,
 ) -> PathBuf {
-    let work = lab.root.join(format!("work-{id}"));
+    let work = work(lab, id);
     std::fs::create_dir_all(work.join("data")).unwrap();
+    std::fs::create_dir_all(work.join("payload")).unwrap();
+    write_exec(&work.join("payload/run"), payload);
     for (p, c) in before {
         std::fs::write(work.join(p), c).unwrap();
     }
@@ -56,13 +107,11 @@ pub fn register_study(
     let done = register::run(&spec_path, &lab.home, &mut input, &mut out, true)
         .unwrap_or_else(|e| panic!("{}: {}", e.msg, String::from_utf8_lossy(&out)));
     assert_eq!(done.code, 0, "{}", String::from_utf8_lossy(&out));
-    let dir = lab.home.study_dir(id);
-    std::fs::create_dir_all(dir.join("payload")).unwrap();
-    write_exec(&dir.join("payload/run"), payload);
-    dir
+    lab.home.study_dir(id)
 }
 
-/// A study whose one input is `data/example.txt`.
+/// A study with the template's inputs: `data/example.txt`, written, and the confirmation
+/// input `data/confirm.txt`, absent, whose 3 declared units make 3 units x 2 conditions = 6 rows.
 pub fn plain(lab: &Lab, id: &str) -> PathBuf {
     with_payload(lab, id, PAYLOAD)
 }
@@ -74,16 +123,13 @@ pub fn with_payload(lab: &Lab, id: &str, payload: &str) -> PathBuf {
 
 /// `with_payload` with the spec text changed by `edit` before registration.
 pub fn edited(lab: &Lab, id: &str, edit: impl Fn(String) -> String, payload: &str) -> PathBuf {
-    let dir = register_study(
+    register_study(
         lab,
         id,
         edit,
         &[("data/example.txt", "calibration")],
         payload,
-    );
-    std::fs::create_dir_all(dir.join("data")).unwrap();
-    std::fs::write(dir.join("data/example.txt"), "calibration").unwrap();
-    dir
+    )
 }
 
 /// Every verified record of the study, in order.
@@ -297,4 +343,255 @@ pub fn no_level1() -> Option<String> {
         Ok(o) => Some(String::from_utf8_lossy(&o.stderr).trim().to_string()),
         Err(e) => Some(format!("cannot run bwrap: {e}")),
     }
+}
+
+/// A record of study `study` for a box built by hand. `seq` keeps two records with one body
+/// apart: each has its own hash.
+pub fn record(study: &str, seq: u64, kind: &str, body: serde_json::Value) -> records::Record {
+    records::Record {
+        seq,
+        prev: "0".repeat(64),
+        study: study.into(),
+        row: None,
+        kind: kind.into(),
+        body,
+        ts: "2026-01-01T00:00:00Z".into(),
+    }
+}
+
+/// The template's outcome: `ppl-ratio`, measured as `ppl`, paired in percent.
+pub fn ppl_ratio() -> Outcome {
+    Outcome {
+        id: "ppl-ratio".into(),
+        unit: "ratio".into(),
+        direction: Direction::Lower,
+        measure: "ppl".into(),
+        paired: Paired::Percent,
+        registered: true,
+    }
+}
+
+/// A term of a contrast: condition id, weight and params.
+pub type Term<'a> = (&'a str, f64, serde_json::Value);
+
+/// The body of an estimate of the template outcome for the contrast `terms` against the
+/// template's reference `exact`, in `stratum`.
+pub fn estimate(terms: &[Term], stratum: &str, var: f64, icc: Option<f64>) -> serde_json::Value {
+    estimate_against(("exact", serde_json::json!({})), terms, stratum, var, icc)
+}
+
+/// `estimate` against another reference condition.
+pub fn estimate_against(
+    reference: (&str, serde_json::Value),
+    terms: &[Term],
+    stratum: &str,
+    var: f64,
+    icc: Option<f64>,
+) -> serde_json::Value {
+    let terms: Vec<(String, f64, serde_json::Value)> = terms
+        .iter()
+        .map(|(c, w, p)| (c.to_string(), *w, p.clone()))
+        .collect();
+    let reference = (reference.0.to_string(), reference.1);
+    let (key, key_hash) = derived::contrast_key(&ppl_ratio(), 1, &reference, &terms);
+    serde_json::json!({
+        "hypothesis": "H1", "outcome": "ppl-ratio", "key": key, "key_hash": key_hash,
+        "stratum": stratum, "clusters": 4, "units": 20, "mean": 1.0, "var": var, "icc": icc
+    })
+}
+
+/// The pooled estimate of the template's contrast, `arm-a` alone: variance 4, icc 0.1.
+pub fn arm_a() -> serde_json::Value {
+    estimate(&[("arm-a", 1.0, serde_json::json!({}))], "", 4.0, Some(0.1))
+}
+
+/// The records of a finished study, as (kind, body): its register record, an analysis record
+/// that promises `estimates`, and the estimates.
+pub fn finished(estimates: Vec<serde_json::Value>) -> Vec<(&'static str, serde_json::Value)> {
+    let register = derived::Register {
+        spec_hash: format!("sha256:{}", "ab".repeat(32)),
+        leaf: 0,
+        log: "testlog".into(),
+        defaults: serde_json::json!([]),
+        root_id: "12".repeat(32),
+        payload: "cd".repeat(32),
+        inputs: vec![],
+        resolved: vec![],
+        alpha: None,
+        timestamp: None,
+    };
+    let analysis = derived::Analysis {
+        commit: "ef".repeat(32),
+        box_version: "0.1.0".into(),
+        estimates: estimates.len() as u64,
+        verdicts: 0,
+        slot: None,
+    };
+    let head = [
+        ("register", serde_json::to_value(register).unwrap()),
+        ("analysis", serde_json::to_value(analysis).unwrap()),
+    ];
+    head.into_iter()
+        .chain(estimates.into_iter().map(|e| ("estimate", e)))
+        .collect()
+}
+
+/// `finished`, with the `selection` record the selection stage writes before the analysis:
+/// the pick was `selected`, over the one candidate `arm-a`.
+pub fn finished_selecting(
+    selected: &str,
+    estimates: Vec<serde_json::Value>,
+) -> Vec<(&'static str, serde_json::Value)> {
+    let selection = derived::Selection {
+        metric: "ppl-ratio".into(),
+        rule: SelectionRule::BestMean,
+        direction: Direction::Lower,
+        candidates: vec![derived::Candidate {
+            id: "arm-a".into(),
+            mean: -1.0,
+        }],
+        selected: selected.into(),
+        units: vec!["data/select.txt#0".into()],
+        complete_units: 1,
+        incomplete_units: 0,
+    };
+    let mut all = finished(estimates);
+    all.insert(1, ("selection", serde_json::to_value(selection).unwrap()));
+    all
+}
+
+/// `bodies` as the records of study `id`, in order, for a hand-built box.
+pub fn records_for(id: &str, bodies: &[(&str, serde_json::Value)]) -> Vec<records::Record> {
+    bodies
+        .iter()
+        .enumerate()
+        .map(|(i, (kind, body))| record(id, i as u64, kind, body.clone()))
+        .collect()
+}
+
+/// A box built by hand: each study id with its records, or the error its log gives.
+pub struct Studies(pub Vec<(&'static str, Result<Vec<records::Record>, String>)>);
+
+impl BoxRecords for Studies {
+    fn study(&self, id: &str) -> Result<Option<Vec<records::Record>>, String> {
+        match self.0.iter().find(|(s, _)| *s == id) {
+            Some((_, found)) => found.clone().map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Each stream is empty.
+    fn stream_next(&self, log: &str) -> Result<stream::Next, String> {
+        let log = stream::LogName::parse(log).map_err(|e| e.to_string())?;
+        stream::next_of(log, &[], &[]).map_err(|e| e.to_string())
+    }
+
+    fn stream_closed(&self, _: &str, _: &str, _: u64) -> Result<bool, String> {
+        Ok(false)
+    }
+}
+
+/// `Studies` whose stream of `log` gives `next`; another log cannot be read.
+pub struct Streamed {
+    pub studies: Studies,
+    pub log: &'static str,
+    pub next: Result<stream::Next, String>,
+}
+
+impl BoxRecords for Streamed {
+    fn study(&self, id: &str) -> Result<Option<Vec<records::Record>>, String> {
+        self.studies.study(id)
+    }
+
+    fn stream_next(&self, log: &str) -> Result<stream::Next, String> {
+        if log == self.log {
+            self.next.clone()
+        } else {
+            Err(format!("no {log} stream here"))
+        }
+    }
+
+    fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String> {
+        self.studies.stream_closed(log, study, slot)
+    }
+}
+
+/// The slot and level the stream of `log` in the box at `home` would give next, from its
+/// records alone: no register record is checked against it, as `HomeRecords::stream_next`
+/// does.
+pub fn next_slot(
+    home: &Home,
+    log: stream::LogName,
+    key: &ed25519_dalek::VerifyingKey,
+) -> Result<stream::Next, stream::StreamError> {
+    let all = records::read_all(stream::Log::of(home, log).path(), key)?;
+    stream::next_of(log, &all, &[])
+}
+
+/// Sign `bodies` into the record log of study `id` in the box at `home`. Returns the hash of
+/// each record.
+pub fn plant(home: &Home, id: &str, bodies: &[(&str, serde_json::Value)]) -> Vec<String> {
+    let key = keys::load_or_create(home).unwrap();
+    std::fs::create_dir_all(home.study_dir(id)).unwrap();
+    let path = home.study_dir(id).join("records.jsonl");
+    bodies
+        .iter()
+        .map(|(kind, body)| {
+            let draft = records::RecordDraft {
+                study: id.into(),
+                row: None,
+                kind: kind.to_string(),
+                body: body.clone(),
+            };
+            records::hash(&records::append(&path, &key, draft).unwrap())
+        })
+        .collect()
+}
+
+/// A finished study `my-pilot`, the one the template's commented `estimates` names, with
+/// `estimates`. Returns the hash of each estimate record.
+pub fn pilot(home: &Home, estimates: Vec<serde_json::Value>) -> Vec<String> {
+    let n = estimates.len();
+    let hashes = plant(home, "my-pilot", &finished(estimates));
+    hashes[hashes.len() - n..].to_vec()
+}
+
+/// The template text as a confirmatory plan with its example claim, power_at, estimates and
+/// alpha share uncommented: below 0 by the median, with the sd and icc of `my-pilot`, at the
+/// whole level. It is sized at -20, where every unit lies below the margin, and 14 more
+/// confirmation inputs give the 15 clusters the median test needs: each scores 1, and
+/// 1.5^14 = 292 reaches 1/0.005.
+pub fn confirmatory(t: String) -> String {
+    ["power_at", "estimates"]
+        .iter()
+        .fold(with_claim(t), |t, k| {
+            t.replace(&format!("# {k} = "), &format!("{k} = "))
+        })
+        .replace("power_at = -1.0", "power_at = -20.0")
+        .replacen("[pins]", &format!("{}[pins]", clusters("fiction", 14)), 1)
+        .replace("mode = \"exploratory\"", "mode = \"confirmatory\"")
+        .replace("label = \"signal\"", "label = \"confirmed\"")
+}
+
+/// `n` confirmation inputs `data/<stratum>-<i>.txt` of 3 units in `stratum`, as spec text.
+pub fn clusters(stratum: &str, n: usize) -> String {
+    (0..n)
+        .map(|i| {
+            format!(
+                "[[inputs]]
+path = \"data/{stratum}-{i:02}.txt\"
+sha256 = \"\"
+role = \"confirmation\"
+stratum = \"{stratum}\"
+units = 3
+[inputs.licence]
+spdx = \"\"
+type = \"unspecified\"
+source = \"\"
+creators = []
+
+"
+            )
+        })
+        .collect()
 }

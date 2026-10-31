@@ -1,5 +1,6 @@
 //! Typed rules, loaded from data. `generic` runs the data-driven checks; `named` the cross-field ones.
 use crate::diag::Severity;
+use crate::stream::{LogName, Next};
 use regex::Regex;
 use serde::Deserialize;
 use std::path::Path;
@@ -8,13 +9,94 @@ use std::sync::OnceLock;
 mod generic;
 mod named;
 pub use generic::{check_generic, safe_key};
-pub use named::{CheckCtx, check_named, input_bytes};
+pub use named::{
+    CAP, CheckCtx, Gates, Lookup, Power, StratumInput, Taken, check_named, estimate_inputs,
+    granted, power, selected_by,
+};
+
+/// The records of a box, by study. An `Err` is a log that cannot be read or trusted.
+pub trait BoxRecords {
+    /// The verified records of the registered study `id`, in order; `None` when no study
+    /// with that id is registered in the box.
+    fn study(&self, id: &str) -> Result<Option<Vec<crate::records::Record>>, String>;
+    /// The slot and level the stream of `log` would give a study that opened a slot now.
+    fn stream_next(&self, log: &str) -> Result<Next, String>;
+    /// True when slot `slot` of the stream of `log` was opened by study `study` and is closed.
+    fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String>;
+}
+
+/// An empty box.
+pub struct NoRecords;
+
+impl BoxRecords for NoRecords {
+    fn study(&self, _: &str) -> Result<Option<Vec<crate::records::Record>>, String> {
+        Ok(None)
+    }
+
+    /// Each stream is empty.
+    fn stream_next(&self, log: &str) -> Result<Next, String> {
+        let log = LogName::parse(log).map_err(|e| e.to_string())?;
+        crate::stream::next_of(log, &[], &[]).map_err(|e| e.to_string())
+    }
+
+    fn stream_closed(&self, _: &str, _: &str, _: u64) -> Result<bool, String> {
+        Ok(false)
+    }
+}
+
+/// `B`, with each stream read once and the answer kept, so every rule of one check sees one
+/// slot and level, or one error.
+pub struct ReadOnce<B> {
+    inner: B,
+    streams: std::cell::RefCell<std::collections::BTreeMap<String, Result<Next, String>>>,
+}
+
+impl<B> ReadOnce<B> {
+    pub fn new(inner: B) -> ReadOnce<B> {
+        ReadOnce {
+            inner,
+            streams: Default::default(),
+        }
+    }
+}
+
+impl<B: BoxRecords> BoxRecords for ReadOnce<B> {
+    fn study(&self, id: &str) -> Result<Option<Vec<crate::records::Record>>, String> {
+        self.inner.study(id)
+    }
+
+    fn stream_next(&self, log: &str) -> Result<Next, String> {
+        let mut streams = self.streams.borrow_mut();
+        let read = streams
+            .entry(log.to_string())
+            .or_insert_with(|| self.inner.stream_next(log));
+        read.clone()
+    }
+
+    fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String> {
+        self.inner.stream_closed(log, study, slot)
+    }
+}
+
+/// True when `id` has the form E-FMT-001 gives `study.id` in the built-in rules.
+pub fn is_study_id(id: &str) -> bool {
+    has_format("study.id", id)
+}
+
+/// True when `value` has the form E-FMT-001 gives the field at `path` in the built-in rules.
+fn has_format(path: &str, value: &str) -> bool {
+    builtin().iter().any(|r| {
+        r.code == "E-FMT-001"
+            && r.path == path
+            && matches!(&r.check, Check::Format(re) if re.is_match(value))
+    })
+}
 
 #[derive(Debug, Clone)]
 pub struct Rule {
     pub code: String,
     pub severity: Severity,
-    /// Dots and `[*]` for array elements; `**` means any depth.
+    /// Dots, `[*]` for array elements and `*` for every key of a table; `**` means any depth.
     pub path: String,
     pub check: Check,
     pub problem: String,
@@ -75,6 +157,9 @@ pub enum Kind {
     Bool,
     Array,
     Table,
+    /// Any value. The path and everything below it are known keys; a named check owns the
+    /// value's shape.
+    Any,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

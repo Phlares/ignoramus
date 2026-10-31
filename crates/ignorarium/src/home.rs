@@ -3,7 +3,7 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-const SUBDIRS: [&str; 4] = ["keys", "planlog", "testlog", "studies"];
+const SUBDIRS: [&str; 5] = ["keys", "planlog", "testlog", "studies", "stream"];
 
 #[derive(Debug)]
 pub enum HomeError {

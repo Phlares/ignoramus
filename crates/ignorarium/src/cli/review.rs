@@ -3,16 +3,53 @@
 use super::check::{self, Assessed};
 use super::{Ctx, Done, Run, out};
 use crate::diag::{Diagnostic, Severity};
-use crate::rules::safe_key;
+use crate::rules::{self, safe_key};
 use serde_json::Value;
 use std::path::Path;
 
 fn at(v: &Value, pointer: &str) -> String {
-    match v.pointer(pointer) {
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => other.to_string(),
-        None => "(missing)".into(),
+    v.pointer(pointer).map_or_else(|| "(missing)".into(), plain)
+}
+
+/// A value as plain text: a table as `key value` pairs, a list in brackets.
+fn plain(v: &Value) -> String {
+    let join = |parts: Vec<String>| parts.join(", ");
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Array(a) => format!("[{}]", join(a.iter().map(plain).collect())),
+        Value::Object(m) => join(m.iter().map(|(k, x)| format!("{k} {}", plain(x))).collect()),
+        other => other.to_string(),
     }
+}
+
+/// `<id>: <statement> (rival: <rival>)`, then what the hypothesis tests and how.
+fn hypothesis_line(h: &Value) -> String {
+    let strata = items(h, "/strata");
+    let strata = if strata.is_empty() {
+        "pooled".to_string()
+    } else {
+        strata.iter().map(plain).collect::<Vec<_>>().join(", ")
+    };
+    let mut parts = vec![
+        format!(
+            "{}: {} (rival: {})",
+            at(h, "/id"),
+            at(h, "/statement"),
+            at(h, "/rival")
+        ),
+        format!("outcome: {}", at(h, "/outcome")),
+        format!("contrast: {}", at(h, "/contrast")),
+        format!("strata: {strata}"),
+    ];
+    if h.get("claim").is_none() {
+        parts.push("claim: none (descriptive)".into());
+    }
+    let shown = ["claim", "statistic", "power_at", "estimates", "alpha_share"];
+    parts.extend(shown.iter().filter_map(|key| {
+        let label = key.replace('_', " ");
+        Some(format!("{label}: {}", plain(h.get(*key)?)))
+    }));
+    parts.join("; ")
 }
 
 fn items<'a>(v: &'a Value, pointer: &str) -> &'a [Value] {
@@ -75,17 +112,22 @@ fn withheld(v: &Value) -> Value {
 
 const NO_ESTIMATE: &str = "Not available: the plan has errors.\n";
 
+/// The root relative to the current folder when it lies inside it, else the full path.
+fn shown_root(root: &Path) -> String {
+    let rel = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| root.strip_prefix(cwd).ok().map(Path::to_path_buf));
+    match rel {
+        Some(r) if r.as_os_str().is_empty() => ".".into(),
+        Some(r) => r.display().to_string(),
+        None => root.display().to_string(),
+    }
+}
+
 fn page(a: &Assessed) -> String {
     let v = &withheld(&a.value);
     let est = a.estimate.as_ref();
-    let hypotheses = items(v, "/question/hypotheses").iter().map(|h| {
-        format!(
-            "{}: {} (rival: {})",
-            at(h, "/id"),
-            at(h, "/statement"),
-            at(h, "/rival")
-        )
-    });
+    let hypotheses = items(v, "/question/hypotheses").iter().map(hypothesis_line);
     let outcomes = items(v, "/outcomes").iter().map(|o| {
         format!(
             "{} ({}, {} is better)",
@@ -113,9 +155,10 @@ fn page(a: &Assessed) -> String {
         )
     });
     let mut s = format!(
-        "# Plan review: {}\n\nSpec hash: {}\n\n## Plan\n\n",
+        "# Plan review: {}\n\nSpec hash: {}\n\nStudy root: {}\n\n## Plan\n\n",
         at(v, "/study/id"),
-        a.hash
+        a.hash,
+        shown_root(&a.root)
     );
     s.push_str(&bullets([
         format!(
@@ -134,6 +177,12 @@ fn page(a: &Assessed) -> String {
     s.push_str(&format!("\n## Conditions\n\n{}", bullets(conditions)));
     s.push_str("\n## Estimate\n\n");
     s.push_str(&est.map_or(NO_ESTIMATE.into(), |e| bullets(check::figure_lines(e))));
+    let level = a.stream.iter().map(check::stream_line);
+    s.push_str(&format!("\n## Level\n\n{}", bullets(level)));
+    let power = rules::power(&a.value, &a.ctx)
+        .into_iter()
+        .map(|p| format!("{}: {}", p.hypothesis, p.sentence()));
+    s.push_str(&format!("\n## Power\n\n{}", bullets(power)));
     s.push_str(&format!(
         "\n## Claim label\n\n{}",
         bullets([

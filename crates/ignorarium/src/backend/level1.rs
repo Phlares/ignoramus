@@ -4,7 +4,9 @@
 //! seccomp filter. See the bubblewrap manual: <https://github.com/containers/bubblewrap>.
 use super::rootfs::KEPT;
 use super::selftest::SelfTest;
-use super::{Backend, Exit, Probe, RowJob, RowOutcome, TIMEOUT_CODE, Watch, outcome, supervise};
+use super::{
+    Backend, Exit, Probe, RowJob, RowOutcome, TIMEOUT_CODE, Watch, host_cpus, outcome, supervise,
+};
 use crate::sys;
 use rustix::pipe::{PipeFlags, pipe_with};
 use rustix::process::{getpid, set_child_subreaper};
@@ -200,7 +202,8 @@ impl Level1 {
             held: Cell::new(Some((pipes.filter, pipes.status_w))),
             inner: watch,
         };
-        let (exit, cpu) = supervise(cmd, job, start, &started);
+        let ran = supervise(cmd, job, start, &started);
+        let (exit, cpu, ended) = (ran.exit, ran.cpu_seconds, ran.ended);
         // Closes the inherited ends when bubblewrap never started.
         drop(started);
         let status = pipes.status.recv_timeout(DRAIN_GRACE).unwrap_or_default();
@@ -239,6 +242,7 @@ impl Level1 {
             cpu,
             cpu_unknown,
             stdout,
+            ended,
         }
     }
 
@@ -287,6 +291,7 @@ impl Level1 {
             result,
             cpu: l.cpu,
             cpu_unknown: l.cpu_unknown,
+            ended: l.ended,
         }
     }
 }
@@ -354,6 +359,8 @@ struct Checked {
     result: Result<SelfTest, (Exit, Option<SelfTest>)>,
     cpu: f64,
     cpu_unknown: Option<String>,
+    /// The box killed the self-test sandbox.
+    ended: bool,
 }
 
 /// The wall limit for the self-test sandbox, on the row's clock: `own` after `elapsed`,
@@ -376,6 +383,10 @@ impl Backend for Level1 {
         }
     }
 
+    fn cpus(&self) -> u32 {
+        host_cpus()
+    }
+
     fn launcher(&self) -> String {
         match self.version() {
             Ok((text, _)) => format!("bubblewrap {text}"),
@@ -387,7 +398,7 @@ impl Backend for Level1 {
         let start = Instant::now();
         let sandbox = match row_args(job) {
             Ok(s) => s,
-            Err(why) => return Ok(outcome(job, start, Exit::Infra(why), 0.0)),
+            Err(why) => return Ok(outcome(job, start, Exit::Infra(why), 0.0, false)),
         };
         let checked = self.self_test(job, start, watch);
         let selftest = match checked.result {
@@ -396,7 +407,7 @@ impl Backend for Level1 {
                 return Ok(RowOutcome {
                     selftest: found,
                     cpu_unknown: checked.cpu_unknown,
-                    ..outcome(job, start, exit, checked.cpu)
+                    ..outcome(job, start, exit, checked.cpu, checked.ended)
                 });
             }
         };
@@ -404,7 +415,7 @@ impl Backend for Level1 {
         Ok(RowOutcome {
             selftest,
             cpu_unknown: l.cpu_unknown.or(checked.cpu_unknown),
-            ..outcome(job, start, l.exit, checked.cpu + l.cpu)
+            ..outcome(job, start, l.exit, checked.cpu + l.cpu, l.ended)
         })
     }
 }
@@ -554,6 +565,8 @@ struct Launched {
     cpu: f64,
     cpu_unknown: Option<String>,
     stdout: String,
+    /// The box killed the sandbox.
+    ended: bool,
 }
 
 impl Launched {
@@ -563,6 +576,7 @@ impl Launched {
             cpu: 0.0,
             cpu_unknown: None,
             stdout: String::new(),
+            ended: false,
         }
     }
 }

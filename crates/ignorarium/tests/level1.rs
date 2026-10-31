@@ -636,7 +636,13 @@ fn level1_dead_box_child() {
     let Some((home, id)) = common::boxed_study() else {
         return;
     };
-    let plan = prepare_with(&home, &id, vec![Box::new(backend())]).unwrap();
+    let plan = prepare_with(
+        &home,
+        &id,
+        &common::work_of(&home, &id),
+        vec![Box::new(backend())],
+    )
+    .unwrap();
     let _ = runner::run(&plan);
 }
 
@@ -812,9 +818,10 @@ fn progress_of(lab: &common::Lab, id: &str) -> runner::Progress {
 
 /// The study's per-row CPU estimate in seconds.
 fn per_row_cpu(lab: &common::Lab, id: &str) -> f64 {
-    let spec = progress_of(lab, id).spec;
+    let p = progress_of(lab, id);
     let m = machine::load(&lab.home.root).unwrap();
-    let e = ignorarium::estimate::estimate(&spec, &m, ignorarium::estimate::units(&spec));
+    let rows = ignorarium::schedule::rows(&p.spec, &p.spec_hash).unwrap();
+    let e = ignorarium::estimate::estimate(&p.spec, &m, &rows);
     e.cpu_hours * 3600.0 / e.rows.max(1) as f64
 }
 
@@ -894,6 +901,7 @@ fn an_unknown_cpu_row_is_charged_the_estimate_warned_about_and_pauses_the_run() 
     let plan = prepare_with(
         &lab.home,
         "unk",
+        &common::work_of(&lab.home, "unk"),
         vec![Box::new(stuck_bwrap(d.path(), true, false))],
     )
     .unwrap();
@@ -908,10 +916,14 @@ fn an_unknown_cpu_row_is_charged_the_estimate_warned_about_and_pauses_the_run() 
     let rows = rows_of(&lab, "unk");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].body["cpu_unknown"], UNKNOWN);
-    // The row is charged the estimate, not the near-zero it measured.
+    // The row is charged the larger of the estimate and the CPU it could have used, not the
+    // near-zero it measured, and the record marks the figure as a bound.
     let est = per_row_cpu(&lab, "unk");
     assert!(est > 1.0, "{est}");
+    let wall = rows[0].body["wall_seconds"].as_f64().unwrap();
+    let est = est.max(wall * f64::from(Level0.cpus()));
     assert_eq!(rows[0].body["cpu_seconds"].as_f64().unwrap(), est);
+    assert_eq!(rows[0].body["cpu_bound"], true);
     // The warn event names the row.
     let events = common::events_of(&dir);
     let warns = common::named(&events, "row.cpu_unknown");
@@ -938,6 +950,7 @@ fn an_unknown_cpu_attempt_that_is_retried_leaves_a_spend_record_and_still_pauses
     let plan = prepare_with(
         &lab.home,
         "unk2",
+        &common::work_of(&lab.home, "unk2"),
         vec![Box::new(stuck_bwrap(d.path(), false, true))],
     )
     .unwrap();
@@ -952,13 +965,14 @@ fn an_unknown_cpu_attempt_that_is_retried_leaves_a_spend_record_and_still_pauses
     let spends = common::kind_of(&lab, "unk2", "spend");
     assert_eq!(spends.len(), 1);
     assert_eq!(spends[0].body["cpu_unknown"], UNKNOWN);
-    assert_eq!(
-        spends[0].body["cpu_seconds"].as_f64().unwrap(),
-        per_row_cpu(&lab, "unk2")
-    );
+    let wall = spends[0].body["wall_seconds"].as_f64().unwrap();
+    let charged = per_row_cpu(&lab, "unk2").max(wall * f64::from(Level0.cpus()));
+    assert_eq!(spends[0].body["cpu_seconds"].as_f64().unwrap(), charged);
+    assert_eq!(spends[0].body["cpu_bound"], true);
     let rows = rows_of(&lab, "unk2");
     assert_eq!(rows.len(), 1);
     assert!(rows[0].body.get("cpu_unknown").is_none());
+    assert!(rows[0].body.get("cpu_bound").is_none());
     assert_eq!(rows[0].body["attempts"], 2);
     // One warning, for the first attempt.
     let events = common::events_of(&dir);
@@ -969,7 +983,7 @@ fn an_unknown_cpu_attempt_that_is_retried_leaves_a_spend_record_and_still_pauses
     assert_eq!(warns[0]["attrs"]["reason"], UNKNOWN);
     assert_eq!(
         warns[0]["attrs"]["charged_cpu_seconds"].as_f64().unwrap(),
-        per_row_cpu(&lab, "unk2")
+        charged
     );
 }
 
@@ -990,6 +1004,9 @@ impl Backend for BreakEvents {
     }
     fn probe(&self) -> Probe {
         Probe::Available
+    }
+    fn cpus(&self) -> u32 {
+        1
     }
     fn launcher(&self) -> String {
         "stub".into()
@@ -1015,6 +1032,7 @@ impl Backend for BreakEvents {
             output_hash: output_hash(&job.output_dir)?,
             selftest: self.selftest.then_some(passed),
             cpu_unknown: self.unknown.then(|| UNKNOWN.into()),
+            ended: false,
         })
     }
 }
@@ -1032,7 +1050,7 @@ fn an_attempts_record_is_written_before_its_events_can_fail() {
         let lab = lab();
         let id = format!("ev{i}");
         let dir = plain(&lab, &id);
-        let mut plan = prepare(&lab.home, &id, 0).unwrap();
+        let mut plan = prepare(&lab.home, &id, &common::work_of(&lab.home, &id), 0).unwrap();
         plan.backend = Box::new(BreakEvents {
             dir: dir.clone(),
             exit,
@@ -1074,7 +1092,7 @@ fn a_pause_sticks_when_the_event_log_cannot_be_written() {
         let lab = lab();
         let id = format!("stick{i}");
         let dir = plain(&lab, &id);
-        let mut plan = prepare(&lab.home, &id, 0).unwrap();
+        let mut plan = prepare(&lab.home, &id, &common::work_of(&lab.home, &id), 0).unwrap();
         plan.backend = Box::new(BreakEvents {
             dir: dir.clone(),
             exit: Exit::Ok,
@@ -1096,7 +1114,7 @@ fn a_pause_sticks_when_the_event_log_cannot_be_written() {
         // With the event log back, the next run does not go past the pause.
         std::fs::remove_dir(dir.join("events.jsonl")).unwrap();
         std::fs::rename(dir.join("events.old"), dir.join("events.jsonl")).unwrap();
-        let again = prepare(&lab.home, &id, 0).unwrap();
+        let again = prepare(&lab.home, &id, &common::work_of(&lab.home, &id), 0).unwrap();
         assert_eq!(
             runner::run(&again).unwrap(),
             RunStatus::Paused("a pause was requested".into()),
@@ -1128,6 +1146,9 @@ impl Backend for BreakAtRetry {
         }
         Probe::Available
     }
+    fn cpus(&self) -> u32 {
+        1
+    }
     fn launcher(&self) -> String {
         "stub".into()
     }
@@ -1140,6 +1161,7 @@ impl Backend for BreakAtRetry {
             output_hash: output_hash(&job.output_dir)?,
             selftest: None,
             cpu_unknown: Some(UNKNOWN.into()),
+            ended: false,
         })
     }
 }
@@ -1148,7 +1170,7 @@ impl Backend for BreakAtRetry {
 fn an_unknown_cpu_pause_survives_a_failed_alert_at_the_retry_gate() {
     let lab = lab();
     let dir = plain(&lab, "gate");
-    let mut plan = prepare(&lab.home, "gate", 0).unwrap();
+    let mut plan = prepare(&lab.home, "gate", &common::work_of(&lab.home, "gate"), 0).unwrap();
     plan.backend = Box::new(BreakAtRetry {
         dir: dir.clone(),
         runs: Cell::new(0),
@@ -1181,7 +1203,7 @@ fn an_unknown_cpu_pause_survives_a_failed_alert_at_the_retry_gate() {
     );
     std::fs::remove_dir(dir.join("events.jsonl")).unwrap();
     std::fs::rename(dir.join("events.old"), dir.join("events.jsonl")).unwrap();
-    let again = prepare(&lab.home, "gate", 0).unwrap();
+    let again = prepare(&lab.home, "gate", &common::work_of(&lab.home, "gate"), 0).unwrap();
     assert_eq!(
         runner::run(&again).unwrap(),
         RunStatus::Paused("a pause was requested".into())
@@ -1260,14 +1282,21 @@ fn need_isolation(t: String) -> String {
 fn min_isolation_1_is_refused_without_level1() {
     let lab = lab();
     register_study(&lab, "need1", need_isolation, &[], PAYLOAD);
-    let err = prepare_with(&lab.home, "need1", vec![Box::new(Level0)])
-        .err()
-        .unwrap();
+    let err = prepare_with(
+        &lab.home,
+        "need1",
+        &common::work_of(&lab.home, "need1"),
+        vec![Box::new(Level0)],
+    )
+    .err()
+    .unwrap();
     assert!(
         matches!(&err, RunError::NoBackend { need: 1, have } if *have == [0]),
         "{err}"
     );
-    let err = prepare(&lab.home, "need1", 0).err().unwrap();
+    let err = prepare(&lab.home, "need1", &common::work_of(&lab.home, "need1"), 0)
+        .err()
+        .unwrap();
     assert!(
         matches!(&err, RunError::NoBackend { need: 1, have } if *have == [0]),
         "{err}"
@@ -1281,10 +1310,22 @@ fn prepare_prefers_the_highest_backend() {
     let dir = plain(&lab, "hi");
     let launcher = b.launcher();
     let both: Vec<Box<dyn Backend>> = vec![Box::new(b), Box::new(Level0)];
-    let plan = prepare_with(&lab.home, "hi", both).unwrap();
+    let plan = prepare_with(&lab.home, "hi", &common::work_of(&lab.home, "hi"), both).unwrap();
     assert_eq!(plan.backend.level(), 1);
-    assert_eq!(prepare(&lab.home, "hi", 1).unwrap().backend.level(), 1);
-    assert_eq!(prepare(&lab.home, "hi", 0).unwrap().backend.level(), 0);
+    assert_eq!(
+        prepare(&lab.home, "hi", &common::work_of(&lab.home, "hi"), 1)
+            .unwrap()
+            .backend
+            .level(),
+        1
+    );
+    assert_eq!(
+        prepare(&lab.home, "hi", &common::work_of(&lab.home, "hi"), 0)
+            .unwrap()
+            .backend
+            .level(),
+        0
+    );
     // The whole study runs at level 1, and every record says so.
     assert_eq!(runner::run(&plan).unwrap(), RunStatus::Done);
     let rows = rows_of(&lab, "hi");
@@ -1351,4 +1392,48 @@ fn seccomp_program_is_a_whole_number_of_filters() {
     const ERRNO_EPERM: u32 = 0x0005_0000 | libc::EPERM as u32;
     const ALLOW: u32 = 0x7fff_0000;
     assert_eq!(returns, [ERRNO_EPERM, ALLOW, KILL_PROCESS]);
+}
+
+/// Says stop once the row's own group runs: the second group the backend starts, after the
+/// self-test's.
+struct StopInRow(Cell<u32>);
+impl Watch for StopInRow {
+    fn tick(&self) -> bool {
+        self.0.get() < 2
+    }
+    fn started(&self, _pid: u32) {
+        self.0.set(self.0.get() + 1);
+    }
+}
+
+#[test]
+fn a_stopped_level1_row_is_ended() {
+    let Some(b) = ready() else { return };
+    let (_w, job) = row("sleep 30", LONG);
+    let o = b.run_row(&job, &StopInRow(Cell::new(0))).unwrap();
+    assert_eq!(o.exit, Exit::Stopped);
+    assert!(o.selftest.is_some());
+    assert!(o.ended);
+    // A stop during the self-test ends the row too.
+    let o = b.run_row(&job, &|| false).unwrap();
+    assert_eq!(o.exit, Exit::Stopped);
+    assert!(o.ended);
+}
+
+#[test]
+fn a_level1_row_that_finishes_or_exits_124_is_not_ended() {
+    let Some(b) = ready() else { return };
+    let (_w, job) = row("exit 124", LONG);
+    let o = b.run_row(&job, &|| true).unwrap();
+    assert_eq!(o.exit, Exit::Payload(124));
+    assert!(!o.ended);
+}
+
+#[test]
+fn a_timed_out_level1_row_is_ended() {
+    let Some(b) = ready() else { return };
+    let (_w, job) = row("sleep 30", Duration::from_secs(3));
+    let o = b.run_row(&job, &|| true).unwrap();
+    assert_eq!(o.exit, Exit::Payload(124));
+    assert!(o.ended);
 }

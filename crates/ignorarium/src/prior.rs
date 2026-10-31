@@ -1,6 +1,10 @@
 //! Earlier-use lookup: has a data file already been seen by an earlier study?
 use crate::canon::sha256_hex;
 
+/// The largest file that gets a normalized hash. Larger files, and files that are not
+/// UTF-8 text, have none.
+pub const NORMALIZE_LIMIT: u64 = 64 << 20;
+
 /// The earlier-use log cannot be read. Callers must treat this as a refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PriorError(pub String);
@@ -42,11 +46,27 @@ pub fn normalized_sha256(text: &str) -> String {
     sha256_hex(folded.as_bytes())
 }
 
+/// Two files, by their `(exact, normalized)` hashes, hold the same data: the same exact hash,
+/// or the same normalized hash (text that differs only in case and spacing). An empty
+/// normalized hash (no text) matches nothing.
+pub fn same_data(a: &(String, String), b: &(String, String)) -> bool {
+    a.0 == b.0 || (!a.1.is_empty() && a.1 == b.1)
+}
+
 /// `(exact, normalized)` SHA-256 of a file. The normalized hash is empty
-/// when the bytes are not UTF-8 text.
+/// when the bytes are not UTF-8 text or exceed `NORMALIZE_LIMIT`.
 pub fn file_hashes(bytes: &[u8]) -> (String, String) {
-    let normalized = std::str::from_utf8(bytes)
-        .map(normalized_sha256)
-        .unwrap_or_default();
+    file_hashes_within(bytes, NORMALIZE_LIMIT)
+}
+
+/// `file_hashes` with another size limit.
+pub fn file_hashes_within(bytes: &[u8], limit: u64) -> (String, String) {
+    let normalized = if bytes.len() as u64 <= limit {
+        std::str::from_utf8(bytes)
+            .map(normalized_sha256)
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     (sha256_hex(bytes), normalized)
 }

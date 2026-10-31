@@ -23,6 +23,12 @@ regex = '(?i)(?:api[_-]?key|secret|token|password)[\x22\x27]?\s*[:=]\s*[\x22\x27
 allow = ['^[^A-Za-z]*$', '^\D*$', '^[$<{]', '^env:']
 
 [[pattern]]
+kind = "home-path"
+# A path into a user's home folder. A placeholder such as `<name>` is allowed.
+regex = '(?i)(?:/home/|/Users/|[a-z]:\\Users\\)[^/\\\s]+'
+allow = ['[<{$]']
+
+[[pattern]]
 kind = "email"
 regex = '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
 # RFC 2606 names.

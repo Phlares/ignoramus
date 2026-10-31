@@ -1,5 +1,4 @@
 use ignorarium::diag::{Diagnostic, render_human};
-use ignorarium::prior::NoPriorUse;
 use ignorarium::rules::{self, CheckCtx, Rule};
 use ignorarium::scan::{self, Pattern, ScanError};
 use serde_json::{Value, json};
@@ -42,10 +41,8 @@ fn run(spec: &Value) -> Vec<Diagnostic> {
 /// `text` is the spec source the comment scan reads.
 fn run_text(spec: &Value, text: &str) -> Vec<Diagnostic> {
     let ctx = CheckCtx {
-        study_dir: ".".into(),
-        prior: Box::new(NoPriorUse),
-        machine_max_level: 2,
         spec_text: text.into(),
+        ..CheckCtx::empty(".".as_ref())
     };
     let (_, _, d) = rules::check_all(spec, v0(), &ctx);
     d.into_iter().filter(|d| d.code == "E-SEC-001").collect()
@@ -160,7 +157,7 @@ fn pinned_hashes_in_a_spec_pass() {
     let mut s = template();
     s["inputs"] = json!([{"path": "data/a.csv", "sha256": sha, "role": "selection"}]);
     s["pins"] = json!({"model": sha});
-    s["design"]["variance"]["source"] = json!(format!("record:{sha}"));
+    s["question"]["hypotheses"][0]["estimates"] = json!({ "from": format!("study-{sha}") });
     assert!(run(&s).is_empty());
 }
 
@@ -172,7 +169,7 @@ fn load_matches_builtin() {
             .map(|p| (p.kind.clone(), p.regex.as_str().to_string(), p.allow.len()))
             .collect()
     };
-    assert_eq!(loaded.len(), 7);
+    assert_eq!(loaded.len(), 8);
     assert_eq!(pairs(&loaded), pairs(scan::builtin()));
 }
 
@@ -329,4 +326,18 @@ b = 1  # fine
     );
     assert!(run_text(&template(), &text).is_empty());
     assert!(run_text(&template(), "").is_empty());
+}
+
+#[test]
+fn home_path_rules() {
+    let path = |root: &str, name: &str| format!("at {root}{name}/data");
+    for root in ["/home/", "/Users/"] {
+        assert_eq!(kinds(&path(root, "alice")), ["home-path"], "{root}");
+        assert!(kinds(&path(root, "<name>")).is_empty(), "{root}");
+    }
+    let win = |drive: &str, root: &str, name: &str| [drive, root, name, "data"].join("\\");
+    assert_eq!(kinds(&win("C:", "Users", "alice")), ["home-path"]);
+    assert_eq!(kinds(&win("d:", "users", "alice")), ["home-path"]);
+    assert!(kinds(&win("C:", "Users", "<name>")).is_empty());
+    assert!(kinds("the home folder and the Users table").is_empty());
 }

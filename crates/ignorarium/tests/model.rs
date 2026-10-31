@@ -1,5 +1,8 @@
-use ignorarium::spec::model::{Label, Mode, Spec};
+use evidence::Tail;
+use evidence::claim::{Bound, Statistic};
+use ignorarium::spec::model::{Claim, Label, Mode, Reference, Spec, StatisticSpec};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 const TEMPLATES: [&str; 2] = [
     "../../templates/numeric-ablation.toml",
@@ -42,14 +45,13 @@ fn unknown_key_is_rejected_at_every_depth() {
         "/scope/end_of_run",
         "/design",
         "/design/conditions/0",
-        "/design/selection",
-        "/design/confirmation",
         "/pins",
         "/mutations",
         "/access",
         "/report",
-        "/design/variance",
+        "/design/confirmation",
         "/inputs/0",
+        "/inputs/1",
         "/inputs/0/licence",
         "/scope/budget",
         "/mutations/seeds",
@@ -90,9 +92,10 @@ fn wrong_enum_value_is_rejected() {
         "/study/mode",
         "/study/label",
         "/outcomes/0/direction",
+        "/outcomes/0/paired",
         "/scope/stop_rule",
         "/scope/end_of_run/route",
-        "/design/test",
+        "/design/pick",
         "/inputs/0/role",
         "/inputs/0/licence/type",
         "/report/publish",
@@ -108,11 +111,11 @@ fn whole_numbers_widen_to_floats_and_fractions_do_not_fit_integers() {
     let mut v = template_value();
     v["scope"]["budget"]["cpu_hours"] = json!(1);
     v["design"]["row_seconds"] = json!(0);
-    v["design"]["variance"]["value"] = json!(0);
+    v["design"]["power"] = json!(1);
     let s = Spec::from_value(&v).unwrap();
     assert_eq!(s.scope.budget.cpu_hours, 1.0);
     assert_eq!(s.design.row_seconds, 0.0);
-    assert_eq!(s.design.variance.value, 0.0);
+    assert_eq!(s.design.power, 1.0);
     v["scope"]["min_isolation"] = json!(1.5);
     assert!(Spec::from_value(&v).is_err());
 }
@@ -127,9 +130,13 @@ fn every_allowed_enum_value_deserializes() {
             &["signal", "confirmed", "replicated", "generalized"],
         ),
         ("/outcomes/0/direction", &["lower", "higher"]),
+        (
+            "/outcomes/0/paired",
+            &["difference", "percent", "log-ratio"],
+        ),
         ("/scope/stop_rule", &["budget-only", "e-process"]),
         ("/scope/end_of_run/route", &["report", "follow-on", "share"]),
-        ("/design/test", &["paired-mean", "descriptive"]),
+        ("/design/pick", &["seeded", "first"]),
         (
             "/inputs/0/role",
             &["calibration", "selection", "confirmation", "model"],
@@ -139,7 +146,6 @@ fn every_allowed_enum_value_deserializes() {
             &["common", "custom", "request-form", "unspecified"],
         ),
         ("/report/publish", &["none", "zenodo-sandbox"]),
-        ("/design/variance/source", &["stated", "record:abc"]),
     ];
     for (path, values) in cases {
         for val in values {
@@ -173,4 +179,107 @@ fn operator_types_and_scalars_keep_their_kind() {
     assert_eq!(format!("{:?}", ops[2].range), r#"[Text("u"), Text("v")]"#);
     v["mutations"]["operators"][0]["type"] = json!("bool");
     assert!(Spec::from_value(&v).is_err());
+}
+
+#[test]
+fn bounds_follow_the_claim_shape() {
+    let b = |tail, margin| Bound { tail, margin };
+    assert_eq!(Claim::Below(4.0).bounds(), [b(Tail::Lower, 4.0)]);
+    assert_eq!(Claim::Above(-1.5).bounds(), [b(Tail::Upper, -1.5)]);
+    // Two one-sided bounds: above the low margin, then below the high one.
+    assert_eq!(
+        Claim::Within([-2.0, 3.0]).bounds(),
+        [b(Tail::Upper, -2.0), b(Tail::Lower, 3.0)]
+    );
+    assert_eq!(
+        StatisticSpec::Mean([-10.0, 10.0]).to_evidence(),
+        Statistic::Mean {
+            lo: -10.0,
+            hi: 10.0
+        }
+    );
+    assert_eq!(
+        StatisticSpec::Quantile(0.9).to_evidence(),
+        Statistic::Quantile(0.9)
+    );
+}
+
+#[test]
+fn a_hypothesis_reads_every_field_and_a_claim_is_a_one_key_table() {
+    let mut v = template_value();
+    v["question"]["hypotheses"][0] = json!({
+        "id": "E1", "statement": "s", "rival": "r", "outcome": "ppl-ratio",
+        "contrast": { "selected": 1, "arm-a": -0.5 }, "strata": ["code", "article"],
+        "claim": { "within": [-4, 4] }, "statistic": { "mean": [-100.0, 100.0] },
+        "power_at": 0.5, "estimates": { "from": "pilot" }, "alpha_share": 0.25
+    });
+    let h = Spec::from_value(&v).unwrap().question.hypotheses.remove(0);
+    assert_eq!((h.id.as_str(), h.outcome.as_str()), ("E1", "ppl-ratio"));
+    let weights = BTreeMap::from([("arm-a".to_string(), -0.5), ("selected".to_string(), 1.0)]);
+    assert_eq!(h.contrast, weights);
+    assert_eq!(h.strata, ["code", "article"]);
+    assert_eq!(h.claim, Some(Claim::Within([-4.0, 4.0])));
+    assert_eq!(h.statistic, Some(StatisticSpec::Mean([-100.0, 100.0])));
+    assert_eq!((h.power_at, h.alpha_share), (Some(0.5), Some(0.25)));
+    assert_eq!(
+        h.estimates,
+        Some(Reference {
+            from: "pilot".into()
+        })
+    );
+    let read = |field: &str, x: Value| {
+        let mut w = v.clone();
+        w["question"]["hypotheses"][0][field] = x;
+        Spec::from_value(&w).map(|s| s.question.hypotheses[0].clone())
+    };
+    assert_eq!(
+        read("claim", json!({ "below": 2 })).unwrap().claim,
+        Some(Claim::Below(2.0))
+    );
+    assert_eq!(
+        read("claim", json!({ "above": -1 })).unwrap().claim,
+        Some(Claim::Above(-1.0))
+    );
+    assert_eq!(
+        read("statistic", json!({ "quantile": 0.5 }))
+            .unwrap()
+            .statistic,
+        Some(StatisticSpec::Quantile(0.5))
+    );
+    // A claim and a statistic are one-key tables; a reference holds `from` only.
+    for (field, bad) in [
+        ("claim", json!({ "below": 1, "above": 2 })),
+        ("claim", json!({})),
+        ("claim", json!({ "within": [1, 2, 3] })),
+        ("claim", json!({ "near": 1 })),
+        ("statistic", json!({ "quantile": 0.5, "mean": [0, 1] })),
+        ("estimates", json!({ "from": "a", "x": 1 })),
+    ] {
+        assert!(read(field, bad.clone()).is_err(), "{field} = {bad}");
+    }
+    // Without a claim the hypothesis is descriptive; without strata, every unit is one group.
+    let mut w = v.clone();
+    let h = w["question"]["hypotheses"][0].as_object_mut().unwrap();
+    for k in [
+        "strata",
+        "claim",
+        "statistic",
+        "power_at",
+        "estimates",
+        "alpha_share",
+    ] {
+        h.remove(k).unwrap();
+    }
+    let h = Spec::from_value(&w).unwrap().question.hypotheses.remove(0);
+    assert!(h.strata.is_empty() && h.claim.is_none() && h.statistic.is_none());
+    assert!(h.power_at.is_none() && h.estimates.is_none() && h.alpha_share.is_none());
+    // `outcome` and `contrast` are required.
+    for k in ["outcome", "contrast"] {
+        let mut w = v.clone();
+        w["question"]["hypotheses"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove(k);
+        assert!(Spec::from_value(&w).is_err(), "{k}");
+    }
 }

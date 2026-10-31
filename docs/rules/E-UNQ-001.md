@@ -12,13 +12,14 @@ Give every entry its own value. Remove the repeat, or rename it.
 
 ## Why
 
-A repeated cluster would count its units twice in the power gate. A repeated condition, outcome, hypothesis, input, operator or trigger id makes later steps pick one entry and ignore the other.
+A repeated input would run its units twice and count them twice in the power gate. A stage that lists a condition twice runs it twice. A repeated condition, outcome, measure, hypothesis, operator or trigger id makes later steps pick one entry and ignore the other.
 
 ## Applies to
 
-- `design.selection.clusters` (unique)
-- `design.confirmation.clusters` (unique)
 - `design.conditions` (unique)
+- `design.selection.conditions` (unique)
+- `design.confirmation.conditions` (unique)
+- `outcomes` (unique)
 - `outcomes` (unique)
 - `question.hypotheses` (unique)
 - `inputs` (unique)

@@ -1,3 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/ignorarium", "crates/evidence", "crates/ignorarium-guest", "crates/bundle", "crates/deposit"]
+
+# The power gate simulates thousands of replicates on every check; an unoptimized build
+# makes each check, and the test suite, many times slower.
+[profile.dev.package.evidence]
+opt-level = 3

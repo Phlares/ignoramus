@@ -506,6 +506,9 @@ impl Backend for Stub {
     fn probe(&self) -> Probe {
         Probe::Available
     }
+    fn cpus(&self) -> u32 {
+        1
+    }
     fn launcher(&self) -> String {
         "stub".into()
     }
@@ -539,9 +542,14 @@ fn store_of(lab: &Lab) -> Store {
 fn a_pinned_environment_must_be_in_the_store() {
     let lab = lab();
     pinned(&lab, "pin", ABSENT);
-    let err = prepare_with(&lab.home, "pin", vec![Box::new(Stub(1))])
-        .err()
-        .unwrap();
+    let err = prepare_with(
+        &lab.home,
+        "pin",
+        &common::work_of(&lab.home, "pin"),
+        vec![Box::new(Stub(1))],
+    )
+    .err()
+    .unwrap();
     assert!(
         matches!(&err, RunError::EnvironmentMissing(d) if d == ABSENT),
         "{err}"
@@ -557,14 +565,26 @@ fn a_pinned_environment_in_the_store_becomes_the_root() {
     let lab = lab();
     let digest = small_image(&store_of(&lab));
     pinned(&lab, "pin", &digest);
-    let plan = prepare_with(&lab.home, "pin", vec![Box::new(Stub(1))]).unwrap();
+    let plan = prepare_with(
+        &lab.home,
+        "pin",
+        &common::work_of(&lab.home, "pin"),
+        vec![Box::new(Stub(1))],
+    )
+    .unwrap();
     let root = store_of(&lab).root.join("rootfs").join(&digest);
     assert_eq!(plan.rootfs.as_deref(), Some(root.as_path()));
     assert_eq!(plan.environment, digest);
     assert!(root.join("usr/a").is_file());
     // The `sha256:` form names the same image.
     pinned(&lab, "pin2", &format!("sha256:{digest}"));
-    let plan = prepare_with(&lab.home, "pin2", vec![Box::new(Stub(1))]).unwrap();
+    let plan = prepare_with(
+        &lab.home,
+        "pin2",
+        &common::work_of(&lab.home, "pin2"),
+        vec![Box::new(Stub(1))],
+    )
+    .unwrap();
     assert_eq!(plan.environment, digest);
 }
 
@@ -574,7 +594,13 @@ fn level0_ignores_the_environment() {
     let dir = pinned(&lab, "zero", ABSENT);
     // A recipe folder too: a build here would fail for want of a builder or a base.
     fs::create_dir(dir.join("env")).unwrap();
-    let plan = prepare_with(&lab.home, "zero", vec![Box::new(Level0)]).unwrap();
+    let plan = prepare_with(
+        &lab.home,
+        "zero",
+        &common::work_of(&lab.home, "zero"),
+        vec![Box::new(Level0)],
+    )
+    .unwrap();
     assert_eq!(plan.backend.level(), 0);
     assert_eq!(plan.rootfs, None);
     assert_eq!(plan.environment, "host");
@@ -585,7 +611,13 @@ fn level0_ignores_the_environment() {
 fn no_pin_and_no_recipe_runs_on_the_host_root() {
     let lab = lab();
     common::plain(&lab, "host");
-    let plan = prepare_with(&lab.home, "host", vec![Box::new(Stub(1))]).unwrap();
+    let plan = prepare_with(
+        &lab.home,
+        "host",
+        &common::work_of(&lab.home, "host"),
+        vec![Box::new(Stub(1))],
+    )
+    .unwrap();
     assert_eq!(plan.rootfs, None);
     assert_eq!(plan.environment, "host");
 }
@@ -650,7 +682,13 @@ fn the_start_event_and_row_records_name_the_environment() {
     let lab = lab();
     let digest = small_image(&store_of(&lab));
     let dir = pinned(&lab, "rec", &digest);
-    let plan = prepare_with(&lab.home, "rec", vec![Box::new(Level0)]).unwrap();
+    let plan = prepare_with(
+        &lab.home,
+        "rec",
+        &common::work_of(&lab.home, "rec"),
+        vec![Box::new(Level0)],
+    )
+    .unwrap();
     assert_eq!(runner::run(&plan).unwrap(), RunStatus::Done);
     let events = common::events_of(&dir);
     assert_eq!(
@@ -701,15 +739,23 @@ fn a_row_runs_in_the_pinned_image() {
     }
     assert_eq!(level1.probe(), Probe::Available);
     let digest = shell_image(&store_of(&lab));
-    let payload =
-        "#!/bin/sh\nread x < /etc/os-release\nprintf '%s' \"$x\" > \"$IGNORARIUM_OUT/os\"\n";
+    let payload = format!(
+        "#!/bin/sh\nread x < /etc/os-release\nprintf '%s' \"$x\" > \"$IGNORARIUM_OUT/os\"\n{}\n",
+        common::VALUES
+    );
     let dir = edited(
         &lab,
         "e2e",
         |t| t.replace("environment = \"\"", &format!("environment = \"{digest}\"")),
-        payload,
+        &payload,
     );
-    let plan = prepare_with(&lab.home, "e2e", vec![Box::new(level1)]).unwrap();
+    let plan = prepare_with(
+        &lab.home,
+        "e2e",
+        &common::work_of(&lab.home, "e2e"),
+        vec![Box::new(level1)],
+    )
+    .unwrap();
     assert_eq!(plan.environment, digest);
     assert_eq!(runner::run(&plan).unwrap(), RunStatus::Done);
     let rows = common::rows_of(&lab, "e2e");
@@ -735,6 +781,7 @@ fn a_built_environment_runs_at_level1() {
         "#!/bin/sh\n",
         "head -n1 /etc/passwd > \"$IGNORARIUM_OUT/os\"\n",
         "[ -e /bin/busybox ] && echo busybox >> \"$IGNORARIUM_OUT/os\"\n",
+        "printf '{\"ppl\": 1.5}' > \"$IGNORARIUM_OUT/values.json\"\n",
     );
     let dir = edited(&lab, "built", |t| t, payload);
     let env = dir.join("env");
@@ -747,7 +794,13 @@ fn a_built_environment_runs_at_level1() {
     )
     .unwrap();
     fs::write(env.join("uv.lock"), "").unwrap();
-    let plan = prepare_with(&lab.home, "built", vec![Box::new(level1)]).unwrap();
+    let plan = prepare_with(
+        &lab.home,
+        "built",
+        &common::work_of(&lab.home, "built"),
+        vec![Box::new(level1)],
+    )
+    .unwrap();
     assert_eq!(runner::run(&plan).unwrap(), RunStatus::Done);
     let out = fs::read_to_string(dir.join("run/rows/0/out/os")).unwrap();
     assert_eq!(out, "root:x:0:0:root:/root:/bin/sh\nbusybox\n");

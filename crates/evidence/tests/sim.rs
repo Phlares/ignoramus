@@ -342,7 +342,7 @@ fn a_small_mixed_scenario_is_pinned() {
     let r = simulate(&s, 300, &mut seed(OTHER, 9)).unwrap();
     assert_eq!(
         (r.fwer.mean, r.fdr.mean, r.power.mean, r.power.n),
-        (0.13, 0.01388888888888889, 0.7083333333333331, 280)
+        (0.12, 0.0125, 0.6895833333333332, 280)
     );
 }
 

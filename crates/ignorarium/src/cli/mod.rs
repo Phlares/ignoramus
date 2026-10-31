@@ -7,10 +7,11 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
 
-mod check;
+pub mod check;
 mod docs;
 mod guide;
 mod history;
+mod import;
 mod new;
 mod pause;
 mod probe;
@@ -147,6 +148,16 @@ enum Verb {
         #[arg(required = true)]
         files: Vec<PathBuf>,
     },
+    /// Add files to the box's content store, so an input can name one by its digest.
+    /// Importing a file again adds another signed record.
+    Import {
+        /// Where the files came from, kept in the signed record.
+        #[arg(long)]
+        source: String,
+        /// The files.
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+    },
     /// Check the plan logs and, with --study, one study's record chain.
     Verify {
         /// Study id.
@@ -214,6 +225,7 @@ impl Verb {
             Verb::Review { .. } => "review",
             Verb::Register { .. } => "register",
             Verb::ImportHistory { .. } => "import-history",
+            Verb::Import { .. } => "import",
             Verb::Verify { .. } => "verify",
             Verb::Probe => "probe",
             Verb::Run { .. } => "run",
@@ -234,6 +246,7 @@ impl Verb {
             Verb::Review { spec } => review::run(ctx, &spec),
             Verb::Register { spec } => register::run_stdio(ctx, &spec),
             Verb::ImportHistory { phase, files } => history::run(ctx, &phase, &files),
+            Verb::Import { source, files } => import::run(ctx, &source, &files),
             Verb::Verify { study } => verify::run(ctx, study.as_deref()),
             Verb::Probe => probe::run(ctx),
             Verb::Run { study, max_level } => run::run(ctx, &study, max_level),
@@ -347,7 +360,10 @@ fn registered<'a>(
         .ok_or_else(|| not_registered(id))?;
     let all = crate::records::read_all(&log, &key.verifying_key())
         .map_err(|e| CliError::usage(format!("records of {id}: {e}")))?;
-    if !all.iter().any(|r| r.kind == "register") {
+    if !all
+        .iter()
+        .any(|r| crate::derived::Register::of(r).is_some())
+    {
         return Err(not_registered(id));
     }
     Ok((home, key, all))

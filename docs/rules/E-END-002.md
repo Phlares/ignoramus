@@ -8,7 +8,7 @@ A follow-on spec file is missing.
 
 ## Fix
 
-Create the file under the study folder, or fix the spec path.
+Create the file under the study root, or fix the spec path.
 
 ## Why
 

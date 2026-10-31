@@ -1,5 +1,12 @@
+mod common;
+
 use assert_cmd::Command;
-use serde_json::Value;
+use ignorarium::cli::check::{self, HomeRecords};
+use ignorarium::home::Home;
+use ignorarium::keys;
+use ignorarium::rules::BoxRecords;
+use ignorarium::stream::{self, LogName};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
@@ -40,9 +47,9 @@ fn no_unit(t: String) -> String {
     t.replace("unit = \"ratio\"", "unit = \"\"")
 }
 
-/// Drops the alpha line so the default fills it.
-fn no_alpha(t: String) -> String {
-    t.replace("alpha = 0.005\n", "")
+/// Drops the power line so the default fills it.
+fn no_power(t: String) -> String {
+    t.replace("power = 0.8\n", "")
 }
 
 #[test]
@@ -55,13 +62,22 @@ fn guide_json_lists_every_step_with_its_output() {
     assert_eq!(
         ids,
         [
-            "brief", "template", "fill", "check", "review", "register", "run", "status", "report"
+            "brief", "template", "fill", "payload", "import", "check", "review", "register", "run",
+            "status", "report"
         ]
     );
     for s in steps {
         for key in ["title", "does", "produces", "command"] {
             assert!(!s[key].as_str().unwrap().is_empty(), "{s}");
         }
+    }
+    let produces = |id: &str| {
+        let s = steps.iter().find(|s| s["id"] == id).unwrap();
+        s["produces"].as_str().unwrap().to_string()
+    };
+    assert!(produces("payload").contains("payload/run"));
+    for part in ["payload", "store"] {
+        assert!(produces("register").contains(part), "{part}");
     }
     let report = steps.iter().find(|s| s["id"] == "report").unwrap();
     assert!(
@@ -82,12 +98,14 @@ fn guide_prints_steps_in_order() {
             .unwrap_or_else(|| panic!("{id}"))
     };
     assert!(at("brief") < at("template") && at("template") < at("report"));
+    assert!(at("fill") < at("payload") && at("payload") < at("import"));
+    assert!(at("import") < at("check"));
     assert!(out.contains("ignorarium check"));
 }
 
 #[test]
 fn check_passes_the_template_and_prints_the_estimate() {
-    let (_d, home, spec) = setup(no_alpha);
+    let (_d, home, spec) = setup(no_power);
     let a = bin(&home).arg("check").arg(&spec).assert().code(0);
     let out = stdout(&a);
     for want in [
@@ -99,7 +117,7 @@ fn check_passes_the_template_and_prints_the_estimate() {
         "money: $0.00",
         "long job: no",
         "label: signal",
-        "design.alpha = 0.005",
+        "design.power = 0.8",
     ] {
         assert!(out.contains(want), "missing {want:?} in:\n{out}");
     }
@@ -139,7 +157,7 @@ fn check_json_is_machine_readable() {
 
 #[test]
 fn check_json_passing_plan_has_estimate_and_defaults() {
-    let (_d, home, spec) = setup(no_alpha);
+    let (_d, home, spec) = setup(no_power);
     let a = bin(&home)
         .arg("check")
         .arg(&spec)
@@ -153,7 +171,7 @@ fn check_json_passing_plan_has_estimate_and_defaults() {
         .iter()
         .map(|d| d["code"].as_str().unwrap())
         .collect();
-    assert_eq!(codes, ["W-LIC-001", "W-HSH-001"]);
+    assert_eq!(codes, ["W-LIC-001", "W-LIC-001", "W-HSH-001", "W-HSH-001"]);
     assert_eq!(v["estimate"]["rows"], 2);
     assert_eq!(v["estimate"]["label"], "signal");
     assert_eq!(v["estimate"]["long_job"], false);
@@ -162,7 +180,7 @@ fn check_json_passing_plan_has_estimate_and_defaults() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|d| d["path"] == "design.alpha" && d["value"] == 0.005)
+            .any(|d| d["path"] == "design.power" && d["value"] == 0.8)
     );
 }
 
@@ -216,6 +234,43 @@ fn review_has_all_sections_and_the_hash() {
     assert!(out.contains(&format!("Spec hash: {hash}")));
     assert!(out.contains("- exact: 1 rows"));
     assert!(out.contains("data/example.txt"));
+}
+
+#[test]
+fn review_lists_each_claim_with_its_strata_and_statistic() {
+    let second = "[[question.hypotheses]]
+id = \"P1\"
+statement = \"The spread per text.\"
+rival = \"none\"
+outcome = \"ppl-ratio\"
+contrast = { arm-a = 1.0, exact = 0.5 }
+
+[[outcomes]]";
+    let (_d, home, spec) = setup(|t| {
+        common::with_claim(t)
+            .replacen("statement = \"\"", "statement = \"The arm lowers it.\"", 1)
+            .replacen("rival = \"\"", "rival = \"Chance.\"", 1)
+            .replace("strata = []", "strata = [\"fiction\"]")
+            .replacen("\n[[outcomes]]", &format!("\n{second}"), 1)
+    });
+    // P1's contrast names the reference: review still prints the plan as written.
+    let a = bin(&home).arg("review").arg(&spec).assert().code(1);
+    let out = stdout(&a);
+    let lines = [
+        "- H1: The arm lowers it. (rival: Chance.); outcome: ppl-ratio; contrast: arm-a 1.0; \
+         strata: fiction; claim: below 0.0; statistic: quantile 0.5; alpha share: 1.0\n",
+        "- P1: The spread per text. (rival: none); outcome: ppl-ratio; contrast: arm-a 1.0, \
+         exact 0.5; strata: pooled; claim: none (descriptive)\n",
+    ];
+    let hypotheses = &out[out.find("Hypotheses:").expect(&out)..out.find("Outcomes:").unwrap()];
+    assert_eq!(
+        hypotheses,
+        format!("Hypotheses:\n\n{}{}\n", lines[0], lines[1])
+    );
+    assert!(
+        out.contains("E-HYP-001 at `question.hypotheses[1].contrast.exact`"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -439,7 +494,7 @@ fn check_resolves_inputs_from_a_bare_filename() {
     let write = |sha: &str| {
         std::fs::write(
             dir.path().join("spec.toml"),
-            text.replace("sha256 = \"\"", &format!("sha256 = \"{sha}\"")),
+            text.replacen("sha256 = \"\"", &format!("sha256 = \"{sha}\""), 1),
         )
         .unwrap();
     };
@@ -458,6 +513,219 @@ fn check_resolves_inputs_from_a_bare_filename() {
         .assert()
         .code(1);
     assert!(stdout(&a).contains("E-HSH-001"));
+}
+
+/// A study root with `ignorarium.toml`, the input at `root/data/example.txt`, and a
+/// spec in `root/spec/` made from the template.
+fn rooted(edit: impl Fn(String) -> String) -> (TempDir, PathBuf, PathBuf) {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(
+        home.join("machine.toml"),
+        "max_level = 1
+",
+    )
+    .unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    let root = dir.path().join("root");
+    std::fs::create_dir_all(root.join("spec")).unwrap();
+    std::fs::create_dir_all(root.join("data")).unwrap();
+    std::fs::write(root.join("ignorarium.toml"), "").unwrap();
+    std::fs::write(root.join("data/example.txt"), "hello").unwrap();
+    let text = std::fs::read_to_string(TEMPLATE).unwrap();
+    let spec = root.join("spec/s.toml");
+    std::fs::write(&spec, edit(text)).unwrap();
+    (dir, home, spec)
+}
+
+/// The first input pinned to the bytes `hello`.
+fn pinned(t: String) -> String {
+    t.replacen(
+        "sha256 = \"\"",
+        &format!("sha256 = \"{}\"", ignorarium::canon::sha256_hex(b"hello")),
+        1,
+    )
+}
+
+#[test]
+fn a_spec_in_spec_reads_inputs_from_the_root() {
+    let (_d, home, spec) = rooted(pinned);
+    let a = bin(&home).arg("check").arg(&spec).assert().code(0);
+    assert!(!stdout(&a).contains("E-HSH-001"));
+    // A wrong pin fails with the same call: the file was found and hashed.
+    std::fs::write(
+        &spec,
+        pinned(std::fs::read_to_string(TEMPLATE).unwrap())
+            .replace(&ignorarium::canon::sha256_hex(b"hello"), &"0".repeat(64)),
+    )
+    .unwrap();
+    let a = bin(&home).arg("check").arg(&spec).assert().code(1);
+    assert!(stdout(&a).contains("E-HSH-001"));
+}
+
+#[test]
+fn follow_on_specs_resolve_from_the_root() {
+    let follow = |t: String| {
+        t.replace(
+            "follow_on = []",
+            "follow_on = [{ when = \"done\", spec = \"spec/next.toml\" }]",
+        )
+    };
+    let (_d, home, spec) = rooted(follow);
+    let root = spec.parent().unwrap().parent().unwrap();
+    let a = bin(&home).arg("check").arg(&spec).assert().code(1);
+    assert!(stdout(&a).contains("E-END-002"), "{}", stdout(&a));
+    std::fs::write(
+        root.join("spec/next.toml"),
+        "x = 1
+",
+    )
+    .unwrap();
+    let a = bin(&home).arg("check").arg(&spec).assert().code(0);
+    assert!(!stdout(&a).contains("E-END-002"));
+}
+
+/// A temp folder that holds `.git`, so the root search stops inside it and a stray
+/// marker in `/tmp` or above cannot reach the test.
+fn repo() -> TempDir {
+    let dir = TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    dir
+}
+
+fn mark(dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("ignorarium.toml"), "").unwrap();
+}
+
+#[test]
+fn no_marker_keeps_the_spec_folder() {
+    let dir = repo();
+    let spec = dir.path().join("a/b/s.toml");
+    assert_eq!(check::study_root(&spec), dir.path().join("a/b"));
+}
+
+#[test]
+fn a_relative_spec_without_a_marker_roots_at_the_current_folder() {
+    let dir = repo();
+    std::fs::write(dir.path().join("s.toml"), "").unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    let a = bin(&home)
+        .current_dir(dir.path())
+        .args(["review", "s.toml"])
+        .assert();
+    assert!(
+        stdout(&a).contains(
+            "Study root: .
+"
+        ),
+        "{}",
+        stdout(&a)
+    );
+}
+
+#[test]
+fn the_nearest_marker_above_the_spec_wins() {
+    let dir = repo();
+    let inner = dir.path().join("outer/inner");
+    std::fs::create_dir_all(inner.join("deep")).unwrap();
+    mark(&dir.path().join("outer"));
+    let spec = inner.join("deep/s.toml");
+    assert_eq!(check::study_root(&spec), dir.path().join("outer"));
+    mark(&inner);
+    assert_eq!(check::study_root(&spec), inner);
+    mark(&inner.join("deep"));
+    assert_eq!(check::study_root(&spec), inner.join("deep"));
+}
+
+#[test]
+fn a_marker_that_is_a_folder_or_a_link_is_not_a_marker() {
+    let dir = repo();
+    let folder = dir.path().join("f");
+    std::fs::create_dir_all(folder.join("spec/ignorarium.toml")).unwrap();
+    assert_eq!(
+        check::study_root(&folder.join("spec/s.toml")),
+        folder.join("spec")
+    );
+    #[cfg(unix)]
+    {
+        let linked = dir.path().join("l");
+        std::fs::create_dir_all(linked.join("spec")).unwrap();
+        std::fs::write(linked.join("real.toml"), "").unwrap();
+        std::os::unix::fs::symlink(linked.join("real.toml"), linked.join("ignorarium.toml"))
+            .unwrap();
+        assert_eq!(
+            check::study_root(&linked.join("spec/s.toml")),
+            linked.join("spec")
+        );
+    }
+}
+
+#[test]
+fn the_search_stops_at_the_repo_root_but_checks_it() {
+    let dir = TempDir::new().unwrap();
+    mark(dir.path());
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(repo.join("sub/spec")).unwrap();
+    let spec = repo.join("sub/spec/s.toml");
+    // The marker above the repo is out of reach.
+    assert_eq!(check::study_root(&spec), repo.join("sub/spec"));
+    // A marker in the repo root itself counts.
+    mark(&repo);
+    assert_eq!(check::study_root(&spec), repo);
+}
+
+#[test]
+fn the_search_never_uses_a_marker_in_the_home_folder() {
+    let dir = repo();
+    let home = dir.path().join("home");
+    mark(&home);
+    let spec = home.join("study/s.toml");
+    assert_eq!(check::study_root_in(&spec, Some(&home)), home.join("study"));
+    assert_eq!(check::study_root_in(&spec, None), home);
+}
+
+#[test]
+fn dotdot_in_the_spec_argument_is_folded_before_the_walk() {
+    let dir = repo();
+    mark(&dir.path().join("a"));
+    std::fs::create_dir_all(dir.path().join("b")).unwrap();
+    let spec = dir.path().join("a/../b/s.toml");
+    assert_eq!(check::study_root(&spec), dir.path().join("b"));
+}
+
+#[test]
+fn review_shows_the_root_relative_to_the_current_folder_when_inside_it() {
+    let (d, home, spec) = rooted(|t| t);
+    let root = spec.parent().unwrap().parent().unwrap();
+    let a = bin(&home).arg("review").arg(&spec).assert();
+    assert!(stdout(&a).contains(&format!(
+        "Study root: {}
+",
+        root.display()
+    )));
+    let a = bin(&home)
+        .current_dir(d.path())
+        .args(["review", "root/spec/s.toml"])
+        .assert();
+    assert!(
+        stdout(&a).contains(
+            "Study root: root
+"
+        ),
+        "{}",
+        stdout(&a)
+    );
+}
+
+#[test]
+fn dotdot_is_still_refused_under_a_root() {
+    let (_d, home, spec) = rooted(|t| t.replace("data/example.txt", "../x"));
+    let a = bin(&home).arg("check").arg(&spec).assert().code(1);
+    assert!(stdout(&a).contains("E-PTH-001"), "{}", stdout(&a));
 }
 
 #[test]
@@ -693,9 +961,18 @@ fn import_history_refuses_a_phase_in_the_form_of_a_studys_own_label() {
     assert!(stdout(&help).contains("Must not start with `study:`"));
 }
 
-/// Register the template through the library, then return the box.
+/// Give the study root of `spec` a payload folder, as `register` needs.
+fn give_payload(spec: &Path) {
+    let dir = spec.parent().unwrap().join("payload");
+    std::fs::create_dir_all(&dir).unwrap();
+    common::write_exec(&dir.join("run"), common::PAYLOAD);
+}
+
+/// Register the template through the library, then return the box. The box's payload copy
+/// is made writable again, so the temp folder can be removed.
 fn registered() -> (TempDir, PathBuf, PathBuf) {
     let (d, home, spec) = setup(|t| t);
+    give_payload(&spec);
     let h = ignorarium::home::Home::open_at(&home).unwrap();
     let typed = format!("{}\n", &ignorarium::spec::load(&spec).unwrap().hash[7..15]);
     let mut out = Vec::new();
@@ -707,6 +984,7 @@ fn registered() -> (TempDir, PathBuf, PathBuf) {
         true,
     )
     .unwrap();
+    common::unseal(&home);
     (d, home, spec)
 }
 
@@ -933,16 +1211,9 @@ fn content_faults_that_break_the_model_exit_1_with_a_code() {
     type Case = (fn(String) -> String, &'static str, &'static str);
     let cases: [Case; 4] = [
         (
-            |t| {
-                t.replace(
-                    "[design.confirmation]
-clusters = []",
-                    "[design.confirmation]
-clusters = [1]",
-                )
-            },
+            |t| t.replace("units = 3 ", "units = [3] "),
             "E-TYP-001",
-            "design.confirmation.clusters[0]",
+            "inputs[1].units",
         ),
         (
             |t| t.replace("creators = []", "creators = [1]"),
@@ -989,4 +1260,734 @@ clusters = [1]",
         let a = bin(&home).arg("review").arg(&spec).assert().code(1);
         assert!(stdout(&a).contains(code), "{}", stdout(&a));
     }
+}
+
+fn check_out(home: &Path, spec: &Path, code: i32) -> String {
+    stdout(&bin(home).arg("check").arg(spec).assert().code(code))
+}
+
+fn with_code<'a>(v: &'a Value, code: &str) -> Vec<&'a Value> {
+    v["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["code"] == code)
+        .collect()
+}
+
+#[test]
+fn an_unfinished_study_is_pending_and_check_exits_3() {
+    let (_d, home, spec) = setup(common::confirmatory);
+    let box_home = Home::open_at(&home).unwrap();
+    // Not registered; registered with no analysis record; an analysis record that promises
+    // an estimate the log does not hold yet.
+    let all = common::finished(vec![common::arm_a()]);
+    for (planted, which) in [
+        (&all[..0], "not registered"),
+        (&all[..1], "not finished"),
+        (&all[1..2], "not finished"),
+    ] {
+        common::plant(&box_home, "my-pilot", planted);
+        let a = bin(&home)
+            .arg("check")
+            .arg(&spec)
+            .arg("--json")
+            .assert()
+            .code(3);
+        let v = json_out(&a);
+        assert_eq!(v["pending"], json!(["question.hypotheses[0].estimates"]));
+        let w = with_code(&v, "W-REF-001");
+        assert_eq!(w.len(), 1, "{v}");
+        assert_eq!(w[0]["severity"], "warning");
+        assert_eq!(
+            w[0]["problem"],
+            format!(
+                "A value waits on a study that has not finished. Waits on study my-pilot, which is {which}."
+            )
+        );
+        assert!(
+            !v["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d["severity"] == "error"),
+            "{v}"
+        );
+        // Values pending, no errors: the plan still gets its estimate and review.
+        assert!(v["estimate"].is_object());
+        let out = check_out(&home, &spec, 3);
+        assert!(out.contains("warning[W-REF-001]"), "{out}");
+        let a = bin(&home).arg("review").arg(&spec).assert().code(3);
+        assert!(stdout(&a).contains("W-REF-001"));
+    }
+    // The last estimate arrives: the study is finished, and the plan passes.
+    common::plant(&box_home, "my-pilot", &all[2..]);
+    let a = bin(&home)
+        .arg("check")
+        .arg(&spec)
+        .arg("--json")
+        .assert()
+        .code(0);
+    assert_eq!(json_out(&a)["pending"], json!([]));
+    // An error wins over a pending value.
+    std::fs::write(
+        &spec,
+        common::confirmatory(std::fs::read_to_string(TEMPLATE).unwrap())
+            .replace("from = \"my-pilot\"", "from = \"later\"")
+            .replace("unit = \"ratio\"", "unit = \"\""),
+    )
+    .unwrap();
+    let v = json_out(
+        &bin(&home)
+            .arg("check")
+            .arg(&spec)
+            .arg("--json")
+            .assert()
+            .code(1),
+    );
+    assert_eq!(v["pending"], json!(["question.hypotheses[0].estimates"]));
+}
+
+#[test]
+fn the_gate_gives_the_same_verdict_on_every_check() {
+    // The median claim sized 3 below the margin: about 93% of units lie at or below it, so
+    // some replicates of 15 clusters pass and some do not.
+    let near = |t: String| common::confirmatory(t).replace("power_at = -20.0", "power_at = -3.0");
+    let (_d, home, spec) = setup(near);
+    common::pilot(&Home::open_at(&home).unwrap(), vec![common::arm_a()]);
+    let power = |code: i32| {
+        let a = bin(&home)
+            .arg("check")
+            .arg(&spec)
+            .arg("--json")
+            .assert()
+            .code(code);
+        json_out(&a)["power"].clone()
+    };
+    let first = power(1);
+    assert_eq!(
+        first,
+        json!([{
+            "hypothesis": "H1", "power": 0.35825, "target": 0.8, "clusters": { "": 15 },
+            "needed": 20
+        }])
+    );
+    assert_eq!(power(1), first);
+    let sentence =
+        "Simulated power 0.35 with 15 clusters in the pooled group; about 20 clusters reach 0.80.";
+    assert!(check_out(&home, &spec, 1).contains(sentence));
+    let page = stdout(&bin(&home).arg("review").arg(&spec).assert().code(1));
+    assert!(
+        page.contains(&format!(
+            "## Power
+
+- H1: {sentence}
+"
+        )),
+        "{page}"
+    );
+    // Another spec hash draws other replicates for the same plan.
+    let text = std::fs::read_to_string(&spec).unwrap();
+    std::fs::write(
+        &spec,
+        text.replace("population = \"\"", "population = \"texts\""),
+    )
+    .unwrap();
+    let other = power(1);
+    assert_ne!(other[0]["power"], first[0]["power"]);
+    assert_eq!(other[0]["clusters"], first[0]["clusters"]);
+    // Sized 20 below the margin, every replicate passes, and nothing more is needed.
+    std::fs::write(
+        &spec,
+        common::confirmatory(std::fs::read_to_string(TEMPLATE).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(
+        power(0),
+        json!([{
+            "hypothesis": "H1", "power": 1.0, "target": 0.8, "clusters": { "": 15 },
+            "needed": null
+        }])
+    );
+    let page = stdout(&bin(&home).arg("review").arg(&spec).assert().code(0));
+    assert!(
+        page.contains(
+            "- H1: Simulated power 1.00 with 15 clusters in the pooled group; the target is 0.80.
+"
+        ),
+        "{page}"
+    );
+    // Sized just below the margin, half the units lie on each side, and 1,024 clusters do
+    // not reach the target: `needed` says so, apart from the null of a plan that passes.
+    let edge = |t: String| common::confirmatory(t).replace("power_at = -20.0", "power_at = -0.01");
+    std::fs::write(&spec, edge(std::fs::read_to_string(TEMPLATE).unwrap())).unwrap();
+    let beyond = power(1);
+    assert_eq!(beyond[0]["needed"], ">1024", "{beyond}");
+    assert!(
+        check_out(&home, &spec, 1).contains("; 1024 clusters do not reach 0.80."),
+        "{beyond}"
+    );
+}
+
+#[test]
+fn a_broken_key_fails_only_the_checks_that_need_a_record() {
+    let (_d, home, spec) = setup(|t| t);
+    let box_home = Home::open_at(&home).unwrap();
+    common::pilot(&box_home, vec![common::arm_a()]);
+    std::fs::write(home.join("keys/box.ed25519"), b"short").unwrap();
+    // An exploratory plan reads no record, so the key is never read.
+    assert!(!check_out(&home, &spec, 0).contains("E-CNF-003"));
+    let text = common::confirmatory(std::fs::read_to_string(TEMPLATE).unwrap());
+    std::fs::write(&spec, &text).unwrap();
+    let out = check_out(&home, &spec, 1);
+    assert!(out.contains("error[E-CNF-003]"), "{out}");
+    assert!(
+        out.contains(
+            "The box cannot read the records of study my-pilot: key file has 5 bytes, expected 32."
+        ),
+        "{out}"
+    );
+    // A study with no log in the box needs no key to be not registered. The stream still
+    // needs it: each study log's register record must be checked against the stream.
+    std::fs::write(
+        &spec,
+        text.replace("from = \"my-pilot\"", "from = \"later\""),
+    )
+    .unwrap();
+    let out = check_out(&home, &spec, 1);
+    assert!(
+        out.contains("Waits on study later, which is not registered."),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "The planlog stream cannot be read: study my-pilot: key file has 5 bytes, expected 32."
+        ),
+        "{out}"
+    );
+    // With no study log in the box, no key is read at all.
+    std::fs::rename(home.join("studies/my-pilot"), home.join("moved-pilot")).unwrap();
+    assert!(check_out(&home, &spec, 3).contains("Waits on study later, which is not registered."));
+}
+
+#[test]
+fn logs_without_a_box_key_cannot_answer() {
+    let (_d, home, spec) = setup(common::confirmatory);
+    Home::open_at(&home).unwrap();
+    std::fs::create_dir(home.join("studies/my-pilot")).unwrap();
+    std::fs::write(home.join("studies/my-pilot/records.jsonl"), "{}\n").unwrap();
+    let out = check_out(&home, &spec, 1);
+    assert!(
+        out.contains("The box cannot read the records of study my-pilot: the box key is missing."),
+        "{out}"
+    );
+    // With a key, the same log is not a whole record.
+    keys::load_or_create(&Home::open_at(&home).unwrap()).unwrap();
+    let out = check_out(&home, &spec, 1);
+    assert!(
+        out.contains(
+            "The box cannot read the records of study my-pilot: line 1 is not a whole record."
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_log_without_a_register_record_is_not_a_registered_study() {
+    let (_d, home, spec) = setup(common::confirmatory);
+    let box_home = Home::open_at(&home).unwrap();
+    // A log whose only record does not parse as a register record.
+    common::plant(
+        &box_home,
+        "my-pilot",
+        &[("register", json!({ "spec_hash": "x" }))],
+    );
+    let out = check_out(&home, &spec, 3);
+    assert!(
+        out.contains("Waits on study my-pilot, which is not registered."),
+        "{out}"
+    );
+}
+
+// ---- stream ----
+
+fn check_json(home: &Path, spec: &Path, code: i32) -> Value {
+    json_out(
+        &bin(home)
+            .arg("check")
+            .arg(spec)
+            .arg("--json")
+            .assert()
+            .code(code),
+    )
+}
+
+#[test]
+fn check_shows_the_slot_and_level_the_stream_would_give() {
+    let (_d, home, spec) = setup(common::confirmatory);
+    let box_home = Home::open_at(&home).unwrap();
+    common::pilot(&box_home, vec![common::arm_a()]);
+    let out = check_out(&home, &spec, 0);
+    assert!(
+        out.contains("\nstream: slot 1, level 0.005\nspec: "),
+        "{out}"
+    );
+    let v = check_json(&home, &spec, 0);
+    assert_eq!(
+        v["stream"],
+        json!({ "log": "planlog", "slot": 1, "level": 0.005000000000000001 })
+    );
+    // A check writes nothing to the stream.
+    assert!(!home.join("stream/planlog.jsonl").exists());
+    // Once a study holds slot 1, the next is slot 2; the review page shows it too.
+    let key = keys::load_or_create(&box_home).unwrap();
+    stream::Log::of(&box_home, LogName::Plan)
+        .open(&key, "other", 0.0)
+        .unwrap();
+    assert!(check_out(&home, &spec, 0).contains("\nstream: slot 2, level 0.005\n"));
+    let page = stdout(&bin(&home).arg("review").arg(&spec).assert().code(0));
+    assert!(
+        page.contains("\n## Level\n\n- stream: slot 2, level 0.005\n\n## Power\n"),
+        "{page}"
+    );
+    // A test study reads the test stream, which is still empty.
+    let text = std::fs::read_to_string(&spec).unwrap();
+    std::fs::write(&spec, text.replace("test_log = false", "test_log = true")).unwrap();
+    assert_eq!(
+        check_json(&home, &spec, 0)["stream"],
+        json!({ "log": "testlog", "slot": 1, "level": 0.005000000000000001 })
+    );
+    // An exploratory plan takes no slot.
+    let (_d, home, spec) = setup(|t| t);
+    assert!(!check_out(&home, &spec, 0).contains("stream:"));
+    assert_eq!(check_json(&home, &spec, 0)["stream"], Value::Null);
+    let page = stdout(&bin(&home).arg("review").arg(&spec).assert().code(0));
+    assert!(page.contains("\n## Level\n\n- none\n"), "{page}");
+}
+
+#[test]
+fn check_refuses_a_plan_beyond_the_tenth_slot() {
+    let (_d, home, spec) = setup(common::confirmatory);
+    let box_home = Home::open_at(&home).unwrap();
+    common::pilot(&box_home, vec![common::arm_a()]);
+    let key = keys::load_or_create(&box_home).unwrap();
+    let log = stream::Log::of(&box_home, LogName::Plan);
+    for i in 1..=10 {
+        log.open(&key, &format!("s{i:02}"), 0.0).unwrap();
+    }
+    let v = check_json(&home, &spec, 1);
+    let errors: Vec<&Value> = (v["diagnostics"].as_array().unwrap().iter())
+        .filter(|d| d["severity"] == "error")
+        .collect();
+    assert_eq!(errors.len(), 1, "{v}");
+    assert_eq!(
+        (&errors[0]["code"], &errors[0]["path"]),
+        (&json!("E-STR-001"), &json!("study.mode"))
+    );
+    assert_eq!(
+        errors[0]["problem"],
+        "The stream gives this confirmatory study no level. Slot 11 is beyond the 10 slots of the planlog stream."
+    );
+    assert_eq!(
+        v["stream"],
+        json!({ "log": "planlog", "slot": 11, "level": 0.0 })
+    );
+    assert_eq!(v["power"], json!([]));
+    let out = check_out(&home, &spec, 1);
+    assert!(out.contains("error[E-STR-001]"), "{out}");
+    assert!(out.contains("\nstream: slot 11, level 0\n"), "{out}");
+    // A damaged stream log fails the check closed.
+    std::fs::write(home.join("stream/planlog.jsonl"), "{}\n").unwrap();
+    let v = check_json(&home, &spec, 1);
+    assert_eq!(
+        with_code(&v, "E-STR-001")[0]["problem"],
+        "The stream gives this confirmatory study no level. The planlog stream cannot be read: the log fails verification: line 1 is not a whole record."
+    );
+    assert_eq!(v["stream"], Value::Null);
+}
+
+#[test]
+fn a_study_reference_never_names_a_path() {
+    let (d, home, _) = setup(|t| t);
+    let box_home = Home::open_at(&home).unwrap();
+    // A record log where each of these ids would lead: beside the studies folder, in it, in a
+    // folder with a capital letter, and one folder down. Without a key, a log that is read
+    // is an error, so `Ok(None)` shows that none was read.
+    for (id, folder) in [
+        ("../outside", "outside"),
+        ("", "studies"),
+        ("My-Pilot", "studies/My-Pilot"),
+        ("a/b", "studies/a/b"),
+    ] {
+        std::fs::create_dir_all(home.join(folder)).unwrap();
+        std::fs::write(home.join(folder).join("records.jsonl"), "{}\n").unwrap();
+        let records = HomeRecords {
+            home: box_home.clone(),
+            key: Ok(None),
+        };
+        assert_eq!(records.study(id), Ok(None), "{id}");
+    }
+    // The same reader does read a study id's log.
+    std::fs::create_dir_all(home.join("studies/my-pilot")).unwrap();
+    std::fs::write(home.join("studies/my-pilot/records.jsonl"), "{}\n").unwrap();
+    let records = HomeRecords {
+        home: box_home,
+        key: Ok(None),
+    };
+    assert_eq!(
+        records.study("my-pilot"),
+        Err("the box key is missing".to_string())
+    );
+    drop(d);
+}
+
+#[test]
+fn a_study_folder_that_cannot_be_read_is_an_error() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_d, home, _) = setup(|t| t);
+    let box_home = Home::open_at(&home).unwrap();
+    common::pilot(&box_home, vec![common::arm_a()]);
+    let folder = home.join("studies/my-pilot");
+    let mode = |m| std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(m)).unwrap();
+    mode(0o000);
+    if folder.join("records.jsonl").symlink_metadata().is_ok() {
+        mode(0o755);
+        println!("skip unreadable study folder: this user reads a mode-000 folder (root)");
+        return;
+    }
+    let key = keys::load(&box_home).unwrap().map(|k| k.verifying_key());
+    let got = HomeRecords {
+        home: box_home,
+        key: Ok(key),
+    }
+    .study("my-pilot");
+    mode(0o755);
+    // Not "not registered": the box cannot tell.
+    let e = got.unwrap_err();
+    assert!(e.contains("Permission denied"), "{e}");
+}
+
+#[test]
+fn a_log_that_holds_another_studys_records_is_an_error() {
+    let (_d, home, _) = setup(|t| t);
+    let box_home = Home::open_at(&home).unwrap();
+    // A finished study's log, copied under another study's name.
+    common::plant(&box_home, "first", &common::finished(vec![common::arm_a()]));
+    std::fs::create_dir_all(home.join("studies/my-pilot")).unwrap();
+    std::fs::copy(
+        home.join("studies/first/records.jsonl"),
+        home.join("studies/my-pilot/records.jsonl"),
+    )
+    .unwrap();
+    let key = keys::load(&box_home).unwrap().map(|k| k.verifying_key());
+    let records = HomeRecords {
+        home: box_home,
+        key: Ok(key),
+    };
+    assert_eq!(
+        records.study("my-pilot"),
+        Err("record 0 belongs to study first".to_string())
+    );
+    assert!(records.study("first").unwrap().is_some());
+}
+
+// ---- import ----
+
+fn blob_lines(home: &Path) -> Vec<Value> {
+    std::fs::read_to_string(home.join("store/imports.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+#[test]
+fn import_prints_digests_and_signs_one_record_per_file() {
+    let (d, home, _) = setup(|t| t);
+    let (a, b) = (d.path().join("a.txt"), d.path().join("b.bin"));
+    std::fs::write(&a, "Hello  World").unwrap();
+    std::fs::write(&b, [0xff, 0xfe, 0x00]).unwrap();
+    let out = bin(&home)
+        .args(["import", "--source", "the pilot corpus"])
+        .args([&a, &b])
+        .assert()
+        .code(0);
+    let sha = ignorarium::canon::sha256_hex;
+    let (da, db) = (sha(b"Hello  World"), sha(&[0xff, 0xfe, 0x00]));
+    assert_eq!(
+        stdout(&out),
+        format!(
+            "{da}  {}
+{db}  {}
+",
+            a.display(),
+            b.display()
+        )
+    );
+    assert_eq!(
+        std::fs::read(home.join("store").join(&da)).unwrap(),
+        b"Hello  World"
+    );
+    let key = ignorarium::keys::load(&Home::open_at(&home).unwrap())
+        .unwrap()
+        .unwrap()
+        .verifying_key();
+    let recs = ignorarium::records::read_all(&home.join("store/imports.jsonl"), &key).unwrap();
+    assert_eq!(recs.len(), 2);
+    assert_eq!(
+        (recs[0].study.as_str(), recs[0].kind.as_str()),
+        ("store", "import")
+    );
+    assert_eq!(recs[0].row, None);
+    assert_eq!(
+        recs[0].body,
+        serde_json::json!({
+            "digest": da, "size": 12, "source": "the pilot corpus",
+            "normalized_sha256": sha(b"hello world"), "file": "a.txt"
+        })
+    );
+    assert_eq!(recs[1].body["digest"], db);
+    assert_eq!(recs[1].body["file"], "b.bin");
+    assert_eq!(recs[1].body["normalized_sha256"], "");
+    assert_eq!(recs[1].seq, 1);
+    let ev = events(&home);
+    assert_eq!(ev[0]["name"], "import");
+    assert_eq!(ev[0]["attrs"]["exit"], 0);
+}
+
+#[test]
+fn import_writes_no_meta_when_its_record_cannot_be_signed() {
+    let (d, home, _) = setup(|t| t);
+    let (a, b) = (d.path().join("a.txt"), d.path().join("b.txt"));
+    std::fs::write(&a, "first").unwrap();
+    std::fs::write(&b, "second").unwrap();
+    bin(&home)
+        .args(["import", "--source", "s"])
+        .arg(&a)
+        .assert()
+        .code(0);
+    // A torn last line, as a crash in mid-write leaves it: no record can be appended.
+    let log = home.join("store/imports.jsonl");
+    let whole = std::fs::read(&log).unwrap();
+    std::fs::write(&log, [&whole[..], b"{\"rec"].concat()).unwrap();
+    bin(&home)
+        .args(["import", "--source", "s"])
+        .arg(&b)
+        .assert()
+        .code(2);
+    // A meta would tell a later register that the blob already has its record.
+    let digest = ignorarium::canon::sha256_hex(b"second");
+    let meta = home.join("store/meta").join(format!("{digest}.json"));
+    assert!(!meta.exists());
+    // With the log whole again, the import signs its record, then writes the meta.
+    std::fs::write(&log, &whole).unwrap();
+    bin(&home)
+        .args(["import", "--source", "s"])
+        .arg(&b)
+        .assert()
+        .code(0);
+    assert!(meta.exists());
+    let key = ignorarium::keys::load(&Home::open_at(&home).unwrap())
+        .unwrap()
+        .unwrap()
+        .verifying_key();
+    let recs = ignorarium::records::read_all(&log, &key).unwrap();
+    assert_eq!(recs.len(), 2);
+    assert_eq!(recs[1].body["digest"], digest.as_str());
+}
+
+#[test]
+fn import_refuses_a_bad_file_before_it_adds_anything() {
+    let (d, home, _) = setup(|t| t);
+    let good = d.path().join("good.txt");
+    std::fs::write(&good, "x").unwrap();
+    for bad in [d.path().join("missing.txt"), d.path().to_path_buf()] {
+        let a = bin(&home)
+            .args(["import", "--source", "s"])
+            .arg(&good)
+            .arg(&bad)
+            .assert()
+            .code(2);
+        assert!(
+            stderr(&a).contains(&bad.display().to_string()),
+            "{}",
+            stderr(&a)
+        );
+        assert!(
+            !home
+                .join("store")
+                .join(ignorarium::canon::sha256_hex(b"x"))
+                .exists()
+        );
+        assert!(blob_lines(&home).is_empty());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn import_refuses_a_symlink() {
+    let (d, home, _) = setup(|t| t);
+    let real = d.path().join("real.txt");
+    std::fs::write(&real, "x").unwrap();
+    let link = d.path().join("link.txt");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let a = bin(&home)
+        .args(["import", "--source", "s"])
+        .arg(&link)
+        .assert()
+        .code(2);
+    assert!(stderr(&a).contains("not a regular file"), "{}", stderr(&a));
+    assert!(blob_lines(&home).is_empty());
+}
+
+#[test]
+fn import_refuses_a_source_that_looks_like_a_secret_and_does_not_echo_it() {
+    let (d, home, _) = setup(|t| t);
+    let f = d.path().join("a.txt");
+    std::fs::write(&f, "x").unwrap();
+    let secret = &format!("AKIA{}", "ABCDEFGHIJKLMNOP");
+    let a = bin(&home)
+        .args(["import", "--source", &format!("bucket key {secret}")])
+        .arg(&f)
+        .assert()
+        .code(1);
+    let err = stderr(&a);
+    assert!(err.contains("aws-key"), "{err}");
+    assert!(!err.contains(secret), "{err}");
+    assert!(!stdout(&a).contains(secret));
+    assert!(blob_lines(&home).is_empty());
+    assert!(
+        !home
+            .join("store")
+            .join(ignorarium::canon::sha256_hex(b"x"))
+            .exists()
+    );
+    // The event log keeps no copy of the secret either.
+    let log = std::fs::read_to_string(home.join("events.jsonl")).unwrap_or_default();
+    assert!(!log.contains(secret), "{log}");
+}
+
+#[test]
+fn import_needs_a_source() {
+    let (d, home, _) = setup(|t| t);
+    let f = d.path().join("a.txt");
+    std::fs::write(&f, "x").unwrap();
+    bin(&home).arg("import").arg(&f).assert().code(2);
+    let a = bin(&home)
+        .args(["import", "--source", ""])
+        .arg(&f)
+        .assert()
+        .code(2);
+    assert!(stderr(&a).contains("--source needs text"), "{}", stderr(&a));
+}
+
+#[test]
+fn a_whitespace_only_source_is_refused() {
+    let (d, home, _) = setup(|t| t);
+    let f = d.path().join("a.txt");
+    std::fs::write(&f, "x").unwrap();
+    let a = bin(&home)
+        .args(["import", "--source", "  "])
+        .arg(&f)
+        .assert()
+        .code(2);
+    assert!(stderr(&a).contains("--source needs text"), "{}", stderr(&a));
+}
+
+#[test]
+fn import_refuses_a_home_path_in_the_source_and_a_secret_in_the_file_name() {
+    let (d, home, _) = setup(|t| t);
+    let f = d.path().join("a.txt");
+    std::fs::write(&f, "x").unwrap();
+    for src in [
+        format!("copied from /{}/{}/data", "home", "alice"),
+        format!("copied from /{}/{}/data", "Users", "alice"),
+        format!("copied from C:\\{}\\{}\\data", "Users", "alice"),
+    ] {
+        let a = bin(&home)
+            .args(["import", "--source", &src])
+            .arg(&f)
+            .assert()
+            .code(1);
+        assert!(stderr(&a).contains("home-path"), "{src}: {}", stderr(&a));
+        assert!(!stderr(&a).contains("alice"), "{}", stderr(&a));
+    }
+    // A placeholder is not a path.
+    bin(&home)
+        .args(["import", "--source", "kept under /home/<name>/data"])
+        .arg(&f)
+        .assert()
+        .code(0);
+    let secret = format!("AKIA{}.txt", "ABCDEFGHIJKLMNOP");
+    let g = d.path().join(&secret);
+    std::fs::write(&g, "y").unwrap();
+    let a = bin(&home)
+        .args(["import", "--source", "s"])
+        .arg(&g)
+        .assert()
+        .code(1);
+    assert!(stderr(&a).contains("aws-key"), "{}", stderr(&a));
+    assert!(!stderr(&a).contains(&secret), "{}", stderr(&a));
+}
+
+#[test]
+fn a_signed_import_record_holds_the_file_name_only() {
+    let (d, home, _) = setup(|t| t);
+    let sub = d.path().join("deep/er");
+    std::fs::create_dir_all(&sub).unwrap();
+    let f = sub.join("a.txt");
+    std::fs::write(&f, "x").unwrap();
+    let a = bin(&home)
+        .args(["import", "--source", "s"])
+        .arg(&f)
+        .assert()
+        .code(0);
+    // The path as given is printed, and kept out of the record.
+    assert!(stdout(&a).contains("deep"), "{}", stdout(&a));
+    let raw = std::fs::read_to_string(home.join("store/imports.jsonl")).unwrap();
+    assert!(!raw.contains("deep"), "{raw}");
+}
+
+#[test]
+fn check_creates_no_store_folder() {
+    let (_d, home, spec) = setup(no_power);
+    bin(&home).arg("check").arg(&spec).assert().code(0);
+    assert!(!home.join("store").exists());
+}
+
+#[test]
+fn register_accepts_an_input_that_only_the_store_holds() {
+    let (d, home, _) = setup(|t| t);
+    let f = d.path().join("corpus.txt");
+    std::fs::write(&f, "Stored  Words").unwrap();
+    bin(&home)
+        .args(["import", "--source", "s"])
+        .arg(&f)
+        .assert()
+        .code(0);
+    let digest = ignorarium::canon::sha256_hex(b"Stored  Words");
+    let spec = d.path().join("stored-spec.toml");
+    let text = std::fs::read_to_string(TEMPLATE).unwrap();
+    let pin = format!("sha256 = \"{digest}\"");
+    assert!(text.contains("sha256 = \"\""));
+    std::fs::write(&spec, text.replacen("sha256 = \"\"", &pin, 1)).unwrap();
+    give_payload(&spec);
+    let h = Home::open_at(&home).unwrap();
+    let typed = format!("{}\n", &ignorarium::spec::load(&spec).unwrap().hash[7..15]);
+    let mut out = Vec::new();
+    let done = ignorarium::cli::register::run(
+        &spec,
+        &h,
+        &mut std::io::Cursor::new(typed.into_bytes()),
+        &mut out,
+        true,
+    )
+    .unwrap_or_else(|e| panic!("{}", e.msg));
+    assert_eq!(done.code, 0);
+    let leaves = leaf_lines(&home, "planlog");
+    assert_eq!(
+        leaves[0]["data_hashes"],
+        serde_json::json!([[digest, ignorarium::canon::sha256_hex(b"stored words")]])
+    );
+    common::unseal(&home);
 }

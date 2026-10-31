@@ -156,19 +156,35 @@ pub fn read_tail<R: Read + Seek>(r: &mut R) -> io::Result<Tail> {
     })
 }
 
-/// Append one write to a log under an exclusive lock. `build` sees the
-/// log's tail and returns the bytes to write; they go out in one
-/// `write_all`, then fsync.
+/// Every byte of `r`, from its start.
+pub fn read_whole<R: Read + Seek>(r: &mut R) -> io::Result<Vec<u8>> {
+    r.seek(SeekFrom::Start(0))?;
+    let mut buf = Vec::new();
+    r.read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
+/// Append one write to a log under an exclusive lock. `build` reads what it
+/// needs from the locked file and returns the bytes to write; they go out in
+/// one `write_all`, then fsync.
+pub fn locked_write<E: From<io::Error>>(
+    path: &Path,
+    build: impl FnOnce(&mut fs::File) -> Result<Vec<u8>, E>,
+) -> Result<(), E> {
+    let mut f = open_log(path)?;
+    f.lock()?;
+    let bytes = build(&mut f)?;
+    f.write_all(&bytes)?;
+    f.sync_all()?;
+    Ok(())
+}
+
+/// `locked_write` where `build` sees only the log's tail.
 pub fn locked_append<E: From<io::Error>>(
     path: &Path,
     build: impl FnOnce(Tail) -> Result<Vec<u8>, E>,
 ) -> Result<(), E> {
-    let mut f = open_log(path)?;
-    f.lock()?;
-    let bytes = build(read_tail(&mut f)?)?;
-    f.write_all(&bytes)?;
-    f.sync_all()?;
-    Ok(())
+    locked_write(path, |f| build(read_tail(f)?))
 }
 
 /// Append `v` as one canonical JSON line under an exclusive lock. A log that ends in a
@@ -230,6 +246,37 @@ pub fn temp_beside(path: &Path) -> io::Result<PathBuf> {
         std::process::id(),
         hex::encode(rnd)
     )))
+}
+
+/// Stream `r` into a new file at `path` with exactly `mode`, whatever the umask, then
+/// publish it with `hard_link`, which fails if `path` exists. The temp file is always
+/// removed.
+#[cfg(unix)]
+pub fn create_from(path: &Path, r: &mut impl Read, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = temp_beside(path)?;
+    let out = create_new(&tmp, 0o600).and_then(|mut f| {
+        io::copy(r, &mut f)?;
+        f.set_permissions(fs::Permissions::from_mode(mode))?;
+        f.sync_all()?;
+        fs::hard_link(&tmp, path)
+    });
+    let _ = fs::remove_file(&tmp);
+    out
+}
+
+/// Set `dir` and every folder below it to mode 0o555, so no entry can be added, removed or
+/// renamed in them. Files keep their modes; links are not followed.
+#[cfg(unix)]
+pub fn seal(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for e in fs::read_dir(dir)? {
+        let e = e?;
+        if e.file_type()?.is_dir() {
+            seal(&e.path())?;
+        }
+    }
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o555))
 }
 
 /// Create `path` for writing; fails if it exists. `mode` applies on unix only.

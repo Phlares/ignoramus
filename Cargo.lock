@@ -438,6 +438,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "ed25519-dalek",
+ "evidence",
  "flate2",
  "getrandom 0.3.4",
  "hex",

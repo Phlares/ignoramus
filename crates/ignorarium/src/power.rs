@@ -57,16 +57,11 @@ pub fn z(p: f64) -> f64 {
     }
 }
 
-/// Units needed for a two-sided paired-mean test, with a design effect for clusters:
-/// `ceil(((z(1 - alpha/2) + z(power)) * sd / sesoi)^2 * (1 + (m - 1) * icc))`.
-pub fn required_units(
-    alpha: f64,
-    power: f64,
-    sd: f64,
-    sesoi: f64,
-    units_per_cluster: u32,
-    icc: f64,
-) -> u64 {
-    let base = ((z(1.0 - alpha / 2.0) + z(power)) * sd / sesoi).powi(2);
-    (base * (1.0 + (f64::from(units_per_cluster) - 1.0) * icc)).ceil() as u64
+/// Clusters a one-sided test of the mean of cluster means needs, at level `alpha` and
+/// `power`, when one cluster mean has sd `sd_cluster` and the true mean lies `distance` from
+/// the margin: `ceil(((z(1 - alpha) + z(power)) * sd_cluster / distance)^2)`.
+pub fn required_clusters(alpha: f64, power: f64, sd_cluster: f64, distance: f64) -> u64 {
+    ((z(1.0 - alpha) + z(power)) * sd_cluster / distance)
+        .powi(2)
+        .ceil() as u64
 }

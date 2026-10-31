@@ -178,3 +178,156 @@ fn bad_digests_are_refused() {
     }
     assert!(s.path(HELLO).is_ok());
 }
+
+// ---- import ----
+
+use ignorarium::canon::sha256_hex;
+use ignorarium::prior::{file_hashes, file_hashes_within, normalized_sha256};
+use ignorarium::store::{Meta, NORMALIZE_LIMIT};
+
+fn source(bytes: &[u8]) -> (tempfile::TempDir, std::path::PathBuf) {
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("in.bin");
+    std::fs::write(&f, bytes).unwrap();
+    (d, f)
+}
+
+fn meta_file(s: &Store, digest: &str) -> std::path::PathBuf {
+    s.root.join("meta").join(format!("{digest}.json"))
+}
+
+#[test]
+fn import_streams_the_blob_and_writes_meta_once() {
+    let (_d, s) = open();
+    let (_src, f) = source(b"Hello  World");
+    let (digest, meta) = s.import(&f).unwrap();
+    assert_eq!(digest, sha256_hex(b"Hello  World"));
+    assert_eq!(
+        meta,
+        Meta {
+            size: 12,
+            normalized_sha256: normalized_sha256("hello world")
+        }
+    );
+    assert_eq!(
+        std::fs::read(s.path(&digest).unwrap()).unwrap(),
+        b"Hello  World"
+    );
+    assert_eq!(s.meta(&digest).unwrap(), Some(meta.clone()));
+    let first = std::fs::read(meta_file(&s, &digest)).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&first).unwrap(),
+        serde_json::json!({"size": 12, "normalized_sha256": meta.normalized_sha256})
+    );
+    // A second import changes nothing.
+    assert_eq!(s.import(&f).unwrap(), (digest.clone(), meta));
+    assert_eq!(std::fs::read(meta_file(&s, &digest)).unwrap(), first);
+    assert!(leftovers(&s).is_empty());
+}
+
+#[test]
+fn meta_is_none_for_an_unknown_digest_and_refuses_a_bad_one() {
+    let (_d, s) = open();
+    assert_eq!(s.meta(HELLO).unwrap(), None);
+    assert!(matches!(s.meta("../x"), Err(StoreError::BadDigest)));
+    // A meta entry the store cannot read is an error, not an absent meta.
+    std::fs::create_dir_all(meta_file(&s, HELLO)).unwrap();
+    assert!(matches!(s.meta(HELLO), Err(StoreError::Io(_))));
+}
+
+#[test]
+fn a_changed_meta_file_is_an_error_not_a_silent_rewrite() {
+    let (_d, s) = open();
+    let (_src, f) = source(b"abc");
+    let (digest, _) = s.import(&f).unwrap();
+    let path = meta_file(&s, &digest);
+    let mut perm = std::fs::metadata(&path).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perm.set_readonly(false);
+    std::fs::set_permissions(&path, perm).unwrap();
+    std::fs::write(&path, b"{\"size\":1,\"normalized_sha256\":\"\"}").unwrap();
+    assert!(s.import(&f).is_err());
+}
+
+#[test]
+fn a_binary_file_has_no_normalized_hash() {
+    let (_d, s) = open();
+    let (_src, f) = source(&[0xff, 0xfe, 0x00, 0x01]);
+    let (_, meta) = s.import(&f).unwrap();
+    assert_eq!(meta.size, 4);
+    assert_eq!(meta.normalized_sha256, "");
+}
+
+#[test]
+fn the_limit_is_64_mib_and_the_plain_calls_use_it() {
+    assert_eq!(NORMALIZE_LIMIT, 64 << 20);
+    let (_d, s) = open();
+    let (_src, f) = source(b"Some  Text");
+    assert_eq!(
+        s.import(&f).unwrap().1.normalized_sha256,
+        file_hashes(b"Some  Text").1
+    );
+    assert_eq!(
+        file_hashes_within(b"Some  Text", NORMALIZE_LIMIT),
+        file_hashes(b"Some  Text")
+    );
+}
+
+#[test]
+fn the_normalized_hash_stops_at_the_size_limit() {
+    let (at, over) = (b"Ab Cd  e", b"Ab Cd  eF");
+    assert_eq!(file_hashes_within(at, 8).1, normalized_sha256("ab cd e"));
+    assert_eq!(file_hashes_within(over, 8).1, "");
+    assert_eq!(file_hashes_within(over, 8).0, sha256_hex(over));
+    let (_d, s) = open();
+    let (_src, f) = source(at);
+    let (_, meta) = s.import_within(&f, 8).unwrap();
+    assert_eq!(
+        (meta.size, meta.normalized_sha256),
+        (8, normalized_sha256("ab cd e"))
+    );
+    let (_src2, f2) = source(over);
+    let (_, meta) = s.import_within(&f2, 8).unwrap();
+    assert_eq!((meta.size, meta.normalized_sha256), (9, String::new()));
+}
+
+#[test]
+fn re_importing_over_a_corrupt_blob_is_refused_and_writes_no_meta() {
+    let (_d, s) = open();
+    let (_src, f) = source(b"abc");
+    let digest = sha256_hex(b"abc");
+    std::fs::write(s.root.join(&digest), b"bad").unwrap();
+    assert!(s.import(&f).is_err());
+    assert!(!meta_file(&s, &digest).exists());
+}
+
+#[test]
+fn re_importing_over_an_intact_blob_succeeds() {
+    let (_d, s) = open();
+    let (_src, f) = source(b"abc");
+    s.put(b"abc").unwrap();
+    assert_eq!(s.import(&f).unwrap().0, sha256_hex(b"abc"));
+}
+
+#[test]
+fn import_refuses_a_folder_and_a_missing_file() {
+    let (_d, s) = open();
+    let (src, _) = source(b"x");
+    assert!(matches!(s.import(src.path()), Err(StoreError::NotRegular)));
+    assert!(matches!(
+        s.import(&src.path().join("none")),
+        Err(StoreError::Io(_))
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn import_refuses_a_link() {
+    let (_d, s) = open();
+    let (src, f) = source(b"x");
+    let link = src.path().join("link");
+    std::os::unix::fs::symlink(&f, &link).unwrap();
+    assert!(matches!(s.import(&link), Err(StoreError::Link)));
+    assert!(!s.has(&sha256_hex(b"x")));
+    assert!(!s.root.join("meta").exists());
+}

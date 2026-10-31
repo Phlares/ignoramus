@@ -59,9 +59,9 @@ fn faults() -> Vec<Fault> {
         ),
         (
             "E-RNG-001",
-            "/design/alpha",
-            Some(json!(0.0)),
-            "design.alpha",
+            "/design/power",
+            Some(json!(0.4)),
+            "design.power",
         ),
         ("E-FMT-001", "/study/id", Some(json!("étude-1")), "study.id"),
         (
@@ -89,18 +89,17 @@ fn faults() -> Vec<Fault> {
             "design.conditions[1].id",
         ),
         (
-            "E-FMT-002",
-            "/design/variance/source",
-            Some(json!("record:xyz")),
-            "design.variance.source",
-        ),
-        (
             "E-FMT-003",
             "/inputs/0/sha256",
             Some(json!("ABC")),
             "inputs[0].sha256",
         ),
-        ("E-NUM-001", "/design/sesoi", nan(), "design.sesoi"),
+        (
+            "E-NUM-001",
+            "/design/row_seconds",
+            nan(),
+            "design.row_seconds",
+        ),
         (
             "E-KEY-001",
             "/study/surprise",
@@ -133,6 +132,36 @@ fn faults() -> Vec<Fault> {
             "outcomes[0].direction",
         ),
         (
+            "E-REQ-001",
+            "/outcomes/0/measure",
+            None,
+            "outcomes[0].measure",
+        ),
+        (
+            "E-REQ-001",
+            "/outcomes/0/paired",
+            None,
+            "outcomes[0].paired",
+        ),
+        (
+            "E-TYP-001",
+            "/outcomes/0/measure",
+            Some(json!(1)),
+            "outcomes[0].measure",
+        ),
+        (
+            "E-TYP-001",
+            "/outcomes/0/paired",
+            Some(json!(true)),
+            "outcomes[0].paired",
+        ),
+        (
+            "E-ENM-001",
+            "/outcomes/0/paired",
+            Some(json!("ratio")),
+            "outcomes[0].paired",
+        ),
+        (
             "W-LIC-001",
             "/inputs/0/licence/spdx",
             Some(json!("")),
@@ -162,18 +191,6 @@ fn faults() -> Vec<Fault> {
             "/design/conditions",
             Some(json!([1])),
             "design.conditions[0]",
-        ),
-        (
-            "E-TYP-001",
-            "/design/selection/clusters",
-            Some(json!([1])),
-            "design.selection.clusters[0]",
-        ),
-        (
-            "E-TYP-001",
-            "/design/confirmation/clusters",
-            Some(json!([1])),
-            "design.confirmation.clusters[0]",
         ),
         ("E-TYP-001", "/inputs", Some(json!([1])), "inputs[0]"),
         (
@@ -225,10 +242,11 @@ fn each_fault_row_yields_its_code_and_path_alone() {
     for row in faults() {
         let (code, _, _, path) = &row;
         let d = rules::check_generic(&faulted(std::slice::from_ref(&row)), &rules);
-        // The template itself carries both warnings; drop them unless the row is about them.
+        // The template itself carries both warnings on each input; drop them unless the row is
+        // about that warning at that path.
         let d: Vec<_> = d
             .into_iter()
-            .filter(|x| !x.code.starts_with("W-") || x.code == *code)
+            .filter(|x| !x.code.starts_with("W-") || (x.code == *code && x.path == *path))
             .collect();
         assert_eq!(codes_paths(&d), [(*code, *path)], "{row:?}");
     }
@@ -243,7 +261,9 @@ fn templates_have_no_generic_errors_and_no_unknown_keys() {
             codes_paths(&d),
             [
                 ("W-LIC-001", "inputs[0].licence.spdx"),
+                ("W-LIC-001", "inputs[1].licence.spdx"),
                 ("W-HSH-001", "inputs[0].sha256"),
+                ("W-HSH-001", "inputs[1].sha256"),
             ]
         );
         assert!(d.iter().all(|x| x.severity == Severity::Warning));
@@ -253,7 +273,7 @@ fn templates_have_no_generic_errors_and_no_unknown_keys() {
 fn three_faults() -> Value {
     let rows = faults();
     let pick = |i: usize| rows[i].clone();
-    // study.mode removed, alpha 0, study.id non-ASCII.
+    // study.mode removed, power 0.4, study.id non-ASCII.
     faulted(&[pick(0), pick(3), pick(4)])
 }
 
@@ -264,10 +284,12 @@ fn all_faults_reported_at_once_in_rule_file_order() {
         codes_paths(&d),
         [
             ("E-REQ-001", "study.mode"),
-            ("E-RNG-001", "design.alpha"),
+            ("E-RNG-001", "design.power"),
             ("E-FMT-001", "study.id"),
             ("W-LIC-001", "inputs[0].licence.spdx"),
+            ("W-LIC-001", "inputs[1].licence.spdx"),
             ("W-HSH-001", "inputs[0].sha256"),
+            ("W-HSH-001", "inputs[1].sha256"),
         ]
     );
 }
@@ -314,7 +336,9 @@ fn missing_licence_id_gives_the_schema_error_then_the_warning() {
         [
             ("E-REQ-001", "inputs[0].licence.spdx"),
             ("W-LIC-001", "inputs[0].licence.spdx"),
+            ("W-LIC-001", "inputs[1].licence.spdx"),
             ("W-HSH-001", "inputs[0].sha256"),
+            ("W-HSH-001", "inputs[1].sha256"),
         ]
     );
 }
@@ -327,8 +351,7 @@ fn fat_templates() -> Vec<Value> {
             let mut s = spec_at(&format!("../../templates/{t}.toml"));
             let mut second = s["outcomes"][0].clone();
             second["id"] = json!("second");
-            s["design"]["selection"]["clusters"] = json!(["s1", "s2"]);
-            s["design"]["confirmation"]["clusters"] = json!(["c1", "c2"]);
+            second["measure"] = json!("second-measure");
             s["inputs"][0]["licence"]["creators"] = json!(["x", "y"]);
             s["mutations"]["operators"] = json!([
                 { "name": "o1", "type": "int", "range": [1, 2], "acts_on": "a" },
@@ -339,17 +362,53 @@ fn fat_templates() -> Vec<Value> {
                 { "id": "t2", "metric": "ppl-ratio", "threshold_e": 1.0 },
             ]);
             s["outcomes"].as_array_mut().unwrap().push(second);
+            s["design"]["conditions"][1]["params"] =
+                json!({ "bits": 4, "mode": "fast", "chosen": { "from": "chooser" } });
+            s["design"]["selection"] =
+                json!({ "metric": "ppl-ratio", "conditions": ["a", "b"], "rule": "best-mean" });
             s["scope"]["end_of_run"]["follow_on"] = json!([
                 { "when": "H1.pass", "spec": "follow/a.toml" },
                 { "when": "H1.pass", "spec": "follow/b.toml" },
             ]);
+            // One hypothesis per claim shape, so every claim and statistic key has a node.
+            let h = &mut s["question"]["hypotheses"];
+            h[0]["contrast"] = json!({ "arm-a": 1.0, "selected": -1.0 });
+            h[0]["strata"] = json!(["fiction", "code"]);
+            h[0]["power_at"] = json!(0.5);
+            h[0]["estimates"] = json!({ "from": "pilot" });
+            h[0]["alpha_share"] = json!(0.5);
+            for (i, claim, stat) in [
+                (0, json!({ "below": 1.0 }), json!({ "mean": [-5.0, 5.0] })),
+                (1, json!({ "above": 0.0 }), json!({ "quantile": 0.5 })),
+                (
+                    2,
+                    json!({ "within": [-1.0, 1.0] }),
+                    json!({ "mean": [-5.0, 5.0] }),
+                ),
+            ] {
+                if i > 0 {
+                    let mut next = h[0].clone();
+                    next["id"] = json!(format!("H{}", i + 1));
+                    h.as_array_mut().unwrap().push(next);
+                }
+                h[i]["claim"] = claim;
+                h[i]["statistic"] = stat;
+            }
             s
         })
         .collect()
 }
 
-/// Concrete paths a pattern selects in `v`, counting only nodes that exist.
+/// Concrete paths a pattern selects in `v`, counting only nodes that exist. A `*` segment
+/// selects every key of a table.
 fn expand(v: &Value, pattern: &str) -> Vec<String> {
+    let join = |p: &str, name: &str| {
+        if p.is_empty() {
+            name.to_string()
+        } else {
+            format!("{p}.{name}")
+        }
+    };
     let mut cur = vec![(String::new(), v)];
     for seg in pattern.split('.') {
         let (name, each) = match seg.strip_suffix("[*]") {
@@ -358,14 +417,15 @@ fn expand(v: &Value, pattern: &str) -> Vec<String> {
         };
         let mut next = vec![];
         for (p, node) in cur {
+            if seg == "*" {
+                let keys = node.as_object().into_iter().flatten();
+                next.extend(keys.map(|(k, c)| (join(&p, k), c)));
+                continue;
+            }
             let Some(child) = node.get(name) else {
                 continue;
             };
-            let base = if p.is_empty() {
-                name.to_string()
-            } else {
-                format!("{p}.{name}")
-            };
+            let base = join(&p, name);
             match (each, child) {
                 (false, c) => next.push((base, c)),
                 (true, Value::Array(a)) => {
@@ -458,7 +518,9 @@ fn indexed_paths_cover_second_elements() {
             ("E-FMT-001", "design.conditions[1].id"),
             ("E-OUT-001", "outcomes[1].unit"),
             ("W-LIC-001", "inputs[0].licence.spdx"),
+            ("W-LIC-001", "inputs[1].licence.spdx"),
             ("W-HSH-001", "inputs[0].sha256"),
+            ("W-HSH-001", "inputs[1].sha256"),
         ]
     );
 }
@@ -486,6 +548,14 @@ fn human_render_matches_exactly() {
     assert_eq!(render_human(&[]), "");
 }
 
+/// The key of a unique check: two unique checks on one array differ by it.
+fn unique_key(c: &Check) -> Option<String> {
+    match c {
+        Check::Unique(k) => k.clone(),
+        _ => None,
+    }
+}
+
 #[test]
 fn no_duplicate_path_and_kind_pairs() {
     let mut seen = HashSet::new();
@@ -494,7 +564,11 @@ fn no_duplicate_path_and_kind_pairs() {
         .filter(|r| !matches!(r.check, Check::Documented))
     {
         assert!(
-            seen.insert((r.path.clone(), r.check.name())),
+            seen.insert((
+                r.path.clone(),
+                unique_key(&r.check).unwrap_or_default(),
+                r.check.name()
+            )),
             "{}: {}",
             r.code,
             r.path
@@ -530,10 +604,16 @@ fn every_template_key_has_a_type_target() {
         .filter(|r| matches!(r.check, Check::Type(_)))
         .map(|r| r.path)
         .collect();
+    // A key under a `*` target, such as a contrast's condition id, is typed by that target.
+    let typed = |p: &str| {
+        types.contains(p)
+            || p.rsplit_once('.')
+                .is_some_and(|(parent, _)| types.contains(&format!("{parent}.*")))
+    };
     for t in ["numeric-ablation", "planted-spawn"] {
         let mut all = vec![];
         paths(&spec_at(&format!("../../templates/{t}.toml")), "", &mut all);
-        let missing: Vec<_> = all.iter().filter(|p| !types.contains(*p)).collect();
+        let missing: Vec<_> = all.iter().filter(|p| !typed(p)).collect();
         assert!(missing.is_empty(), "{t}: {missing:?}");
     }
 }
@@ -546,7 +626,6 @@ fn fields_with_defaults_are_never_required() {
         .map(|r| r.path)
         .collect();
     for p in [
-        "design.alpha",
         "design.power",
         "design.repeats",
         "mutations.depth_cap",
@@ -579,19 +658,11 @@ fn rng_codes(spec: &Value) -> Vec<String> {
 
 #[test]
 fn range_bounds_hold_on_both_sides() {
-    let cases: [(&[&str], Value, bool); 18] = [
-        (&["design", "alpha"], json!(0), true),
-        (&["design", "alpha"], json!(0.0000001), false),
-        (&["design", "alpha"], json!(0.5), false),
-        (&["design", "alpha"], json!(0.5000001), true),
+    let cases: [(&[&str], Value, bool); 10] = [
         (&["design", "power"], json!(0.4999), true),
         (&["design", "power"], json!(0.5), false),
         (&["design", "power"], json!(0.999), false),
         (&["design", "power"], json!(0.9991), true),
-        (&["design", "icc"], json!(-0.0001), true),
-        (&["design", "icc"], json!(0), false),
-        (&["design", "icc"], json!(0.9999), false),
-        (&["design", "icc"], json!(1), true),
         (&["design", "repeats"], json!(0), true),
         (&["design", "repeats"], json!(1), false),
         (&["design", "repeats"], json!(1000000), false),
@@ -605,6 +676,17 @@ fn range_bounds_hold_on_both_sides() {
         assert_eq!(got, want, "{path:?} = {v}");
     }
     assert!(rng_codes(&with(&["scope", "min_isolation"], json!(0))).is_empty());
+}
+
+#[test]
+fn a_plan_cannot_set_its_own_alpha() {
+    // The level comes from the box-wide stream, so design.alpha is an unknown key.
+    let d = rules::check_generic(&with(&["design", "alpha"], json!(0.005)), &v0());
+    let errors: Vec<_> = (d.iter())
+        .filter(|x| x.severity == Severity::Error)
+        .map(|x| (x.code.as_str(), x.path.as_str()))
+        .collect();
+    assert_eq!(errors, [("E-KEY-001", "design.alpha")]);
 }
 
 #[test]
@@ -639,18 +721,33 @@ fn type_rules_accept_and_reject_the_right_values() {
             .iter()
             .any(|d| d.code == "E-TYP-001" && d.path == path.join("."))
     };
-    assert!(!bad(&["design", "alpha"], json!(1))); // float takes an int
-    assert!(!bad(&["design", "alpha"], json!("!nonfinite:nan"))); // E-NUM-001 reports it
-    assert!(bad(&["design", "alpha"], json!("x")));
+    assert!(!bad(&["design", "power"], json!(1))); // float takes an int
+    assert!(!bad(&["design", "power"], json!("!nonfinite:nan"))); // E-NUM-001 reports it
+    assert!(bad(&["design", "power"], json!("x")));
     assert!(bad(&["design", "repeats"], json!(1.5))); // int rejects float
     assert!(bad(&["design", "repeats"], json!(true)));
     assert!(!bad(&["design", "repeats"], json!(-1))); // negative and
     assert!(!bad(&["design", "repeats"], json!(u64::MAX))); // > i64::MAX are still ints
     assert!(bad(&["study", "test_log"], json!("no")));
     assert!(bad(&["study", "id"], json!(3)));
-    assert!(bad(&["design", "selection"], json!([])));
+    assert!(bad(&["design", "pick"], json!([])));
     assert!(bad(&["design", "conditions"], json!({})));
     assert!(!bad(&["design", "conditions"], json!([{"id": "a"}])));
+}
+
+#[test]
+fn every_paired_rule_passes_the_enum_check() {
+    let enum_hit = |rule: &str| -> bool {
+        let mut s = template();
+        s["outcomes"][0]["paired"] = json!(rule);
+        rules::check_generic(&s, &v0())
+            .iter()
+            .any(|d| d.code == "E-ENM-001" && d.path == "outcomes[0].paired")
+    };
+    for rule in ["difference", "percent", "log-ratio"] {
+        assert!(!enum_hit(rule), "{rule}");
+    }
+    assert!(enum_hit("ratio"));
 }
 
 #[test]
@@ -679,9 +776,9 @@ fn child_checks_skip_when_the_parent_is_missing_or_wrong() {
 fn array_elements_are_checked_individually() {
     let mut s = template();
     s["outcomes"] = json!([
-        { "id": "a", "unit": "s", "direction": "lower", "registered": true },
-        { "id": "b", "unit": "", "direction": "higher", "registered": true },
-        { "id": "c", "unit": "s", "direction": "up", "registered": true },
+        { "id": "a", "unit": "s", "direction": "lower", "measure": "m1", "paired": "percent", "registered": true },
+        { "id": "b", "unit": "", "direction": "higher", "measure": "m2", "paired": "percent", "registered": true },
+        { "id": "c", "unit": "s", "direction": "up", "measure": "m3", "paired": "percent", "registered": true },
     ]);
     let d = rules::check_generic(&s, &v0());
     assert_eq!(
@@ -690,7 +787,9 @@ fn array_elements_are_checked_individually() {
             ("E-OUT-001", "outcomes[1].unit"),
             ("E-OUT-002", "outcomes[2].direction"),
             ("W-LIC-001", "inputs[0].licence.spdx"),
+            ("W-LIC-001", "inputs[1].licence.spdx"),
             ("W-HSH-001", "inputs[0].sha256"),
+            ("W-HSH-001", "inputs[1].sha256"),
         ]
     );
 }
@@ -710,10 +809,35 @@ fn unknown_keys_report_once_at_the_top_and_inside_array_elements() {
 }
 
 #[test]
+fn a_star_segment_selects_every_key_and_known_key_accepts_them() {
+    let r = local_rules(&format!(
+        "[[rule]]\n{HEAD}target = [\n\
+         {{ path = \"a\", check = \"type\", kind = \"table\" }},\n\
+         {{ path = \"a.*\", check = \"type\", kind = \"int\" }},\n\
+         {{ path = \"b\", check = \"type\", kind = \"table\" }},\n\
+         {{ path = \"b.*\", check = \"type\", kind = \"any\" }},\n\
+         {{ path = \"**\", check = \"known-key\" }},\n]\n"
+    ));
+    let s = json!({
+        "a": { "x": 1, "y": "two", "Pasted Secret": "three", "p.q": "four" },
+        "b": { "t": { "deep": 1 }, "u": [1, "x"], "v": true },
+        "c": 1,
+    });
+    let got: Vec<_> = rules::check_generic(&s, &r)
+        .into_iter()
+        .map(|d| d.path)
+        .collect();
+    // `a.*` types every key of `a`, naming an unsafe key `<key>`; `b.*` (any) checks no
+    // type and keeps known-key out of its values. A key with a dot is never a `*` key: only
+    // known-key reports it, not the type rule.
+    assert_eq!(got, ["a.<key>", "a.y", "a.<key>", "c"]);
+}
+
+#[test]
 fn a_key_holding_a_dot_or_bracket_is_unknown_and_never_printed() {
     let mut s = template();
     s["design.alpha"] = json!(0.1);
-    s["design"]["variance.value"] = json!(1.0);
+    s["design"]["units.per_cluster"] = json!(1.0);
     s["outcomes"][0]["a[0]"] = json!(1);
     let d = rules::check_generic(&s, &v0());
     let got: Vec<_> = d
@@ -750,6 +874,39 @@ fn when_filters_by_mode_and_label() {
     s["study"]["label"] = json!("signal");
     s["study"]["mode"] = json!("exploratory");
     assert!(rules::check_generic(&s, &r).is_empty());
+}
+
+#[test]
+fn a_confirmatory_plan_needs_a_hypothesis() {
+    let cnf006 = |mode: &str, hypotheses: Option<Value>| {
+        let mut s = template();
+        s["study"]["mode"] = json!(mode);
+        match hypotheses {
+            Some(h) => s["question"]["hypotheses"] = h,
+            None => {
+                s["question"].as_object_mut().unwrap().remove("hypotheses");
+            }
+        }
+        let d = rules::check_generic(&s, &v0());
+        d.into_iter()
+            .filter(|x| x.code == "E-CNF-006")
+            .map(|x| x.path)
+            .collect::<Vec<_>>()
+    };
+    // No hypothesis has nothing to test, and its slot could never give a discovery.
+    assert_eq!(
+        cnf006("confirmatory", Some(json!([]))),
+        ["question.hypotheses"]
+    );
+    assert_eq!(cnf006("confirmatory", None), ["question.hypotheses"]);
+    assert!(cnf006("exploratory", Some(json!([]))).is_empty());
+    assert!(
+        cnf006(
+            "confirmatory",
+            Some(template()["question"]["hypotheses"].clone())
+        )
+        .is_empty()
+    );
 }
 
 #[test]
@@ -985,18 +1142,6 @@ fn cost_inputs_are_range_checked_at_their_edges() {
         ),
         (vec!["design", "units_per_cluster"], json!(1), vec![]),
         (
-            vec!["design", "variance", "value"],
-            json!(-1e-9),
-            vec!["design.variance.value".into()],
-        ),
-        (vec!["design", "variance", "value"], json!(0.0), vec![]),
-        (
-            vec!["design", "sesoi"],
-            json!(-1e-9),
-            vec!["design.sesoi".into()],
-        ),
-        (vec!["design", "sesoi"], json!(0.0), vec![]),
-        (
             vec!["mutations", "depth_cap"],
             json!(-1),
             vec!["mutations.depth_cap".into()],
@@ -1120,7 +1265,7 @@ fn the_documented_codes_are_exactly_the_register_refusals() {
         .map(|r| r.code.as_str())
         .collect();
     codes.sort_unstable();
-    assert_eq!(codes, ["E-REG-001", "E-REG-002"]);
+    assert_eq!(codes, ["E-REG-001", "E-REG-002", "E-REG-003"]);
 }
 
 #[test]
@@ -1166,11 +1311,10 @@ key = \"id\"",
 }
 
 /// (array path, key) for each unique target of E-UNQ-001.
-const UNIQUE_TARGETS: [(&str, Option<&str>); 8] = [
-    ("design.selection.clusters", None),
-    ("design.confirmation.clusters", None),
+const UNIQUE_TARGETS: [(&str, Option<&str>); 7] = [
     ("design.conditions", Some("id")),
     ("outcomes", Some("id")),
+    ("outcomes", Some("measure")),
     ("question.hypotheses", Some("id")),
     ("inputs", Some("path")),
     ("mutations.operators", Some("name")),
@@ -1212,4 +1356,156 @@ fn e_unq_001_fires_on_a_repeat_in_each_list_and_not_on_distinct_values() {
         };
         assert_eq!(unq(&s), [want], "{path}");
     }
+}
+
+#[test]
+fn input_units_strata_and_the_pick_rule_are_checked_at_their_edges() {
+    let rules = v0();
+    let at = |ptr: &str, v: Value| -> Vec<(String, String)> {
+        let mut s = template();
+        apply(&mut s, ptr, Some(v));
+        rules::check_generic(&s, &rules)
+            .into_iter()
+            .filter(|d| !d.code.starts_with("W-"))
+            .map(|d| (d.code, d.path))
+            .collect()
+    };
+    let one = |code: &str, path: &str| vec![(code.to_string(), path.to_string())];
+    let units = "inputs[1].units";
+    assert_eq!(at("/inputs/1/units", json!(0)), one("E-RNG-001", units));
+    assert!(at("/inputs/1/units", json!(1)).is_empty());
+    assert!(at("/inputs/1/units", json!(4294967295u32)).is_empty());
+    assert_eq!(
+        at("/inputs/1/units", json!(4294967296u64)),
+        one("E-RNG-001", units)
+    );
+    assert_eq!(at("/inputs/1/units", json!("3")), one("E-TYP-001", units));
+    let stratum = "inputs[1].stratum";
+    assert_eq!(
+        at("/inputs/1/stratum", json!("Fiction")),
+        one("E-FMT-001", stratum)
+    );
+    assert!(at("/inputs/1/stratum", json!("short-fiction")).is_empty());
+    assert!(at("/inputs/1/stratum", json!("")).is_empty());
+    assert_eq!(at("/inputs/1/stratum", json!(3)), one("E-TYP-001", stratum));
+    assert_eq!(
+        at("/design/stratum", json!("by genre")),
+        one("E-FMT-001", "design.stratum")
+    );
+    assert!(at("/design/stratum", json!("")).is_empty());
+    assert_eq!(
+        at("/design/pick", json!("random")),
+        one("E-ENM-001", "design.pick")
+    );
+    assert!(at("/design/pick", json!("first")).is_empty());
+    assert_eq!(
+        at("/design/pick", json!(1)),
+        one("E-TYP-001", "design.pick")
+    );
+}
+
+/// The errors of the template with its first hypothesis's `field` set to `v`.
+fn hypothesis_with(field: &str, v: Value) -> Vec<(String, String)> {
+    let mut s = template();
+    s["question"]["hypotheses"][0][field] = v;
+    rules::check_generic(&s, &v0())
+        .into_iter()
+        .filter(|d| !d.code.starts_with("W-"))
+        .map(|d| (d.code, d.path))
+        .collect()
+}
+
+fn at_hypothesis(code: &str, path: &str) -> Vec<(String, String)> {
+    vec![(code.to_string(), format!("question.hypotheses[0].{path}"))]
+}
+
+#[test]
+fn hypothesis_fields_are_typed_and_ids_and_strata_have_their_form() {
+    let (h, one) = (hypothesis_with, at_hypothesis);
+    for id in ["E1", "P1a", "h1-b2"] {
+        assert!(h("id", json!(id)).is_empty(), "{id}");
+    }
+    for id in ["E1.pass", "E 1", "", "E--1", "-E1", "\u{c9}1"] {
+        assert_eq!(h("id", json!(id)), one("E-FMT-001", "id"), "{id}");
+    }
+    assert!(h("strata", json!(["code", "short-fiction"])).is_empty());
+    for s in ["Code", "", "a b"] {
+        assert_eq!(
+            h("strata", json!(["code", s])),
+            one("E-FMT-001", "strata[1]"),
+            "{s}"
+        );
+    }
+    assert_eq!(h("strata", json!([3])), one("E-TYP-001", "strata[0]"));
+    assert_eq!(h("strata", json!("code")), one("E-TYP-001", "strata"));
+    assert_eq!(h("outcome", json!(1)), one("E-TYP-001", "outcome"));
+    assert!(h("contrast", json!({ "arm-a": 1, "arm-b": -0.5 })).is_empty());
+    assert_eq!(
+        h("contrast", json!({ "arm-a": "x" })),
+        one("E-TYP-001", "contrast.arm-a")
+    );
+    assert_eq!(h("contrast", json!([1])), one("E-TYP-001", "contrast"));
+    for (field, v) in [
+        ("claim", json!({ "below": 1 })),
+        ("claim", json!({ "above": -1.5 })),
+        ("claim", json!({ "within": [-1, 1] })),
+        ("statistic", json!({ "mean": [-5, 5] })),
+        ("statistic", json!({ "quantile": 0.5 })),
+        ("power_at", json!(1)),
+        ("alpha_share", json!(0.5)),
+        ("estimates", json!({ "from": "my-pilot" })),
+    ] {
+        assert!(h(field, v.clone()).is_empty(), "{field} = {v}");
+    }
+    assert_eq!(h("claim", json!(1)), one("E-TYP-001", "claim"));
+    assert_eq!(
+        h("claim", json!({ "below": "x" })),
+        one("E-TYP-001", "claim.below")
+    );
+    assert_eq!(
+        h("claim", json!({ "within": [1, "x"] })),
+        one("E-TYP-001", "claim.within[1]")
+    );
+    assert_eq!(
+        h("claim", json!({ "beloww": 1 })),
+        one("E-KEY-001", "claim.beloww")
+    );
+    assert_eq!(
+        h("statistic", json!({ "mean": 5 })),
+        one("E-TYP-001", "statistic.mean")
+    );
+    assert_eq!(
+        h("statistic", json!({ "quantile": "half" })),
+        one("E-TYP-001", "statistic.quantile")
+    );
+    assert_eq!(h("power_at", json!("x")), one("E-TYP-001", "power_at"));
+    assert_eq!(
+        h("alpha_share", json!(true)),
+        one("E-TYP-001", "alpha_share")
+    );
+    assert_eq!(
+        h("estimates", json!("my-pilot")),
+        one("E-TYP-001", "estimates")
+    );
+    assert_eq!(
+        h("estimates", json!({ "from": 3 })),
+        one("E-TYP-001", "estimates.from")
+    );
+    assert_eq!(
+        h("estimates", json!({ "from": "My-Pilot" })),
+        one("E-FMT-001", "estimates.from")
+    );
+    assert_eq!(
+        h("estimates", json!({})),
+        one("E-REQ-001", "estimates.from")
+    );
+}
+
+#[test]
+fn a_planted_record_hash_is_not_a_study_id() {
+    let planted = format!("record:{}", "0".repeat(64));
+    assert_eq!(
+        hypothesis_with("estimates", json!({ "from": planted })),
+        at_hypothesis("E-FMT-001", "estimates.from")
+    );
 }

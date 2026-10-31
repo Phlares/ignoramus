@@ -17,4 +17,4 @@ Every comparison is made against the reference condition. A reference that match
 ## Applies to
 
 - `design.conditions` (non-empty)
-- `design.reference` (named:reference-is-condition)
+- `design.reference` (named:condition-declared)

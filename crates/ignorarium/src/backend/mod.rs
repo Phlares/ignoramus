@@ -1,7 +1,7 @@
 //! Backends run one schedule row in isolation and report what happened.
 pub mod level0;
 pub mod level1;
-mod output;
+pub(crate) mod output;
 pub mod rootfs;
 pub mod seccomp;
 pub mod selftest;
@@ -58,6 +58,9 @@ pub struct RowOutcome {
     pub selftest: Option<selftest::SelfTest>,
     /// Why the CPU count is missing the sandbox's own processes, when it is.
     pub cpu_unknown: Option<String>,
+    /// The box ended the row: the watch said stop, or the wall timeout passed. The CPU
+    /// count then misses what the killed processes used.
+    pub ended: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +90,8 @@ pub trait Backend {
     fn probe(&self) -> Probe;
     /// What starts the payload, recorded beside the isolation level.
     fn launcher(&self) -> String;
+    /// How many CPUs a row may use at once.
+    fn cpus(&self) -> u32;
     fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> io::Result<RowOutcome>;
 }
 
@@ -95,9 +100,39 @@ pub fn registered() -> Vec<Box<dyn Backend>> {
     vec![Box::new(level0::Level0), Box::new(level1::Level1::new())]
 }
 
+/// The CPUs this host gives a row: what the OS reports, 1 when it cannot.
+pub(crate) fn host_cpus() -> u32 {
+    std::thread::available_parallelism().map_or(1, |n| u32::try_from(n.get()).unwrap_or(u32::MAX))
+}
+
+/// How `supervise` ended a group.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Supervised {
+    pub exit: Exit,
+    pub cpu_seconds: f64,
+    /// The box killed the group: a watch stop or the wall timeout.
+    pub ended: bool,
+}
+
+impl Supervised {
+    fn failed(why: String) -> Supervised {
+        Supervised {
+            exit: Exit::Infra(why),
+            cpu_seconds: 0.0,
+            ended: false,
+        }
+    }
+}
+
 /// The outcome of a row that ended with `exit` after `cpu_seconds` of CPU: the wall time
-/// since `start` and the hash of `job.output_dir`.
-pub fn outcome(job: &RowJob, start: Instant, mut exit: Exit, cpu_seconds: f64) -> RowOutcome {
+/// since `start` and the hash of `job.output_dir`. `ended` is true when the box killed it.
+pub fn outcome(
+    job: &RowJob,
+    start: Instant,
+    mut exit: Exit,
+    cpu_seconds: f64,
+    ended: bool,
+) -> RowOutcome {
     let wall_seconds = start.elapsed().as_secs_f64();
     // A row the box ended is not data: nothing reads its hash, and a large output would
     // hold up the spend record. Otherwise the payload ran, and an output it left
@@ -119,18 +154,19 @@ pub fn outcome(job: &RowJob, start: Instant, mut exit: Exit, cpu_seconds: f64) -
         output_hash,
         selftest: None,
         cpu_unknown: None,
+        ended,
     }
 }
 
 /// Run `cmd` (program, args, env and stdio already set) as its own process group leader and
 /// wait for it. Ends it at `job.wall_timeout` or when the watch says stop, kills the group,
 /// then reaps it. Returns how it ended and the CPU seconds it used.
-pub fn supervise(mut cmd: Command, job: &RowJob, start: Instant, watch: &dyn Watch) -> (Exit, f64) {
+pub fn supervise(mut cmd: Command, job: &RowJob, start: Instant, watch: &dyn Watch) -> Supervised {
     let prog = cmd.get_program().to_string_lossy().into_owned();
     let child = cmd.process_group(0).spawn();
     let mut child = match child {
         Ok(c) => c,
-        Err(e) => return (Exit::Infra(format!("cannot start {prog}: {e}")), 0.0),
+        Err(e) => return Supervised::failed(format!("cannot start {prog}: {e}")),
     };
     let pid = child.id();
     watch.started(pid);
@@ -167,16 +203,25 @@ pub fn supervise(mut cmd: Command, job: &RowJob, start: Instant, watch: &dyn Wat
     }
     let reaped = match sys::wait4(pid, true) {
         Ok(Some(r)) => r,
-        Ok(None) => return (Exit::Infra("wait returned early".into()), 0.0),
-        Err(e) => return (Exit::Infra(format!("wait failed: {e}")), 0.0),
+        Ok(None) => return Supervised::failed("wait returned early".into()),
+        Err(e) => return Supervised::failed(format!("wait failed: {e}")),
     };
+    let ended = ended_by_box.is_some();
     if let Some(f) = fault {
-        return (Exit::Infra(f), reaped.cpu_seconds);
+        return Supervised {
+            exit: Exit::Infra(f),
+            cpu_seconds: reaped.cpu_seconds,
+            ended,
+        };
     }
     let exit = ended_by_box.unwrap_or(match reaped.ended {
         Ended::Code(0) => Exit::Ok,
         Ended::Code(c) => Exit::Payload(c),
         Ended::Signal(s) => Exit::Payload(128 + s),
     });
-    (exit, reaped.cpu_seconds)
+    Supervised {
+        exit,
+        cpu_seconds: reaped.cpu_seconds,
+        ended,
+    }
 }

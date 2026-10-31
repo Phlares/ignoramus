@@ -26,8 +26,13 @@ target = [
   { path = "question.hypotheses[*].id", check = "required" },
   { path = "question.hypotheses[*].statement", check = "required" },
   { path = "question.hypotheses[*].rival", check = "required" },
+  { path = "question.hypotheses[*].outcome", check = "required" },
+  { path = "question.hypotheses[*].contrast", check = "required" },
+  { path = "question.hypotheses[*].estimates.from", check = "required" },
   { path = "outcomes", check = "required" },
   { path = "outcomes[*].id", check = "required" },
+  { path = "outcomes[*].measure", check = "required" },
+  { path = "outcomes[*].paired", check = "required" },
   { path = "outcomes[*].registered", check = "required" },
   { path = "scope", check = "required" },
   { path = "scope.stop_rule", check = "required" },
@@ -46,19 +51,14 @@ target = [
   { path = "design.stratum", check = "required" },
   { path = "design.reference", check = "required" },
   { path = "design.row_seconds", check = "required" },
-  { path = "design.test", check = "required" },
-  { path = "design.sesoi", check = "required" },
-  { path = "design.icc", check = "required" },
   { path = "design.units_per_cluster", check = "required" },
-  { path = "design.variance", check = "required" },
-  { path = "design.variance.value", check = "required" },
-  { path = "design.variance.source", check = "required" },
   { path = "design.conditions", check = "required" },
   { path = "design.conditions[*].id", check = "required" },
-  { path = "design.selection", check = "required" },
-  { path = "design.selection.clusters", check = "required" },
+  { path = "design.selection.metric", check = "required" },
+  { path = "design.selection.conditions", check = "required" },
+  { path = "design.selection.rule", check = "required" },
   { path = "design.confirmation", check = "required" },
-  { path = "design.confirmation.clusters", check = "required" },
+  { path = "design.confirmation.conditions", check = "required" },
   { path = "inputs", check = "required" },
   { path = "inputs[*].path", check = "required" },
   { path = "inputs[*].sha256", check = "required" },
@@ -95,7 +95,7 @@ target = [
 code = "E-TYP-001"
 severity = "error"
 problem = "A field has the wrong type."
-instruction = "Use the type the template shows for this field."
+instruction = "Use the type the template shows for this field. Each value in a condition's params is a string or a number, or a table { from = \"<study id>\" } that takes the condition that study selected. A param that takes a value from a study has a key of 1 to 40 characters from a-z, 0-9, _ and -."
 why = "A wrong type changes what the value means, and later checks cannot read it."
 sources = ["https://toml.io/en/v1.0.0"]
 target = [
@@ -115,11 +115,31 @@ target = [
   { path = "question.hypotheses[*].id", check = "type", kind = "string" },
   { path = "question.hypotheses[*].statement", check = "type", kind = "string" },
   { path = "question.hypotheses[*].rival", check = "type", kind = "string" },
+  { path = "question.hypotheses[*].outcome", check = "type", kind = "string" },
+  { path = "question.hypotheses[*].contrast", check = "type", kind = "table" },
+  { path = "question.hypotheses[*].contrast.*", check = "type", kind = "float" },
+  { path = "question.hypotheses[*].strata", check = "type", kind = "array" },
+  { path = "question.hypotheses[*].strata[*]", check = "type", kind = "string" },
+  { path = "question.hypotheses[*].claim", check = "type", kind = "table" },
+  { path = "question.hypotheses[*].claim.below", check = "type", kind = "float" },
+  { path = "question.hypotheses[*].claim.above", check = "type", kind = "float" },
+  { path = "question.hypotheses[*].claim.within", check = "type", kind = "array" },
+  { path = "question.hypotheses[*].claim.within[*]", check = "type", kind = "float" },
+  { path = "question.hypotheses[*].statistic", check = "type", kind = "table" },
+  { path = "question.hypotheses[*].statistic.mean", check = "type", kind = "array" },
+  { path = "question.hypotheses[*].statistic.mean[*]", check = "type", kind = "float" },
+  { path = "question.hypotheses[*].statistic.quantile", check = "type", kind = "float" },
+  { path = "question.hypotheses[*].power_at", check = "type", kind = "float" },
+  { path = "question.hypotheses[*].estimates", check = "type", kind = "table" },
+  { path = "question.hypotheses[*].estimates.from", check = "type", kind = "string" },
+  { path = "question.hypotheses[*].alpha_share", check = "type", kind = "float" },
   { path = "outcomes", check = "type", kind = "array" },
   { path = "outcomes[*]", check = "type", kind = "table" },
   { path = "outcomes[*].id", check = "type", kind = "string" },
   { path = "outcomes[*].unit", check = "type", kind = "string" },
   { path = "outcomes[*].direction", check = "type", kind = "string" },
+  { path = "outcomes[*].measure", check = "type", kind = "string" },
+  { path = "outcomes[*].paired", check = "type", kind = "string" },
   { path = "outcomes[*].registered", check = "type", kind = "bool" },
   { path = "scope", check = "type", kind = "table" },
   { path = "scope.min_isolation", check = "type", kind = "int" },
@@ -141,29 +161,30 @@ target = [
   { path = "design.reference", check = "type", kind = "string" },
   { path = "design.repeats", check = "type", kind = "int" },
   { path = "design.row_seconds", check = "type", kind = "float" },
-  { path = "design.test", check = "type", kind = "string" },
-  { path = "design.alpha", check = "type", kind = "float" },
   { path = "design.power", check = "type", kind = "float" },
-  { path = "design.sesoi", check = "type", kind = "float" },
-  { path = "design.icc", check = "type", kind = "float" },
   { path = "design.units_per_cluster", check = "type", kind = "int" },
-  { path = "design.variance", check = "type", kind = "table" },
-  { path = "design.variance.value", check = "type", kind = "float" },
-  { path = "design.variance.source", check = "type", kind = "string" },
+  { path = "design.pick", check = "type", kind = "string" },
   { path = "design.conditions", check = "type", kind = "array" },
   { path = "design.conditions[*]", check = "type", kind = "table" },
   { path = "design.conditions[*].id", check = "type", kind = "string" },
+  { path = "design.conditions[*].params", check = "type", kind = "table" },
+  { path = "design.conditions[*].params.*", check = "type", kind = "any" },
+  { path = "design.conditions[*].params.*", check = "named:param-shape" },
   { path = "design.selection", check = "type", kind = "table" },
-  { path = "design.selection.clusters", check = "type", kind = "array" },
-  { path = "design.selection.clusters[*]", check = "type", kind = "string" },
+  { path = "design.selection.metric", check = "type", kind = "string" },
+  { path = "design.selection.conditions", check = "type", kind = "array" },
+  { path = "design.selection.conditions[*]", check = "type", kind = "string" },
+  { path = "design.selection.rule", check = "type", kind = "string" },
   { path = "design.confirmation", check = "type", kind = "table" },
-  { path = "design.confirmation.clusters", check = "type", kind = "array" },
-  { path = "design.confirmation.clusters[*]", check = "type", kind = "string" },
+  { path = "design.confirmation.conditions", check = "type", kind = "array" },
+  { path = "design.confirmation.conditions[*]", check = "type", kind = "string" },
   { path = "inputs", check = "type", kind = "array" },
   { path = "inputs[*]", check = "type", kind = "table" },
   { path = "inputs[*].path", check = "type", kind = "string" },
   { path = "inputs[*].sha256", check = "type", kind = "string" },
   { path = "inputs[*].role", check = "type", kind = "string" },
+  { path = "inputs[*].stratum", check = "type", kind = "string" },
+  { path = "inputs[*].units", check = "type", kind = "int" },
   { path = "inputs[*].licence", check = "type", kind = "table" },
   { path = "inputs[*].licence.spdx", check = "type", kind = "string" },
   { path = "inputs[*].licence.type", check = "type", kind = "string" },
@@ -211,7 +232,9 @@ target = [
   { path = "study.label", check = "enum", values = ["signal", "confirmed", "replicated", "generalized"] },
   { path = "scope.stop_rule", check = "enum", values = ["budget-only", "e-process"] },
   { path = "scope.end_of_run.route", check = "enum", values = ["report", "follow-on", "share"] },
-  { path = "design.test", check = "enum", values = ["paired-mean", "descriptive"] },
+  { path = "design.pick", check = "enum", values = ["seeded", "first"] },
+  { path = "design.selection.rule", check = "enum", values = ["best-mean"] },
+  { path = "outcomes[*].paired", check = "enum", values = ["difference", "percent", "log-ratio"] },
   { path = "inputs[*].role", check = "enum", values = ["calibration", "selection", "confirmation", "model"] },
   { path = "inputs[*].licence.type", check = "enum", values = ["common", "custom", "request-form", "unspecified"] },
   { path = "mutations.operators[*].type", check = "enum", values = ["int", "float", "enum"] },
@@ -222,22 +245,19 @@ target = [
 code = "E-RNG-001"
 severity = "error"
 problem = "A number is outside its allowed range."
-instruction = "Bring the value into range: min_isolation 0 to 3, alpha above 0 up to 0.5, power 0.5 to 0.999, icc 0 up to but below 1, repeats at least 1, each budget value 0 or more, row_seconds above 0, units_per_cluster 1 up to 4294967295, repeats up to 4294967295, variance and sesoi 0 or more, depth_cap 0 to 255, each trigger threshold_e above 0."
-why = "Values outside these ranges are meaningless or make the sample-size maths fail. The default alpha is 0.005, because 0.05 gives too many false findings."
-sources = ["https://doi.org/10.1038/s41562-017-0189-z", "https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661"]
+instruction = "Bring the value into range: min_isolation 0 to 3, power 0.5 to 0.999, repeats at least 1, each budget value 0 or more, row_seconds above 0, units_per_cluster 1 up to 4294967295, each input's units 1 up to 4294967295, repeats up to 4294967295, depth_cap 0 to 255, each trigger threshold_e above 0."
+why = "Values outside these ranges are meaningless or make the sample-size maths fail."
+sources = ["https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661"]
 target = [
   { path = "scope.min_isolation", check = "range", interval = "[0, 3]" },
-  { path = "design.alpha", check = "range", interval = "(0, 0.5]" },
   { path = "design.power", check = "range", interval = "[0.5, 0.999]" },
-  { path = "design.icc", check = "range", interval = "[0, 1)" },
   { path = "design.repeats", check = "range", interval = "[1, 4294967295]" },
   { path = "scope.budget.cpu_hours", check = "range", interval = "[0, inf)" },
   { path = "scope.budget.wall_hours", check = "range", interval = "[0, inf)" },
   { path = "scope.budget.money_usd", check = "range", interval = "[0, inf)" },
   { path = "design.row_seconds", check = "range", interval = "(0, inf)" },
   { path = "design.units_per_cluster", check = "range", interval = "[1, 4294967295]" },
-  { path = "design.variance.value", check = "range", interval = "[0, inf)" },
-  { path = "design.sesoi", check = "range", interval = "[0, inf)" },
+  { path = "inputs[*].units", check = "range", interval = "[1, 4294967295]" },
   { path = "mutations.depth_cap", check = "range", interval = "[0, 255]" },
   { path = "mutations.triggers[*].threshold_e", check = "range", interval = "(0, inf)" },
 ]
@@ -245,25 +265,20 @@ target = [
 [[rule]]
 code = "E-FMT-001"
 severity = "error"
-problem = "An id is not ASCII kebab-case."
-instruction = "Use ASCII lowercase letters and digits, joined by single hyphens, for example my-study."
-why = "Ids become file names and seed inputs. Accents and look-alike letters would make two ids that look the same differ."
+problem = "An id, a stratum or a study reference is not ASCII letters and digits joined by single hyphens."
+instruction = "Use ASCII lowercase letters and digits, joined by single hyphens, for example my-study. A hypothesis id may also use capital letters, for example E1 or P1a. A stratum may be empty where the design or an input names none, but not in the strata a hypothesis lists. estimates.from and a param's from name a study id."
+why = "Ids and strata become file names, seed inputs and record keys, and are printed in diagnostics. Accents and look-alike letters would make two ids that look the same differ."
 sources = ["https://toml.io/en/v1.0.0"]
 target = [
   { path = "study.id", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
+  { path = "question.hypotheses[*].id", check = "format", pattern = "^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$" },
   { path = "design.conditions[*].id", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
   { path = "outcomes[*].id", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
-]
-
-[[rule]]
-code = "E-FMT-002"
-severity = "error"
-problem = "The variance source is not in a known form."
-instruction = "Use stated, or record:<sha256> with the 64 lowercase hex characters of a record."
-why = "A variance must say where it came from. A record reference must name one exact record."
-sources = ["https://toml.io/en/v1.0.0"]
-target = [
-  { path = "design.variance.source", check = "format", pattern = "^(stated|record:[0-9a-f]{64})$" },
+  { path = "design.stratum", check = "format", pattern = "^([a-z0-9]+(-[a-z0-9]+)*)?$" },
+  { path = "inputs[*].stratum", check = "format", pattern = "^([a-z0-9]+(-[a-z0-9]+)*)?$" },
+  { path = "question.hypotheses[*].strata[*]", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
+  { path = "question.hypotheses[*].estimates.from", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
+  { path = "design.conditions[*].params.*.from", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
 ]
 
 [[rule]]
@@ -304,13 +319,14 @@ code = "E-UNQ-001"
 severity = "error"
 problem = "A list repeats an id, path or name."
 instruction = "Give every entry its own value. Remove the repeat, or rename it."
-why = "A repeated cluster would count its units twice in the power gate. A repeated condition, outcome, hypothesis, input, operator or trigger id makes later steps pick one entry and ignore the other."
+why = "A repeated input would run its units twice and count them twice in the power gate. A stage that lists a condition twice runs it twice. A repeated condition, outcome, measure, hypothesis, operator or trigger id makes later steps pick one entry and ignore the other."
 sources = []
 target = [
-  { path = "design.selection.clusters", check = "unique" },
-  { path = "design.confirmation.clusters", check = "unique" },
   { path = "design.conditions", check = "unique", key = "id" },
+  { path = "design.selection.conditions", check = "unique" },
+  { path = "design.confirmation.conditions", check = "unique" },
   { path = "outcomes", check = "unique", key = "id" },
+  { path = "outcomes", check = "unique", key = "measure" },
   { path = "question.hypotheses", check = "unique", key = "id" },
   { path = "inputs", check = "unique", key = "path" },
   { path = "mutations.operators", check = "unique", key = "name" },
@@ -322,7 +338,7 @@ code = "E-OUT-001"
 severity = "error"
 problem = "An outcome has no unit."
 instruction = "Give every outcome a unit, for example ratio or seconds."
-why = "An effect size has no meaning without its unit. The smallest effect of interest is stated in this unit."
+why = "An effect size has no meaning without its unit. Margins and power_at are stated in this unit."
 sources = ["https://doi.org/10.1136/bmj.e7586"]
 target = [
   { path = "outcomes[*].unit", check = "non-empty" },
@@ -371,7 +387,31 @@ why = "Every comparison is made against the reference condition. A reference tha
 sources = []
 target = [
   { path = "design.conditions", check = "non-empty" },
-  { path = "design.reference", check = "named:reference-is-condition" },
+  { path = "design.reference", check = "named:condition-declared" },
+]
+
+[[rule]]
+code = "E-REF-002"
+severity = "error"
+problem = "A reference names this study, or a study that recorded no selection."
+instruction = "Set estimates.from or a param's from to the id of another study: one that has run, or will run, before this one. A param takes the condition that study selected, so that study needs a selection stage."
+why = "A value taken from a study exists only once that study has finished. This study's own values come from this run, so a plan cannot be sized by them or take a condition from them. A study without a selection stage selects no condition."
+sources = []
+target = [
+  { path = "question.hypotheses[*].estimates.from", check = "named:reference-not-self" },
+  { path = "design.conditions[*].params.*.from", check = "named:reference-not-self" },
+]
+
+[[rule]]
+code = "W-REF-001"
+severity = "warning"
+problem = "A value waits on a study that has not finished."
+instruction = "Run the study it names to its end, then check again. Until then check exits 3 and register refuses the plan; nothing else needs to change."
+why = "A follow-on plan is written and checked before the study it builds on runs. Its values are read from that study's records once the study has written them all, so a value cannot change after the plan is registered. The box cannot read a study it has not run."
+sources = []
+target = [
+  { path = "question.hypotheses[*].estimates", check = "named:reference-finished" },
+  { path = "design.conditions[*].params.*", check = "named:reference-finished" },
 ]
 
 [[rule]]
@@ -389,50 +429,62 @@ target = [
 [[rule]]
 code = "E-CNF-001"
 severity = "error"
-problem = "A confirmatory study has no smallest effect of interest above zero."
-instruction = "Set design.sesoi to the smallest effect, in outcome units, that you would act on. It must be above 0."
-why = "The sample size depends on the effect you care about. Without it the power gate has nothing to size."
-sources = ["https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661"]
+problem = "A confirmatory hypothesis has no power_at strictly on its claimed side, or power_at lies outside the range of its mean statistic."
+instruction = "Set power_at to the true value of the statistic at which the test must have its power: below m for a claim below m, above m for a claim above m, strictly between a and b for a claim within [a, b], and inside [lo, hi] for a mean statistic."
+why = "The sample size depends on the effect the study must detect, so the power gate needs a value to size at. It is set when the plan is written, not read from a pilot: an effect seen in a small pilot is noisy, and sizing at it gives studies too small to detect the effect."
+sources = ["https://doi.org/10.1016/j.jesp.2017.09.004", "https://doi.org/10.1038/nrn3475"]
 when = { mode = "confirmatory" }
 target = [
-  { path = "design.sesoi", check = "named:sesoi-required" },
+  { path = "question.hypotheses[*].power_at", check = "named:power-at-side" },
 ]
 
 [[rule]]
 code = "E-CNF-002"
 severity = "error"
 problem = "The confirmation sample is too small."
-instruction = "Add confirmation clusters or units per cluster until the count reaches the number the power gate needs."
-why = "A test with too few units misses real effects and exaggerates the ones it finds. The gate uses alpha, power, the variance, the smallest effect, and the cluster correlation."
-sources = ["https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661"]
+instruction = "Add confirmation inputs to each stratum the detail names, until each has the clusters the power gate needs. The detail states the simulated power and about how many clusters per stratum reach design.power. Raising design.units_per_cluster helps only as far as the icc allows, since the test takes one value per cluster. A mean range wider than the cluster means need also costs power. Two inputs that hold the same data are one cluster."
+why = "A test with too few clusters misses real effects and exaggerates the ones it finds. The gate simulates the test the box runs: one value per cluster, a bounded betting e-value for each bound in each stratum the claim lists (all confirmation inputs when it lists none), and a pass only when every bound in every stratum reaches 1 / (the level the stream gives the study x alpha_share). It draws 4,000 replicates of each stratum's own clusters from a normal model with the sd and icc from the study in estimates, centred on power_at; for a quantile claim, the units' quantile lies at power_at. For a mean claim each simulated cluster mean is clipped to the declared range, as the test clips each unit; the two agree while the units stay inside the range, and the claim is about the clipped mean. Each simulation draws at most 100 million values, so a quantile claim on very large clusters fails closed instead of running for hours. The power is that of the joint event, so each of several strata needs more than the target alone. The seed comes from the spec hash and the hypothesis id, so every check of a spec gives the same power. A one-sided z-test needs fewer clusters than the e-value test, so a mean claim with fewer clusters than the z count fails first, without the simulation. The z count assumes the box estimates the statistic as the unweighted mean of the cluster means, and so uses the harmonic mean of the units the clusters give. The model is normal: a skewed outcome can have another power."
+sources = ["https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661", "https://doi.org/10.1186/1471-2288-11-94", "https://arxiv.org/abs/2010.09686", "https://doi.org/10.1080/00401706.1982.10487790"]
 when = { mode = "confirmatory" }
 target = [
-  { path = "design.confirmation.clusters", check = "named:power-met" },
+  { path = "question.hypotheses[*]", check = "named:power-met" },
+]
+
+[[rule]]
+code = "E-STR-001"
+severity = "error"
+problem = "The stream gives this confirmatory study no level."
+instruction = "Run the plan as an exploratory study, or set study.test_log = true to try it against the test stream, which never counts and never runs out. The plan stream gives levels to its first 10 confirmatory studies only. A stream log that cannot be read, or that lacks a slot a register record names, must be restored from a copy that holds every slot before any confirmatory study registers."
+why = "A confirmatory study takes its level from the stream of the log it registers in, never from the plan: e-LOND with alpha 0.05 split evenly over 10 slots. A slot's level is 0.005 times one more than the discoveries closed before it opened, and a slot is a discovery when the study's e-value reaches 1 / level, which happens exactly when one of its claims passes. When each study's e-value has expected value at most 1 under its null hypothesis, as the box's fixed-size tests give, the false discovery rate over the studies the stream counts as discoveries stays at or below 0.05, whatever the dependence between the studies. The slots go in the order studies register, which is fixed before any result. The plan stream never resets and refuses a study beyond its 10th slot, so results never stretch the budget to more studies. The test stream starts a new epoch, a fresh stream of 10 slots, each time its slots are used up, because its studies never count. Each slot records its level, its e-value and the decision. Every slot a register record names must be in the stream, so a stream log that was cut or rolled back is refused, not read as a fresh budget. register opens the slot and refuses when the level has dropped below the one check showed."
+sources = ["https://arxiv.org/abs/2311.06412", "https://arxiv.org/abs/2208.11418", "https://doi.org/10.1038/s41562-017-0189-z"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "study.mode", check = "named:stream-level" },
 ]
 
 [[rule]]
 code = "E-CNF-003"
 severity = "error"
-problem = "The variance is not taken from a record."
-instruction = "Measure the variance in an earlier run and set design.variance.source to record:<sha256> of that record."
-why = "A variance guessed by hand can be too small, which makes the power gate pass a study that is too small."
+problem = "A confirmatory hypothesis takes its sd and icc from no matching estimate of a finished study."
+instruction = "Set estimates = { from = \"<study id>\" } to a study in this box that measured this hypothesis's contrast: the same outcome, measure and paired rule, the same reference condition with the same params, and the same conditions, weights and params. A contrast on selected needs an estimate for each candidate. The study needs an estimate in each stratum the hypothesis lists, or a pooled one, with an icc, which takes 2 or more clusters and more units than clusters. Estimates of one contrast in one stratum must agree."
+why = "A variance typed by hand can be too small, which makes the power gate pass a study that is too small. The box reads the sd and icc from the records of a finished study instead, so no one types them."
 sources = ["https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661"]
 when = { mode = "confirmatory" }
 target = [
-  { path = "design.variance.source", check = "named:variance-from-record" },
+  { path = "question.hypotheses[*].estimates", check = "named:estimates-from-record" },
 ]
 
 [[rule]]
 code = "E-CNF-004"
 severity = "error"
-problem = "The confirmation clusters are empty or overlap the selection clusters."
-instruction = "List confirmation clusters that do not appear in the selection clusters."
-why = "A winner picked on some data looks better on that same data. Only fresh clusters give an honest test."
+problem = "The plan has no confirmation input, or a confirmation input holds the same data as a selection input."
+instruction = "Add a confirmation input. Give each one data that no selection input holds: not the same bytes, and not the same text in other case or spacing."
+why = "A winner picked on some data looks better on that same data. Only fresh data gives an honest test. The content decides, not the file name."
 sources = ["https://doi.org/10.1038/s41562-016-0021"]
 when = { mode = "confirmatory" }
 target = [
-  { path = "design.confirmation.clusters", check = "named:selection-confirmation-disjoint" },
-  { path = "design.confirmation.clusters[*]", check = "named:selection-confirmation-disjoint" },
+  { path = "inputs", check = "named:selection-confirmation-disjoint" },
+  { path = "inputs[*].sha256", check = "named:selection-confirmation-disjoint" },
 ]
 
 [[rule]]
@@ -450,13 +502,105 @@ target = [
 [[rule]]
 code = "E-CNF-006"
 severity = "error"
-problem = "A confirmatory study uses a test the checker does not allow."
-instruction = "Set design.test to paired-mean."
-why = "v0 confirms only with the paired-mean test. Other tests have no power gate yet."
+problem = "A confirmatory study has no hypothesis, or a hypothesis of it has no claim."
+instruction = "List at least one hypothesis, and give each a claim, { below = m }, { above = m } or { within = [a, b] }, and its statistic. Or make the study exploratory."
+why = "A confirmatory study tests each hypothesis against margins stated before the data come in. A hypothesis with no claim has nothing to test, so any reading of it would be chosen after the fact. A study with no hypothesis would spend a stream slot that can never give a discovery."
+sources = ["https://doi.org/10.1038/s41562-016-0021"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "question.hypotheses", check = "non-empty" },
+  { path = "question.hypotheses[*].claim", check = "named:claim-required" },
+]
+
+[[rule]]
+code = "E-UNT-001"
+severity = "error"
+problem = "The plan has no selection or confirmation input, or one does not declare its units, or its stratum while the design names strata."
+instruction = "List each file of units as a selection or confirmation input. Set its units to the number of units the file holds. When design.stratum is set, give each such input its stratum."
+why = "Each selection or confirmation input is one cluster, and the schedule picks its units from the count the input declares. The box does not count units itself. A plan without a cluster runs nothing."
+sources = []
+target = [
+  { path = "inputs", check = "named:units-declared" },
+  { path = "inputs[*].units", check = "named:units-declared" },
+  { path = "inputs[*].stratum", check = "named:units-declared" },
+]
+
+[[rule]]
+code = "E-UNT-002"
+severity = "error"
+problem = "The schedule has more rows than the box allows."
+instruction = "Lower design.units_per_cluster, design.repeats, the number of conditions a stage runs, or the units of the selection and confirmation inputs."
+why = "check builds the whole schedule to count its rows and cost. A typo in a unit count must stop here, not exhaust the memory."
+sources = []
+target = [
+  { path = "design.units_per_cluster", check = "named:row-cap" },
+]
+
+[[rule]]
+code = "E-SEL-001"
+severity = "error"
+problem = "A stage is not well formed: a selection stage with no selection input, or a selection input with no stage; fewer than two candidates; a stage condition that is the reference or not in design.conditions; a metric that is not an outcome; selected with no selection stage; or a condition named selected."
+instruction = "Give design.selection two or more candidates from design.conditions other than the reference, a metric that is an outcome id, and at least one selection input; or remove the stage and the selection inputs. List conditions from design.conditions in design.confirmation.conditions, and selected only with a selection stage. Name no condition selected."
+why = "The selection stage picks one candidate on the selection inputs by a rule fixed before the data come in, and the confirmation stage then tests the pick on other data. Only a declared rule over declared candidates shows that the confirmation data did not shape the choice. The rule best-mean takes only the selection units that have a paired metric value for every candidate, and each mean is over those units. The best mean in the metric outcome's direction wins, and a tie goes to the candidate listed first. With no such unit the run pauses before any confirmation row. The reference runs in every stage."
+sources = ["https://www.fda.gov/media/78495/download"]
+target = [
+  { path = "design.selection", check = "named:selection-stage" },
+  { path = "inputs[*].role", check = "named:selection-stage" },
+  { path = "design.selection.conditions", check = "named:selection-stage" },
+  { path = "design.selection.conditions[*]", check = "named:condition-declared" },
+  { path = "design.selection.metric", check = "named:selection-stage" },
+  { path = "design.confirmation.conditions[*]", check = "named:condition-declared" },
+  { path = "design.conditions[*].id", check = "named:selection-stage" },
+]
+
+[[rule]]
+code = "E-HYP-001"
+severity = "error"
+problem = "A hypothesis names an outcome that is not listed, or its contrast is empty, has a weight of 0, or names a condition the confirmation stage does not run."
+instruction = "Set outcome to an id from outcomes. Give contrast one or more condition ids from design.confirmation.conditions, each with a weight other than 0, for example { selected = 1.0 } or { arm-a = 1.0, arm-b = -1.0 }. Name selected only with a selection stage, and never the reference."
+why = "The test reads the contrast's paired values in the confirmation stage. A condition that stage does not run, or the reference, which has no paired value, leaves every unit incomplete, and the claim fails after the budget is spent."
+sources = []
+target = [
+  { path = "question.hypotheses[*].outcome", check = "named:hypothesis-shape" },
+  { path = "question.hypotheses[*].contrast", check = "named:hypothesis-shape" },
+  { path = "question.hypotheses[*].contrast.*", check = "named:hypothesis-shape" },
+  { path = "question.hypotheses[*].contrast.*", check = "named:condition-declared" },
+]
+
+[[rule]]
+code = "E-HYP-002"
+severity = "error"
+problem = "A stratum a hypothesis lists has no confirmation input."
+instruction = "List only strata that confirmation inputs name in their stratum field, or add a confirmation input for the stratum. Leave strata empty to test all units as one group."
+why = "A claim holds only when it holds in every stratum it lists, each tested on its own clusters. A stratum with no confirmation input has no data, so the claim could never hold."
+sources = ["https://doi.org/10.1080/00401706.1982.10487790"]
+target = [
+  { path = "question.hypotheses[*].strata[*]", check = "named:hypothesis-strata" },
+]
+
+[[rule]]
+code = "E-HYP-003"
+severity = "error"
+problem = "A claim or a statistic is not well formed."
+instruction = "Write the claim as one of { below = m }, { above = m } or { within = [a, b] } with a below b. Give a claim one statistic: { mean = [lo, hi] } with lo below hi and every margin strictly between them, or { quantile = q } with q strictly between 0 and 1."
+why = "A claim is one or two one-sided bounds, and it holds when every bound holds. within [a, b] is two one-sided tests, above a and below b, so it needs no alpha correction. The test counts each cluster once: the mean of its units, or the share of its units on the claimed side. Before a mean is taken, each unit is clipped to the declared range, so every cluster mean lies inside it and the claim is about the mean of the clipped units. A unit far outside the range cannot then push a cluster mean outside it, which the test could not bound. A margin at or outside the range can never be tested."
+sources = ["https://doi.org/10.1080/00401706.1982.10487790", "https://doi.org/10.1177/1948550617697177"]
+target = [
+  { path = "question.hypotheses[*].claim", check = "named:hypothesis-shape" },
+  { path = "question.hypotheses[*].statistic", check = "named:hypothesis-shape" },
+]
+
+[[rule]]
+code = "E-HYP-004"
+severity = "error"
+problem = "A confirmatory hypothesis has no alpha share above 0 and at most 1, or the shares do not sum to 1."
+instruction = "Give each hypothesis with a claim an alpha_share above 0 and at most 1, so that the shares of the study sum to 1. A study with one hypothesis sets alpha_share = 1.0."
+why = "The study's level is split between its claims. Shares that sum to more than 1 would let the study reject more often than its level allows, and shares that sum to less waste power."
 sources = []
 when = { mode = "confirmatory" }
 target = [
-  { path = "design.test", check = "named:confirmatory-test-allowed" },
+  { path = "question.hypotheses[*].alpha_share", check = "named:alpha-shares" },
+  { path = "question.hypotheses", check = "named:alpha-shares" },
 ]
 
 [[rule]]
@@ -474,8 +618,8 @@ target = [
 code = "E-END-001"
 severity = "error"
 problem = "The end-of-run route is not valid."
-instruction = "For route follow-on, list at least one follow_on entry. Write each when as <hypothesis id>.pass or <hypothesis id>.fail, using an id from question.hypotheses."
-why = "A follow-on that names no hypothesis can never run. The route must say what happens, before the data come in."
+instruction = "For route follow-on, list at least one follow_on entry. Write each when as done, which runs the follow-on whatever the result, or as <hypothesis id>.pass or <hypothesis id>.fail, using a hypothesis that has a claim."
+why = "A follow-on whose condition can never be met never runs. A hypothesis with no claim has no pass or fail: a confirmatory claim passes on its test, an exploratory one on its point estimate. The route must say what happens, before the data come in."
 sources = []
 target = [
   { path = "scope.end_of_run.follow_on", check = "named:route-valid" },
@@ -486,7 +630,7 @@ target = [
 code = "E-END-002"
 severity = "error"
 problem = "A follow-on spec file is missing."
-instruction = "Create the file under the study folder, or fix the spec path."
+instruction = "Create the file under the study root, or fix the spec path."
 why = "The run would reach the follow-on step and find nothing to run."
 sources = []
 target = [
@@ -540,20 +684,21 @@ target = [
 [[rule]]
 code = "E-PTH-001"
 severity = "error"
-problem = "A file path is absolute, starts with a drive, has a . or .. segment, contains a backslash or a colon, has a segment ending in a dot or space, or passes through a symbolic link."
-instruction = "Write the path from the study folder with no `.` or `..` segment, no `:` or `\\`, and no segment ending in a dot or space; write `data/x.txt`, not `./data/x.txt`."
-why = "The checker reads only files inside the study folder. It never follows links, so a spec cannot point it at other files."
+problem = "A file path is absolute, starts with a drive, has a . or .. segment, contains a backslash or a colon, has a segment ending in a dot or space, passes through a symbolic link, lies inside the path of another input, or names the file of another input in another spelling."
+instruction = "Write the path from the study root with no `.` or `..` segment, no `:` or `\\`, and no segment ending in a dot or space; write `data/x.txt`, not `./data/x.txt`. List a folder or the files in it, not both, and name each file once."
+why = "The checker reads only files inside the study root. It never follows links, so a spec cannot point it at other files."
 sources = []
 target = [
   { path = "inputs[*].path", check = "named:input-path-safe" },
+  { path = "inputs[*].path", check = "named:input-path-nested" },
   { path = "scope.end_of_run.follow_on[*].spec", check = "named:input-path-safe" },
 ]
 
 [[rule]]
 code = "E-HSH-001"
 severity = "error"
-problem = "An input file is missing or its SHA-256 differs from the pin."
-instruction = "Fix the path, or update the sha256 if the file was changed on purpose."
+problem = "An input is in neither place: the pin names no object in the box's store, and the file is missing or its SHA-256 differs from the pin."
+instruction = "Fix the path, or update the sha256 if the file was changed on purpose. To pin a stored object, run `ignorarium import` and use the digest it prints."
 why = "The pin says which bytes the plan was approved on. A different file is a different study."
 sources = []
 target = [
@@ -587,5 +732,14 @@ severity = "error"
 problem = "A study with this id is already registered in the box."
 instruction = "Choose a new `study.id` for a new plan. A registered plan cannot be replaced."
 why = "A plan registered once is fixed. A second plan under the same id would hide the first."
+sources = []
+check = "documented"
+
+[[rule]]
+code = "E-REG-003"
+severity = "error"
+problem = "The study root has no usable `payload/` folder, or `pins.payload` is not its hash."
+instruction = "Put the payload in `payload/` under the study root: an executable `payload/run`, and only regular files and folders below it, no links. Leave `pins.payload` empty, or set it to the folder hash that `register` prints."
+why = "The box copies the payload folder at registration and every row runs that copy. A copy of other code than the pinned code, or code outside the folder, would make the records name code that did not run."
 sources = []
 check = "documented"

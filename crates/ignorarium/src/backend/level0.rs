@@ -1,5 +1,7 @@
 //! Level 0: a bare process on the host. No isolation.
-use super::{Backend, Exit, Probe, RowJob, RowOutcome, Watch, outcome, supervise};
+use super::{
+    Backend, Exit, Probe, RowJob, RowOutcome, Supervised, Watch, host_cpus, outcome, supervise,
+};
 use std::io;
 use std::process::{Command, Stdio};
 use std::time::Instant;
@@ -19,16 +21,24 @@ impl Backend for Level0 {
         "process".into()
     }
 
+    fn cpus(&self) -> u32 {
+        host_cpus()
+    }
+
     fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> io::Result<RowOutcome> {
         let start = Instant::now();
-        let (exit, cpu_seconds) = run_child(job, start, watch);
-        Ok(outcome(job, start, exit, cpu_seconds))
+        let s = run_child(job, start, watch);
+        Ok(outcome(job, start, s.exit, s.cpu_seconds, s.ended))
     }
 }
 
-fn run_child(job: &RowJob, start: Instant, watch: &dyn Watch) -> (Exit, f64) {
+fn run_child(job: &RowJob, start: Instant, watch: &dyn Watch) -> Supervised {
     let Some((prog, args)) = job.argv.split_first() else {
-        return (Exit::Infra("empty argv".into()), 0.0);
+        return Supervised {
+            exit: Exit::Infra("empty argv".into()),
+            cpu_seconds: 0.0,
+            ended: false,
+        };
     };
     let mut cmd = Command::new(prog);
     cmd.args(args)

@@ -15,6 +15,13 @@ fn bin(lab: &Lab) -> Command {
     c
 }
 
+/// `bin` in the root of study `id`, where `run` and `resume` read a late input from.
+fn bin_at(lab: &Lab, id: &str) -> Command {
+    let mut c = bin(lab);
+    c.current_dir(common::work(lab, id));
+    c
+}
+
 fn text(a: &assert_cmd::assert::Assert) -> String {
     String::from_utf8_lossy(&a.get_output().stdout).into_owned()
 }
@@ -26,6 +33,24 @@ fn err(a: &assert_cmd::assert::Assert) -> String {
 fn status(lab: &Lab, id: &str) -> Value {
     let a = bin(lab).args(["status", id, "--json"]).assert().success();
     serde_json::from_str(&text(&a)).unwrap()
+}
+
+#[test]
+fn a_register_record_that_does_not_parse_is_not_a_registered_study() {
+    let lab = lab();
+    let dir = plain(&lab, "noroot");
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let log = dir.join("records.jsonl");
+    std::fs::rename(&log, dir.join("records.old")).unwrap();
+    let draft = ignorarium::records::RecordDraft {
+        study: "noroot".into(),
+        row: None,
+        kind: "register".into(),
+        body: serde_json::json!({"spec_hash": "sha256:ab", "leaf": 1, "log": "planlog", "defaults": []}),
+    };
+    ignorarium::records::append(&log, &key, draft).unwrap();
+    let a = bin(&lab).args(["status", "noroot"]).assert().code(1);
+    assert!(err(&a).contains("is not registered"), "{}", err(&a));
 }
 
 #[test]
@@ -100,7 +125,7 @@ fn probe_refuses_a_bad_machine_file() {
 fn run_a_registered_study_to_completion() {
     let lab = lab();
     plain(&lab, "s1");
-    let a = bin(&lab).args(["run", "s1"]).assert().code(0);
+    let a = bin_at(&lab, "s1").args(["run", "s1"]).assert().code(0);
     assert!(text(&a).contains("done"), "{}", text(&a));
     let s = status(&lab, "s1");
     assert_eq!(s["state"], "done");
@@ -126,6 +151,72 @@ fn run_a_registered_study_to_completion() {
 }
 
 #[test]
+fn editing_the_working_payload_after_register_does_not_reach_the_run() {
+    let lab = lab();
+    let dir = plain(&lab, "frozen");
+    let registered = kind_of(&lab, "frozen", "register")[0].body["payload"].clone();
+    // The author edits the working payload after registration; the box runs its copy.
+    let work = common::work(&lab, "frozen").join("payload/run");
+    common::write_exec(
+        &work,
+        "#!/bin/sh\necho edited > \"$IGNORARIUM_OUT/result\"\nprintf '{\"ppl\": 1.5}' > \"$IGNORARIUM_OUT/values.json\"\n",
+    );
+    bin_at(&lab, "frozen")
+        .args(["run", "frozen"])
+        .assert()
+        .code(0);
+    let rows = kind_of(&lab, "frozen", "row");
+    assert_eq!(rows.len(), 6);
+    for r in &rows {
+        assert_eq!(r.body["exit"], "ok");
+        assert_eq!(r.body["payload_sha256"], registered);
+        let out = dir.join(format!("run/rows/{}/out/result", r.row.unwrap()));
+        let got = std::fs::read_to_string(out).unwrap();
+        let want = format!(
+            "{} {} {}",
+            r.body["condition"].as_str().unwrap(),
+            r.body["unit"].as_str().unwrap(),
+            r.body["repeat"]
+        );
+        assert_eq!(got, want);
+    }
+}
+
+#[test]
+fn rows_see_exactly_the_declared_inputs() {
+    let lab = lab();
+    // A model the store holds and the root does not, pinned by digest.
+    let model = lab.root.join("weights.bin");
+    std::fs::write(&model, [0u8, 1, 2, 3]).unwrap();
+    let store = ignorarium::store::Store::open(&lab.home.root).unwrap();
+    let (digest, _) = store.import(&model).unwrap();
+    let declared = move |t: String| {
+        format!(
+            "{t}\n[[inputs]]\npath = \"models/m.bin\"\nsha256 = \"{digest}\"\nrole = \"model\"\n\
+             [inputs.licence]\nspdx = \"\"\ntype = \"unspecified\"\nsource = \"\"\ncreators = []\n"
+        )
+    };
+    let payload = "#!/bin/sh\ncd \"$IGNORARIUM_IN\" && find . | LC_ALL=C sort > \"$IGNORARIUM_OUT/seen\"\nprintf '{\"ppl\": 1.5}' > \"$IGNORARIUM_OUT/values.json\"\n";
+    // The root also holds a file no input names.
+    let before = [
+        ("data/example.txt", "calibration"),
+        ("data/other.txt", "not declared"),
+    ];
+    let dir = register_study(&lab, "view", declared, &before, payload);
+    bin_at(&lab, "view").args(["run", "view"]).assert().code(0);
+    let rows = kind_of(&lab, "view", "row");
+    assert_eq!(rows.len(), 6);
+    for r in &rows {
+        assert_eq!(r.body["exit"], "ok", "{:?}", r.body);
+        let seen = dir.join(format!("run/rows/{}/out/seen", r.row.unwrap()));
+        assert_eq!(
+            std::fs::read_to_string(seen).unwrap(),
+            ".\n./data\n./data/example.txt\n./models\n./models/m.bin\n"
+        );
+    }
+}
+
+#[test]
 fn run_refuses_when_the_machine_is_below_min_isolation() {
     let lab = lab();
     std::fs::write(lab.home.root.join("machine.toml"), "max_level = 2\n").unwrap();
@@ -137,7 +228,7 @@ fn run_refuses_when_the_machine_is_below_min_isolation() {
         common::PAYLOAD,
     );
     std::fs::write(lab.home.root.join("machine.toml"), "max_level = 0\n").unwrap();
-    let a = bin(&lab).args(["run", "hi"]).assert().code(1);
+    let a = bin_at(&lab, "hi").args(["run", "hi"]).assert().code(1);
     let e = err(&a);
     assert!(e.contains("level 2"), "{e}");
     assert!(e.contains("ignorarium probe"), "{e}");
@@ -148,16 +239,34 @@ fn run_refuses_when_the_machine_is_below_min_isolation() {
 fn max_level_flag_parses_and_a_value_above_3_is_a_usage_error() {
     let lab = lab();
     plain(&lab, "ml");
-    bin(&lab)
+    bin_at(&lab, "ml")
         .args(["run", "ml", "--max-level", "4"])
         .assert()
         .code(2);
     assert!(kind_of(&lab, "ml", "row").is_empty());
-    bin(&lab)
+    bin_at(&lab, "ml")
         .args(["run", "ml", "--max-level", "0"])
         .assert()
         .code(0);
     assert_eq!(status(&lab, "ml")["state"], "done");
+}
+
+#[test]
+fn run_outside_the_study_root_is_refused_when_an_input_was_absent_at_registration() {
+    let lab = lab();
+    plain(&lab, "out");
+    let a = bin(&lab)
+        .current_dir(&lab.root)
+        .args(["run", "out"])
+        .assert()
+        .code(1);
+    assert!(
+        err(&a).contains("input data/confirm.txt was absent at registration"),
+        "{}",
+        err(&a)
+    );
+    assert!(kind_of(&lab, "out", "row").is_empty());
+    bin_at(&lab, "out").args(["run", "out"]).assert().code(0);
 }
 
 #[test]
@@ -184,7 +293,7 @@ fn pause_then_status_shows_paused_and_run_refuses_until_resume() {
     bin(&lab).args(["pause", "p1"]).assert().code(0);
     let s = status(&lab, "p1");
     assert_eq!(s["request"], "pause");
-    let a = bin(&lab).args(["run", "p1"]).assert().code(1);
+    let a = bin_at(&lab, "p1").args(["run", "p1"]).assert().code(1);
     assert!(
         err(&a).contains("a pause is pending; run `ignorarium resume p1`"),
         "{}",
@@ -192,7 +301,7 @@ fn pause_then_status_shows_paused_and_run_refuses_until_resume() {
     );
     assert!(kind_of(&lab, "p1", "row").is_empty());
     // resume clears the pause and runs to the end.
-    bin(&lab).args(["resume", "p1"]).assert().code(0);
+    bin_at(&lab, "p1").args(["resume", "p1"]).assert().code(0);
     let s = status(&lab, "p1");
     assert_eq!(s["state"], "done");
     assert!(s["request"].is_null());
@@ -208,7 +317,7 @@ fn a_run_stopped_by_the_budget_exits_1_with_the_reason() {
         &[],
         common::PAYLOAD,
     );
-    let a = bin(&lab).args(["run", "bud"]).assert().code(1);
+    let a = bin_at(&lab, "bud").args(["run", "bud"]).assert().code(1);
     assert!(
         err(&a).contains("paused: the next row would reach the cpu cap"),
         "{}",
@@ -238,9 +347,9 @@ fn stop_writes_a_record_and_status_shows_stopped() {
     let s = status(&lab, "x1");
     assert_eq!(s["state"], "stopped");
     assert_eq!(s["detail"], "enough");
-    let a = bin(&lab).args(["run", "x1"]).assert().code(1);
+    let a = bin_at(&lab, "x1").args(["run", "x1"]).assert().code(1);
     assert!(err(&a).contains("stopped"), "{}", err(&a));
-    let a = bin(&lab).args(["resume", "x1"]).assert().code(1);
+    let a = bin_at(&lab, "x1").args(["resume", "x1"]).assert().code(1);
     assert!(err(&a).contains("stopped"), "{}", err(&a));
     // A second stop adds nothing.
     bin(&lab)
@@ -275,6 +384,7 @@ fn resume_and_stop_during_a_live_run() {
     with_payload(&lab, "live", "#!/bin/sh\nsleep 20\n");
     let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("ignorarium"))
         .args(["run", "live"])
+        .current_dir(common::work(&lab, "live"))
         .env("IGNORARIUM_HOME", &lab.home.root)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -292,7 +402,10 @@ fn resume_and_stop_during_a_live_run() {
     // A resume while the run is live clears the pause and starts nothing.
     bin(&lab).args(["pause", "live"]).assert().code(0);
     assert_eq!(status(&lab, "live")["request"], "pause");
-    let a = bin(&lab).args(["resume", "live"]).assert().code(0);
+    let a = bin_at(&lab, "live")
+        .args(["resume", "live"])
+        .assert()
+        .code(0);
     assert_eq!(text(&a), "the live run continues\n");
     assert_eq!(status(&lab, "live")["request"], "resume");
     let start = std::time::Instant::now();
@@ -318,6 +431,7 @@ if [ "$IGNORARIUM_ROW" = 0 ]; then
   echo started > "$IGNORARIUM_OUT/started"
   sleep 30
 fi
+printf '{"ppl": 1.5}' > "$IGNORARIUM_OUT/values.json"
 "#;
 
 /// `ignorarium run <id>` in the background, through `env` with `env_args`, which `env`
@@ -327,6 +441,7 @@ fn start_run(lab: &Lab, id: &str, env_args: &[&str]) -> std::process::Child {
         .args(env_args)
         .arg(assert_cmd::cargo::cargo_bin("ignorarium"))
         .args(["run", id])
+        .current_dir(common::work(lab, id))
         .env("IGNORARIUM_HOME", &lab.home.root)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -463,7 +578,7 @@ fn stop_sends_its_request_before_it_reads_a_torn_log() {
         .code(2);
     assert_eq!(
         err(&a),
-        "error: the stop request is sent, but records of torn: line 1 is not a whole record\n"
+        "error: the stop request is sent, but records of torn: line 2 is not a whole record\n"
     );
     assert_eq!(
         ControlFile::of(&lab.home, id).peek().unwrap(),
@@ -493,6 +608,7 @@ if [ "$IGNORARIUM_ROW" = 0 ]; then
   echo started > "$IGNORARIUM_OUT/started"
   sleep 1
 fi
+printf '{"ppl": 1.5}' > "$IGNORARIUM_OUT/values.json"
 "#;
 
 #[test]
@@ -548,7 +664,7 @@ fn run_refuses_a_bad_machine_file_with_exit_2() {
     let lab = lab();
     plain(&lab, "bm");
     std::fs::write(lab.home.root.join("machine.toml"), "cpus = 0\n").unwrap();
-    let a = bin(&lab).args(["run", "bm"]).assert().code(2);
+    let a = bin_at(&lab, "bm").args(["run", "bm"]).assert().code(2);
     assert!(err(&a).contains("machine.toml"), "{}", err(&a));
 }
 
@@ -757,7 +873,7 @@ fn status_order_stop_then_live_then_interrupted_then_state() {
 fn status_json_has_every_field() {
     let lab = lab();
     plain(&lab, "j1");
-    bin(&lab).args(["run", "j1"]).assert().code(0);
+    bin_at(&lab, "j1").args(["run", "j1"]).assert().code(0);
     let s = status(&lab, "j1");
     let obj = s.as_object().unwrap();
     for key in [
@@ -824,7 +940,7 @@ fn status_json_has_every_field() {
 fn status_counts_void_rows_and_retries() {
     let lab = lab();
     with_payload(&lab, "v1", "#!/bin/sh\nexit 3\n");
-    bin(&lab).args(["run", "v1"]).assert().code(0);
+    bin_at(&lab, "v1").args(["run", "v1"]).assert().code(0);
     let s = status(&lab, "v1");
     assert_eq!(s["voided"], s["total"]);
     assert_eq!(s["done"], s["total"]);
@@ -853,7 +969,7 @@ fn status_blinds_condition_ids_when_blind_is_set() {
         &[("data/example.txt", "calibration")],
         common::PAYLOAD,
     );
-    bin(&lab).args(["run", "b1"]).assert().code(0);
+    bin_at(&lab, "b1").args(["run", "b1"]).assert().code(0);
     let a = bin(&lab).args(["status", "b1"]).assert().success();
     let t = text(&a);
     assert!(!t.contains("arm-a") && !t.contains("exact"), "{t}");
@@ -934,6 +1050,111 @@ fn run_refuses_while_another_run_holds_the_lock() {
     let lab = lab();
     plain(&lab, "bz");
     let _held = RunLock::try_take(&lab.home, "bz").unwrap().unwrap();
-    let a = bin(&lab).args(["run", "bz"]).assert().code(1);
+    let a = bin_at(&lab, "bz").args(["run", "bz"]).assert().code(1);
     assert!(err(&a).contains("in progress"), "{}", err(&a));
+}
+
+// ---- a pilot's estimates serve a follow-on ----
+
+/// The template with a second confirmation input: 2 clusters of 3 units.
+fn two_clusters(t: String) -> String {
+    let second = r#"[[inputs]]
+path = "data/confirm2.txt"
+sha256 = ""
+role = "confirmation"
+stratum = "fiction"
+units = 3
+[inputs.licence]
+spdx = ""
+type = "unspecified"
+source = ""
+creators = []
+
+[pins]"#;
+    t.replacen("[pins]", second, 1)
+}
+
+/// A payload that writes `base` for the reference and `base + step * k` for `arm-a` on
+/// unit `k` of the first cluster and `base + step * (k + 4)` on the second: arm-a pairs to
+/// 100 * step / base percent per k.
+fn graded(base: f64, step: f64) -> String {
+    let mut cases = String::new();
+    for (path, offset) in [("data/confirm.txt", 0), ("data/confirm2.txt", 4)] {
+        for k in 0..3 {
+            let v = base + step * f64::from(k + offset + 1);
+            cases += &format!("\"{path}#{k}\") v={v};; ");
+        }
+    }
+    format!(
+        "#!/bin/sh\ncase \"$2\" in exact) v={base};; *) case \"$4\" in {cases}esac;; esac\nprintf '{{\"ppl\": %s}}' \"$v\" > \"$IGNORARIUM_OUT/values.json\"\n"
+    )
+}
+
+/// Register and run a pilot study `id` at level 0.
+fn pilot_run(lab: &Lab, id: &str, payload: &str) {
+    use ignorarium::backend::level0::Level0;
+    use ignorarium::runner::{RunStatus, prepare_with, run};
+    register_study(lab, id, two_clusters, &[], payload);
+    let plan = prepare_with(
+        &lab.home,
+        id,
+        &common::work_of(&lab.home, id),
+        vec![Box::new(Level0)],
+    )
+    .unwrap();
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+}
+
+fn check_json(lab: &Lab, spec: &std::path::Path) -> (i32, Value) {
+    let a = bin(lab).arg("check").arg(spec).arg("--json").assert();
+    let out = a.get_output();
+    (
+        out.status.code().unwrap(),
+        serde_json::from_slice(&out.stdout).unwrap(),
+    )
+}
+
+/// The codes of the diagnostics that concern the plan's values, not its licences or pins.
+fn codes(v: &Value) -> Vec<&str> {
+    let d = v["diagnostics"].as_array().unwrap();
+    let all = d.iter().map(|d| d["code"].as_str().unwrap());
+    all.filter(|c| !c.starts_with("W-LIC") && !c.starts_with("W-HSH"))
+        .collect()
+}
+
+#[test]
+fn a_pilot_then_a_follow_on_resolve_end_to_end() {
+    let lab = lab();
+    // Cluster means 0.2 % and 0.6 % (percent values 0.1 k): var 0.0867, icc 0.885.
+    pilot_run(&lab, "my-pilot", &graded(1000.0, 1.0));
+    // The same shape, 1000 times wider.
+    pilot_run(&lab, "wide-pilot", &graded(1.0, 1.0));
+    let est = kind_of(&lab, "my-pilot", "estimate");
+    assert_eq!(est.len(), 1);
+    let e = ignorarium::derived::Estimate::of(&est[0]).unwrap();
+    assert_eq!((e.clusters, e.units, e.stratum.as_str()), (2, 6, ""));
+    assert!((e.var - 0.086_666_666_7).abs() < 1e-6, "{}", e.var);
+    assert!(
+        (e.icc.unwrap() - 2300.0 / 2600.0).abs() < 1e-6,
+        "{:?}",
+        e.icc
+    );
+    let follow = |from: &str| {
+        let t = std::fs::read_to_string("../../templates/numeric-ablation.toml").unwrap();
+        let path = lab.root.join(format!("follow-{from}.toml"));
+        // A claim on a mean statistic in [-22, 22], sized 20 below the margin: with a small
+        // variance each of the 16 clusters scores about 0.91, enough to reach 1/0.005.
+        let text = common::confirmatory(two_clusters(t))
+            .replace("{ quantile = 0.5 }", "{ mean = [-22.0, 22.0] }");
+        std::fs::write(&path, text.replace("my-pilot", from)).unwrap();
+        path
+    };
+    // The estimate resolves: no pending value, no missing estimate, and the power gate
+    // passes on the small variance.
+    let (code, v) = check_json(&lab, &follow("my-pilot"));
+    assert_eq!((code, codes(&v)), (0, Vec::<&str>::new()), "{v}");
+    assert_eq!(v["pending"], serde_json::json!([]));
+    // The wide pilot resolves too, and the gate refuses on its variance alone.
+    let (code, v) = check_json(&lab, &follow("wide-pilot"));
+    assert_eq!((code, codes(&v)), (1, vec!["E-CNF-002"]), "{v}");
 }
