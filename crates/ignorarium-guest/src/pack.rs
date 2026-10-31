@@ -8,11 +8,11 @@
 //! (u32 big-endian length, raw bytes, `/`-separated). `f` adds a u64 big-endian length
 //! and the bytes. `l` adds a u32 big-endian length and the target bytes.
 use crate::tree::{Entry, TreeRow, hash_rows, link_row, row, walk};
-use rustix::fs::{CWD, FileType, Mode, mknodat};
+use rustix::fs::{FileType, Mode, OFlags, mkdirat, mknodat, open, openat};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::fs;
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -149,6 +149,11 @@ pub fn write(dir: &Path, w: &mut impl Write, limit: u64) -> io::Result<Packed> {
             }
         });
         Ok(())
+    })
+    .map_err(|e| match e.raw_os_error() {
+        // Past `PATH_MAX`, made with calls relative to a folder: what the payload left.
+        Some(libc::ENAMETOOLONG) => bad(format!("an output path is too long: {e}")),
+        _ => e,
     })?;
     w.write_all(b"e")?;
     Ok(Packed {
@@ -220,7 +225,11 @@ impl<R: Read> Reader<'_, R> {
     }
 }
 
+/// A relative path the host can make below its folder: a path and its NUL fit in `PATH_MAX`.
 fn check_path(path: &[u8]) -> Result<(), &'static str> {
+    if path.len() >= MAX_PATH {
+        return Err("path is too long");
+    }
     for part in path.split(|&b| b == b'/') {
         match part {
             p if p.len() > MAX_PART => return Err("path part is too long"),
@@ -262,7 +271,8 @@ pub struct Unpacked {
 /// Unpacks a pack into the empty directory `dest`, charging `limit` and hashing as `write`
 /// does, a file's digest from the bytes as they are copied out. Every entry is checked
 /// before anything is made for it; nothing is made outside `dest`. A link is recorded and
-/// never made, so nothing on the host can follow it.
+/// never made, so nothing on the host can follow it. Entries are made relative to `dest`,
+/// so its own length does not count against `PATH_MAX`.
 pub fn unpack(r: &mut impl Read, dest: &Path, limit: u64) -> io::Result<Unpacked> {
     if fs::read_dir(dest)?.next().is_some() {
         return Err(io::Error::new(
@@ -270,6 +280,11 @@ pub fn unpack(r: &mut impl Read, dest: &Path, limit: u64) -> io::Result<Unpacked
             "dest is not empty",
         ));
     }
+    let dest = open(
+        dest,
+        OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
     let mut r = Reader {
         inner: r,
         budget: Budget::new(limit),
@@ -302,24 +317,19 @@ pub fn unpack(r: &mut impl Read, dest: &Path, limit: u64) -> io::Result<Unpacked
         {
             return Err(entry("parent is not an earlier directory"));
         }
-        let to = dest.join(OsStr::from_bytes(&path));
+        let to = OsStr::from_bytes(&path);
         if seen.insert(path.clone(), kind[0]).is_some() {
             return Err(entry("duplicate path"));
         }
-        if to.as_os_str().len() >= MAX_PATH {
-            return Err(entry("path with the destination is too long"));
-        }
         match kind[0] {
-            b'd' => fs::create_dir(&to)?,
+            b'd' => mkdirat(&dest, to, Mode::from_raw_mode(0o777))?,
             b'f' => {
                 let len = r.u64()?;
                 r.budget
                     .charge(len)
                     .map_err(|_| entry("file is past the limit"))?;
-                let f = fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&to)?;
+                let new = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC;
+                let f = File::from(openat(&dest, to, new, Mode::from_raw_mode(0o666))?);
                 let (n, digest) = copy_hashed(r.inner.by_ref(), f, len)?;
                 if n != len {
                     return Err(entry("file is past the end of the pack"));
@@ -336,8 +346,7 @@ pub fn unpack(r: &mut impl Read, dest: &Path, limit: u64) -> io::Result<Unpacked
                 links.push(Link { path, target });
             }
             _ => {
-                mknodat(CWD, &to, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0)
-                    .map_err(io::Error::from)?;
+                mknodat(&dest, to, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0)?;
                 rows.push(row(&path, "other", String::new()));
             }
         }

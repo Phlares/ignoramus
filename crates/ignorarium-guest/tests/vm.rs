@@ -338,6 +338,21 @@ fn the_payload_starts_in_out() {
 
 #[test]
 #[ignore = "boots a VM; see the top of the file"]
+fn an_output_tree_past_path_max_is_the_payloads_result() {
+    // 21 folders of 200 bytes, made with relative calls: the walk cannot name the deepest.
+    let o = Row::sh(
+        "cd /out && p=$(printf '%0200d' 0) && for i in $(seq 21); do mkdir $p && cd $p; done \
+         && echo x > f",
+    )
+    .run();
+    assert_eq!(o.report.end, Some(End::Code(0)));
+    let why = o.report.pack_refused.unwrap_or_default();
+    assert!(why.starts_with("\"an output path is too long: "), "{why}");
+    assert_eq!(o.output_hash, "");
+}
+
+#[test]
+#[ignore = "boots a VM; see the top of the file"]
 fn a_sparse_output_is_the_payloads_result() {
     // A sparse file and hard links take less of /out than they take of the pack: the pack
     // refuses them, and the payload's own run stands.

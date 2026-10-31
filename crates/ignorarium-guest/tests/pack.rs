@@ -1,11 +1,12 @@
 mod common;
 use common::{entry, file, link, pack, packed};
 use ignorarium_guest::pack::{ENTRY_MAX, Link, out_caps, unpack, write};
-use ignorarium_guest::tree::{link_row, tree_hash, tree_rows};
+use ignorarium_guest::tree::{hash_rows, link_row, row, tree_hash, tree_rows};
+use rustix::fs::{Mode, OFlags};
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt, symlink};
 use std::path::Path;
@@ -243,23 +244,69 @@ fn bytes_after_the_end_are_ignored() {
     assert_eq!(tree_hash(out.path()).unwrap(), tree_hash(d.path()).unwrap());
 }
 
-/// Sixteen 255-byte parts: every prefix is a legal path, but the last is too long once
-/// joined to any `dest`.
-fn deep_pack() -> Vec<u8> {
+/// `n` folders of `len`-byte parts, one in the other, and a file `x` as the last part: a
+/// file path of `n * len + n - 1` bytes. Returns the pack and the file's path.
+fn deep_pack(n: usize, len: usize) -> (Vec<u8>, Vec<u8>) {
     let mut parts = Vec::new();
     let mut path = Vec::new();
-    for i in 0..16 {
+    for i in 0..n {
         if i > 0 {
             path.push(b'/');
         }
-        path.extend_from_slice(&[b'p'; 255]);
-        parts.push(if i < 15 {
+        path.extend(std::iter::repeat_n(b'p', len));
+        parts.push(if i < n - 1 {
             entry(b'd', &path)
         } else {
             file(&path, b"x")
         });
     }
-    pack(&parts)
+    (pack(&parts), path)
+}
+
+/// The bytes of the file at `rel` below `dir`, opened relative to `dir`, so the whole path
+/// may be past `PATH_MAX`.
+fn read_below(dir: &Path, rel: &[u8]) -> Vec<u8> {
+    let at = rustix::fs::open(dir, OFlags::DIRECTORY | OFlags::RDONLY, Mode::empty()).unwrap();
+    let f = rustix::fs::openat(&at, OsStr::from_bytes(rel), OFlags::RDONLY, Mode::empty());
+    let mut bytes = Vec::new();
+    fs::File::from(f.unwrap()).read_to_end(&mut bytes).unwrap();
+    bytes
+}
+
+#[test]
+fn a_path_of_4095_bytes_unpacks_below_any_dest_and_4096_is_refused() {
+    // The host makes each entry relative to `dest`, so the length of `dest` does not count.
+    let top = tempfile::tempdir().unwrap();
+    let dest = top.path().join("d".repeat(250));
+    fs::create_dir(&dest).unwrap();
+    let (longest, path) = deep_pack(16, 255);
+    assert_eq!(path.len(), 4095);
+    let u = unpack(&mut longest.as_slice(), &dest, 1 << 20).unwrap();
+    let digest = hex::encode(Sha256::digest(b"x"));
+    assert_eq!(u.hash, hash_rows(&[row(&path, "file", digest)]).unwrap());
+    assert_eq!(read_below(&dest, &path), b"x");
+    // 4096 bytes and the NUL do not fit in `PATH_MAX`.
+    let (over, path) = deep_pack(17, 240);
+    assert_eq!(path.len(), 4096);
+    let msg = refusal(&over);
+    assert!(msg.ends_with(": path is too long"), "{msg}");
+}
+
+#[test]
+fn a_tree_past_path_max_is_refused_as_what_the_payload_left() {
+    // A payload can make it with calls relative to a folder; the walk cannot name its end.
+    let d = tempfile::tempdir().unwrap();
+    let part = "d".repeat(200);
+    let mut at = rustix::fs::open(d.path(), OFlags::DIRECTORY | OFlags::RDONLY, Mode::empty());
+    for _ in 0..21 {
+        let fd = at.unwrap();
+        rustix::fs::mkdirat(&fd, part.as_str(), Mode::from_raw_mode(0o755)).unwrap();
+        at = rustix::fs::openat(&fd, part.as_str(), OFlags::DIRECTORY, Mode::empty());
+    }
+    let e = write(d.path(), &mut Vec::new(), 1 << 30).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::InvalidData, "{e}");
+    let msg = e.to_string();
+    assert!(msg.starts_with("an output path is too long: "), "{msg}");
 }
 
 #[test]
@@ -341,7 +388,6 @@ fn hostile_packs_are_refused() {
         ("bad kind", pack(&[entry(b'z', b"a")]), 1 << 20),
         ("truncated path", b"IGNPACK1f\0\0\0\x09ab".to_vec(), 1 << 20),
         ("no end", b"IGNPACK1".to_vec(), 1 << 20),
-        ("path past the limit with dest", deep_pack(), 1 << 20),
     ];
     for (name, bytes, limit) in cases {
         let outer = tempfile::tempdir().unwrap();
