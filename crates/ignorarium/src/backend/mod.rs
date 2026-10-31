@@ -108,6 +108,12 @@ pub trait Backend {
     fn probe(&self) -> Probe;
     /// What starts the payload, recorded beside the isolation level.
     fn launcher(&self) -> String;
+    /// The hex SHA-256 of the program that sets up the payload inside the sandbox, recorded
+    /// beside the launcher: level 2's guest agent. `None` for a backend without one, or while
+    /// it cannot be read.
+    fn agent_sha256(&self) -> Option<String> {
+        None
+    }
     /// How many CPUs a row may use at once.
     fn cpus(&self) -> u32;
     fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> io::Result<RowOutcome>;

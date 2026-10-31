@@ -294,6 +294,7 @@ struct Fake {
     wall: Option<f64>,
     /// Every attempt reports its CPU count unknown, for this reason.
     unknown: Option<String>,
+    agent: Option<String>,
 }
 
 impl Backend for Fake {
@@ -302,6 +303,9 @@ impl Backend for Fake {
     }
     fn launcher(&self) -> String {
         "process".into()
+    }
+    fn agent_sha256(&self) -> Option<String> {
+        self.agent.clone()
     }
     fn level(&self) -> u8 {
         self.level
@@ -339,6 +343,7 @@ fn fake(script: Vec<Exit>) -> (Fake, Rc<RefCell<Vec<u64>>>) {
         level: 0,
         wall: None,
         unknown: None,
+        agent: None,
     };
     (b, seen)
 }
@@ -388,6 +393,7 @@ fn run_writes_one_record_per_row_in_order() {
         assert_eq!(r.body["attempts"], 1);
         assert_eq!(r.body["isolation"], 0);
         assert_eq!(r.body["launcher"], "process");
+        assert_eq!(r.body.get("agent_sha256"), None);
         assert_eq!(r.body["payload_sha256"], plan.payload_sha256.as_str());
         assert_eq!(r.body["data_hashes"].as_array().unwrap().len(), 1);
         assert_eq!(r.body["output_hash"].as_str().unwrap().len(), 64);
@@ -2206,6 +2212,26 @@ fn run_start_names_the_isolation_and_the_launcher() {
     assert_eq!(starts.len(), 1);
     assert_eq!(starts[0]["attrs"]["isolation"], 0);
     assert_eq!(starts[0]["attrs"]["launcher"], "process");
+    assert_eq!(starts[0]["attrs"].get("agent_sha256"), None);
+}
+
+#[test]
+fn the_agent_a_backend_runs_is_named_next_to_the_launcher() {
+    let lab = lab();
+    let dir = plain(&lab, "agent");
+    let mut plan = plan_of(&lab, "agent");
+    let (mut b, _) = fake(vec![]);
+    let agent = "ab".repeat(32);
+    b.agent = Some(agent.clone());
+    plan.backend = Box::new(b);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let ev = events_of(&dir);
+    assert_eq!(named(&ev, "run.start")[0]["attrs"]["agent_sha256"], agent);
+    let rows = rows_of(&lab, "agent");
+    assert_eq!(rows.len(), 6);
+    for r in rows {
+        assert_eq!(r.body["agent_sha256"], agent);
+    }
 }
 
 #[test]

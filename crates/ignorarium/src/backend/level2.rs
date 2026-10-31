@@ -12,6 +12,7 @@ use ignorarium_guest::proto::{self, End, GUEST_IN, GUEST_OUT, GUEST_PAYLOAD};
 use ignorarium_guest::tree;
 use rustix::io::Errno;
 use rustix::process::{Pid, geteuid, test_kill_process};
+use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::fs;
 use std::io;
@@ -54,8 +55,9 @@ pub struct Level2 {
     pub report_slack: Duration,
     /// The first line of `<vmm> --version`, read on first use.
     version: OnceLock<Option<String>>,
-    /// The initramfs that holds the agent, built on the first read that works.
-    initramfs: OnceLock<Vec<u8>>,
+    /// The initramfs that holds the agent, and the agent's hex SHA-256, from the first read
+    /// that works.
+    initramfs: OnceLock<(Vec<u8>, String)>,
 }
 
 impl Default for Level2 {
@@ -139,14 +141,18 @@ impl Level2 {
         faults
     }
 
-    /// The initramfs that holds the agent. A failed read is tried again on the next call.
-    fn initramfs(&self) -> Result<&[u8], String> {
+    /// The initramfs that holds the agent, and the agent's hex SHA-256. A failed read is
+    /// tried again on the next call.
+    fn initramfs(&self) -> Result<&(Vec<u8>, String), String> {
         if let Some(built) = self.initramfs.get() {
             return Ok(built);
         }
         let agent = fs::read(&self.agent)
             .map_err(|e| format!("cannot read the agent {}: {e}", self.agent.display()))?;
-        Ok(self.initramfs.get_or_init(|| image::initramfs(&agent)))
+        let sha256 = hex::encode(Sha256::digest(&agent));
+        Ok(self
+            .initramfs
+            .get_or_init(|| (image::initramfs(&agent), sha256)))
     }
 
     /// Runs one row and returns its outcome, with the host's timings when the machine ran to
@@ -186,7 +192,7 @@ impl Level2 {
             return ended(Err(VmError::Stopped));
         }
         let initramfs = match self.initramfs() {
-            Ok(b) => b,
+            Ok((b, _)) => b,
             Err(why) => return infra(why),
         };
         let scratch = match Scratch::new(initramfs) {
@@ -307,6 +313,11 @@ impl Backend for Level2 {
         let v = self.version.get_or_init(|| version(&self.vmm));
         v.clone()
             .unwrap_or_else(|| "cloud-hypervisor unknown".into())
+    }
+
+    /// The agent the rows boot: read once, with the initramfs.
+    fn agent_sha256(&self) -> Option<String> {
+        self.initramfs().ok().map(|(_, sha256)| sha256.clone())
     }
 
     fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> io::Result<RowOutcome> {

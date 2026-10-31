@@ -1023,6 +1023,22 @@ fn a_row_removes_its_scratch_folder_and_a_dead_box_s() {
 }
 
 #[test]
+fn the_agent_is_named_by_the_sha256_of_the_bytes_the_rows_boot() {
+    let d = TempDir::new().unwrap();
+    let (mut b, job) = fake_box(d.path());
+    let agent = b.agent.clone();
+    b.agent = d.path().join("later");
+    assert_eq!(b.agent_sha256(), None);
+    fs::copy(&agent, &b.agent).unwrap();
+    let want = sha256_file(&agent).unwrap();
+    assert_eq!(b.agent_sha256(), Some(want.clone()));
+    // Read once with the initramfs: a new file is not what the rows boot.
+    fs::write(&b.agent, b"another build").unwrap();
+    assert!(boot_failed(&b.run_row(&job, &|| true).unwrap().exit));
+    assert_eq!(b.agent_sha256(), Some(want));
+}
+
+#[test]
 fn a_failed_agent_read_is_tried_again_next_row() {
     let d = TempDir::new().unwrap();
     let (mut b, job) = fake_box(d.path());
@@ -1437,6 +1453,8 @@ fn a_level2_study_reads_the_sealed_view_and_records_values() {
             (&b["isolation"], &b["environment"]),
             (&json!(2), &json!(digest))
         );
+        let agent = sha256_file(&Level2::new().agent).unwrap();
+        assert_eq!(b["agent_sha256"], agent);
         assert_eq!(b["values"], json!({ "ppl": 1.5 }));
         let out = dir.join(format!("run/rows/{}/out", rec.row.unwrap()));
         assert_eq!(tree::tree_rows(&out.join("in")).unwrap(), view);

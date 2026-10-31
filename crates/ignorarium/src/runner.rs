@@ -883,11 +883,12 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
     State::Running
         .write(&plan.home, &plan.study_id)
         .map_err(io)?;
-    let launch = json!({
+    let mut launch = json!({
         "isolation": plan.backend.level(),
         "launcher": plan.backend.launcher(),
         "environment": plan.environment,
     });
+    agent(&mut launch, plan);
     let resumed = all.iter().any(|r| r.kind == "row" || r.kind == "spend");
     let name = if resumed { "run.resume" } else { "run.start" };
     log_event(plan, &dir, None, name, "info", launch)?;
@@ -1468,6 +1469,7 @@ fn attempt_row(
         "exit": exit,
         "attempts": attempts,
     });
+    agent(&mut body, plan);
     if let Some(why) = reason {
         body["reason"] = json!(why);
     }
@@ -1602,6 +1604,13 @@ fn unrecorded(
     )?;
     books.add(plan, o, false);
     Ok(())
+}
+
+/// The agent the backend runs beside the payload, beside the launcher, when it has one.
+fn agent(attrs: &mut Value, plan: &RunPlan) {
+    if let Some(sha256) = plan.backend.agent_sha256() {
+        attrs["agent_sha256"] = json!(sha256);
+    }
 }
 
 /// The box's CPU for an attempt, beside the row's own, when it spent any.
