@@ -63,8 +63,13 @@ pub struct RunPlan {
     /// Each condition's params as rows get them, by condition id: the spec's values, and for a
     /// reference the condition `register` froze.
     pub params: BTreeMap<String, Value>,
-    /// The input view rows see: `<study>/in`, one link per input present.
+    /// The input view rows see: `<study>/in`, one link per input present and one to the
+    /// manifest.
     pub view: PathBuf,
+    /// The view's entries by path and store digest: each input present, then the manifest.
+    pub entries: Vec<(String, String)>,
+    /// The store digest of the view's manifest.
+    pub manifest: String,
     /// The scan of the view that `prepare` took before every file in it hashed to its digest.
     /// A later scan that differs only in ctimes over the same bytes replaces it, so a chmod
     /// or another study's link to a blob costs one full hash, not one per attempt.
@@ -284,12 +289,13 @@ pub fn up_to(backends: Vec<Box<dyn Backend>>, max: u8) -> Vec<Box<dyn Backend>> 
 }
 
 /// Load a registered study, check its payload copy and its stored inputs, build its input
-/// view, gate its late data, write its schedule, and pick the highest backend whose probe
-/// finds it available, that meets `scope.min_isolation` and can run the study: level 2 and up
-/// run rows only in the study's environment image, so a study without one runs at the
-/// highest level below, and one `run.isolation` event names the levels it skipped. Every
-/// input in the view is hashed in full here, once per `run` or `resume`; before each attempt
-/// the run only compares the view's stamps (see `stale`).
+/// view (the inputs present and the manifest that lists them with their roles), gate its late
+/// data, write its schedule, and pick the highest backend whose probe finds it available, that
+/// meets `scope.min_isolation` and can run the study: level 2 and up run rows only in the
+/// study's environment image, so a study without one runs at the highest level below, and one
+/// `run.isolation` event names the levels it skipped. Every file in the view is hashed in full
+/// here, once per `run` or `resume`; before each attempt the run only compares the view's
+/// stamps (see `stale`).
 /// The first prepare that gets this far signs an `inputs` record of every input's digest,
 /// or its absence; a later one whose inputs differ is refused before anything changes, so
 /// every row of a study runs on the same bytes. `root` is the study root found where the
@@ -381,9 +387,13 @@ pub fn prepare_with(
         return Err(RunError::InputFrozen(path.clone()));
     }
     let params = resolved_params(home, &key, &spec, &register)?;
-    let present = present(&inputs);
-    let view = view::build(&store, &dir, &present).map_err(view_error)?;
-    let view_seen = view::verify(&view, &present).map_err(view_error)?;
+    let mut entries = present(&inputs);
+    let manifest = store
+        .put(&view::manifest(&spec, &entries))
+        .map_err(|e| io(format!("{}: {e}", view::MANIFEST)))?;
+    entries.push((view::MANIFEST.into(), manifest.clone()));
+    let view = view::build(&store, &dir, &entries).map_err(view_error)?;
+    let view_seen = view::verify(&view, &entries).map_err(view_error)?;
     if backend.level() >= IMAGE_LEVEL {
         let folders = [
             (&view, "the input view"),
@@ -419,6 +429,8 @@ pub fn prepare_with(
         inputs,
         params,
         view,
+        entries,
+        manifest,
         view_seen: RefCell::new(view_seen),
         payload,
         payload_sha256,
@@ -642,7 +654,7 @@ fn stale(plan: &RunPlan, dir: &Path) -> Option<String> {
         changed.push("payload".to_string());
     }
     let mut seen = plan.view_seen.borrow_mut();
-    match view::changes(&plan.view, &present(&plan.inputs), &seen) {
+    match view::changes(&plan.view, &plan.entries, &seen) {
         Err(e) => faults.push(format!("the input view cannot be read: {e}")),
         Ok(c) if c.inputs.is_empty() && !c.other => *seen = c.now,
         Ok(c) => {
@@ -1463,6 +1475,7 @@ fn attempt_row(
         "environment": plan.environment,
         "payload_sha256": plan.payload_sha256,
         "data_hashes": plan.inputs.iter().filter_map(|(_, h)| h.as_ref()).collect::<Vec<_>>(),
+        "manifest": plan.manifest,
         "cpu_seconds": outcome.cpu_seconds,
         "wall_seconds": outcome.wall_seconds,
         "output_hash": outcome.output_hash,

@@ -15,7 +15,7 @@ use ignorarium::planlog::store::PlanLog;
 use ignorarium::prior::{PriorUse, file_hashes};
 use ignorarium::runner::{RunError, RunPlan, RunStatus, prepare, prepare_with, run, up_to};
 use ignorarium::stream::{Log, LogName};
-use ignorarium::{analysis, estimate, keys, records, schedule, spec};
+use ignorarium::{analysis, estimate, keys, records, schedule, spec, view};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -559,6 +559,7 @@ fn pauses_after_row_0(lab: &Lab, id: &str, why: &str) {
     // The record names the bytes row 0 started with.
     let row = &rows_of(lab, id)[0];
     assert_eq!(row.body["payload_sha256"], plan.payload_sha256.as_str());
+    assert_eq!(row.body["manifest"], plan.manifest.as_str());
 }
 
 #[test]
@@ -632,6 +633,26 @@ fn a_changed_store_blob_pauses_the_run() {
         matches!(&err, RunError::InputChanged(p) if p == "data/example.txt"),
         "{err}"
     );
+}
+
+#[test]
+fn a_changed_manifest_blob_pauses_the_run() {
+    let lab = lab();
+    // The view's link is the blob itself.
+    let edit = edits_in_row_0(&format!(
+        "m=\"$IGNORARIUM_IN/{}\"; chmod u+w \"$m\"; printf x >> \"$m\"",
+        view::MANIFEST
+    ));
+    common::with_payload(&lab, "list", &edit);
+    pauses_after_row_0(
+        &lab,
+        "list",
+        "ignorarium:inputs.json changed after the run began",
+    );
+    // The next prepare writes the same manifest and finds other bytes under its digest.
+    let err = err_of(&lab, "list").to_string();
+    assert!(err.contains(view::MANIFEST), "{err}");
+    assert!(err.contains("stored blob differs"), "{err}");
 }
 
 #[test]

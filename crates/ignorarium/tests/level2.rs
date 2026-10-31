@@ -1460,7 +1460,7 @@ fn a_level2_study_reads_the_sealed_view_and_records_values() {
     let dir = lab.home.study_dir(id);
     let view = tree::tree_rows(&dir.join("in")).unwrap();
     let names: Vec<&str> = view.iter().map(|r| r.path.as_str()).collect();
-    assert_eq!(names, ["data/example.txt"]);
+    assert_eq!(names, ["data/example.txt", ignorarium::view::MANIFEST]);
     let rows = common::rows_of(&lab, id);
     let mut conditions: Vec<&str> = rows
         .iter()
