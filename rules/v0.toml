@@ -502,12 +502,13 @@ target = [
 [[rule]]
 code = "E-CNF-006"
 severity = "error"
-problem = "A hypothesis of a confirmatory study has no claim."
-instruction = "Give the hypothesis a claim, { below = m }, { above = m } or { within = [a, b] }, and its statistic. Or make the study exploratory."
-why = "A confirmatory study tests each hypothesis against margins stated before the data come in. A hypothesis with no claim has nothing to test, so any reading of it would be chosen after the fact."
+problem = "A confirmatory study has no hypothesis, or a hypothesis of it has no claim."
+instruction = "List at least one hypothesis, and give each a claim, { below = m }, { above = m } or { within = [a, b] }, and its statistic. Or make the study exploratory."
+why = "A confirmatory study tests each hypothesis against margins stated before the data come in. A hypothesis with no claim has nothing to test, so any reading of it would be chosen after the fact. A study with no hypothesis would spend a stream slot that can never give a discovery."
 sources = ["https://doi.org/10.1038/s41562-016-0021"]
 when = { mode = "confirmatory" }
 target = [
+  { path = "question.hypotheses", check = "non-empty" },
   { path = "question.hypotheses[*].claim", check = "named:claim-required" },
 ]
 

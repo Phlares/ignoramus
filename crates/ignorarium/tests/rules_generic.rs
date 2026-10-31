@@ -877,6 +877,30 @@ fn when_filters_by_mode_and_label() {
 }
 
 #[test]
+fn a_confirmatory_plan_needs_a_hypothesis() {
+    let cnf006 = |mode: &str, hypotheses: Option<Value>| {
+        let mut s = template();
+        s["study"]["mode"] = json!(mode);
+        match hypotheses {
+            Some(h) => s["question"]["hypotheses"] = h,
+            None => {
+                s["question"].as_object_mut().unwrap().remove("hypotheses");
+            }
+        }
+        let d = rules::check_generic(&s, &v0());
+        d.into_iter()
+            .filter(|x| x.code == "E-CNF-006")
+            .map(|x| x.path)
+            .collect::<Vec<_>>()
+    };
+    // No hypothesis has nothing to test, and its slot could never give a discovery.
+    assert_eq!(cnf006("confirmatory", Some(json!([]))), ["question.hypotheses"]);
+    assert_eq!(cnf006("confirmatory", None), ["question.hypotheses"]);
+    assert!(cnf006("exploratory", Some(json!([]))).is_empty());
+    assert!(cnf006("confirmatory", Some(template()["question"]["hypotheses"].clone())).is_empty());
+}
+
+#[test]
 fn warning_severity_is_kept() {
     let r = local_rules(&format!(
         "[[rule]]\n{}\n[[rule.target]]\npath = \"study.id\"\ncheck = \"required\"\n",
