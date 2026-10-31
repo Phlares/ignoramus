@@ -1,6 +1,7 @@
 use ignorarium::canon::{sha256_hex, to_canonical};
 use ignorarium::derived::{
-    Alpha, Analysis, Estimate, Instrument, Register, Selection, StudyState, contrast_key,
+    Alpha, Analysis, Estimate, Instrument, PinDeviated, Register, Selection, StudyState,
+    contrast_key,
 };
 use ignorarium::records::Record;
 use ignorarium::spec::model::{Direction, Outcome, Paired};
@@ -82,10 +83,36 @@ fn a_register_record_parses_with_its_root_identity() {
     );
     assert_eq!(frozen.records, ["e".repeat(64)]);
     assert_eq!(frozen.value, json!({ "": { "sd": 2.0, "icc": 0.1 } }));
-    assert_eq!(serde_json::to_value(&r).unwrap(), register_body());
+    // A record written before deviations were recorded reads as one that declares none.
+    assert!(r.deviations.is_empty());
+    let mut now = register_body();
+    now["deviations"] = json!([]);
+    assert_eq!(serde_json::to_value(&r).unwrap(), now);
     assert_eq!(r.timestamp, None);
     assert_eq!(r.alpha, None);
-    let mut b = register_body();
+    let mut b = now.clone();
+    b["deviations"] = json!([{
+        "from": "pilot", "reason": "r", "timing": "after-results", "differs": ["payload"]
+    }]);
+    let r = Register::of(&rec("register", b.clone())).unwrap();
+    assert_eq!(
+        r.deviations,
+        [PinDeviated {
+            from: "pilot".into(),
+            reason: "r".into(),
+            timing: "after-results".into(),
+            differs: vec!["payload".into()],
+        }]
+    );
+    assert_eq!(serde_json::to_value(&r).unwrap(), b);
+    for field in ["from", "reason", "timing", "differs"] {
+        let mut c = b.clone();
+        c["deviations"][0].as_object_mut().unwrap().remove(field);
+        assert_eq!(Register::of(&rec("register", c)), None, "{field}");
+    }
+    let mut c = b.clone();
+    c["deviations"][0]["extra"] = json!(1);
+    assert_eq!(Register::of(&rec("register", c)), None);
     b["timestamp"] = json!("pending");
     b["alpha"] = json!({ "log": "planlog", "slot": 4, "level": 0.01 });
     let r = Register::of(&rec("register", b.clone())).unwrap();

@@ -1368,13 +1368,13 @@ fn the_gate_gives_the_same_verdict_on_every_check() {
     assert_eq!(
         first,
         json!([{
-            "hypothesis": "H1", "power": 0.35825, "target": 0.8, "clusters": { "": 15 },
+            "hypothesis": "H1", "power": 0.3625, "target": 0.8, "clusters": { "": 15 },
             "needed": 20
         }])
     );
     assert_eq!(power(1), first);
     let sentence =
-        "Simulated power 0.35 with 15 clusters in the pooled group; about 20 clusters reach 0.80.";
+        "Simulated power 0.36 with 15 clusters in the pooled group; about 20 clusters reach 0.80.";
     assert!(check_out(&home, &spec, 1).contains(sentence));
     let page = stdout(&bin(&home).arg("review").arg(&spec).assert().code(1));
     assert!(

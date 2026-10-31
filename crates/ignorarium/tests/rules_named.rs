@@ -1,11 +1,12 @@
 mod common;
 
 use ignorarium::canon::sha256_hex;
+use ignorarium::derived::Instrument;
 use ignorarium::diag::{Diagnostic, Severity};
 use ignorarium::prior::{NoPriorUse, PriorError, PriorUse, normalized_sha256};
 use ignorarium::records;
 use ignorarium::rules::{
-    self, BoxRecords, CheckCtx, Lookup, Power, Rule, StratumInput, estimate_inputs,
+    self, Borrowed, BoxRecords, CheckCtx, Lookup, Power, Rule, StratumInput, estimate_inputs,
 };
 use ignorarium::stream::Next;
 use serde_json::{Value, json};
@@ -161,7 +162,8 @@ fn hyp(field: &str, v: Option<Value>) -> Edit {
 /// 2 and icc 0 a cluster mean has sd 0.89; 30 below the margin, in a range of half-width 50,
 /// each scores about -0.6, and the simulated test at the first stream level (0.005) and power
 /// 0.8 needs 22 clusters (31 at a share of 0.1). A selection stage picks `arm-a` or `arm-b` on the selection
-/// input, and the confirmation stage runs the pick, which `h1()` tests.
+/// input, and the confirmation stage runs the pick, which `h1()` tests. Its code is not
+/// `pilot`'s, and it declares a deviation from `pilot`.
 fn ok() -> Value {
     let mut s = spec_at("../../templates/numeric-ablation.toml");
     let edits = [
@@ -185,6 +187,7 @@ fn ok() -> Value {
             "/mutations/triggers",
             json!([{ "id": "T1", "metric": "ppl-ratio", "threshold_e": 1.0 }]),
         ),
+        ("/pins/deviations", json!([deviation("pilot")])),
     ];
     for (p, v) in edits {
         set(&mut s, p, Some(v));
@@ -193,6 +196,37 @@ fn ok() -> Value {
 }
 
 type Edit = (&'static str, Option<Value>);
+
+/// A deviation from study `from`, made before the confirmation data were collected.
+fn deviation(from: &str) -> Value {
+    json!({
+        "from": from, "reason": "The payload reads a newer tokenizer.",
+        "timing": "before-collection"
+    })
+}
+
+/// The model input `pilot` ran with (`common::instrument()`), as the plan declares it.
+fn model_input() -> Value {
+    json!({
+        "path": "model/m.bin", "sha256": sha256_hex(common::MODEL), "role": "model",
+        "licence": { "spdx": "", "type": "unspecified", "source": "", "creators": [] }
+    })
+}
+
+/// `ok()` without its deviation, pinning `pilot`'s code: its payload (with the prefix), its
+/// environment, and its one model input in place of the calibration input; then `extra`.
+fn matched(extra: Vec<Edit>) -> Vec<Edit> {
+    let i = common::instrument();
+    and(
+        vec![
+            ("/pins/deviations", None),
+            ("/pins/payload", j(json!(format!("sha256:{}", i.payload)))),
+            ("/pins/environment", j(json!(i.environment))),
+            ("/inputs/0", j(model_input())),
+        ],
+        extra,
+    )
+}
 
 /// Edits on `ok()`, then the exact diagnostics (code, path) in rule-file order.
 struct Fault {
@@ -266,6 +300,10 @@ fn guard(ptr: &'static str, v: Value) -> Vec<Edit> {
 }
 
 const POWER: (&str, &str) = ("E-CNF-002", "question.hypotheses[0]");
+/// The first hypothesis takes estimates from a study whose code the plan does not pin.
+const SAME: (&str, &str) = ("E-REF-003", "question.hypotheses[0].estimates");
+/// The first deviation names a study the plan takes no estimates from.
+const STRAY: (&str, &str) = ("E-REF-003", "pins.deviations[0].from");
 /// The start of the problem the simulation states.
 const SIM: &str = "The confirmation sample is too small. Simulated power ";
 
@@ -311,27 +349,114 @@ fn faults() -> Vec<Fault> {
         // Selection inputs do not count: 22 confirmation inputs pass, 21 do not.
         f(vec![("/inputs", j(inputs(21, 5)))], vec![POWER]),
         f(vec![("/inputs", j(inputs(22, 5)))], vec![]),
-        // The sd and icc come from a finished study's estimates.
+        // The sd and icc come from a finished study's estimates. A plan that takes none from
+        // pilot declares a deviation from a study it takes no estimates from.
         f(
             vec![hyp("estimates", None)],
-            vec![("E-CNF-003", "question.hypotheses[0].estimates")],
+            vec![STRAY, ("E-CNF-003", "question.hypotheses[0].estimates")],
         ),
         f(
             vec![hyp("estimates", j(json!({ "from": "nobody" })))],
-            vec![("W-REF-001", "question.hypotheses[0].estimates")],
+            vec![("W-REF-001", "question.hypotheses[0].estimates"), STRAY],
         ),
         f(
             vec![hyp("estimates", j(json!({ "from": "my-study" })))],
-            vec![("E-REF-002", "question.hypotheses[0].estimates.from")],
+            vec![
+                ("E-REF-002", "question.hypotheses[0].estimates.from"),
+                STRAY,
+            ],
         ),
         // A mistyped or malformed reference is the generic rules'.
-        f(vec![hyp("estimates", j(json!("pilot")))], vec![]),
-        f(vec![hyp("estimates", j(json!({})))], vec![]),
+        f(vec![hyp("estimates", j(json!("pilot")))], vec![STRAY]),
+        f(vec![hyp("estimates", j(json!({})))], vec![STRAY]),
         f(
             vec![hyp("estimates", j(json!({ "from": "../pilot" })))],
+            vec![STRAY],
+        ),
+        f(vec![hyp("estimates", j(json!({ "from": 3 })))], vec![STRAY]),
+        // The plan pins the code of the study it takes estimates from, or declares a deviation
+        // from it. `matched` pins pilot's code.
+        f(matched(vec![]), vec![]),
+        f(
+            matched(vec![("/pins/payload", j(json!("ab".repeat(32))))]),
+            vec![SAME],
+        ),
+        f(
+            matched(vec![(
+                "/pins/payload",
+                j(json!(common::instrument().payload)),
+            )]),
             vec![],
         ),
-        f(vec![hyp("estimates", j(json!({ "from": 3 })))], vec![]),
+        f(
+            matched(vec![(
+                "/pins/payload",
+                j(json!(format!(" sha256:{} ", common::instrument().payload))),
+            )]),
+            vec![],
+        ),
+        // An empty payload pin stands for the payload folder's hash; this root has no folder.
+        f(matched(vec![("/pins/payload", j(json!("")))]), vec![SAME]),
+        f(
+            matched(vec![("/pins/environment", j(json!("")))]),
+            vec![SAME],
+        ),
+        f(
+            matched(vec![(
+                "/pins/environment",
+                j(json!(format!(
+                    "sha256:{}",
+                    common::instrument().environment
+                ))),
+            )]),
+            vec![],
+        ),
+        f(
+            matched(vec![("/inputs/0/role", j(json!("calibration")))]),
+            vec![SAME],
+        ),
+        f(
+            matched(vec![("/inputs/0/sha256", j(json!("")))]),
+            vec![SAME],
+        ),
+        f(
+            matched(vec![
+                ("/pins/payload", j(json!(""))),
+                ("/pins/deviations", j(json!([deviation("pilot")]))),
+            ]),
+            vec![],
+        ),
+        f(
+            matched(vec![("/pins/deviations", j(json!([deviation("nobody")])))]),
+            vec![STRAY],
+        ),
+        f(
+            vec![("/pins/deviations/0/from", j(json!("nobody")))],
+            vec![SAME, STRAY],
+        ),
+        f(
+            vec![("/pins/deviations/0/from", j(json!("my-study")))],
+            vec![SAME, STRAY],
+        ),
+        f(
+            vec![(
+                "/pins/deviations",
+                j(json!([deviation("pilot"), deviation("nobody")])),
+            )],
+            vec![("E-REF-003", "pins.deviations[1].from")],
+        ),
+        // A deviation whose study is mistyped or no study id is the generic rules', and does
+        // not cover pilot.
+        f(vec![("/pins/deviations/0/from", j(json!(3)))], vec![SAME]),
+        f(
+            vec![("/pins/deviations/0/from", j(json!("Pilot")))],
+            vec![SAME],
+        ),
+        // An exploratory plan takes no estimates, and its deviations are not read.
+        f(
+            exploring(vec![("/pins/deviations/0/from", j(json!("nobody")))]),
+            vec![],
+        ),
         // No confirmation input leaves the stratum with no data and the gate with no cluster.
         f(
             vec![("/inputs", j(inputs(0, 5)))],
@@ -543,7 +668,7 @@ fn faults() -> Vec<Fault> {
         // it, so the one fault gives one diagnostic.
         f(
             vec![hyp("claim", None)],
-            vec![("E-CNF-006", "question.hypotheses[0].claim")],
+            vec![STRAY, ("E-CNF-006", "question.hypotheses[0].claim")],
         ),
         // A hypothesis names a listed outcome, and a contrast with non-zero weights.
         f(
@@ -733,7 +858,7 @@ fn faults() -> Vec<Fault> {
             vec![hyp("statistic", j(json!({ "mean": ["a", 1] })))],
             vec![],
         ),
-        f(vec![("/question/hypotheses", j(json!([1])))], vec![]),
+        f(vec![("/question/hypotheses", j(json!([1])))], vec![STRAY]),
         // With no outcome list or no confirmation list, the generic rules report that.
         f(
             vec![("/outcomes", None)],
@@ -949,10 +1074,12 @@ fn faults() -> Vec<Fault> {
     ]
 }
 
-/// The study folder every table row runs in: `f.toml` exists, `data/example.txt` does not.
+/// The study folder every table row runs in: `f.toml` and `pilot`'s model file
+/// `model/m.bin` exist, `data/example.txt` does not.
 fn study_dir() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("f.toml"), "x = 1\n").unwrap();
+    write(dir.path(), "model/m.bin", common::MODEL);
     dir
 }
 
@@ -1339,7 +1466,10 @@ fn a_reference_to_itself_is_refused() {
     );
     assert_eq!(
         codes_paths(&d),
-        [("E-REF-002", "question.hypotheses[0].estimates.from")]
+        [
+            ("E-REF-002", "question.hypotheses[0].estimates.from"),
+            STRAY
+        ]
     );
     assert_eq!(
         d[0].problem,
@@ -1350,7 +1480,7 @@ fn a_reference_to_itself_is_refused() {
     s["study"]["id"] = json!("other-study");
     assert_eq!(
         codes_paths(&named(&s, dir.path())),
-        [("W-REF-001", "question.hypotheses[0].estimates")]
+        [("W-REF-001", "question.hypotheses[0].estimates"), STRAY]
     );
 }
 
@@ -1698,6 +1828,7 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
         "E-LBL-001",
         "E-REF-002",
         "W-REF-001",
+        "E-REF-003",
         "E-CNF-001",
         "E-CNF-002",
         "E-CNF-003",
@@ -3619,4 +3750,427 @@ fn an_estimates_study_that_has_not_finished_waits_while_a_param_waits_too() {
     // A finished study waits on nothing; only the param does.
     let done = common::Studies(vec![("pilot", Ok(common::records_for("pilot", &pilot)))]);
     assert_eq!(waits(done), [bits]);
+}
+
+// ---- the code of a study the plan takes estimates from ----
+
+const REF003: &str =
+    "The plan takes estimates from a study that ran other code, and declares no deviation from it.";
+
+/// The problem E-REF-003 states at a hypothesis whose study `pilot` ran `payload` in
+/// `environment`, when this plan differs in `parts`.
+fn ran(payload: &str, environment: &str, parts: &str) -> String {
+    format!(
+        "{REF003} Study pilot ran payload {payload}, environment {environment}; this plan differs in {parts}."
+    )
+}
+
+/// A box whose finished study `pilot` ran `instrument`.
+fn ran_with(instrument: Instrument) -> common::Studies {
+    let records = common::finished_with(instrument, pilot_estimates());
+    common::Studies(vec![("pilot", Ok(common::records_for("pilot", &records)))])
+}
+
+/// The E-REF-003 diagnostics of the plan `edits` make, in a box whose `pilot` ran `instrument`.
+fn ref003(dir: &Path, edits: &[Edit], instrument: Instrument) -> Vec<Diagnostic> {
+    rules::check_named(&edited(edits), v0(), &with_box(dir, ran_with(instrument)))
+        .into_iter()
+        .filter(|d| d.code == "E-REF-003")
+        .collect()
+}
+
+#[test]
+fn matching_pins_need_no_deviation() {
+    let dir = study_dir();
+    let spec = edited(&matched(vec![]));
+    assert!(named(&spec, dir.path()).is_empty());
+    let analysis = hashes(pilot_estimates())[1].clone();
+    assert_eq!(
+        rules::borrowed(&spec, &ctx(dir.path())),
+        [Borrowed {
+            study: "pilot".into(),
+            analysis: analysis.clone(),
+            instrument: common::instrument(),
+            differs: vec![],
+        }]
+    );
+    // The base plan pins none of pilot's code.
+    assert_eq!(
+        rules::borrowed(&ok(), &ctx(dir.path())),
+        [Borrowed {
+            study: "pilot".into(),
+            analysis,
+            instrument: common::instrument(),
+            differs: vec!["payload", "environment", "inputs"],
+        }]
+    );
+}
+
+#[test]
+fn a_declared_deviation_clears_the_hit() {
+    let dir = study_dir();
+    let i = common::instrument();
+    assert!(named(&ok(), dir.path()).is_empty());
+    let d = named(&edited(&[("/pins/deviations", None)]), dir.path());
+    assert_eq!(codes_paths(&d), [SAME]);
+    assert_eq!(
+        d[0].problem,
+        ran(&i.payload, &i.environment, "payload, environment, inputs")
+    );
+    // Each hypothesis that takes estimates from the study is reported, and one deviation
+    // covers them all.
+    let two = and(shared(&[0.5, 0.5]), vec![("/pins/deviations", None)]);
+    assert_eq!(
+        codes_paths(&named(&edited(&two), dir.path())),
+        [SAME, ("E-REF-003", "question.hypotheses[1].estimates")]
+    );
+    assert!(named(&edited(&shared(&[0.5, 0.5])), dir.path()).is_empty());
+    // A deviation from another study covers nothing, and names a study the plan takes no
+    // estimates from.
+    let d = named(
+        &edited(&[("/pins/deviations/0/from", j(json!("nobody")))]),
+        dir.path(),
+    );
+    assert_eq!(codes_paths(&d), [SAME, STRAY]);
+    assert_eq!(
+        d[1].problem,
+        format!("{REF003} No hypothesis with a claim takes estimates from study nobody.")
+    );
+    // A hypothesis without a claim takes no estimates, whatever it names: it is not reported,
+    // and a deviation from its study alone names a study the plan takes no estimates from.
+    let mut p1 = descriptive("P1");
+    p1["estimates"] = json!({ "from": "pilot" });
+    let mut later = h1();
+    later["estimates"] = json!({ "from": "later" });
+    let reported = |edits: &[Edit]| -> Vec<(String, String)> {
+        (named(&edited(edits), dir.path()).into_iter())
+            .filter(|d| d.code == "E-REF-003")
+            .map(|d| (d.code, d.path))
+            .collect()
+    };
+    let both = ("/question/hypotheses", j(json!([h1(), p1.clone()])));
+    assert_eq!(
+        reported(&[both, ("/pins/deviations", None)]),
+        [(SAME.0.to_string(), SAME.1.to_string())]
+    );
+    let apart = ("/question/hypotheses", j(json!([later, p1])));
+    let declared = json!([deviation("later"), deviation("pilot")]);
+    assert_eq!(
+        reported(&[apart, ("/pins/deviations", j(declared))]),
+        [(
+            "E-REF-003".to_string(),
+            "pins.deviations[1].from".to_string()
+        )]
+    );
+}
+
+#[test]
+fn each_part_that_differs_is_named() {
+    let dir = study_dir();
+    let i = common::instrument();
+    let other = "ab".repeat(32);
+    let o = other.as_str();
+    for (edits, parts) in [
+        (vec![("/pins/payload", j(json!(o)))], "payload"),
+        (vec![("/pins/environment", j(json!("")))], "environment"),
+        (vec![("/pins/environment", j(json!(o)))], "environment"),
+        // Another pin, path or role of the model input; another input of the code.
+        (vec![("/inputs/0/sha256", j(json!(o)))], "inputs"),
+        (vec![("/inputs/0/path", j(json!("model/n.bin")))], "inputs"),
+        (vec![("/inputs/0/role", j(json!("calibration")))], "inputs"),
+        (
+            vec![
+                ("/inputs/2", j(model_input())),
+                ("/inputs/2/path", j(json!("model/n.bin"))),
+            ],
+            "inputs",
+        ),
+        (
+            vec![
+                ("/pins/payload", j(json!(o))),
+                ("/inputs/0/sha256", j(json!(o))),
+            ],
+            "payload, inputs",
+        ),
+    ] {
+        let d = ref003(dir.path(), &matched(edits.clone()), i.clone());
+        assert_eq!(codes_paths(&d), [SAME], "{edits:?}");
+        assert_eq!(d[0].problem, ran(&i.payload, &i.environment, parts));
+    }
+    // Selection and confirmation inputs are data, not code.
+    let data = matched(vec![("/inputs/2/sha256", j(json!(o)))]);
+    assert!(ref003(dir.path(), &data, i.clone()).is_empty());
+    // The study's inputs are compared as a set, whatever order the plan lists them in.
+    let two = Instrument {
+        inputs: vec![
+            ("model/a.bin".into(), "model".into(), other.clone()),
+            (
+                "model/m.bin".into(),
+                "model".into(),
+                sha256_hex(common::MODEL),
+            ),
+        ],
+        ..i.clone()
+    };
+    let mut second = model_input();
+    second["path"] = json!("model/a.bin");
+    second["sha256"] = json!(o);
+    let listed = matched(vec![("/inputs/2", j(second))]);
+    assert!(ref003(dir.path(), &listed, two.clone()).is_empty());
+    let missing = ref003(dir.path(), &matched(vec![]), two);
+    assert_eq!(
+        missing[0].problem,
+        ran(&i.payload, &i.environment, "inputs")
+    );
+    // An empty pin pins nothing, even where the study names no digest.
+    let unpinned = Instrument {
+        inputs: vec![("model/m.bin".into(), "model".into(), String::new())],
+        ..i.clone()
+    };
+    let empty = matched(vec![("/inputs/0/sha256", j(json!("")))]);
+    let d = ref003(dir.path(), &empty, unpinned);
+    assert_eq!(d[0].problem, ran(&i.payload, &i.environment, "inputs"));
+}
+
+#[test]
+fn a_source_without_one_environment_needs_a_deviation() {
+    let dir = study_dir();
+    let i = common::instrument();
+    // Rows in two environments name none; rows on the host name no image a pin can name.
+    for (theirs, shown) in [("", "none"), ("host", "host")] {
+        for pin in [i.environment.as_str(), theirs] {
+            let source = Instrument {
+                environment: theirs.into(),
+                ..i.clone()
+            };
+            let edits = matched(vec![("/pins/environment", j(json!(pin)))]);
+            let d = ref003(dir.path(), &edits, source);
+            assert_eq!(codes_paths(&d), [SAME], "{theirs:?} {pin:?}");
+            assert_eq!(d[0].problem, ran(&i.payload, shown, "environment"));
+        }
+    }
+    // A study recorded before its analysis named the code differs in every part.
+    let d = ref003(dir.path(), &matched(vec![]), Instrument::default());
+    assert_eq!(
+        d[0].problem,
+        ran("none", "none", "payload, environment, inputs")
+    );
+}
+
+#[test]
+fn an_empty_payload_pin_stands_for_the_payload_folder() {
+    let dir = study_dir();
+    write(dir.path(), "payload/run", b"#!/bin/sh\n");
+    let folder = ignorarium::payload::tree_hash(&dir.path().join("payload")).unwrap();
+    let source = Instrument {
+        payload: folder.clone(),
+        ..common::instrument()
+    };
+    let pinned = |pin: &str| {
+        ref003(
+            dir.path(),
+            &matched(vec![("/pins/payload", j(json!(pin)))]),
+            source.clone(),
+        )
+    };
+    assert!(pinned("").is_empty());
+    assert!(pinned(&folder).is_empty());
+    // A pin is the payload the plan names, whatever the folder holds.
+    assert_eq!(codes_paths(&pinned(&"ab".repeat(32))), [SAME]);
+    write(dir.path(), "payload/run", b"#!/bin/sh\nexit 1\n");
+    assert_eq!(codes_paths(&pinned("")), [SAME]);
+    assert!(pinned(&folder).is_empty());
+}
+
+#[test]
+fn a_pending_source_is_left_to_w_ref_001() {
+    let dir = study_dir();
+    let begun = common::records_for("pilot", &common::finished(pilot_estimates())[..1]);
+    let wait = ("W-REF-001", "question.hypotheses[0].estimates");
+    let unpinned = edited(&[("/pins/deviations", None)]);
+    for registered in [false, true] {
+        let held = if registered {
+            vec![("pilot", Ok(begun.clone()))]
+        } else {
+            vec![]
+        };
+        let c = with_box(dir.path(), common::Studies(held));
+        assert_eq!(
+            codes_paths(&rules::check_named(&unpinned, v0(), &c)),
+            [wait],
+            "{registered}"
+        );
+        assert!(rules::borrowed(&unpinned, &c).is_empty());
+        // A deviation from the study it waits on names a study it takes estimates from.
+        assert_eq!(
+            codes_paths(&rules::check_named(&ok(), v0(), &c)),
+            [wait],
+            "{registered}"
+        );
+    }
+    // A record log that cannot be read is E-CNF-003's.
+    let torn = common::Studies(vec![("pilot", Err("line 2 is not a whole record".into()))]);
+    let c = with_box(dir.path(), torn);
+    assert_eq!(
+        codes_paths(&rules::check_named(&unpinned, v0(), &c)),
+        [("E-CNF-003", "question.hypotheses[0].estimates")]
+    );
+    assert!(rules::borrowed(&unpinned, &c).is_empty());
+}
+
+#[test]
+fn the_studies_borrowed_from_are_the_finished_ones_each_once_first_mention_first() {
+    let dir = study_dir();
+    let claimed = |id: &str, from: &str| {
+        let mut h = h1();
+        h["id"] = json!(id);
+        h["estimates"] = json!({ "from": from });
+        h["alpha_share"] = json!(0.25);
+        h
+    };
+    let mut described = descriptive("P1");
+    described["estimates"] = json!({ "from": "late" });
+    let spec = edited(&[(
+        "/question/hypotheses",
+        j(json!([
+            claimed("H1", "early"),
+            claimed("H2", "pilot"),
+            claimed("H3", "early"),
+            claimed("H4", "pending"),
+            described,
+        ])),
+    )]);
+    let early = Instrument {
+        payload: "aa".repeat(32),
+        ..common::instrument()
+    };
+    let run = |id: &'static str, i: Instrument| {
+        let records = common::records_for(id, &common::finished_with(i, pilot_estimates()));
+        let analysis = records::hash(&records[1]);
+        ((id, Ok::<_, String>(records)), analysis)
+    };
+    let (e, early_hash) = run("early", early.clone());
+    let (p, pilot_hash) = run("pilot", common::instrument());
+    let (l, _) = run("late", common::instrument());
+    let pending = (
+        "pending",
+        Ok(common::records_for(
+            "pending",
+            &common::finished(vec![])[..1],
+        )),
+    );
+    let c = with_box(dir.path(), common::Studies(vec![l, pending, p, e]));
+    let parts = vec!["payload", "environment", "inputs"];
+    assert_eq!(
+        rules::borrowed(&spec, &c),
+        [
+            Borrowed {
+                study: "early".into(),
+                analysis: early_hash,
+                instrument: early,
+                differs: parts.clone(),
+            },
+            Borrowed {
+                study: "pilot".into(),
+                analysis: pilot_hash,
+                instrument: common::instrument(),
+                differs: parts,
+            },
+        ]
+    );
+    // An exploratory plan takes no estimates.
+    let mut s = spec.clone();
+    s["study"]["mode"] = json!("exploratory");
+    assert!(rules::borrowed(&s, &c).is_empty());
+}
+
+#[test]
+fn a_deviation_names_a_study_a_reason_and_a_known_timing() {
+    type Found = Vec<(String, String)>;
+    let dir = study_dir();
+    let at = |edits: Vec<Edit>| -> Found {
+        let (_, _, d) = rules::check_all(&edited(&edits), v0(), &ctx(dir.path()));
+        (d.into_iter())
+            .filter(|x| x.path.starts_with("pins"))
+            .map(|x| (x.code, x.path))
+            .collect()
+    };
+    let one = |code: &str, path: &str| vec![(code.to_string(), path.to_string())];
+    const T: &str = "/pins/deviations/0/timing";
+    for timing in [
+        "before-collection",
+        "during-collection",
+        "after-collection-before-access",
+        "after-access-before-results",
+        "after-results",
+    ] {
+        assert!(at(vec![(T, j(json!(timing)))]).is_empty(), "{timing}");
+    }
+    assert!(at(vec![]).is_empty());
+    let cases: Vec<(Vec<Edit>, Found)> = vec![
+        (
+            vec![(T, j(json!("later")))],
+            one("E-ENM-001", "pins.deviations[0].timing"),
+        ),
+        (
+            vec![(T, j(json!(3)))],
+            one("E-TYP-001", "pins.deviations[0].timing"),
+        ),
+        (
+            vec![(T, None)],
+            one("E-REQ-001", "pins.deviations[0].timing"),
+        ),
+        (
+            vec![("/pins/deviations/0/reason", j(json!("")))],
+            one("E-REF-003", "pins.deviations[0].reason"),
+        ),
+        (
+            vec![("/pins/deviations/0/reason", j(json!(["why"])))],
+            one("E-TYP-001", "pins.deviations[0].reason"),
+        ),
+        (
+            vec![("/pins/deviations/0/reason", None)],
+            [
+                one("E-REQ-001", "pins.deviations[0].reason"),
+                one("E-REF-003", "pins.deviations[0].reason"),
+            ]
+            .concat(),
+        ),
+        (
+            vec![("/pins/deviations/0/from", None)],
+            one("E-REQ-001", "pins.deviations[0].from"),
+        ),
+        (
+            vec![("/pins/deviations/0/from", j(json!(3)))],
+            one("E-TYP-001", "pins.deviations[0].from"),
+        ),
+        (
+            vec![("/pins/deviations/0/from", j(json!("Pilot")))],
+            one("E-FMT-001", "pins.deviations[0].from"),
+        ),
+        (
+            vec![("/pins/deviations/0/note", j(json!("x")))],
+            one("E-KEY-001", "pins.deviations[0].note"),
+        ),
+        (
+            vec![("/pins/deviations", j(json!("pilot")))],
+            one("E-TYP-001", "pins.deviations"),
+        ),
+        (
+            vec![("/pins/deviations", j(json!(["pilot"])))],
+            one("E-TYP-001", "pins.deviations[0]"),
+        ),
+        (
+            vec![(
+                "/pins/deviations",
+                j(json!([deviation("pilot"), deviation("pilot")])),
+            )],
+            one("E-UNQ-001", "pins.deviations[1].from"),
+        ),
+        // A plan with no deviation lists none.
+        (vec![("/pins/deviations", j(json!([])))], vec![]),
+    ];
+    for (edits, want) in cases {
+        assert_eq!(at(edits.clone()), want, "{edits:?}");
+    }
 }

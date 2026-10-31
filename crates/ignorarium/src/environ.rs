@@ -1,7 +1,7 @@
 //! Run-environment identity: a recipe hash, a container build whose saved
 //! image goes into the content store, and a measured rebuild rate.
 use crate::canon::{sha256_hex, to_canonical};
-use crate::store::{Store, StoreError};
+use crate::store::{Store, StoreError, is_digest};
 use serde_json::json;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -71,10 +71,6 @@ pub fn recipe_hash(r: &Recipe) -> String {
     });
     // A `Value` built from strings always serializes.
     sha256_hex(&to_canonical(&v).unwrap_or_default())
-}
-
-fn is_digest(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// True when the Dockerfile has a `FROM` and every `FROM` names an earlier

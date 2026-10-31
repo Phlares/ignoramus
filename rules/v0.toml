@@ -72,6 +72,9 @@ target = [
   { path = "pins.environment", check = "required" },
   { path = "pins.payload", check = "required" },
   { path = "pins.rule_base", check = "required" },
+  { path = "pins.deviations[*].from", check = "required" },
+  { path = "pins.deviations[*].reason", check = "required" },
+  { path = "pins.deviations[*].timing", check = "required" },
   { path = "mutations", check = "required" },
   { path = "mutations.operators", check = "required" },
   { path = "mutations.operators[*].name", check = "required" },
@@ -195,6 +198,11 @@ target = [
   { path = "pins.environment", check = "type", kind = "string" },
   { path = "pins.payload", check = "type", kind = "string" },
   { path = "pins.rule_base", check = "type", kind = "string" },
+  { path = "pins.deviations", check = "type", kind = "array" },
+  { path = "pins.deviations[*]", check = "type", kind = "table" },
+  { path = "pins.deviations[*].from", check = "type", kind = "string" },
+  { path = "pins.deviations[*].reason", check = "type", kind = "string" },
+  { path = "pins.deviations[*].timing", check = "type", kind = "string" },
   { path = "mutations", check = "type", kind = "table" },
   { path = "mutations.depth_cap", check = "type", kind = "int" },
   { path = "mutations.operators", check = "type", kind = "array" },
@@ -239,6 +247,7 @@ target = [
   { path = "inputs[*].licence.type", check = "enum", values = ["common", "custom", "request-form", "unspecified"] },
   { path = "mutations.operators[*].type", check = "enum", values = ["int", "float", "enum"] },
   { path = "report.publish", check = "enum", values = ["none", "zenodo-sandbox"] },
+  { path = "pins.deviations[*].timing", check = "enum", values = ["before-collection", "during-collection", "after-collection-before-access", "after-access-before-results", "after-results"] },
 ]
 
 [[rule]]
@@ -266,7 +275,7 @@ target = [
 code = "E-FMT-001"
 severity = "error"
 problem = "An id, a stratum or a study reference is not ASCII letters and digits joined by single hyphens."
-instruction = "Use ASCII lowercase letters and digits, joined by single hyphens, for example my-study. A hypothesis id may also use capital letters, for example E1 or P1a. A stratum may be empty where the design or an input names none, but not in the strata a hypothesis lists. estimates.from and a param's from name a study id."
+instruction = "Use ASCII lowercase letters and digits, joined by single hyphens, for example my-study. A hypothesis id may also use capital letters, for example E1 or P1a. A stratum may be empty where the design or an input names none, but not in the strata a hypothesis lists. estimates.from, a param's from and a deviation's from name a study id."
 why = "Ids and strata become file names, seed inputs and record keys, and are printed in diagnostics. Accents and look-alike letters would make two ids that look the same differ."
 sources = ["https://toml.io/en/v1.0.0"]
 target = [
@@ -279,6 +288,7 @@ target = [
   { path = "question.hypotheses[*].strata[*]", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
   { path = "question.hypotheses[*].estimates.from", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
   { path = "design.conditions[*].params.*.from", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
+  { path = "pins.deviations[*].from", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
 ]
 
 [[rule]]
@@ -319,7 +329,7 @@ code = "E-UNQ-001"
 severity = "error"
 problem = "A list repeats an id, path or name."
 instruction = "Give every entry its own value. Remove the repeat, or rename it."
-why = "A repeated input would run its units twice and count them twice in the power gate. A stage that lists a condition twice runs it twice. A repeated condition, outcome, measure, hypothesis, operator or trigger id makes later steps pick one entry and ignore the other."
+why = "A repeated input would run its units twice and count them twice in the power gate. A stage that lists a condition twice runs it twice. A repeated condition, outcome, measure, hypothesis, operator or trigger id makes later steps pick one entry and ignore the other. Two deviations from one study would record two reasons for one change."
 sources = []
 target = [
   { path = "design.conditions", check = "unique", key = "id" },
@@ -331,6 +341,7 @@ target = [
   { path = "inputs", check = "unique", key = "path" },
   { path = "mutations.operators", check = "unique", key = "name" },
   { path = "mutations.triggers", check = "unique", key = "id" },
+  { path = "pins.deviations", check = "unique", key = "from" },
 ]
 
 [[rule]]
@@ -412,6 +423,19 @@ sources = []
 target = [
   { path = "question.hypotheses[*].estimates", check = "named:reference-finished" },
   { path = "design.conditions[*].params.*", check = "named:reference-finished" },
+]
+
+[[rule]]
+code = "E-REF-003"
+severity = "error"
+problem = "The plan takes estimates from a study that ran other code, and declares no deviation from it."
+instruction = "Pin the source study's payload, environment and model and calibration inputs, or add a `[[pins.deviations]]` entry with `from`, `reason` and `timing`."
+why = "Estimates describe the code that produced them. A pipeline is frozen before the confirmatory data exist, and a change is reported with its reason and when it happened."
+sources = ["https://journals.plos.org/plosbiology/article?id=10.1371/journal.pbio.3000246", "https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1010571", "https://doi.org/10.1177/25152459231213802"]
+target = [
+  { path = "question.hypotheses[*].estimates", check = "named:estimates-same-code" },
+  { path = "pins.deviations[*].from", check = "named:deviation-borrowed" },
+  { path = "pins.deviations[*].reason", check = "non-empty" },
 ]
 
 [[rule]]

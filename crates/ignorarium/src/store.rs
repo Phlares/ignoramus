@@ -249,11 +249,7 @@ impl Store {
 
     /// The blob path for `digest`. Refuses anything but 64 lowercase hex characters.
     pub fn path(&self, digest: &str) -> Result<PathBuf, StoreError> {
-        if digest.len() == 64
-            && digest
-                .bytes()
-                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        {
+        if is_digest(digest) {
             Ok(self.root.join(digest))
         } else {
             Err(StoreError::BadDigest)
@@ -307,4 +303,9 @@ impl<R: Read> Read for Seen<'_, R> {
         self.head.extend_from_slice(&buf[..n.min(room)]);
         Ok(n)
     }
+}
+
+/// True when `s` is a SHA-256 digest as the store names blobs: 64 lowercase hex characters.
+pub fn is_digest(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }

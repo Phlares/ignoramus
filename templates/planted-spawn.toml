@@ -92,6 +92,10 @@ creators = []
 environment = ""
 payload = ""                    # "", or the hash of payload/ under the study root that register prints
 rule_base = ""
+# [[pins.deviations]]           # confirmatory: one per study in estimates whose payload, environment, or model and calibration inputs this plan does not pin
+# from = "my-pilot"             # the study id
+# reason = "the payload changed after the pilot"  # why this plan runs other code
+# timing = "before-collection"  # when, against the confirmation data: before-collection | during-collection | after-collection-before-access | after-access-before-results | after-results
 
 [mutations]
 depth_cap = 2

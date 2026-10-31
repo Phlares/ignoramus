@@ -353,6 +353,10 @@ fn fat_templates() -> Vec<Value> {
             second["id"] = json!("second");
             second["measure"] = json!("second-measure");
             s["inputs"][0]["licence"]["creators"] = json!(["x", "y"]);
+            s["pins"]["deviations"] = json!([
+                { "from": "pilot", "reason": "r", "timing": "before-collection" },
+                { "from": "early", "reason": "r", "timing": "after-results" },
+            ]);
             s["mutations"]["operators"] = json!([
                 { "name": "o1", "type": "int", "range": [1, 2], "acts_on": "a" },
                 { "name": "o2", "type": "int", "range": [1, 2], "acts_on": "a" },

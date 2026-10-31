@@ -4,7 +4,7 @@ use super::check::{self, Assessed, PENDING};
 use super::{CliError, Ctx, Done};
 use crate::backend::output::file_digest;
 use crate::canon::to_canonical;
-use crate::derived::{Alpha, REGISTER, Register, Resolved};
+use crate::derived::{Alpha, PinDeviated, REGISTER, Register, Resolved};
 use crate::diag::render_human;
 use crate::estimate::defaults_json;
 use crate::files::{self, WriteOnceError, write_once};
@@ -71,13 +71,14 @@ fn put(dir: &Path, name: &str, bytes: &[u8], mode: u32) -> Result<(), CliError> 
 }
 
 /// What `register` freezes besides the spec: the identity of the study root, the payload
-/// folder's hash, the digest of the stored copy of each input present, and the values taken
-/// from other studies.
+/// folder's hash, the digest of the stored copy of each input present, the values taken
+/// from other studies, and the deviations from their code.
 struct Frozen {
     root_id: String,
     payload: String,
     inputs: Vec<(String, String)>,
     resolved: Vec<Resolved>,
+    deviations: Vec<PinDeviated>,
 }
 
 /// The body of the `register` record. A confirmatory plan holds the stream slot `alpha`, and
@@ -99,6 +100,7 @@ fn record_body(
         payload: frozen.payload.clone(),
         inputs: frozen.inputs.clone(),
         resolved: frozen.resolved.clone(),
+        deviations: frozen.deviations.clone(),
         timestamp: alpha.is_some().then(|| "pending".into()),
         alpha,
     })
@@ -157,6 +159,7 @@ pub fn run(
     }
     let spec = Spec::from_value(&a.value).map_err(|e| io("spec does not fit the schema", e))?;
     let resolved = resolve(&a, &spec.design.conditions)?;
+    let deviations = deviated(&a, &spec);
     let checked = level_to_spend(&a)?;
     let id = spec.study.id.as_str();
     if home.study_dir(id).symlink_metadata().is_ok() {
@@ -173,6 +176,9 @@ pub fn run(
     .map_err(say)?;
     for r in &resolved {
         writeln!(output, "{}", taken(r)).map_err(say)?;
+    }
+    for d in &deviations {
+        writeln!(output, "{}", deviates(d)).map_err(say)?;
     }
     if let Some(granted) = checked {
         writeln!(output, "{}", check::stream_line(granted)).map_err(say)?;
@@ -192,6 +198,7 @@ pub fn run(
         payload,
         inputs,
         resolved,
+        deviations,
     };
     let (leaf, alpha) = store(spec_path, home, &spec, &a, checked, &key, &frozen)?;
     if let (Some(approved), Some(spent)) = (checked, &alpha)
@@ -322,6 +329,46 @@ fn taken(r: &Resolved) -> String {
         })
         .collect();
     format!("takes {} from {}: {}", r.path, r.study, groups.join("; "))
+}
+
+/// Each deviation the plan declares, with the parts of its study's code the plan does not
+/// pin. The check passed, so each names a finished study the plan takes estimates from.
+fn deviated(a: &Assessed, spec: &Spec) -> Vec<PinDeviated> {
+    let found = rules::borrowed(&a.value, &a.ctx);
+    (spec.pins.deviations.iter())
+        .map(|d| PinDeviated {
+            from: d.from.clone(),
+            reason: d.reason.clone(),
+            timing: json!(d.timing).as_str().unwrap_or_default().into(),
+            differs: (found.iter().find(|b| b.study == d.from)).map_or(vec![], |b| {
+                b.differs.iter().map(|p| p.to_string()).collect()
+            }),
+        })
+        .collect()
+}
+
+/// `deviates from <study> in <parts, or nothing> (<timing>): <reason>`, which a person
+/// approves with the plan. A control character in the reason prints as its escape, so the
+/// reason stays on its line.
+fn deviates(d: &PinDeviated) -> String {
+    let parts = if d.differs.is_empty() {
+        "nothing".into()
+    } else {
+        d.differs.join(", ")
+    };
+    let reason: String = (d.reason.chars())
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect();
+    format!(
+        "deviates from {} in {parts} ({}): {reason}",
+        d.from, d.timing
+    )
 }
 
 fn mode_of(a: &Assessed) -> &str {
@@ -597,6 +644,12 @@ mod tests {
                 records: vec!["ef".repeat(32)],
                 value: json!({ "": { "sd": 2.0, "icc": 0.1 } }),
             }],
+            deviations: vec![PinDeviated {
+                from: "pilot".into(),
+                reason: "r".into(),
+                timing: "after-results".into(),
+                differs: vec!["environment".into()],
+            }],
         };
         let exp = record_body("sha256:ab", 3, "planlog", &filled, &frozen, None).unwrap();
         assert_eq!(
@@ -608,6 +661,8 @@ mod tests {
                    "resolved": [{ "path": "question.hypotheses[0].estimates",
                                   "study": "pilot", "records": ["ef".repeat(32)],
                                   "value": { "": { "sd": 2.0, "icc": 0.1 } } }],
+                   "deviations": [{ "from": "pilot", "reason": "r", "timing": "after-results",
+                                    "differs": ["environment"] }],
                    "alpha": null})
         );
         let slot = Alpha {

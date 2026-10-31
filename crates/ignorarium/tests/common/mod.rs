@@ -405,13 +405,20 @@ pub fn arm_a() -> serde_json::Value {
     estimate(&[("arm-a", 1.0, serde_json::json!({}))], "", 4.0, Some(0.1))
 }
 
+/// The bytes of the model input `instrument` names.
+pub const MODEL: &[u8] = b"weights v1";
+
 /// The instrument `finished` names: the payload of its register record, an image
-/// environment and one model input.
+/// environment and one model input, `model/m.bin` holding `MODEL`.
 pub fn instrument() -> derived::Instrument {
     derived::Instrument {
         payload: "cd".repeat(32),
         environment: "ef".repeat(32),
-        inputs: vec![("model/m.bin".into(), "model".into(), "01".repeat(32))],
+        inputs: vec![(
+            "model/m.bin".into(),
+            "model".into(),
+            ignorarium::canon::sha256_hex(MODEL),
+        )],
     }
 }
 
@@ -435,6 +442,7 @@ pub fn finished_with(
         payload: "cd".repeat(32),
         inputs: vec![],
         resolved: vec![],
+        deviations: vec![],
         alpha: None,
         timestamp: None,
     };
@@ -575,21 +583,26 @@ pub fn pilot(home: &Home, estimates: Vec<serde_json::Value>) -> Vec<String> {
     hashes[hashes.len() - n..].to_vec()
 }
 
-/// The template text as a confirmatory plan with its example claim, power_at, estimates and
-/// alpha share uncommented: below 0 by the median, with the sd and icc of `my-pilot`, at the
-/// whole level. It is sized at -20, where every unit lies below the margin, and 14 more
-/// confirmation inputs give the 15 clusters the median test needs: each scores 1, and
-/// 1.5^14 = 292 reaches 1/0.005.
+/// The template text as a confirmatory plan with its example claim, power_at, estimates,
+/// alpha share and deviation uncommented: below 0 by the median, with the sd and icc of
+/// `my-pilot`, whose code it does not pin, at the whole level. It is sized at -20, where every
+/// unit lies below the margin, and 14 more confirmation inputs give the 15 clusters the median
+/// test needs: each scores 1, and 1.5^14 = 292 reaches 1/0.005.
 pub fn confirmatory(t: String) -> String {
-    ["power_at", "estimates"]
-        .iter()
-        .fold(with_claim(t), |t, k| {
-            t.replace(&format!("# {k} = "), &format!("{k} = "))
-        })
-        .replace("power_at = -1.0", "power_at = -20.0")
-        .replacen("[pins]", &format!("{}[pins]", clusters("fiction", 14)), 1)
-        .replace("mode = \"exploratory\"", "mode = \"confirmatory\"")
-        .replace("label = \"signal\"", "label = \"confirmed\"")
+    [
+        "power_at = ",
+        "estimates = ",
+        "[[pins.deviations]]",
+        "from = ",
+        "reason = ",
+        "timing = ",
+    ]
+    .iter()
+    .fold(with_claim(t), |t, k| t.replace(&format!("# {k}"), k))
+    .replace("power_at = -1.0", "power_at = -20.0")
+    .replacen("[pins]", &format!("{}[pins]", clusters("fiction", 14)), 1)
+    .replace("mode = \"exploratory\"", "mode = \"confirmatory\"")
+    .replace("label = \"signal\"", "label = \"confirmed\"")
 }
 
 /// `n` confirmation inputs `data/<stratum>-<i>.txt` of 3 units in `stratum`, as spec text.

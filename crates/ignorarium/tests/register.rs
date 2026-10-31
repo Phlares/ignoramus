@@ -174,6 +174,8 @@ fn success_writes_four_files_a_plan_leaf_and_a_record() {
     assert_eq!(rec["body"]["leaf"], 0);
     assert_eq!(rec["body"]["log"], "planlog");
     assert!(rec["body"].get("timestamp").is_none());
+    assert_eq!(rec["body"]["deviations"], json!([]));
+    assert!(!out.contains("deviates"), "{out}");
 }
 
 #[test]
@@ -1146,4 +1148,64 @@ fn register_refuses_a_param_that_waits_or_has_no_selection() {
     assert!(out.contains("error[E-REF-002]"), "{out}");
     assert!(!out.contains(PROMPT), "{out}");
     assert!(!f.home.study_dir("my-study").exists());
+}
+
+/// The reason the template's example deviation gives.
+const REASON: &str = "the payload changed after the pilot";
+
+#[test]
+fn register_records_each_deviation_with_what_differs() {
+    let image = "ef".repeat(32);
+    let calibration = sha256_hex(b"Hello  World");
+    // `edit` on the confirmatory plan, which pins `image` and declares the template's
+    // deviation from my-pilot. my-pilot ran this plan's payload in `image`, with the
+    // calibration input the study root holds.
+    let registered = |edit: &dyn Fn(String) -> String| {
+        let (f, spec) = setup("numeric-ablation", |t| {
+            let pinned = format!("environment = \"{image}\"");
+            edit(common::confirmatory(t).replace("environment = \"\"", &pinned))
+        });
+        let instrument = ignorarium::derived::Instrument {
+            payload: ignorarium::payload::tree_hash(&spec.parent().unwrap().join("payload"))
+                .unwrap(),
+            environment: image.clone(),
+            inputs: vec![(
+                "data/example.txt".into(),
+                "calibration".into(),
+                calibration.clone(),
+            )],
+        };
+        let source = common::finished_with(instrument, vec![common::arm_a()]);
+        common::plant(&f.home, "my-pilot", &source);
+        let (r, out) = go(&f, &spec, &answer(&spec), true);
+        assert_eq!(r.unwrap().code, 0, "{out}");
+        (body_of(&f), out)
+    };
+    // The plan leaves the calibration input unpinned, and an empty pin pins nothing.
+    let (body, out) = registered(&|t| t);
+    assert_eq!(
+        body["deviations"],
+        json!([{ "from": "my-pilot", "reason": REASON, "timing": "before-collection",
+                 "differs": ["inputs"] }])
+    );
+    let line = format!("deviates from my-pilot in inputs (before-collection): {REASON}\n");
+    let at = out.find(&line).unwrap_or_else(|| panic!("{out}"));
+    assert!(at < out.find(PROMPT).unwrap(), "{out}");
+    assert_eq!(out.matches("deviates").count(), 1, "{out}");
+    // A deviation from a study whose code the plan pins records that nothing differs. The
+    // reason prints on one line, whatever it holds.
+    let pin = format!("sha256 = \"{calibration}\"");
+    let (body, out) = registered(&|t| {
+        t.replacen("sha256 = \"\"", &pin, 1)
+            .replace(&format!("\"{REASON}\""), "\"one\\nline\"")
+    });
+    assert_eq!(
+        body["deviations"],
+        json!([{ "from": "my-pilot", "reason": "one\nline", "timing": "before-collection",
+                 "differs": [] }])
+    );
+    assert!(
+        out.contains("\ndeviates from my-pilot in nothing (before-collection): one\\nline\n"),
+        "{out}"
+    );
 }

@@ -1,6 +1,8 @@
 use evidence::Tail;
 use evidence::claim::{Bound, Statistic};
-use ignorarium::spec::model::{Claim, Label, Mode, Reference, Spec, StatisticSpec};
+use ignorarium::spec::model::{
+    Claim, Label, Mode, PinDeviation, Reference, Spec, StatisticSpec, Timing,
+};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -281,5 +283,47 @@ fn a_hypothesis_reads_every_field_and_a_claim_is_a_one_key_table() {
             .unwrap()
             .remove(k);
         assert!(Spec::from_value(&w).is_err(), "{k}");
+    }
+}
+
+#[test]
+fn pins_list_deviations_each_with_one_of_five_timings() {
+    let mut v = template_value();
+    assert!(Spec::from_value(&v).unwrap().pins.deviations.is_empty());
+    let timings = [
+        ("before-collection", Timing::BeforeCollection),
+        ("during-collection", Timing::DuringCollection),
+        (
+            "after-collection-before-access",
+            Timing::AfterCollectionBeforeAccess,
+        ),
+        (
+            "after-access-before-results",
+            Timing::AfterAccessBeforeResults,
+        ),
+        ("after-results", Timing::AfterResults),
+    ];
+    for (text, timing) in timings {
+        v["pins"]["deviations"] = json!([{ "from": "pilot", "reason": "r", "timing": text }]);
+        assert_eq!(
+            Spec::from_value(&v).unwrap().pins.deviations,
+            [PinDeviation {
+                from: "pilot".into(),
+                reason: "r".into(),
+                timing
+            }],
+            "{text}"
+        );
+        assert_eq!(serde_json::to_value(timing).unwrap(), json!(text));
+    }
+    for bad in [
+        json!({ "from": "pilot", "reason": "r", "timing": "later" }),
+        json!({ "from": "pilot", "reason": "r", "timing": "before-collection", "x": 1 }),
+        json!({ "from": "pilot", "reason": "r" }),
+        json!({ "from": "pilot", "timing": "after-results" }),
+        json!({ "reason": "r", "timing": "after-results" }),
+    ] {
+        v["pins"]["deviations"] = json!([bad.clone()]);
+        assert!(Spec::from_value(&v).is_err(), "{bad}");
     }
 }

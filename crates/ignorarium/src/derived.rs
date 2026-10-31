@@ -75,6 +75,10 @@ pub struct Register {
     pub inputs: Vec<(String, String)>,
     /// The values the plan takes from other studies, as registration found them.
     pub resolved: Vec<Resolved>,
+    /// Each deviation the plan declares. A record written before the field existed reads as
+    /// none.
+    #[serde(default)]
+    pub deviations: Vec<PinDeviated>,
     /// The stream slot a confirmatory plan holds; `None` for an exploratory one. Written as
     /// `null`, never left out.
     #[serde(deserialize_with = "Option::deserialize")]
@@ -168,6 +172,18 @@ pub struct Resolved {
     pub study: String,
     pub records: Vec<String>,
     pub value: Value,
+}
+
+/// A deviation the plan declares, as `register` records it: the study, the reason, the
+/// timing, and the parts of that study's code the plan does not pin (a subset of `payload`,
+/// `environment`, `inputs`, in that order; empty when it pins them all).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PinDeviated {
+    pub from: String,
+    pub reason: String,
+    pub timing: String,
+    pub differs: Vec<String>,
 }
 
 /// The first record of a finished run. It states how many records follow it, so a reader can

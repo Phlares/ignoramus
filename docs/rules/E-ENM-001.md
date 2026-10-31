@@ -32,3 +32,4 @@ A value outside the set has no defined meaning in the checker or the run.
 - `inputs[*].licence.type` (enum)
 - `mutations.operators[*].type` (enum)
 - `report.publish` (enum)
+- `pins.deviations[*].timing` (enum)

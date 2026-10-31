@@ -4,16 +4,19 @@
 //! is missing or mistyped: the generic rules report that.
 use super::generic::{applies, diagnostic, join, join_key, plain_key, safe_key, select};
 use super::{BoxRecords, Check, NoRecords, Rule, has_format, is_study_id};
-use crate::derived::{Alpha, Estimate, Selection, StudyState, contrast_key};
+use crate::derived::{
+    ANALYSIS, Alpha, Analysis, Estimate, Instrument, Selection, StudyState, contrast_key,
+};
 use crate::diag::Diagnostic;
 use crate::inputs::{self, Found, input_path};
+use crate::payload;
 use crate::power::{required_clusters, z};
 use crate::prior::{PriorUse, same_data};
 use crate::records;
 use crate::schedule::ROW_CAP;
 use crate::seed::seed;
 use crate::spec::model::{Claim, Outcome, SELECTED, StatisticSpec};
-use crate::store::Store;
+use crate::store::{Store, is_digest};
 use crate::stream::{self, LogName};
 use evidence::claim::{Bound, Statistic};
 use evidence::power::{Plan, Stratum, WORK, clusters_needed, mean_sd, simulate};
@@ -21,7 +24,7 @@ use evidence::rng::Rng;
 use evidence::{Error, Tail};
 use serde_json::{Value, json};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 pub struct CheckCtx {
@@ -84,6 +87,8 @@ const NAMED: &[(&str, NamedFn)] = &[
     ("estimates-from-record", estimates_from_record),
     ("reference-finished", reference_finished),
     ("reference-not-self", reference_not_self),
+    ("estimates-same-code", estimates_same_code),
+    ("deviation-borrowed", deviation_borrowed),
     ("confirmation-disjoint", confirmation_disjoint),
     ("data-fresh", data_fresh),
     ("units-declared", units_declared),
@@ -1167,6 +1172,176 @@ fn looked_up(
 
 fn confirmatory(spec: &Value) -> bool {
     text(spec, "study.mode") == Some("confirmatory")
+}
+
+// ---- the code of the studies estimates come from ----
+
+/// A finished study a confirmatory hypothesis with a claim takes estimates from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Borrowed {
+    pub study: String,
+    /// The hash of the study's `analysis` record, which names its code.
+    pub analysis: String,
+    pub instrument: Instrument,
+    /// The parts of the study's code this plan does not pin: a subset of `payload`,
+    /// `environment`, `inputs`, in that order.
+    pub differs: Vec<&'static str>,
+}
+
+/// The studies the confirmatory hypotheses with a claim take estimates from, each once, first
+/// mention first: the ones `register` freezes values from. A reference that is not a study id,
+/// or names this study, names none.
+fn sources(spec: &Value) -> Vec<&str> {
+    let mut out = vec![];
+    if !confirmatory(spec) {
+        return out;
+    }
+    for (_, h) in nodes(spec, "question.hypotheses[*]") {
+        let reference = h.get("estimates").filter(|_| has_claim(h));
+        if let Some(from) = reference.and_then(|r| study_ref(spec, r))
+            && !out.contains(&from)
+        {
+            out.push(from);
+        }
+    }
+    out
+}
+
+/// One per study in `sources` that has finished, with the parts of its code this plan does
+/// not pin. A study whose records cannot be read is E-CNF-003's.
+pub fn borrowed(spec: &Value, ctx: &CheckCtx) -> Vec<Borrowed> {
+    let finished: Vec<(&str, String, Instrument)> = (sources(spec).into_iter())
+        .filter_map(|from| {
+            let all = ctx.records.study(from).ok()??;
+            let record = all.iter().find(|r| r.kind == ANALYSIS)?;
+            let analysis = records::hash(record);
+            let instrument = Analysis::of(record)?.instrument;
+            let state = StudyState::of(Some(all), |log, slot| {
+                ctx.records.stream_closed(log, from, slot)
+            });
+            matches!(state, Ok(StudyState::Finished(_))).then_some((from, analysis, instrument))
+        })
+        .collect();
+    if finished.is_empty() {
+        return vec![];
+    }
+    let pinned = Pinned::of(spec, &ctx.root);
+    (finished.into_iter())
+        .map(|(study, analysis, instrument)| Borrowed {
+            study: study.into(),
+            analysis,
+            differs: pinned.differs(&instrument),
+            instrument,
+        })
+        .collect()
+}
+
+/// The code a plan pins: its payload, its environment, and its model and calibration inputs
+/// as (path, role, pin).
+struct Pinned {
+    payload: String,
+    environment: String,
+    inputs: BTreeSet<(String, String, String)>,
+}
+
+impl Pinned {
+    /// An empty `pins.payload` stands for the hash of the payload folder under `root`, which
+    /// `register` freezes; a folder that cannot be hashed pins nothing.
+    fn of(spec: &Value, root: &Path) -> Pinned {
+        let pin = |path: &str| {
+            let p = text(spec, path).unwrap_or_default().trim();
+            p.strip_prefix("sha256:").unwrap_or(p).to_string()
+        };
+        let mut payload = pin("pins.payload");
+        if payload.is_empty() {
+            payload = payload::tree_hash(&root.join(payload::DIR)).unwrap_or_default();
+        }
+        let field = |i: &Value, k: &str| {
+            let v = i.get(k).and_then(Value::as_str);
+            v.unwrap_or_default().to_string()
+        };
+        let inputs = (nodes(spec, "inputs[*]").into_iter())
+            .filter(|(_, i)| matches!(role(i), Some("model" | "calibration")))
+            .map(|(_, i)| (field(i, "path"), field(i, "role"), field(i, "sha256")))
+            .collect();
+        Pinned {
+            payload,
+            environment: pin("pins.environment"),
+            inputs,
+        }
+    }
+
+    /// The parts of `theirs` this plan does not pin. A part is pinned by digests equal to the
+    /// study's, so an empty pin pins nothing, and neither does a study's `host` or `""`
+    /// environment: neither names one image.
+    fn differs(&self, theirs: &Instrument) -> Vec<&'static str> {
+        let same = |ours: &str, theirs: &str| is_digest(ours) && ours == theirs;
+        let inputs = self.inputs.iter().all(|(_, _, pin)| is_digest(pin))
+            && self.inputs == theirs.inputs.iter().cloned().collect();
+        [
+            ("payload", same(&self.payload, &theirs.payload)),
+            ("environment", same(&self.environment, &theirs.environment)),
+            ("inputs", inputs),
+        ]
+        .into_iter()
+        .filter_map(|(part, pinned)| (!pinned).then_some(part))
+        .collect()
+    }
+}
+
+/// `Study <s> ran payload <hash>, environment <digest>; this plan differs in <parts>.` A
+/// part the study recorded as `""` prints as `none`.
+fn ran(b: &Borrowed) -> String {
+    let shown = |x: &str| if x.is_empty() { "none" } else { x }.to_string();
+    format!(
+        "Study {} ran payload {}, environment {}; this plan differs in {}.",
+        b.study,
+        shown(&b.instrument.payload),
+        shown(&b.instrument.environment),
+        b.differs.join(", ")
+    )
+}
+
+/// E-REF-003, at `<h>.estimates` of a hypothesis with a claim in a confirmatory study: the
+/// finished study it names ran code this plan does not pin, and no deviation names that
+/// study.
+fn estimates_same_code(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let found = borrowed(spec, ctx);
+    let declared = texts(spec, "pins.deviations[*].from");
+    (children(spec, pat).into_iter())
+        .filter(|(_, h, _)| has_claim(h))
+        .filter_map(|(path, _, reference)| {
+            let from = study_ref(spec, reference?)?;
+            let b = (found.iter()).find(|b| b.study == from && !b.differs.is_empty())?;
+            (!declared.contains(&from)).then(|| Hit {
+                path,
+                detail: Some(ran(b)),
+            })
+        })
+        .collect()
+}
+
+/// E-REF-003, at a deviation's `from` in a confirmatory study: a study id that no hypothesis
+/// with a claim takes estimates from. An exploratory study takes no estimates, so its
+/// deviations are not read; a `from` that is not a study id is the generic rules'.
+fn deviation_borrowed(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    if !confirmatory(spec) {
+        return vec![];
+    }
+    let sources = sources(spec);
+    (nodes(spec, pat).into_iter())
+        .filter_map(|(path, v)| {
+            let from = v
+                .as_str()
+                .filter(|f| is_study_id(f) && !sources.contains(f))?;
+            Some(Hit {
+                path,
+                detail: Some(format!(
+                    "No hypothesis with a claim takes estimates from study {from}."
+                )),
+            })
+        })
+        .collect()
 }
 
 /// E-REF-002. At `<h>.estimates.from` of a confirmatory study: a reference names this study,
