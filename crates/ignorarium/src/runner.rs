@@ -1168,13 +1168,7 @@ fn selection(plan: &RunPlan, log: &Path) -> Result<Result<Pick, String>, RunErro
                 Ok(s) => s,
                 Err(why) => return Ok(Err(why)),
             };
-            let draft = RecordDraft {
-                study: plan.study_id.clone(),
-                row: None,
-                kind: SELECTION.into(),
-                body: serde_json::to_value(&s).map_err(io)?,
-            };
-            records::append(log, &plan.key, draft)?
+            analysis::append(plan, log, SELECTION, &s)?
         }
     };
     let s = Selection::of(&record)

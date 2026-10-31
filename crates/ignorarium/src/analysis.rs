@@ -624,15 +624,16 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
     Ok(())
 }
 
-fn append(plan: &RunPlan, log: &Path, kind: &str, body: &impl Serialize) -> Result<(), RunError> {
-    let draft = RecordDraft {
-        study: plan.study_id.clone(),
-        row: None,
-        kind: kind.into(),
-        body: serde_json::to_value(body).map_err(|e| RunError::Records(e.to_string()))?,
-    };
-    records::append(log, &plan.key, draft)?;
-    Ok(())
+/// Sign `body` as a record of `kind` in the study's log `log`, belonging to no row.
+pub(crate) fn append(
+    plan: &RunPlan,
+    log: &Path,
+    kind: &str,
+    body: &impl Serialize,
+) -> Result<Record, RunError> {
+    let body = serde_json::to_value(body).map_err(|e| RunError::Records(e.to_string()))?;
+    let draft = RecordDraft::new(&plan.study_id, kind, body);
+    Ok(records::append(log, &plan.key, draft)?)
 }
 
 /// The clusters, without any whose input holds the same data (`prior::same_data`) as an
