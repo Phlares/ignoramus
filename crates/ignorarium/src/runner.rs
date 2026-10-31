@@ -1,6 +1,8 @@
 //! The run engine: writes the schedule, runs each row on a backend, records each row.
 //! A row is done when its signed record exists. A crash before the record reruns the row.
-use crate::backend::{self, Backend, Exit, Probe, RowJob, RowOutcome, Watch, level2, rootfs};
+use crate::backend::{
+    self, Backend, Exit, PINNED_LEVEL, Probe, RowJob, RowOutcome, Watch, level2, rootfs,
+};
 use crate::budget::{Alerts, Cost, CostMeter, Decision, HostMeter, decide, dimension_name};
 use crate::control::{self, ControlError, ControlFile, RunLock, Signal, State};
 use crate::derived::{INPUTS, Inputs, REGISTER, Register, SELECTION, Selection};
@@ -45,9 +47,6 @@ const REAPED: &str = "SIGCHLD is ignored; the box cannot see a row end";
 const RECIPE: &str = "env";
 /// The environment name of a run on the host root.
 const HOST: &str = "host";
-/// The lowest level that runs rows in the environment `pins.environment` names; level 0 runs
-/// them on the host root.
-pub const PINNED_LEVEL: u8 = 1;
 /// The lowest level that runs rows only in the study's environment image.
 const IMAGE_LEVEL: u8 = 2;
 const NO_IMAGE: &str = "level 2 runs rows in the study's environment image";

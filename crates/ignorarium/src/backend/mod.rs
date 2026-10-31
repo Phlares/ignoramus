@@ -18,6 +18,9 @@ use std::time::{Duration, Instant};
 
 /// Exit code reported for a row killed at its wall timeout.
 pub const TIMEOUT_CODE: i32 = 124;
+/// The lowest level that runs rows in the environment `pins.environment` names; level 0 runs
+/// them on the host root.
+pub const PINNED_LEVEL: u8 = 1;
 const POLL: Duration = Duration::from_millis(5);
 
 /// What to run: a read-only input dir and one write-only output dir.

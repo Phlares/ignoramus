@@ -1591,7 +1591,7 @@ fn check_shows_where_determinism_comes_from() {
         common::plant(&Home::open_at(&home).unwrap(), "my-pilot", &pilot);
         (check_out(&home, &spec, 0), check_json(&home, &spec, 0), d)
     };
-    let (out, v, _d) = checked(&pinned, Some(passed));
+    let (out, v, _d) = checked(&pinned, Some(passed.clone()));
     assert!(
         out.contains("\n\ndeterminism: carried from my-pilot\nstream: slot 1, level 0.005\n"),
         "{out}"
@@ -1601,6 +1601,27 @@ fn check_shows_where_determinism_comes_from() {
         json!({ "carried_from": "my-pilot", "rows": 0 })
     );
     assert_eq!(v["estimate"]["rows"], 30);
+    // The check reads the plan with its defaults filled: without a min_isolation line the
+    // plan runs at the default level 1, so it carries; without pins.deterministic too, it
+    // declares no determinism.
+    let unset = |key: &'static str| {
+        move |t: String| {
+            let kept: Vec<&str> = (t.lines()).filter(|l| !l.starts_with(key)).collect();
+            format!("{}\n", kept.join("\n"))
+        }
+    };
+    let (no_level, no_flag) = (unset("min_isolation"), unset("deterministic"));
+    let (out, v, _d) = checked(&|t: String| no_level(pinned(t)), Some(passed.clone()));
+    let level = json!({ "path": "scope.min_isolation", "value": 1 });
+    assert!(v["defaults"].as_array().unwrap().contains(&level), "{v}");
+    assert!(
+        out.contains("\ndeterminism: carried from my-pilot\n"),
+        "{out}"
+    );
+    let (out, v, _d) = checked(&|t: String| no_flag(no_level(pinned(t))), Some(passed));
+    assert!(v["defaults"].as_array().unwrap().contains(&level), "{v}");
+    assert!(!out.contains("determinism"), "{out}");
+    assert_eq!(v["recheck"], Value::Null);
     // A source without a passed check: the plan runs its own, one copy per condition id.
     let (out, v, _d) = checked(&pinned, None);
     assert!(

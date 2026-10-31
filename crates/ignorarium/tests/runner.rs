@@ -3673,6 +3673,23 @@ fn a_matching_borrower_carries_a_passed_check() {
     );
     assert!(copies(&plan).is_empty());
     assert_eq!(plan.schedule.rows.len(), 30);
+    // A resume at another level keeps the register record's decision: level 2 runs the same
+    // rows in the same image, and level 0 is refused, since the plan needs level 1.
+    let schedule = || std::fs::read(lab.home.study_dir("carry").join("schedule.json")).unwrap();
+    let before = schedule();
+    let again = prepare_with(&lab.home, "carry", &work, vec![fake_at(2)]).unwrap();
+    assert_eq!(
+        (again.backend.level(), again.environment.as_str()),
+        (2, &*env)
+    );
+    assert!(copies(&again).is_empty());
+    let host = prepare_with(&lab.home, "carry", &work, vec![fake_at(0)]);
+    let host = host.err().unwrap();
+    assert!(
+        matches!(&host, RunError::NoBackend { need: 1, have } if *have == [0]),
+        "{host}"
+    );
+    assert_eq!(schedule(), before);
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
     let rows = rows_of(&lab, "carry");
     assert_eq!(rows.len(), 30);
