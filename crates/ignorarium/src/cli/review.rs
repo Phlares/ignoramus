@@ -44,18 +44,11 @@ fn hypothesis_line(h: &Value) -> String {
     if h.get("claim").is_none() {
         parts.push("claim: none (descriptive)".into());
     }
-    let shown = [
-        ("claim", "claim"),
-        ("statistic", "statistic"),
-        ("power at", "power_at"),
-        ("estimates", "estimates"),
-        ("alpha share", "alpha_share"),
-    ];
-    parts.extend(
-        shown
-            .iter()
-            .filter_map(|(label, key)| Some(format!("{label}: {}", plain(h.get(*key)?)))),
-    );
+    let shown = ["claim", "statistic", "power_at", "estimates", "alpha_share"];
+    parts.extend(shown.iter().filter_map(|key| {
+        let label = key.replace('_', " ");
+        Some(format!("{label}: {}", plain(h.get(*key)?)))
+    }));
     parts.join("; ")
 }
 
