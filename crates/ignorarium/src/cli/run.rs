@@ -39,9 +39,11 @@ pub fn go(ctx: &Ctx, id: &str, max_level: Option<u8>, resume: bool) -> Run {
     let root = super::check::current_root()
         .map_err(|e| CliError::usage(format!("cannot read the current folder: {e}")))?;
     let plan = runner::prepare(home, id, &root, reach).map_err(|e| match e {
-        RunError::NoBackend { need, .. } => CliError::refuse(format!(
-            "study {id} needs isolation level {need}; this machine reaches level {reach}. \
-             Run `ignorarium probe` to measure it again"
+        // Level 0 always runs, so `have` is never empty.
+        RunError::NoBackend { need, have } => CliError::refuse(format!(
+            "study {id} needs isolation level {need}; this machine reaches level {}. \
+             Run `ignorarium probe` to measure it again",
+            have.iter().max().unwrap_or(&0)
         )),
         e => run_error(e),
     })?;

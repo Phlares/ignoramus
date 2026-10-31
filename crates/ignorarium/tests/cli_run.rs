@@ -253,6 +253,23 @@ fn run_refuses_when_the_machine_is_below_min_isolation() {
     assert!(e.contains("level 2"), "{e}");
     assert!(e.contains("ignorarium probe"), "{e}");
     assert!(kind_of(&lab, "hi", "row").is_empty());
+    // The file allows level 2, but it cannot run here now: the level named is one that can.
+    std::fs::write(lab.home.root.join("machine.toml"), "max_level = 2\n").unwrap();
+    let mut run = bin_at(&lab, "hi");
+    for var in [
+        "IGNORARIUM_VM_VMM",
+        "IGNORARIUM_VM_KERNEL",
+        "IGNORARIUM_VM_AGENT",
+    ] {
+        run.env_remove(var);
+    }
+    let e = err(&run.args(["run", "hi"]).assert().code(1));
+    assert!(
+        e.contains("needs isolation level 2; this machine reaches level "),
+        "{e}"
+    );
+    assert!(!e.contains("reaches level 2"), "{e}");
+    assert!(kind_of(&lab, "hi", "row").is_empty());
 }
 
 #[test]

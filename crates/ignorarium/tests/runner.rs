@@ -1569,6 +1569,50 @@ fn the_highest_backend_that_meets_min_isolation_runs() {
     );
 }
 
+fn probed_at(level: u8, probe: Probe) -> Box<dyn Backend> {
+    let (mut b, _) = fake(vec![]);
+    (b.level, b.probe) = (level, probe);
+    Box::new(b)
+}
+
+#[test]
+fn only_the_levels_this_host_can_run_are_candidates() {
+    // Level 2 is available and level 1 is not, as on a host that blocks user namespaces.
+    let lab = lab();
+    plain(&lab, "gap0");
+    register_study(&lab, "gap1", need_isolation, &[], PAYLOAD);
+    let blocked = || Probe::Unavailable("user namespaces are blocked".into());
+    let gap = || vec![fake_at(0), probed_at(1, blocked()), fake_at(2)];
+    let prepare = |id: &str, all| prepare_with(&lab.home, id, &common::work_of(&lab.home, id), all);
+    // Level 2 needs an image these studies lack, and level 1 cannot run here.
+    let err = prepare("gap1", gap()).err().unwrap();
+    assert_eq!(
+        err.to_string(),
+        "environment: level 2 runs rows in the study's environment image; \
+         add env/ or set pins.environment"
+    );
+    assert!(!lab.home.study_dir("gap1").join("schedule.json").exists());
+    let plan = prepare("gap0", gap()).unwrap();
+    assert_eq!(plan.backend.level(), 0);
+    let ev = events_of(&lab.home.study_dir("gap0"));
+    assert_eq!(
+        named(&ev, "run.isolation")[0]["attrs"],
+        serde_json::json!({
+            "level": 0,
+            "skipped": [2],
+            "reason": "level 2 runs rows in the study's environment image; \
+                       the study has no env/ and no pins.environment"
+        })
+    );
+    // What the host has is what it can run.
+    let err = prepare("gap1", vec![fake_at(0), probed_at(1, blocked())]);
+    let err = err.err().unwrap();
+    assert!(
+        matches!(&err, RunError::NoBackend { need: 1, have } if *have == [0]),
+        "{err}"
+    );
+}
+
 #[test]
 fn backend_max_filters_out_higher_levels() {
     let levels = |max| -> Vec<u8> {

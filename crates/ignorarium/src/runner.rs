@@ -283,12 +283,12 @@ pub fn up_to(backends: Vec<Box<dyn Backend>>, max: u8) -> Vec<Box<dyn Backend>> 
 }
 
 /// Load a registered study, check its payload copy and its stored inputs, build its input
-/// view, gate its late data, write its schedule, and pick the highest backend that meets
-/// `scope.min_isolation` and can run the study: level 2 and up run rows only in the study's
-/// environment image, so a study without one runs at the highest level below, and one
-/// `run.isolation` event names the levels it skipped. Every input
-/// in the view is hashed in full here, once per `run` or `resume`; before each attempt the
-/// run only compares the view's stamps (see `stale`).
+/// view, gate its late data, write its schedule, and pick the highest backend whose probe
+/// finds it available, that meets `scope.min_isolation` and can run the study: level 2 and up
+/// run rows only in the study's environment image, so a study without one runs at the
+/// highest level below, and one `run.isolation` event names the levels it skipped. Every
+/// input in the view is hashed in full here, once per `run` or `resume`; before each attempt
+/// the run only compares the view's stamps (see `stale`).
 /// The first prepare that gets this far signs an `inputs` record of every input's digest,
 /// or its absence; a later one whose inputs differ is refused before anything changes, so
 /// every row of a study runs on the same bytes. `root` is the study root found where the
@@ -313,9 +313,17 @@ pub fn prepare_with(
         return Err(RunError::SpecChanged);
     }
 
-    let have: Vec<u8> = backends.iter().map(|b| b.level()).collect();
+    // The candidates are the backends that can run here now, whatever the highest is: a
+    // host can run level 2 and not level 1.
+    let available: Vec<_> = (backends.into_iter())
+        .filter(|b| b.probe() == Probe::Available)
+        .collect();
+    let have: Vec<u8> = available.iter().map(|b| b.level()).collect();
     let need = spec.scope.min_isolation;
-    let fit: Vec<_> = backends.into_iter().filter(|b| b.level() >= need).collect();
+    let fit: Vec<_> = available
+        .into_iter()
+        .filter(|b| b.level() >= need)
+        .collect();
     let top = fit.iter().map(|b| b.level()).max();
     let top = top.ok_or(RunError::NoBackend { need, have })?;
 

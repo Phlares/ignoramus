@@ -1264,12 +1264,32 @@ fn level2_lab() -> common::Lab {
     lab
 }
 
+/// A backend that is available at its level and runs no row.
+struct Stub(u8);
+
+impl Backend for Stub {
+    fn level(&self) -> u8 {
+        self.0
+    }
+    fn probe(&self) -> Probe {
+        Probe::Available
+    }
+    fn cpus(&self) -> u32 {
+        1
+    }
+    fn launcher(&self) -> String {
+        "stub".into()
+    }
+    fn run_row(&self, _: &RowJob, _: &dyn Watch) -> io::Result<RowOutcome> {
+        Err(io::Error::other("stub"))
+    }
+}
+
 #[test]
 fn prepare_refuses_level2_without_an_environment() {
     let lab = level2_lab();
     let all = || -> Vec<Box<dyn Backend>> {
-        let level2 = Level2::with(PathBuf::new(), PathBuf::new(), PathBuf::new());
-        vec![Box::new(Level0), Box::new(Level1::new()), Box::new(level2)]
+        vec![Box::new(Level0), Box::new(Stub(1)), Box::new(Stub(2))]
     };
     for (id, min) in [("needs2", 2), ("needs1", 1), ("needs0", 0)] {
         let spec = |t| swap(t, "min_isolation = 0", &format!("min_isolation = {min}"));
@@ -1316,14 +1336,13 @@ fn prepare_refuses_level2_without_an_environment() {
         );
     }
     // No level skipped, no event.
-    let lower: Vec<Box<dyn Backend>> = vec![Box::new(Level0), Box::new(Level1::new())];
+    let lower: Vec<Box<dyn Backend>> = vec![Box::new(Level0), Box::new(Stub(1))];
     let work = common::work_of(&lab.home, "needs1");
     runner::prepare_with(&lab.home, "needs1", &work, lower).unwrap();
     assert_eq!(chosen("needs1").len(), 1);
     // With level 2 alone, nothing is left to run a study without an image.
-    let only2 = Level2::with(PathBuf::new(), PathBuf::new(), PathBuf::new());
     let work = common::work_of(&lab.home, "needs0");
-    let err = runner::prepare_with(&lab.home, "needs0", &work, vec![Box::new(only2)]);
+    let err = runner::prepare_with(&lab.home, "needs0", &work, vec![Box::new(Stub(2))]);
     assert!(matches!(err, Err(RunError::Environment(_))));
 }
 
