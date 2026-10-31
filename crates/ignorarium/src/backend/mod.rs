@@ -68,6 +68,23 @@ pub struct RowOutcome {
     pub output_links: Vec<output::TreeRow>,
 }
 
+impl RowOutcome {
+    /// A row that ended with `exit` after `wall_seconds` with no CPU count, output or
+    /// self-test.
+    pub fn failed(exit: Exit, wall_seconds: f64) -> RowOutcome {
+        RowOutcome {
+            exit,
+            cpu_seconds: 0.0,
+            wall_seconds,
+            output_hash: String::new(),
+            selftest: None,
+            cpu_unknown: None,
+            ended: false,
+            output_links: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Probe {
     Available,

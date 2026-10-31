@@ -828,7 +828,7 @@ fn a_row_without_an_environment_is_infra_before_any_vm() {
     };
     assert_eq!(b.level(), 2);
     let watch = Leaders::default();
-    let (o, timings) = b.run_timed(&job, &watch).unwrap();
+    let (o, timings) = b.run_timed(&job, &watch);
     assert_eq!(
         o.exit,
         Exit::Infra("level 2 runs rows in an environment image; this study has none".into())
@@ -1436,7 +1436,7 @@ impl Backend for Timed {
         self.inner.cpus()
     }
     fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> io::Result<RowOutcome> {
-        let (o, timings) = self.inner.run_timed(job, watch)?;
+        let (o, timings) = self.inner.run_timed(job, watch);
         if let Some(t) = timings {
             self.boots.borrow_mut().push(t.boot.as_secs_f64());
         }

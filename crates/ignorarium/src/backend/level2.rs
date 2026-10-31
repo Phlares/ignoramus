@@ -151,30 +151,14 @@ impl Level2 {
     /// Runs one row and returns its outcome, with the host's timings when the machine ran to
     /// a report. The rootfs disk and the boot count toward the row's wall time, not the
     /// payload's.
-    pub fn run_timed(
-        &self,
-        job: &RowJob,
-        watch: &dyn Watch,
-    ) -> io::Result<(RowOutcome, Option<Timings>)> {
+    pub fn run_timed(&self, job: &RowJob, watch: &dyn Watch) -> (RowOutcome, Option<Timings>) {
         let start = Instant::now();
         let wall = || start.elapsed().as_secs_f64();
-        let ended = |res: Result<VmOutcome, VmError>| -> io::Result<_> {
+        let ended = |res: Result<VmOutcome, VmError>| {
             let timings = res.as_ref().ok().map(|o| o.timings.clone());
-            Ok((outcome_of(res, wall(), self.cpus), timings))
+            (outcome_of(res, wall(), self.cpus), timings)
         };
-        let infra = |why: String| -> io::Result<_> {
-            let o = RowOutcome {
-                exit: Exit::Infra(why),
-                cpu_seconds: 0.0,
-                wall_seconds: wall(),
-                output_hash: String::new(),
-                selftest: None,
-                cpu_unknown: None,
-                ended: false,
-                output_links: Vec::new(),
-            };
-            Ok((o, None))
-        };
+        let infra = |why: String| (RowOutcome::failed(Exit::Infra(why), wall()), None);
         let Some(root) = &job.rootfs else {
             return infra("level 2 runs rows in an environment image; this study has none".into());
         };
@@ -217,7 +201,12 @@ impl Level2 {
             report_slack: self.report_slack,
             serial_log: None,
         };
-        ended(host::run_row(&vm, &host_job, &scratch.0.join("work"), watch))
+        ended(host::run_row(
+            &vm,
+            &host_job,
+            &scratch.0.join("work"),
+            watch,
+        ))
     }
 }
 
@@ -296,7 +285,7 @@ impl Backend for Level2 {
     }
 
     fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> io::Result<RowOutcome> {
-        self.run_timed(job, watch).map(|(o, _)| o)
+        Ok(self.run_timed(job, watch).0)
     }
 }
 
@@ -375,14 +364,9 @@ pub fn outcome_of(res: Result<VmOutcome, VmError>, wall_seconds: f64, cpus: u32)
                 e => Exit::Infra(e.to_string()),
             };
             return RowOutcome {
-                exit,
-                cpu_seconds: 0.0,
-                wall_seconds,
-                output_hash: String::new(),
-                selftest: None,
                 cpu_unknown,
                 ended,
-                output_links: Vec::new(),
+                ..RowOutcome::failed(exit, wall_seconds)
             };
         }
     };
@@ -395,14 +379,9 @@ pub fn outcome_of(res: Result<VmOutcome, VmError>, wall_seconds: f64, cpus: u32)
             r.cpu_seconds
         );
         return RowOutcome {
-            exit: Exit::Infra(why),
-            cpu_seconds: 0.0,
-            wall_seconds,
-            output_hash: String::new(),
             selftest: Some(selftest),
             cpu_unknown: Some(BAD_CPU.into()),
-            ended: false,
-            output_links: Vec::new(),
+            ..RowOutcome::failed(Exit::Infra(why), wall_seconds)
         };
     }
     let ended = r.end == Some(End::Timeout);

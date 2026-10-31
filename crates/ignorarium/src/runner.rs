@@ -1328,16 +1328,7 @@ fn attempt_row(
         let mut o = plan
             .backend
             .run_row(&job, watch)
-            .unwrap_or_else(|e| RowOutcome {
-                exit: Exit::Infra(e.to_string()),
-                cpu_seconds: 0.0,
-                wall_seconds: 0.0,
-                output_hash: String::new(),
-                selftest: None,
-                cpu_unknown: None,
-                ended: false,
-                output_links: Vec::new(),
-            });
+            .unwrap_or_else(|e| RowOutcome::failed(Exit::Infra(e.to_string()), 0.0));
         // Every backend text reaches the records from here.
         redacted(&plan.redact, &mut o);
         // A row the box ended, or whose meter cannot read, is charged a bound. A meter that
