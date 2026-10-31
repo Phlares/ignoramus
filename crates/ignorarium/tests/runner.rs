@@ -656,6 +656,48 @@ fn a_changed_manifest_blob_pauses_the_run() {
 }
 
 #[test]
+fn a_view_without_the_manifest_moves_aside_on_resume() {
+    let lab = lab();
+    // Row 0 takes the manifest out of the view. What is left is the view a box without the
+    // manifest built: the inputs only.
+    let edit = edits_in_row_0(&format!(
+        "chmod u+w \"$IGNORARIUM_IN\"; mv \"$IGNORARIUM_IN/{}\" \"$IGNORARIUM_OUT/../list\"",
+        view::MANIFEST
+    ));
+    common::with_payload(&lab, "old-view", &edit);
+    pauses_after_row_0(
+        &lab,
+        "old-view",
+        "ignorarium:inputs.json changed after the run began",
+    );
+    let dir = lab.home.study_dir("old-view");
+    assert!(!dir.join("in").join(view::MANIFEST).exists());
+    let frozen = kind_of(&lab, "old-view", "inputs");
+    let done = rows_of(&lab, "old-view");
+    let out = dir.join("run/rows/0/out");
+    let hash = ignorarium::backend::output_hash(&out).unwrap();
+    // The resume moves the old view aside whole and builds one that holds the manifest.
+    let plan = plan_of(&lab, "old-view");
+    let old = dir.join("in.old-0");
+    assert!(old.join("data/example.txt").is_file());
+    assert!(!old.join(view::MANIFEST).exists());
+    assert!(!dir.join("in.old-1").exists());
+    let list = std::fs::read(plan.view.join(view::MANIFEST)).unwrap();
+    assert_eq!(sha256_hex(&list), plan.manifest);
+    assert_eq!(done[0].body["manifest"], plan.manifest.as_str());
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    // The frozen inputs and the row recorded before stay as they were.
+    assert_eq!(kind_of(&lab, "old-view", "inputs"), frozen);
+    let rows = rows_of(&lab, "old-view");
+    assert_eq!(rows.len(), 6);
+    assert_eq!(rows[0], done[0]);
+    assert_eq!(ignorarium::backend::output_hash(&out).unwrap(), hash);
+    for r in &rows[1..] {
+        assert_eq!(r.body["manifest"], plan.manifest.as_str());
+    }
+}
+
+#[test]
 fn a_missing_blob_refuses_prepare() {
     let lab = lab();
     let dir = plain(&lab, "noblob");
