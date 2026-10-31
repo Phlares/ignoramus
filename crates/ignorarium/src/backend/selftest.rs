@@ -1,7 +1,7 @@
 //! The check a level 1 sandbox runs on itself before each row: the network is cut off,
 //! `AF_VSOCK` sockets are refused and `io_uring_setup` is refused. The box runs it as
 //! `ignorarium dev selftest` inside a sandbox built like the row's.
-use crate::sys;
+use ignorarium_guest::sys;
 use rustix::net::{AddressFamily, SocketType, socket};
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};

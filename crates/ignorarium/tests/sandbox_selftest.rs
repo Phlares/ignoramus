@@ -6,7 +6,7 @@ use ignorarium::backend::level1::Level1;
 use ignorarium::backend::selftest::{self, SelfTest};
 use ignorarium::backend::{Backend, Exit, RowJob};
 use ignorarium::runner::{self, RunStatus, prepare_with};
-use ignorarium::sys;
+use ignorarium_guest::sys;
 use std::path::Path;
 use std::time::Duration;
 use tempfile::TempDir;

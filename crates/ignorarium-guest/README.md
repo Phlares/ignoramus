@@ -10,7 +10,7 @@ Runs one experiment row inside a fresh virtual machine (isolation level 2). The 
 | `image` | host | Pinned kernel and hypervisor, the initramfs with the agent, ext4 disks. |
 | `host` | host | `run_row`: build the input and payload disks, start Cloud Hypervisor as the leader of its own process group, serve the one connection, read the outputs back. |
 | `agent` | guest | PID 1: disks, the payload's view, seed, clock, self-test, payload, pack, report. |
-| `sys` | guest | The only `unsafe` code: vsock, the kernel reseed, child CPU time, killing every process. |
+| `sys` | guest | The only `unsafe` code: vsock, the kernel reseed, child CPU time, the io_uring check (the box's level 1 self-test calls it too), killing every process. |
 
 The binary `ignorarium-guest` is the agent. It runs only as PID 1 inside the machine.
 

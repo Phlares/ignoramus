@@ -159,22 +159,6 @@ pub fn close_range_cloexec(first: libc::c_uint, last: libc::c_uint) -> io::Resul
     }
 }
 
-/// The errno of `io_uring_setup`, or `None` when it succeeds (its descriptor is closed
-/// again).
-pub fn io_uring_setup_errno() -> Option<i32> {
-    // The kernel's `struct io_uring_params` is 120 bytes, all-zero for a plain ring.
-    let mut params = [0u64; 15];
-    // SAFETY: io_uring_setup reads and writes only the 120-byte params struct, which
-    // `params` is, and takes the entry count by value.
-    let fd = unsafe { libc::syscall(libc::SYS_io_uring_setup, 1u32, params.as_mut_ptr()) };
-    if fd < 0 {
-        return io::Error::last_os_error().raw_os_error();
-    }
-    // SAFETY: the kernel just returned `fd`, which nothing else owns.
-    unsafe { libc::close(fd as libc::c_int) };
-    None
-}
-
 /// Send SIGKILL to the process group led by `pid`. A group already gone is fine.
 pub fn kill_group(pid: u32) -> io::Result<()> {
     use rustix::process::{Pid, Signal, kill_process_group};
