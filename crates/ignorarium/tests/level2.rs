@@ -1575,7 +1575,7 @@ fn report(name: &str, rows: usize, trials: &[f64]) {
 /// Rows sit inside trials, so the interval comes from the 10 trial values, as in Georges et
 /// al. (2007) and Laaber et al. (2019).
 #[test]
-#[ignore = "measurement; run on the VPS for the pull request"]
+#[ignore = "measurement; needs a KVM host and level 1"]
 fn overhead_through_the_runner() {
     let Some(r) = ready() else { return };
     if let Some(why) = common::no_level1() {
