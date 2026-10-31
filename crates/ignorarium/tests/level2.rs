@@ -782,6 +782,28 @@ fn rootfs_disk_is_built_once() {
     assert_eq!(names(), ["bad", "root", "root.ext4"]);
 }
 
+/// mkfs.ext4 fails after the temp disk exists: the failed build must remove it.
+#[test]
+fn a_failed_mkfs_leaves_no_temp_disk() {
+    const NAME: &str = "a_failed_mkfs_leaves_no_temp_disk";
+    let d = TempDir::new().unwrap();
+    if !is_child(NAME) {
+        // An empty PATH: mkfs.ext4 cannot start, once the temp disk is made.
+        assert!(in_child(NAME, d.path(), &[("PATH", d.path().as_os_str())]));
+        return;
+    }
+    let root = d.path().join("root");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("f"), "x").unwrap();
+    let e = rootfs_disk(&root).unwrap_err();
+    assert!(e.to_string().contains("mkfs.ext4"), "{e}");
+    let names: Vec<_> = fs::read_dir(d.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["root"]);
+}
+
 /// Levels 0 and 1 hash an output folder with `output_hash`; level 2's guest and host hash the
 /// pack stream with the guest crate's rows. The four agree, links included, and the folder the
 /// host unpacks, with the rows of the links it never makes, hashes the same.

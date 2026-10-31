@@ -148,7 +148,7 @@ fn may_kill_all(pid: u32) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::may_kill_all;
+    use super::{may_kill_all, wait4};
 
     #[test]
     fn only_pid_1_may_kill_all_others() {
@@ -157,5 +157,17 @@ mod tests {
             let e = may_kill_all(pid).unwrap_err();
             assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
         }
+    }
+
+    #[test]
+    fn wait4_of_a_pid_that_is_no_child_is_echild() {
+        // A failed guard would retry for ever, so the call runs in a thread with a deadline.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(wait4(i32::MAX as u32).err()));
+        let e = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("wait4 kept waiting")
+            .expect("wait4 of a non-child succeeded");
+        assert_eq!(e.raw_os_error(), Some(libc::ECHILD));
     }
 }
