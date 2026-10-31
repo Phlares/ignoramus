@@ -840,7 +840,9 @@ fn no_links(base: &Path, parts: &[&str]) -> Result<(), RunError> {
     Ok(())
 }
 
-/// Run every row that has no record, holding the run lock; a second run gets `Busy`.
+/// Run every row that has no record, holding the run lock; a second run gets `Busy`. A
+/// study whose records hold a stop, or a confirmatory study whose records hold a recheck
+/// mismatch (`recheck_stop`), ends with the stop trace before any row.
 /// A row a dead box left running is killed first. At each row boundary the control file is
 /// read: a stop ends the run with the stop trace, a pause ends it at that boundary. Then the
 /// gate runs before each attempt, retries included: the run pauses instead of starting it
@@ -871,8 +873,9 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
     let log = dir.join("records.jsonl");
     let machine = machine::load(&plan.home.root).map_err(io)?;
     let all = records::read_all(&log, &plan.key.verifying_key())?;
-    if let Some(r) = all.iter().find(|r| r.kind == "stop") {
-        let why = why_of(r);
+    let stopped = (all.iter().find(|r| r.kind == "stop").map(why_of))
+        .or_else(|| recheck_stop(&plan.spec, &all));
+    if let Some(why) = stopped {
         return halt(
             plan,
             &dir,
@@ -1469,9 +1472,6 @@ fn attempt_row(
         Exit::Void(why) => ("void:output".to_string(), Some(why)),
         Exit::Infra(_) | Exit::Stopped => ("void:infra".to_string(), None),
     };
-    let compared = (row.recheck_of)
-        .map(|of| compare(plan, log, of, &exit, &outcome.output_hash))
-        .transpose()?;
     let mut body = json!({
         "stage": row.stage,
         "condition": row.condition,
@@ -1491,6 +1491,9 @@ fn attempt_row(
         "attempts": attempts,
     });
     agent(&mut body, plan);
+    let compared = (row.recheck_of)
+        .map(|of| compare(plan, log, of, row.index, &body))
+        .transpose()?;
     if let Some(c) = &compared {
         body["recheck_of"] = json!(c.of);
         body["same"] = json!(c.same);
@@ -1535,55 +1538,119 @@ fn attempt_row(
     Ok((exit, halt))
 }
 
+/// The keys of a row record that say where the row ran. A copy is compared only with an
+/// original that ran in the same environment at the same level: a difference between two
+/// environments or levels is no behaviour of the payload.
+const RAN_IN: [&str; 2] = ["environment", "isolation"];
+
 /// A recheck copy's comparison with the row it repeats.
 struct Compared {
     of: u64,
-    /// Whether the copy gave the original's exit and output hash; `None` when the original
-    /// has no record or either row is void, since a void row is a fault of the box, not
-    /// behaviour of the payload.
+    /// Whether the copy gave the original's exit and output hash. `None` when either row is
+    /// void, so neither its exit nor its output need be the payload's, or when `differs`.
     same: Option<bool>,
+    /// The keys of `RAN_IN` on which the two records differ.
+    differs: Vec<&'static str>,
     /// The original's output hash.
     theirs: String,
 }
 
-/// Compare a copy's `exit` and `output_hash` with the record of row `of`.
+/// Compare the body of copy `row`'s record with the record of row `of`, the row it repeats.
+/// A missing record, or one without an exit or output hash, is a records fault.
 fn compare(
     plan: &RunPlan,
     log: &Path,
     of: u64,
-    exit: &str,
-    output_hash: &str,
+    row: u64,
+    copy: &Value,
 ) -> Result<Compared, RunError> {
     let all = records::read_all(log, &plan.key.verifying_key())?;
-    let original = (all.iter()).find(|r| r.kind == "row" && r.row == Some(of));
-    let theirs = |k: &str| original.and_then(|r| r.body[k].as_str());
-    let void = |e: &str| e.starts_with("void:");
-    let same = theirs("exit")
-        .filter(|e| !void(e) && !void(exit))
-        .map(|e| e == exit && theirs("output_hash") == Some(output_hash));
+    let original = (all.iter())
+        .find(|r| r.kind == "row" && r.row == Some(of))
+        .ok_or_else(|| {
+            RunError::Records(format!(
+                "recheck row {row} repeats row {of}, which has no record"
+            ))
+        })?;
+    let text = |k: &str| {
+        original.body[k].as_str().ok_or_else(|| {
+            RunError::Records(format!(
+                "the record of row {of}, which recheck row {row} repeats, holds no {k}"
+            ))
+        })
+    };
+    let (exit, theirs) = (text("exit")?, text("output_hash")?);
+    let differs: Vec<&'static str> = (RAN_IN.into_iter())
+        .filter(|k| original.body[*k] != copy[*k])
+        .collect();
+    let void = |e: &Value| e.as_str().is_some_and(|e| e.starts_with("void:"));
+    let same = (differs.is_empty() && !void(&original.body["exit"]) && !void(&copy["exit"]))
+        .then(|| copy["exit"] == exit && copy["output_hash"] == theirs);
     Ok(Compared {
         of,
         same,
-        theirs: theirs("output_hash").unwrap_or_default().into(),
+        differs,
+        theirs: theirs.into(),
     })
 }
 
-/// After a compared copy's record: a mismatch stops a confirmatory run; otherwise one
-/// `row.recheck` event, `warn` for a mismatch and `info` for a match.
+/// The stop of a confirmatory run whose recheck copy `row` gave output `ours` and the row
+/// `of` it repeats gave `theirs`.
+fn not_deterministic(of: u64, theirs: &str, row: u64, ours: &str) -> String {
+    format!(
+        "row {of} gave output {theirs} and its recheck row {row} gave {ours}; \
+         the payload is not deterministic"
+    )
+}
+
+/// The stop that the records of a confirmatory study hold before any stop record: the first
+/// recheck copy recorded with `same: false`. The run that wrote it stops at once, so only a
+/// run that ended before its stop record leaves one. A piece the records lack is left empty:
+/// the study stops either way.
+fn recheck_stop(spec: &Spec, all: &[records::Record]) -> Option<String> {
+    let confirmatory = spec.study.mode == Mode::Confirmatory;
+    let copy = (all.iter()).find(|r| confirmatory && r.kind == "row" && r.body["same"] == false)?;
+    let of = copy.body["recheck_of"].as_u64().unwrap_or_default();
+    let hash = |r: &records::Record| {
+        r.body["output_hash"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let theirs = (all.iter()).find(|r| r.kind == "row" && r.row == Some(of));
+    let row = copy.row.unwrap_or_default();
+    Some(not_deterministic(
+        of,
+        &theirs.map(hash).unwrap_or_default(),
+        row,
+        &hash(copy),
+    ))
+}
+
+/// After a copy's record: a mismatch stops a confirmatory run. Otherwise a compared copy gets
+/// one `row.recheck` event, `warn` for a mismatch and `info` for a match, and so does a copy
+/// that ran in another environment or level than its original, at `warn`, naming the keys
+/// that differ. A void copy or original gets none.
 fn rechecked(watch: &RunWatch, span: &str, row: &Row, c: Compared, ours: &str) -> Option<Halt> {
-    let same = c.same?;
-    if !same && watch.plan.spec.study.mode == Mode::Confirmatory {
-        let why = format!(
-            "row {} gave output {} and its recheck row {} gave {ours}; the payload is not deterministic",
-            c.of, c.theirs, row.index
-        );
-        return Some(Halt::Stop {
-            why,
-            in_flight: None,
-        });
-    }
-    let level = if same { "info" } else { "warn" };
-    let attrs = json!({ "row": row.index, "of": c.of, "same": same });
+    let confirmatory = watch.plan.spec.study.mode == Mode::Confirmatory;
+    let (level, attrs) = match c.same {
+        None if c.differs.is_empty() => return None,
+        None => {
+            let attrs = json!({ "row": row.index, "of": c.of, "same": null, "differs": c.differs });
+            ("warn", attrs)
+        }
+        Some(false) if confirmatory => {
+            let why = not_deterministic(c.of, &c.theirs, row.index, ours);
+            return Some(Halt::Stop {
+                why,
+                in_flight: None,
+            });
+        }
+        Some(same) => {
+            let level = if same { "info" } else { "warn" };
+            (level, json!({ "row": row.index, "of": c.of, "same": same }))
+        }
+    };
     watch.keep(log_event(
         watch.plan,
         watch.dir,

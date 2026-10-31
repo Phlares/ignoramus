@@ -258,7 +258,7 @@ fn analysis_body() -> Value {
             "payload": "p".repeat(64), "environment": "host",
             "inputs": [["data/m.bin", "model", "d".repeat(64)]]
         },
-        "recheck": { "rows": 2, "mismatched": [7], "carried_from": null }
+        "recheck": { "rows": 2, "mismatched": [7], "uncompared": [6], "carried_from": null }
     })
 }
 
@@ -281,6 +281,7 @@ fn an_analysis_record_states_what_follows_it() {
             recheck: Some(Recheck {
                 rows: 2,
                 mismatched: vec![7],
+                uncompared: vec![6],
                 carried_from: None,
             }),
         }
@@ -302,22 +303,24 @@ fn an_analysis_record_states_what_follows_it() {
 }
 
 #[test]
-fn a_recheck_passes_with_rows_compared_or_carried_and_no_mismatch() {
-    let recheck = |rows, mismatched: &[u64], carried_from: Option<&str>| Recheck {
+fn a_recheck_passes_when_every_copy_matched_or_it_was_carried() {
+    let recheck = |rows, mismatched: &[u64], uncompared: &[u64], carried: Option<&str>| Recheck {
         rows,
         mismatched: mismatched.to_vec(),
-        carried_from: carried_from.map(String::from),
+        uncompared: uncompared.to_vec(),
+        carried_from: carried.map(String::from),
     };
-    assert!(recheck(1, &[], None).passed());
-    assert!(recheck(0, &[], Some("pilot")).passed());
-    assert!(!recheck(0, &[], None).passed(), "nothing compared");
-    assert!(!recheck(2, &[7], None).passed());
-    assert!(!recheck(0, &[7], Some("pilot")).passed());
+    assert!(recheck(1, &[], &[], None).passed());
+    assert!(recheck(0, &[], &[], Some("pilot")).passed());
+    assert!(!recheck(0, &[], &[], None).passed(), "nothing compared");
+    assert!(!recheck(2, &[7], &[], None).passed());
+    assert!(!recheck(1, &[], &[6], None).passed(), "a copy not compared");
+    assert!(!recheck(0, &[7], &[], Some("pilot")).passed());
     // A study without determinism writes `null`; a recheck that is there must be whole.
     let mut b = analysis_body();
     b["recheck"] = Value::Null;
     assert_eq!(Analysis::of(&rec("analysis", b)).unwrap().recheck, None);
-    for field in ["rows", "mismatched", "carried_from"] {
+    for field in ["rows", "mismatched", "uncompared", "carried_from"] {
         let mut b = analysis_body();
         b["recheck"].as_object_mut().unwrap().remove(field);
         assert_eq!(Analysis::of(&rec("analysis", b)), None, "{field}");

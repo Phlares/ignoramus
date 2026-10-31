@@ -211,22 +211,26 @@ pub struct Analysis {
     pub recheck: Option<Recheck>,
 }
 
-/// What the recheck copies of a run found: `rows` counts the copies compared with their
-/// originals, `mismatched` lists the copies whose exit or output differed, in the order they
-/// ran, and `carried_from` names the study whose passed check this one takes instead.
+/// What the recheck copies of a run found, one copy per condition: `rows` counts the copies
+/// compared with their originals; `mismatched` lists the compared copies whose exit or output
+/// differed, and `uncompared` the copies not compared (a void row, or another environment or
+/// level), each in the order they ran; `carried_from` names the study whose passed check this
+/// one takes instead.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Recheck {
     pub rows: u64,
     pub mismatched: Vec<u64>,
+    pub uncompared: Vec<u64>,
     #[serde(deserialize_with = "Option::deserialize")]
     pub carried_from: Option<String>,
 }
 
 impl Recheck {
-    /// No copy differed, and some copy was compared or the check was carried.
+    /// Every condition's copy was compared and matched, or the check was carried.
     pub fn passed(&self) -> bool {
-        self.mismatched.is_empty() && (self.rows > 0 || self.carried_from.is_some())
+        let compared = self.rows > 0 && self.uncompared.is_empty();
+        self.mismatched.is_empty() && (compared || self.carried_from.is_some())
     }
 }
 

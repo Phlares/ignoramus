@@ -124,8 +124,8 @@ pub fn paired(spec: &Spec, rows: &[Record]) -> Paired {
 /// The selection stage's pick. A selection unit (a unit of a `selection` row record, recheck
 /// copies aside) is complete when it has a paired metric value for every candidate. Each
 /// candidate's mean is over the complete units; the best mean in the metric outcome's
-/// direction wins, and a tie goes to the first listed. `Err` when the plan has no stage or candidate, its metric is not
-/// an outcome, no unit is complete, or a mean is not finite.
+/// direction wins, and a tie goes to the first listed. `Err` when the plan has no stage or
+/// candidate, its metric is not an outcome, no unit is complete, or a mean is not finite.
 pub fn select(spec: &Spec, rows: &[Record]) -> Result<Selection, String> {
     let stage = (spec.design.selection.as_ref()).ok_or("the plan has no selection stage")?;
     let outcome = (spec.outcomes.iter().find(|o| o.id == stage.metric))
@@ -572,13 +572,21 @@ fn recheck(spec: &Spec, records: &[Record]) -> Option<Recheck> {
     let copies: Vec<&Record> = (records.iter())
         .filter(|r| r.kind == "row" && is_recheck(r))
         .collect();
-    spec.pins.deterministic.then(|| Recheck {
-        rows: copies.iter().filter(|r| !r.body["same"].is_null()).count() as u64,
-        mismatched: (copies.iter())
-            .filter(|r| r.body["same"] == false)
+    // The copies whose record says `same` is `same`, in the order they ran.
+    let with = |same: Value| -> Vec<u64> {
+        (copies.iter())
+            .filter(|r| r.body["same"] == same)
             .filter_map(|r| r.row)
-            .collect(),
-        carried_from: None,
+            .collect()
+    };
+    spec.pins.deterministic.then(|| {
+        let uncompared = with(Value::Null);
+        Recheck {
+            rows: (copies.len() - uncompared.len()) as u64,
+            mismatched: with(json!(false)),
+            uncompared,
+            carried_from: None,
+        }
     })
 }
 
