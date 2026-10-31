@@ -8,6 +8,7 @@ fn job() -> Job {
         argv: vec!["/bin/x".into(), "--y".into()],
         env: vec![("A".into(), "b".into())],
         timeout_ms: 5000,
+        data_limit: Some(64 << 20),
     }
 }
 
@@ -56,6 +57,21 @@ fn frames_round_trip() {
     for e in [End::Code(-1), End::Timeout] {
         assert_eq!(round(&e), e);
     }
+}
+
+#[test]
+fn a_job_without_a_data_limit_has_none() {
+    let mut v = serde_json::to_value(job()).unwrap();
+    assert_eq!(v["data_limit"], 64 << 20);
+    v.as_object_mut().unwrap().remove("data_limit");
+    let parsed: Job = serde_json::from_value(v).unwrap();
+    assert_eq!(
+        parsed,
+        Job {
+            data_limit: None,
+            ..job()
+        }
+    );
 }
 
 #[test]

@@ -10,6 +10,7 @@ fn sh(script: &str) -> Job {
         argv: ["/bin/sh", "-c", script].map(String::from).to_vec(),
         env: vec![],
         timeout_ms: 20_000,
+        data_limit: None,
     }
 }
 

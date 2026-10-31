@@ -339,3 +339,16 @@ fn pins_declare_determinism_off_unless_set() {
     v["pins"]["deterministic"] = json!("yes");
     assert!(Spec::from_value(&v).is_err());
 }
+
+#[test]
+fn a_row_declares_no_memory_unless_set() {
+    let mut v = template_value();
+    assert_eq!(Spec::from_value(&v).unwrap().design.row_memory_mib, None);
+    v["design"]["row_memory_mib"] = json!(512);
+    assert_eq!(
+        Spec::from_value(&v).unwrap().design.row_memory_mib,
+        Some(512)
+    );
+    v["design"]["row_memory_mib"] = json!("lots");
+    assert!(Spec::from_value(&v).is_err());
+}

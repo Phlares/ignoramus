@@ -5,7 +5,9 @@ mod common;
 use common::{in_child, is_child, write_exec};
 use ignorarium::backend::level0::Level0;
 use ignorarium::backend::level1::Level1;
-use ignorarium::backend::level2::{Level2, guest_job, outcome_of, rootfs_disk, selftest_of};
+use ignorarium::backend::level2::{
+    GUEST_MIB, Level2, guest_job, outcome_of, rootfs_disk, selftest_of,
+};
 use ignorarium::backend::selftest::SelfTest;
 use ignorarium::backend::{
     Backend, Exit, Probe, RowJob, RowOutcome, TIMEOUT_CODE, Watch, output_hash, rootfs,
@@ -110,6 +112,7 @@ fn row(r: &Ready, script: &str, timeout: Duration) -> (TempDir, RowJob) {
         seed: [0; 32],
         wall_timeout: timeout,
         rootfs: Some(r.root.clone()),
+        ..RowJob::default()
     };
     (d, job)
 }
@@ -337,6 +340,7 @@ fn guest_job_maps_paths_and_argv() {
         seed: [7; 32],
         wall_timeout: Duration::from_secs(5),
         rootfs: Some(d.path().join("root")),
+        memory_mib: Some(64),
     };
     let h = guest_job(&job).unwrap();
     assert_eq!(h.argv, ["/payload/run", "--condition", "a"]);
@@ -354,6 +358,12 @@ fn guest_job_maps_paths_and_argv() {
         (&h.input_dir, &h.output_dir, h.seed, h.wall_timeout),
         (&job.input_dir, &job.output_dir, job.seed, job.wall_timeout)
     );
+    assert_eq!(h.data_limit, Some(64 << 20));
+    let uncapped = RowJob {
+        memory_mib: None,
+        ..job.clone()
+    };
+    assert_eq!(guest_job(&uncapped).unwrap().data_limit, None);
     let refused = |argv: Vec<String>| {
         guest_job(&RowJob {
             argv,
@@ -1274,6 +1284,129 @@ fn filling_out_is_the_payloads_result() {
     let o = r.level2.run_row(&job, &|| true).unwrap();
     assert_eq!(o.exit, Exit::Payload(7), "{o:?}");
     assert_eq!(o.output_hash, output_hash(&job.output_dir).unwrap());
+}
+
+#[test]
+fn the_vm_holds_the_cap_the_out_disk_and_the_guest() {
+    let mut b = Level2::with(PathBuf::new(), PathBuf::new(), PathBuf::new());
+    let job = |memory_mib| RowJob {
+        memory_mib,
+        ..RowJob::default()
+    };
+    // No declared memory: today's machine.
+    assert_eq!(b.vm_mem_mib(&job(None)), 1024);
+    // The cap, /out (half the 256 MiB output disk), /tmp (all of it) and the guest's own.
+    assert_eq!(GUEST_MIB, 256);
+    assert_eq!(b.vm_mem_mib(&job(Some(2048))), 2688);
+    assert_eq!(b.vm_mem_mib(&job(Some(64))), 704);
+    b.out_mib = 16;
+    assert_eq!(b.vm_mem_mib(&job(Some(2048))), 2048 + 8 + 16 + 256);
+    // /out of an odd disk takes a part of a MiB, which counts as a whole one.
+    b.out_mib = 3;
+    assert_eq!(b.vm_mem_mib(&job(Some(2048))), 2048 + 5 + 256);
+    b.mem_mib = 4096;
+    assert_eq!(b.vm_mem_mib(&job(None)), 4096);
+    // No machine has that much; the host refuses the largest size there is.
+    assert_eq!(b.vm_mem_mib(&job(Some(u32::MAX))), u32::MAX);
+}
+
+/// A level 2 row that runs `script` and declares `memory_mib`.
+fn capped(r: &Ready, memory_mib: Option<u32>, script: &str) -> (TempDir, RowJob) {
+    let (d, job) = row(r, script, LONG);
+    (d, RowJob { memory_mib, ..job })
+}
+
+#[test]
+fn an_absent_row_memory_keeps_todays_limits() {
+    let Some(r) = ready() else { return };
+    let (_d, job) = capped(&r, None, common::LIMITS);
+    let o = r.level2.run_row(&job, &|| true).unwrap();
+    assert_eq!(o.exit, Exit::Ok, "{o:?}");
+    let limits = common::data_limit(&read(&job, "limits"));
+    assert_eq!(limits, ["unlimited", "unlimited"]);
+}
+
+#[test]
+fn the_cap_reaches_the_payload() {
+    let Some(r) = ready() else { return };
+    let (_d, job) = capped(&r, Some(256), common::LIMITS);
+    let o = r.level2.run_row(&job, &|| true).unwrap();
+    assert_eq!(o.exit, Exit::Ok, "{o:?}");
+    let limits = common::data_limit(&read(&job, "limits"));
+    assert_eq!(limits, ["268435456", "268435456"]);
+}
+
+#[test]
+fn a_row_past_its_memory_fails_as_a_payload_failure() {
+    let Some(r) = ready() else { return };
+    let (_d, job) = capped(&r, Some(64), common::HOLD_100_MB);
+    let o = r.level2.run_row(&job, &|| true).unwrap();
+    assert!(common::failed_by_itself(&o.exit), "{o:?}");
+    assert!(!o.ended);
+}
+
+#[test]
+fn a_row_well_under_its_memory_runs_at_every_level() {
+    let Some(r) = ready() else { return };
+    let (_d, job) = capped(&r, Some(1024), common::HOLD_100_MB);
+    let o = r.level2.run_row(&job, &|| true).unwrap();
+    assert_eq!(o.exit, Exit::Ok, "{o:?}");
+}
+
+/// The value of `key` in `/proc/meminfo` text, in kB.
+fn meminfo_kb(text: &str, key: &str) -> u64 {
+    let line = text
+        .lines()
+        .find_map(|l| l.strip_prefix(key)?.strip_prefix(':'));
+    let value = line.unwrap_or_else(|| panic!("no {key} in {text}"));
+    value.trim().trim_end_matches("kB").trim().parse().unwrap()
+}
+
+#[test]
+fn a_level2_vm_boots_with_the_declared_size() {
+    let Some(r) = ready() else { return };
+    let script = format!(
+        "cat /proc/meminfo > \"$IGNORARIUM_OUT/meminfo\"; {}",
+        common::LIMITS
+    );
+    let (_d, job) = capped(&r, Some(2048), &script);
+    let size = r.level2.vm_mem_mib(&job);
+    let o = r.level2.run_row(&job, &|| true).unwrap();
+    assert_eq!(o.exit, Exit::Ok, "{o:?}");
+    let total = meminfo_kb(&read(&job, "meminfo"), "MemTotal");
+    println!("a {size} MiB guest: MemTotal {total} kB");
+    // The kernel keeps some of the machine for itself, but the cap and both tmpfs fit.
+    let held: u64 = (2048 + 128 + 256) << 10;
+    assert!((held..u64::from(size) << 10).contains(&total), "{total} kB");
+    let limits = common::data_limit(&read(&job, "limits"));
+    assert_eq!(limits, ["2147483648", "2147483648"]);
+}
+
+#[test]
+fn a_row_near_its_memory_with_full_tmpfs_runs_at_level_2() {
+    let Some(r) = ready() else { return };
+    // /tmp and /out full, then data 16 MiB under the 256 MiB cap. A guest without room for
+    // all three kills the payload (137) or fails to report.
+    let script = "cat /proc/meminfo > \"$IGNORARIUM_OUT/meminfo\"
+        head -c 256M /dev/zero > /tmp/fill
+        [ \"$(wc -c < /tmp/fill)\" -ge $((255 << 20)) ] || exit 8
+        head -c 128M /dev/zero > \"$IGNORARIUM_OUT/fill\"
+        dd if=/dev/zero of=/dev/null bs=240M count=1 2>/dev/null || exit 9";
+    let (_d, job) = capped(&r, Some(256), script);
+    let size = r.level2.vm_mem_mib(&job);
+    assert_eq!(size, 256 + 128 + 256 + GUEST_MIB);
+    let o = r.level2.run_row(&job, &|| true).unwrap();
+    assert_eq!(o.exit, Exit::Ok, "{o:?}");
+    let filled = fs::metadata(job.output_dir.join("fill")).unwrap().len();
+    assert!(filled >= 127 << 20, "{filled}");
+    let meminfo = read(&job, "meminfo");
+    let (total, free) = (
+        meminfo_kb(&meminfo, "MemTotal"),
+        meminfo_kb(&meminfo, "MemAvailable"),
+    );
+    println!(
+        "a {size} MiB guest at the payload's start: MemTotal {total} kB, MemAvailable {free} kB"
+    );
 }
 
 #[test]

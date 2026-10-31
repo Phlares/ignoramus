@@ -23,6 +23,9 @@ pub struct Job {
     pub argv: Vec<String>,
     pub env: Vec<(String, String)>,
     pub timeout_ms: u64,
+    /// The payload's data limit in bytes; `None` leaves the agent's own.
+    #[serde(default)]
+    pub data_limit: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

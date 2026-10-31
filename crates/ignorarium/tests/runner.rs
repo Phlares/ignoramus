@@ -3754,3 +3754,26 @@ fn prepare_refuses_when_the_carried_record_is_gone() {
     assert!(matches!(&err, RunError::Records(m) if *m == why), "{err}");
     assert!(!lab.home.study_dir("gone").join("schedule.json").exists());
 }
+
+// ---- a declared row memory caps each row ----
+
+#[test]
+fn the_declared_row_memory_caps_every_row_and_its_absence_none() {
+    let lab = lab();
+    let payload = format!("#!/bin/sh\n{}\n{}\n", common::LIMITS, common::VALUES);
+    let memory = |t: String| t.replace("# row_memory_mib = 1024", "row_memory_mib = 1024");
+    let capped = common::edited(&lab, "capped", memory, &payload);
+    let uncapped = common::edited(&lab, "uncapped", |t| t, &payload);
+    for (id, dir, want) in [
+        ("capped", capped, vec!["1073741824".to_string(); 2]),
+        ("uncapped", uncapped, common::own_data_limit()),
+    ] {
+        let plan = plan_of(&lab, id);
+        assert_eq!(run(&plan).unwrap(), RunStatus::Done, "{id}");
+        for row in &plan.schedule.rows {
+            let out = dir.join(format!("run/rows/{}/out/limits", row.index));
+            let limits = common::data_limit(&std::fs::read_to_string(out).unwrap());
+            assert_eq!(limits, want, "{id} row {}", row.index);
+        }
+    }
+}

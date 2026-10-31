@@ -35,6 +35,15 @@ pub struct RowJob {
     pub wall_timeout: Duration,
     /// Root file system to run in. Level 0 ignores it.
     pub rootfs: Option<PathBuf>,
+    /// The payload's data limit in MiB; `None` leaves the box's own.
+    pub memory_mib: Option<u32>,
+}
+
+impl RowJob {
+    /// `memory_mib` in bytes, as every level applies it.
+    pub fn data_limit(&self) -> Option<u64> {
+        self.memory_mib.map(|m| u64::from(m) << 20)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

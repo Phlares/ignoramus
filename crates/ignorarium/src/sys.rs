@@ -68,7 +68,7 @@ fn set_action(sig: libc::c_int, handler: libc::sighandler_t, flags: libc::c_int)
     Ok(())
 }
 
-pub use ignorarium_guest::sys::{Ended, Reaped, wait4};
+pub use ignorarium_guest::sys::{Ended, Reaped, limit_data, wait4};
 
 /// Make the child that `cmd` starts inherit, besides stdin, stdout and stderr, only the
 /// descriptors in `keep`, at the same numbers. The box's own descriptors are close-on-exec,

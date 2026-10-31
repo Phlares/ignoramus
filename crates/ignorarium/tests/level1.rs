@@ -59,6 +59,7 @@ fn row(script: &str, timeout: Duration) -> (TempDir, RowJob) {
         seed: [0; 32],
         wall_timeout: timeout,
         rootfs: None,
+        ..RowJob::default()
     };
     (d, job)
 }
@@ -1453,4 +1454,46 @@ fn a_timed_out_level1_row_is_ended() {
     let o = b.run_row(&job, &|| true).unwrap();
     assert_eq!(o.exit, Exit::Payload(124));
     assert!(o.ended);
+}
+
+/// A level 1 row that runs `script` and declares `memory_mib`.
+fn capped(memory_mib: Option<u32>, script: &str) -> (TempDir, RowJob) {
+    let (d, job) = row(script, LONG);
+    (d, RowJob { memory_mib, ..job })
+}
+
+#[test]
+fn an_absent_row_memory_keeps_todays_limits() {
+    let Some(b) = ready() else { return };
+    let (_d, job) = capped(None, common::LIMITS);
+    assert_eq!(b.run_row(&job, &|| true).unwrap().exit, Exit::Ok);
+    let limits = common::data_limit(&read(&job, "limits"));
+    assert_eq!(limits, common::own_data_limit());
+}
+
+#[test]
+fn the_cap_reaches_the_payload() {
+    let Some(b) = ready() else { return };
+    let (_d, job) = capped(Some(256), common::LIMITS);
+    let o = b.run_row(&job, &|| true).unwrap();
+    assert_eq!(o.exit, Exit::Ok, "{o:?}");
+    let limits = common::data_limit(&read(&job, "limits"));
+    assert_eq!(limits, ["268435456", "268435456"]);
+}
+
+#[test]
+fn a_row_past_its_memory_fails_as_a_payload_failure() {
+    let Some(b) = ready() else { return };
+    let (_d, job) = capped(Some(64), common::HOLD_100_MB);
+    let o = b.run_row(&job, &|| true).unwrap();
+    assert!(common::failed_by_itself(&o.exit), "{o:?}");
+    assert!(!o.ended);
+}
+
+#[test]
+fn a_row_well_under_its_memory_runs_at_every_level() {
+    let Some(b) = ready() else { return };
+    let (_d, job) = capped(Some(1024), common::HOLD_100_MB);
+    let o = b.run_row(&job, &|| true).unwrap();
+    assert_eq!(o.exit, Exit::Ok, "{o:?}");
 }

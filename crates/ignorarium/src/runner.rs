@@ -1836,6 +1836,7 @@ fn job_for(plan: &RunPlan, row: &Row, condition: &str, dir: &Path) -> Result<Row
         seed,
         wall_timeout: wall_timeout(plan.spec.design.row_seconds),
         rootfs: plan.rootfs.clone(),
+        memory_mib: plan.spec.design.row_memory_mib,
     })
 }
 

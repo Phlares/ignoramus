@@ -267,6 +267,33 @@ pub fn write_exec(path: &Path, text: &str) {
     assert!(child.wait().unwrap().success(), "cannot write {path:?}");
 }
 
+/// A payload line that copies its own `/proc/self/limits` to `limits` in its output folder.
+pub const LIMITS: &str = "cat /proc/self/limits > \"$IGNORARIUM_OUT/limits\"";
+
+/// A payload line whose shell holds about 100 MB.
+pub const HOLD_100_MB: &str = "x=$(head -c 100000000 /dev/zero | tr '\\0' a)";
+
+/// The soft and hard limit in the `Max data size` line of `/proc/self/limits` text.
+pub fn data_limit(limits: &str) -> Vec<String> {
+    let line = limits.lines().find(|l| l.starts_with("Max data size"));
+    let words = line.unwrap_or_default().split_whitespace();
+    words.skip(3).take(2).map(String::from).collect()
+}
+
+/// The box's own data limit, which levels 0 and 1 pass on to a row that declares no memory.
+pub fn own_data_limit() -> Vec<String> {
+    let own = data_limit(&std::fs::read_to_string("/proc/self/limits").unwrap());
+    assert_eq!(own.len(), 2, "{own:?}");
+    own
+}
+
+/// A payload failure of the payload's own: not the wall timeout, nor the SIGKILL that the
+/// out-of-memory killer sends.
+pub fn failed_by_itself(exit: &ignorarium::backend::Exit) -> bool {
+    use ignorarium::backend::{Exit, TIMEOUT_CODE};
+    matches!(exit, Exit::Payload(c) if *c != TIMEOUT_CODE && *c != 128 + 9)
+}
+
 /// Set to `1` (CI does) to make every level 1 skip a failure.
 pub const REQUIRE_LEVEL1: &str = "IGNORARIUM_REQUIRE_LEVEL1";
 

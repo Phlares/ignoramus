@@ -233,6 +233,9 @@ pub struct Design {
     pub reference: String,
     pub repeats: u32,
     pub row_seconds: f64,
+    /// The payload's data limit in MiB at every level; `None` when the plan declares none.
+    #[serde(default)]
+    pub row_memory_mib: Option<u32>,
     pub power: f64,
     /// Units each cluster gives the study, at most.
     pub units_per_cluster: u32,

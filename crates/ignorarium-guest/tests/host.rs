@@ -74,7 +74,7 @@ impl Rig {
             initramfs: "initramfs".into(),
             rootfs: "rootfs.img".into(),
             cpus: 2,
-            mem_mib: 256,
+            mem_mib: 512,
             out_mib: 8,
             boot_timeout: Duration::from_secs(10),
             exit_timeout: ms(50),
@@ -89,6 +89,7 @@ impl Rig {
             output_dir: out.clone(),
             seed: [0xab; 32],
             wall_timeout: Duration::from_secs(10),
+            data_limit: None,
         };
         Rig {
             root,
@@ -147,6 +148,7 @@ impl Rig {
             argv: vec![],
             env: vec![],
             timeout_ms: 0,
+            data_limit: None,
         };
         thread::spawn(move || {
             // The VMM is running (its pid is recorded) before the guest connects, so the
@@ -359,7 +361,7 @@ fn vmm_args_have_no_network_and_read_only_inputs() {
     assert_eq!(after(&a, "--kernel"), "kernel");
     assert_eq!(after(&a, "--initramfs"), "initramfs");
     assert_eq!(after(&a, "--cpus"), "boot=2");
-    assert_eq!(after(&a, "--memory"), "size=256M");
+    assert_eq!(after(&a, "--memory"), "size=512M");
 }
 
 #[test]
@@ -387,7 +389,8 @@ fn vmm_args_log_the_serial_console_on_request() {
 
 #[test]
 fn a_row_round_trip_through_a_fake_guest() {
-    let rig = Rig::sleeper();
+    let mut rig = Rig::sleeper();
+    rig.job.data_limit = Some(64 << 20);
     let (seed, argv, env) = (rig.job.seed, rig.job.argv.clone(), rig.job.env.clone());
     let wall = rig.job.wall_timeout.as_millis() as u64;
     let h = rig.guest(move |s, c| {
@@ -397,6 +400,7 @@ fn a_row_round_trip_through_a_fake_guest() {
         assert_eq!(c.job.argv, argv);
         assert_eq!(c.job.env, env);
         assert_eq!(c.job.timeout_ms, wall);
+        assert_eq!(c.job.data_limit, Some(64 << 20));
         assert!(c.job.unix_nanos > 1_000_000_000_000_000_000);
         put_out(&c.work, &packed(&c.src));
         let hash = tree_hash(&c.src).unwrap();
@@ -888,15 +892,35 @@ fn channel_errors_hold_no_raw_guest_bytes() {
     }
 }
 
+/// (output disk, data limit, the least guest memory that holds them): `/out` takes half the
+/// disk and `/tmp` all of it, both in guest memory, beside the payload's data and the
+/// guest's own 256 MiB. A part of a MiB counts as a whole one.
+const SIZES: [(u64, Option<u64>, u32); 4] = [
+    (64, None, 352),
+    (64, Some(100 << 20), 452),
+    (64, Some((100 << 20) + 1), 453),
+    (3, None, 261),
+];
+
 #[test]
-fn output_disks_of_zero_or_over_a_quarter_of_the_memory_are_refused_before_boot() {
+fn a_vm_smaller_than_what_its_guest_holds_is_refused_before_boot() {
     let mut rig = Rig::new(&format!("touch $PIDFILE\n{SLEEPER}"));
-    // A tmpfs of size 0 has no limit; /out and /tmp live in guest memory, each up to the
-    // disk size.
-    for (out_mib, mem_mib) in [(0, 256), (65, 256)] {
-        (rig.vm.out_mib, rig.vm.mem_mib) = (out_mib, mem_mib);
+    // A tmpfs of size 0 has no limit.
+    rig.vm.out_mib = 0;
+    let msg = refused_before_boot(&rig, &rig.work);
+    assert_eq!(
+        msg,
+        "an output disk of 0 MiB leaves /out and /tmp unlimited"
+    );
+    for (out_mib, data_limit, need) in SIZES {
+        (rig.vm.out_mib, rig.job.data_limit, rig.vm.mem_mib) = (out_mib, data_limit, need - 1);
         let msg = refused_before_boot(&rig, &rig.work);
-        assert!(msg.contains("output disk"), "{msg}");
+        let want = format!(
+            "a guest memory of {} MiB cannot hold the row: its data limit, /out and /tmp of \
+             the {out_mib} MiB output disk, and 256 MiB for the guest need {need} MiB",
+            need - 1
+        );
+        assert_eq!(msg, want);
     }
 }
 
@@ -909,10 +933,12 @@ fn boots(rig: &mut Rig) {
 }
 
 #[test]
-fn an_output_disk_of_a_quarter_of_the_memory_boots() {
-    let mut rig = Rig::sleeper();
-    (rig.vm.out_mib, rig.vm.mem_mib) = (64, 256);
-    boots(&mut rig);
+fn a_vm_that_holds_what_its_guest_holds_boots() {
+    for (out_mib, data_limit, need) in SIZES {
+        let mut rig = Rig::sleeper();
+        (rig.vm.out_mib, rig.job.data_limit, rig.vm.mem_mib) = (out_mib, data_limit, need);
+        boots(&mut rig);
+    }
 }
 
 #[test]
@@ -990,6 +1016,7 @@ fn wire_len(job: &HostJob) -> usize {
         argv: job.argv.clone(),
         env: job.env.clone(),
         timeout_ms: job.wall_timeout.as_millis() as u64,
+        data_limit: job.data_limit,
     };
     serde_json::to_vec(&wire).unwrap().len()
 }

@@ -30,6 +30,7 @@ fn job(argv: &[&str], env: &[(&str, &str)], timeout_ms: u64) -> Job {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
         timeout_ms,
+        data_limit: None,
     }
 }
 
@@ -138,6 +139,31 @@ fn payload_exit_code_and_signal() {
         payload::run(&sh("kill -TERM $$", d.path())).unwrap().end,
         End::Signal(15)
     );
+}
+
+/// The soft and hard limit in the `Max data size` line of `/proc/self/limits` text.
+fn data_limit(limits: &str) -> Vec<String> {
+    let line = limits.lines().find(|l| l.starts_with("Max data size"));
+    let words = line.unwrap_or_default().split_whitespace();
+    words.skip(3).take(2).map(String::from).collect()
+}
+
+#[test]
+fn the_data_limit_reaches_the_payload() {
+    let d = tempfile::tempdir().unwrap();
+    let seen = |limit: Option<u64>| {
+        let job = Job {
+            data_limit: limit,
+            ..sh("cat /proc/self/limits > \"$OUT/limits\"", d.path())
+        };
+        assert_eq!(payload::run(&job).unwrap().end, End::Code(0));
+        data_limit(&fs::read_to_string(d.path().join("limits")).unwrap())
+    };
+    assert_eq!(seen(Some(256 << 20)), ["268435456", "268435456"]);
+    // No limit leaves the agent's own.
+    let own = data_limit(&fs::read_to_string("/proc/self/limits").unwrap());
+    assert_eq!(own.len(), 2);
+    assert_eq!(seen(None), own);
 }
 
 #[test]

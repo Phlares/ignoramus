@@ -6,7 +6,7 @@
 use crate::agent::payload::exited;
 use crate::agent::steps::now_nanos;
 use crate::image::{ext4, size_mib};
-use crate::pack::{self, Link, Unpacked};
+use crate::pack::{self, Link, Unpacked, out_caps};
 use crate::proto::{
     CONTROL_PORT, GUEST_CID, Job, MAX_FRAME, Report, SERIAL_IN, SERIAL_OUT, SERIAL_PAYLOAD,
     SERIAL_ROOTFS, ToHost, read_frame, write_frame,
@@ -28,6 +28,21 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 pub const REPORT_SLACK: Duration = Duration::from_secs(30);
+
+/// Guest memory, in MiB, for the guest's kernel, the agent and the page cache.
+pub const GUEST_MIB: u32 = 256;
+
+/// The guest memory, in MiB, that a row needs: the payload's data limit in bytes (none
+/// counts 0), the `/out` and `/tmp` tmpfs of an output disk of `out_mib` (their pages live in
+/// guest memory, outside the data limit), and `GUEST_MIB`. A part of a MiB counts as a whole.
+pub fn needed_mem_mib(data_limit: Option<u64>, out_mib: u64) -> u64 {
+    let out_bytes = out_mib.saturating_mul(1 << 20);
+    // The agent caps /out at `out_caps` of the disk and /tmp at the whole disk.
+    let held = (data_limit.unwrap_or(0))
+        .saturating_add(out_caps(out_bytes).0)
+        .saturating_add(out_bytes);
+    held.div_ceil(1 << 20) + u64::from(GUEST_MIB)
+}
 
 /// What the caller hears while a row runs.
 pub trait Watch {
@@ -70,6 +85,8 @@ pub struct HostJob {
     pub output_dir: PathBuf,
     pub seed: [u8; 32],
     pub wall_timeout: Duration,
+    /// The payload's data limit in bytes; `None` leaves the agent's own.
+    pub data_limit: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -481,12 +498,18 @@ fn check_inputs(vm: &Vm, job: &HostJob, work: &Path) -> io::Result<()> {
             return Err(invalid(format!("{what} {} is not empty", dir.display())));
         }
     }
-    // A tmpfs of size 0 has no limit. /out and /tmp live in guest memory, each up to the
-    // disk size, and together they may take at most half of it.
-    if vm.out_mib == 0 || vm.out_mib.saturating_mul(4) > u64::from(vm.mem_mib) {
+    // A tmpfs of size 0 has no limit.
+    if vm.out_mib == 0 {
+        return Err(invalid(
+            "an output disk of 0 MiB leaves /out and /tmp unlimited".into(),
+        ));
+    }
+    let need = needed_mem_mib(job.data_limit, vm.out_mib);
+    if u64::from(vm.mem_mib) < need {
         return Err(invalid(format!(
-            "output disk of {} MiB: it needs at least 1 MiB and at most a quarter of the {} MiB guest memory",
-            vm.out_mib, vm.mem_mib
+            "a guest memory of {} MiB cannot hold the row: its data limit, /out and /tmp of \
+             the {} MiB output disk, and {GUEST_MIB} MiB for the guest need {need} MiB",
+            vm.mem_mib, vm.out_mib
         )));
     }
     // The clock field is widest at its maximum, so the job sent later is no longer.
@@ -508,6 +531,7 @@ fn wire_job(job: &HostJob, unix_nanos: u64) -> Job {
         argv: job.argv.clone(),
         env: job.env.clone(),
         timeout_ms: job.wall_timeout.as_millis() as u64,
+        data_limit: job.data_limit,
     }
 }
 

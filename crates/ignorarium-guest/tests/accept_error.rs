@@ -37,7 +37,7 @@ fn an_accept_error_surfaces_instead_of_waiting_for_the_boot_timeout() {
         initramfs: "initramfs".into(),
         rootfs: "rootfs.img".into(),
         cpus: 2,
-        mem_mib: 256,
+        mem_mib: 512,
         out_mib: 8,
         boot_timeout: Duration::from_secs(3),
         exit_timeout: Duration::from_millis(50),
@@ -52,6 +52,7 @@ fn an_accept_error_surfaces_instead_of_waiting_for_the_boot_timeout() {
         output_dir: out,
         seed: [0; 32],
         wall_timeout: Duration::from_secs(10),
+        data_limit: None,
     };
     let sock = work.join("vsock.sock_7201");
     let guest = thread::spawn(move || {

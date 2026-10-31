@@ -164,6 +164,7 @@ target = [
   { path = "design.reference", check = "type", kind = "string" },
   { path = "design.repeats", check = "type", kind = "int" },
   { path = "design.row_seconds", check = "type", kind = "float" },
+  { path = "design.row_memory_mib", check = "type", kind = "int" },
   { path = "design.power", check = "type", kind = "float" },
   { path = "design.units_per_cluster", check = "type", kind = "int" },
   { path = "design.pick", check = "type", kind = "string" },
@@ -255,7 +256,7 @@ target = [
 code = "E-RNG-001"
 severity = "error"
 problem = "A number is outside its allowed range."
-instruction = "Bring the value into range: min_isolation 0 to 3, power 0.5 to 0.999, repeats at least 1, each budget value 0 or more, row_seconds above 0, units_per_cluster 1 up to 4294967295, each input's units 1 up to 4294967295, repeats up to 4294967295, depth_cap 0 to 255, each trigger threshold_e above 0."
+instruction = "Bring the value into range: min_isolation 0 to 3, power 0.5 to 0.999, repeats at least 1, each budget value 0 or more, row_seconds above 0, row_memory_mib 1 up to 1048576, units_per_cluster 1 up to 4294967295, each input's units 1 up to 4294967295, repeats up to 4294967295, depth_cap 0 to 255, each trigger threshold_e above 0."
 why = "Values outside these ranges are meaningless or make the sample-size maths fail."
 sources = ["https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661"]
 target = [
@@ -266,6 +267,7 @@ target = [
   { path = "scope.budget.wall_hours", check = "range", interval = "[0, inf)" },
   { path = "scope.budget.money_usd", check = "range", interval = "[0, inf)" },
   { path = "design.row_seconds", check = "range", interval = "(0, inf)" },
+  { path = "design.row_memory_mib", check = "range", interval = "[1, 1048576]" },
   { path = "design.units_per_cluster", check = "range", interval = "[1, 4294967295]" },
   { path = "inputs[*].units", check = "range", interval = "[1, 4294967295]" },
   { path = "mutations.depth_cap", check = "range", interval = "[0, 255]" },

@@ -19,6 +19,7 @@ fn job(dir: &std::path::Path, script: &str, timeout: Duration) -> RowJob {
         seed: [0; 32],
         wall_timeout: timeout,
         rootfs: None,
+        ..RowJob::default()
     }
 }
 
@@ -519,4 +520,48 @@ fn levels_0_and_1_report_the_host_cpu_count() {
     let n = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
     assert_eq!(Level0.cpus(), n);
     assert_eq!(level1::Level1::new().cpus(), n);
+}
+
+/// A level 0 job that runs `script` and declares `memory_mib`.
+fn capped(dir: &std::path::Path, memory_mib: Option<u32>, script: &str) -> RowJob {
+    RowJob {
+        memory_mib,
+        ..job(dir, script, Duration::from_secs(30))
+    }
+}
+
+fn limits_of(job: &RowJob) -> Vec<String> {
+    common::data_limit(&std::fs::read_to_string(job.output_dir.join("limits")).unwrap())
+}
+
+#[test]
+fn an_absent_row_memory_keeps_todays_limits() {
+    let d = tempfile::tempdir().unwrap();
+    let j = capped(d.path(), None, common::LIMITS);
+    assert_eq!(Level0.run_row(&j, &|| true).unwrap().exit, Exit::Ok);
+    assert_eq!(limits_of(&j), common::own_data_limit());
+}
+
+#[test]
+fn the_cap_reaches_the_payload() {
+    let d = tempfile::tempdir().unwrap();
+    let j = capped(d.path(), Some(256), common::LIMITS);
+    assert_eq!(Level0.run_row(&j, &|| true).unwrap().exit, Exit::Ok);
+    assert_eq!(limits_of(&j), ["268435456", "268435456"]);
+}
+
+#[test]
+fn a_row_past_its_memory_fails_as_a_payload_failure() {
+    let d = tempfile::tempdir().unwrap();
+    let j = capped(d.path(), Some(64), common::HOLD_100_MB);
+    let o = Level0.run_row(&j, &|| true).unwrap();
+    assert!(common::failed_by_itself(&o.exit), "{o:?}");
+    assert!(!o.ended);
+}
+
+#[test]
+fn a_row_well_under_its_memory_runs_at_every_level() {
+    let d = tempfile::tempdir().unwrap();
+    let j = capped(d.path(), Some(1024), common::HOLD_100_MB);
+    assert_eq!(Level0.run_row(&j, &|| true).unwrap().exit, Exit::Ok);
 }

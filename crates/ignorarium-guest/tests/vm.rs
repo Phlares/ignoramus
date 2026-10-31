@@ -77,6 +77,7 @@ impl Row {
             output_dir: p.join("out"),
             seed: SEED,
             wall_timeout: secs(60),
+            data_limit: None,
         };
         Row { dir, vm, job }
     }

@@ -6,6 +6,7 @@ use super::rootfs;
 use super::selftest::{Call, SelfTest};
 use super::{Backend, Exit, Probe, RowJob, RowOutcome, TIMEOUT_CODE, Watch};
 use crate::files::temp_beside;
+pub use ignorarium_guest::host::GUEST_MIB;
 use ignorarium_guest::host::{self, HostJob, Timings, Vm, VmError, VmOutcome};
 use ignorarium_guest::image::{self, KERNEL, Pin, VMM, check_pin, has_interp};
 use ignorarium_guest::proto::{self, End, GUEST_IN, GUEST_OUT, GUEST_PAYLOAD};
@@ -46,7 +47,7 @@ pub struct Level2 {
     pub kernel: PathBuf,
     /// A static build of the `ignorarium-guest` binary, the guest's `/init`.
     pub agent: PathBuf,
-    /// Each row's machine.
+    /// Each row's machine; `mem_mib` only for a row that declares no memory (`vm_mem_mib`).
     pub cpus: u32,
     pub mem_mib: u32,
     pub out_mib: u64,
@@ -92,6 +93,19 @@ impl Level2 {
             report_slack: host::REPORT_SLACK,
             version: OnceLock::new(),
             initramfs: OnceLock::new(),
+        }
+    }
+
+    /// The guest memory of `job`'s machine, in MiB: `mem_mib` when the row declares no
+    /// memory; otherwise the cap, the `/out` and `/tmp` tmpfs and `GUEST_MIB`, which the host
+    /// checks every machine against.
+    pub fn vm_mem_mib(&self, job: &RowJob) -> u32 {
+        match job.data_limit() {
+            None => self.mem_mib,
+            limit => {
+                let need = host::needed_mem_mib(limit, self.out_mib);
+                u32::try_from(need).unwrap_or(u32::MAX)
+            }
         }
     }
 
@@ -205,7 +219,7 @@ impl Level2 {
             initramfs: scratch.0.join("initramfs.cpio"),
             rootfs,
             cpus: self.cpus,
-            mem_mib: self.mem_mib,
+            mem_mib: self.vm_mem_mib(job),
             out_mib: self.out_mib,
             boot_timeout: self.boot_timeout,
             exit_timeout: self.exit_timeout,
@@ -361,6 +375,7 @@ pub fn guest_job(job: &RowJob) -> Result<HostJob, String> {
         output_dir: job.output_dir.clone(),
         seed: job.seed,
         wall_timeout: job.wall_timeout,
+        data_limit: job.data_limit(),
     })
 }
 
