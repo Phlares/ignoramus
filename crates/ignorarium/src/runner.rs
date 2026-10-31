@@ -294,8 +294,9 @@ pub fn up_to(backends: Vec<Box<dyn Backend>>, max: u8) -> Vec<Box<dyn Backend>> 
 /// view (the inputs present and the manifest that lists them with their roles), gate its late
 /// data, write its schedule, and pick the highest backend whose probe finds it available, that
 /// meets `scope.min_isolation` and can run the study: level 2 and up run rows only in the
-/// study's environment image, so a study without one runs at the highest level below, and one
-/// `run.isolation` event names the levels it skipped. Every file in the view is hashed in full
+/// study's environment image, in a machine the host's memory must hold, so a study without
+/// one, or with rows too large, runs at the highest level below, and one `run.isolation`
+/// event names the levels it skipped. Every file in the view is hashed in full
 /// here, once per `run` or `resume`; before each attempt the run only compares the view's
 /// stamps (see `stale`).
 /// The first prepare that gets this far signs an `inputs` record of every input's digest,
@@ -358,15 +359,28 @@ pub fn prepare_with(
     } else {
         (None, HOST.into())
     };
-    let unfit = if fit.iter().any(|b| b.level() >= IMAGE_LEVEL) {
+    let image = if fit.iter().any(|b| b.level() >= IMAGE_LEVEL) {
         image_unfit(rootfs.as_deref())?
     } else {
         None
     };
-    let (skipped, fit): (Vec<_>, Vec<_>) =
-        (fit.into_iter()).partition(|b| unfit.is_some() && b.level() >= IMAGE_LEVEL);
+    // Levels 2 and up: the image first, then the machine the rows' memory needs.
+    let memory = spec.design.row_memory_mib;
+    let mut unfit = None;
+    let (skipped, fit): (Vec<_>, Vec<_>) = (fit.into_iter()).partition(|b| {
+        let why = (b.level() >= IMAGE_LEVEL)
+            .then(|| {
+                image
+                    .clone()
+                    .or_else(|| b.unfit(memory).map(|w| (w.clone(), w)))
+            })
+            .flatten();
+        let skip = why.is_some();
+        unfit = unfit.take().or(why);
+        skip
+    });
     let skipped: Vec<u8> = skipped.iter().map(|b| b.level()).collect();
-    // Only the image rule can empty the list.
+    // Only these rules can empty the list.
     let Some(backend) = fit.into_iter().max_by_key(|b| b.level()) else {
         return Err(RunError::Environment(unfit.unwrap_or_default().1));
     };
@@ -444,8 +458,8 @@ pub fn prepare_with(
     })
 }
 
-/// Why levels 2 and up cannot run the study, when they cannot: the `run.isolation` reason, and
-/// the refusal when no lower level is left. They run rows only in an environment image, from
+/// Why levels 2 and up cannot run the study's image, when they cannot: the `run.isolation`
+/// reason, and the refusal when no lower level is left. They run rows only in an environment image, from
 /// its disk, which this builds once. A disk that cannot be built for a fault of the host
 /// refuses the run: the box never falls back to a lower level by itself.
 fn image_unfit(rootfs: Option<&Path>) -> Result<Option<(String, String)>, RunError> {

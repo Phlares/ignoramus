@@ -286,6 +286,11 @@ fn read_job(s: &mut UnixStream, ctx: &mut Ctx) {
 }
 
 fn report(hash: &str, end: Option<End>) -> ToHost {
+    echoing(hash, end, None)
+}
+
+/// A report that says the agent applied `data_limit`.
+fn echoing(hash: &str, end: Option<End>, data_limit: Option<u64>) -> ToHost {
     ToHost::Report(Report {
         selftest: SelfTest {
             only_loopback: true,
@@ -299,6 +304,7 @@ fn report(hash: &str, end: Option<End>) -> ToHost {
         cpu_seconds: 0.5,
         output_hash: hash.into(),
         pack_refused: None,
+        data_limit,
     })
 }
 
@@ -404,7 +410,7 @@ fn a_row_round_trip_through_a_fake_guest() {
         assert!(c.job.unix_nanos > 1_000_000_000_000_000_000);
         put_out(&c.work, &packed(&c.src));
         let hash = tree_hash(&c.src).unwrap();
-        write_frame(s, &report(&hash, Some(End::Code(0)))).unwrap();
+        write_frame(s, &echoing(&hash, Some(End::Code(0)), c.job.data_limit)).unwrap();
     });
     let res = rig.run();
     h.join().unwrap();
@@ -417,6 +423,68 @@ fn a_row_round_trip_through_a_fake_guest() {
     assert!(o.timings.prepare <= o.timings.total);
     assert_eq!(o.timings.payload, Duration::from_nanos(5_000_000));
     rig.pid_gone();
+}
+
+/// The row's result when the fake guest reports that it ran the payload (or, with `ran`
+/// false, that it ran none) under `echoed`, for a job whose data limit is `limit`. With
+/// `drop`, the report lacks the field, as from an agent built before it.
+fn with_echo(
+    limit: Option<u64>,
+    echoed: Option<u64>,
+    ran: bool,
+    drop: bool,
+) -> Result<VmOutcome, VmError> {
+    let mut rig = Rig::sleeper();
+    rig.job.data_limit = limit;
+    let h = rig.guest(move |s, c| {
+        hello(s);
+        read_job(s, c);
+        put_out(&c.work, &packed(&c.src));
+        let hash = tree_hash(&c.src).unwrap();
+        let end = ran.then_some(End::Code(0));
+        let mut frame = serde_json::to_value(echoing(&hash, end, echoed)).unwrap();
+        if drop {
+            frame.as_object_mut().unwrap().remove("data_limit").unwrap();
+        }
+        write_frame(s, &frame).unwrap();
+    });
+    let res = rig.run();
+    h.join().unwrap();
+    rig.pid_gone();
+    res
+}
+
+#[test]
+fn a_payload_run_without_the_jobs_data_limit_is_a_guest_error() {
+    let cap = Some(64 << 20);
+    let refused = |echoed, drop| match with_echo(cap, echoed, true, drop) {
+        Err(VmError::Guest(m)) => m,
+        other => panic!("{other:?}"),
+    };
+    let m = refused(None, true);
+    assert!(
+        m.starts_with(
+            "the agent reported the data limit none, not the job's 67108864 bytes: \
+             rebuild the agent"
+        ),
+        "{m}"
+    );
+    let m = refused(Some(1 << 20), false);
+    assert!(
+        m.starts_with("the agent reported the data limit 1048576 bytes, not the job's 67108864"),
+        "{m}"
+    );
+    // A limit no job asked for is refused too.
+    assert!(matches!(
+        with_echo(None, cap, true, false),
+        Err(VmError::Guest(_))
+    ));
+    // The echo passes, and so does an old agent's report for a job without a limit.
+    assert!(with_echo(cap, cap, true, false).is_ok());
+    assert!(with_echo(None, None, true, true).is_ok());
+    // No payload ran, so nothing was applied: the report stands, and the caller maps it.
+    let o = with_echo(cap, None, false, true).unwrap();
+    assert_eq!(o.report.end, None);
 }
 
 #[test]
@@ -894,12 +962,16 @@ fn channel_errors_hold_no_raw_guest_bytes() {
 
 /// (output disk, data limit, the least guest memory that holds them): `/out` takes half the
 /// disk and `/tmp` all of it, both in guest memory, beside the payload's data and the
-/// guest's own 256 MiB. A part of a MiB counts as a whole one.
+/// guest's own 256 MiB, and the kernel keeps 1/64 of the memory for its page data, so the
+/// sum is over 63/64 of the machine. A part of a MiB counts as a whole one.
 const SIZES: [(u64, Option<u64>, u32); 4] = [
-    (64, None, 352),
-    (64, Some(100 << 20), 452),
-    (64, Some((100 << 20) + 1), 453),
-    (3, None, 261),
+    // (32 + 64 + 256) x 64 / 63 = 357.6
+    (64, None, 358),
+    // (26 + 32 + 64 + 256) x 64 / 63 = 384 exactly, and one byte more needs one MiB more.
+    (64, Some(26 << 20), 384),
+    (64, Some((26 << 20) + 1), 385),
+    // (1.5 + 3 + 256) x 64 / 63 = 264.6
+    (3, None, 265),
 ];
 
 #[test]
@@ -917,7 +989,8 @@ fn a_vm_smaller_than_what_its_guest_holds_is_refused_before_boot() {
         let msg = refused_before_boot(&rig, &rig.work);
         let want = format!(
             "a guest memory of {} MiB cannot hold the row: its data limit, /out and /tmp of \
-             the {out_mib} MiB output disk, and 256 MiB for the guest need {need} MiB",
+             the {out_mib} MiB output disk, 256 MiB for the guest and the kernel's page \
+             data need {need} MiB",
             need - 1
         );
         assert_eq!(msg, want);

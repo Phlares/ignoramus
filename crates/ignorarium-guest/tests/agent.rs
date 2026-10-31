@@ -156,7 +156,8 @@ fn the_data_limit_reaches_the_payload() {
             data_limit: limit,
             ..sh("cat /proc/self/limits > \"$OUT/limits\"", d.path())
         };
-        assert_eq!(payload::run(&job).unwrap().end, End::Code(0));
+        let ran = payload::run(&job).unwrap();
+        assert_eq!((ran.end, ran.data_limit), (End::Code(0), limit));
         data_limit(&fs::read_to_string(d.path().join("limits")).unwrap())
     };
     assert_eq!(seen(Some(256 << 20)), ["268435456", "268435456"]);
@@ -390,6 +391,7 @@ fn ran_with(packed: Result<&str, &str>) -> io::Result<(Ran, Result<String, Strin
         end: End::Code(0),
         wall: Duration::from_millis(5),
         cpu_seconds: 0.25,
+        data_limit: Some(7 << 20),
     };
     Ok((ran, packed.map(str::to_string).map_err(str::to_string)))
 }
@@ -406,6 +408,8 @@ fn gate_runs_the_payload_only_after_a_passing_selftest() {
     assert_eq!((failed.end, failed.output_hash.as_str()), (None, ""));
     assert_eq!(failed.clock_unix_nanos, 42);
     assert_eq!(failed.pack_refused, None);
+    // No payload ran, so no limit was applied.
+    assert_eq!(failed.data_limit, None);
 
     let passed = gate(selftest_with(true), 42, ran).unwrap();
     assert!(called.get());
@@ -414,6 +418,7 @@ fn gate_runs_the_payload_only_after_a_passing_selftest() {
     assert_eq!(passed.payload_wall_ns, 5_000_000);
     assert_eq!(passed.cpu_seconds, 0.25);
     assert_eq!(passed.pack_refused, None);
+    assert_eq!(passed.data_limit, Some(7 << 20));
 }
 
 #[test]

@@ -731,6 +731,66 @@ fn an_image_file_its_owner_cannot_read_keeps_level_2_out() {
     assert_eq!(beside, [std::ffi::OsString::from(&digest)]);
 }
 
+/// A level 2 stand-in on a host too small for the machine of a row that declares memory.
+struct Cramped;
+
+impl Backend for Cramped {
+    fn level(&self) -> u8 {
+        2
+    }
+    fn probe(&self) -> Probe {
+        Probe::Available
+    }
+    fn cpus(&self) -> u32 {
+        1
+    }
+    fn launcher(&self) -> String {
+        "cramped".into()
+    }
+    fn unfit(&self, memory_mib: Option<u32>) -> Option<String> {
+        memory_mib.map(|m| format!("a machine for rows of {m} MiB does not fit"))
+    }
+    fn run_row(&self, _: &RowJob, _: &dyn Watch) -> io::Result<RowOutcome> {
+        Err(io::Error::other("cramped"))
+    }
+}
+
+#[test]
+fn a_machine_larger_than_the_host_keeps_level_2_out() {
+    let lab = lab();
+    let digest = small_image(&store_of(&lab));
+    let data = [("data/example.txt", "calibration")];
+    fs::write(lab.home.root.join("machine.toml"), "max_level = 2\n").unwrap();
+    let capped = |t: String| t.replace("# row_memory_mib = 1024", "row_memory_mib = 1024");
+    pinned_with(&lab, "big0", &digest, &data, capped);
+    let at2 = |t: String| {
+        let t = t.replace("# row_memory_mib = 1024", "row_memory_mib = 1024");
+        t.replace("min_isolation = 0", "min_isolation = 2")
+    };
+    pinned_with(&lab, "big2", &digest, &data, at2);
+    pinned_with(&lab, "uncapped", &digest, &data, |t| t);
+    let both = || -> Vec<Box<dyn Backend>> { vec![Box::new(Stub(1)), Box::new(Cramped)] };
+    let prepare = |id: &str| prepare_with(&lab.home, id, &common::work_of(&lab.home, id), both());
+    let why = "a machine for rows of 1024 MiB does not fit";
+    // Only level 2 would do, so the run is refused before any row.
+    let err = prepare("big2").err().unwrap();
+    assert!(matches!(&err, RunError::Environment(_)), "{err}");
+    assert_eq!(err.to_string(), format!("environment: {why}"));
+    assert!(!lab.home.study_dir("big2").join("schedule.json").exists());
+    // A lower minimum runs at level 1 and says why.
+    let plan = prepare("big0").unwrap();
+    assert_eq!(plan.backend.level(), 1);
+    let events = common::events_of(&lab.home.study_dir("big0"));
+    let chosen = named(&events, "run.isolation");
+    assert_eq!(chosen.len(), 1);
+    let want = serde_json::json!({ "level": 1, "skipped": [2], "reason": why });
+    assert_eq!(chosen[0]["attrs"], want);
+    // The machine of a row without a declared memory fits.
+    assert_eq!(prepare("uncapped").unwrap().backend.level(), 2);
+    let events = common::events_of(&lab.home.study_dir("uncapped"));
+    assert!(named(&events, "run.isolation").is_empty());
+}
+
 #[test]
 fn level0_ignores_the_environment() {
     let lab = lab();

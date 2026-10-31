@@ -198,7 +198,7 @@ impl Level1 {
             .stdout(pipes.stdout_w.take().map_or_else(Stdio::null, Stdio::from))
             .stderr(Stdio::from(pipes.stderr_w));
         sys::inherit_only(&mut cmd, inherited);
-        // bubblewrap's own few allocations count against the cap too.
+        // bubblewrap runs under the cap too; it starts within 256 KiB, below the 1 MiB floor.
         if let Some(bytes) = job.data_limit() {
             sys::limit_data(&mut cmd, bytes);
         }

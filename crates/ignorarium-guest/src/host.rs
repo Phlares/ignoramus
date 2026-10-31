@@ -34,14 +34,16 @@ pub const GUEST_MIB: u32 = 256;
 
 /// The guest memory, in MiB, that a row needs: the payload's data limit in bytes (none
 /// counts 0), the `/out` and `/tmp` tmpfs of an output disk of `out_mib` (their pages live in
-/// guest memory, outside the data limit), and `GUEST_MIB`. A part of a MiB counts as a whole.
+/// guest memory, outside the data limit) and `GUEST_MIB`, over 63/64 of the machine: the
+/// kernel keeps 64 bytes of page data for each 4 KiB page. A part of a MiB counts as a whole.
 pub fn needed_mem_mib(data_limit: Option<u64>, out_mib: u64) -> u64 {
     let out_bytes = out_mib.saturating_mul(1 << 20);
     // The agent caps /out at `out_caps` of the disk and /tmp at the whole disk.
     let held = (data_limit.unwrap_or(0))
         .saturating_add(out_caps(out_bytes).0)
-        .saturating_add(out_bytes);
-    held.div_ceil(1 << 20) + u64::from(GUEST_MIB)
+        .saturating_add(out_bytes)
+        .saturating_add(u64::from(GUEST_MIB) << 20);
+    held.saturating_mul(64).div_ceil(63 << 20)
 }
 
 /// What the caller hears while a row runs.
@@ -508,7 +510,8 @@ fn check_inputs(vm: &Vm, job: &HostJob, work: &Path) -> io::Result<()> {
     if u64::from(vm.mem_mib) < need {
         return Err(invalid(format!(
             "a guest memory of {} MiB cannot hold the row: its data limit, /out and /tmp of \
-             the {} MiB output disk, and {GUEST_MIB} MiB for the guest need {need} MiB",
+             the {} MiB output disk, {GUEST_MIB} MiB for the guest and the kernel's page \
+             data need {need} MiB",
             vm.mem_mib, vm.out_mib
         )));
     }
@@ -651,6 +654,17 @@ pub fn run_row(
         }
     };
     let guest = sent.elapsed();
+    // An agent built before the data limit drops it from the job and runs the payload
+    // uncapped; its report has no echo.
+    if report.end.is_some() && report.data_limit != job.data_limit {
+        let text = |l: Option<u64>| l.map_or("none".into(), |b| format!("{b} bytes"));
+        let msg = format!(
+            "the agent reported the data limit {}, not the job's {}: rebuild the agent",
+            text(report.data_limit),
+            text(job.data_limit)
+        );
+        return Err(guest_err(msg, work));
+    }
     // The guest wrote it, and it reaches the caller's records.
     report.pack_refused = report.pack_refused.as_deref().map(shown);
 

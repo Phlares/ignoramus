@@ -166,16 +166,17 @@ pub fn gate(
     clock_unix_nanos: u64,
     run: impl FnOnce() -> io::Result<(Ran, Result<String, String>)>,
 ) -> io::Result<Report> {
-    let (end, payload_wall_ns, cpu_seconds, packed) = if selftest.ok() {
+    let (end, payload_wall_ns, cpu_seconds, data_limit, packed) = if selftest.ok() {
         let (ran, packed) = run()?;
         (
             Some(ran.end),
             ran.wall.as_nanos() as u64,
             ran.cpu_seconds,
+            ran.data_limit,
             packed,
         )
     } else {
-        (None, 0, 0.0, Ok(String::new()))
+        (None, 0, 0.0, None, Ok(String::new()))
     };
     let (output_hash, pack_refused) = match packed {
         Ok(hash) => (hash, None),
@@ -189,6 +190,7 @@ pub fn gate(
         cpu_seconds,
         output_hash,
         pack_refused,
+        data_limit,
     })
 }
 

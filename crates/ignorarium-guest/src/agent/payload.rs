@@ -13,6 +13,8 @@ pub struct Ran {
     pub end: End,
     pub wall: Duration,
     pub cpu_seconds: f64,
+    /// The data limit the payload ran under, in bytes, as the job gave it.
+    pub data_limit: Option<u64>,
 }
 
 /// Runs `job.argv` as the current user, in `/`. When this returns, no process of the
@@ -82,6 +84,7 @@ fn run_watched(
         end,
         wall,
         cpu_seconds,
+        data_limit: job.data_limit,
     })
 }
 

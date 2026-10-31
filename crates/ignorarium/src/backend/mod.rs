@@ -128,6 +128,11 @@ pub trait Backend {
     }
     /// How many CPUs a row may use at once.
     fn cpus(&self) -> u32;
+    /// Why this backend cannot run the rows of a study that declares `memory_mib` per row, if
+    /// it cannot: level 2's machine for such a row must fit in the host's memory.
+    fn unfit(&self, _memory_mib: Option<u32>) -> Option<String> {
+        None
+    }
     fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> io::Result<RowOutcome>;
 }
 

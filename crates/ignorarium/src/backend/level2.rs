@@ -41,6 +41,8 @@ static ROWS: AtomicU64 = AtomicU64::new(0);
 pub struct Level2 {
     /// The KVM device.
     pub kvm: PathBuf,
+    /// Where the host's memory size is read: `MemTotal` of `/proc/meminfo`.
+    pub meminfo: PathBuf,
     /// Cloud Hypervisor.
     pub vmm: PathBuf,
     /// The guest kernel.
@@ -82,6 +84,7 @@ impl Level2 {
     pub fn with(vmm: PathBuf, kernel: PathBuf, agent: PathBuf) -> Level2 {
         Level2 {
             kvm: "/dev/kvm".into(),
+            meminfo: "/proc/meminfo".into(),
             vmm,
             kernel,
             agent,
@@ -255,6 +258,14 @@ impl Watch for Counted<'_> {
     }
 }
 
+/// `MemTotal` of the `/proc/meminfo` text at `path`, in kB.
+fn host_kb(path: &Path) -> Result<u64, String> {
+    let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let total = text.lines().find_map(|l| l.strip_prefix("MemTotal:"));
+    let kb = total.and_then(|v| v.trim().strip_suffix("kB")?.trim().parse().ok());
+    kb.ok_or_else(|| format!("{} names no MemTotal", path.display()))
+}
+
 /// Why `path` is not the file `pin` names, if it is not.
 fn pinned(path: &Path, pin: &Pin) -> Option<String> {
     match check_pin(path, pin) {
@@ -332,6 +343,26 @@ impl Backend for Level2 {
     /// The agent the rows boot: read once, with the initramfs.
     fn agent_sha256(&self) -> Option<String> {
         self.initramfs().ok().map(|(_, sha256)| sha256.clone())
+    }
+
+    /// A machine larger than the host's memory cannot run; one the host cannot measure is
+    /// taken as one that cannot.
+    fn unfit(&self, memory_mib: Option<u32>) -> Option<String> {
+        let need = self.vm_mem_mib(&RowJob {
+            memory_mib,
+            ..RowJob::default()
+        });
+        let have_kb = match host_kb(&self.meminfo) {
+            Ok(kb) => kb,
+            Err(why) => return Some(format!("cannot read the host's memory size: {why}")),
+        };
+        let rows = memory_mib.map_or("no declared memory".into(), |m| format!("{m} MiB"));
+        (u64::from(need) << 10 > have_kb).then(|| {
+            format!(
+                "a level 2 machine for rows of {rows} needs {need} MiB, more than the host's {} MiB",
+                have_kb >> 10
+            )
+        })
     }
 
     fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> io::Result<RowOutcome> {
