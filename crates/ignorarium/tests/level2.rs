@@ -715,12 +715,27 @@ fn outcome_of_refuses_a_report_no_guest_can_mean() {
         );
         assert_eq!(o.output_hash, "");
     }
-    let o = outcome_of(ran(Some(End::Signal(i32::MAX)), passing()), 2.5, 1);
-    assert_eq!(
-        o.exit,
-        Exit::Infra("the guest reported signal 2147483647".into())
-    );
-    assert_eq!((o.output_hash.as_str(), o.cpu_seconds), ("", 0.75));
+    // A process exits with a code of 0 to 255, or dies of a signal of 1 to 127.
+    let ended = |end: End| outcome_of(ran(Some(end), passing()), 2.5, 1);
+    for (end, exit) in [
+        (End::Code(255), Exit::Payload(255)),
+        (End::Signal(1), Exit::Payload(129)),
+        (End::Signal(127), Exit::Payload(255)),
+    ] {
+        assert_eq!(ended(end).exit, exit);
+    }
+    for (end, what) in [
+        (End::Code(-7), "exit code -7"),
+        (End::Code(256), "exit code 256"),
+        (End::Signal(0), "signal 0"),
+        (End::Signal(-128), "signal -128"),
+        (End::Signal(128), "signal 128"),
+        (End::Signal(i32::MAX), "signal 2147483647"),
+    ] {
+        let o = ended(end);
+        assert_eq!(o.exit, Exit::Infra(format!("the guest reported {what}")));
+        assert_eq!((o.output_hash.as_str(), o.cpu_seconds), ("", 0.75));
+    }
 }
 
 #[test]

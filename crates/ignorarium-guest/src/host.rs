@@ -605,7 +605,7 @@ pub fn run_row(
             work,
         ),
     })?;
-    let report = match recv(
+    let mut report = match recv(
         &mut chan,
         report_by,
         watch,
@@ -622,6 +622,8 @@ pub fn run_row(
         }
     };
     let guest = sent.elapsed();
+    // The guest wrote it, and it reaches the caller's records.
+    report.pack_refused = report.pack_refused.as_deref().map(shown);
 
     // The agent syncs the pack before it reports, so a VMM that lingers is killed.
     let stopping = Instant::now();

@@ -371,9 +371,9 @@ pub fn selftest_of(t: &proto::SelfTest) -> SelfTest {
 /// started, for a machine of `cpus` vCPUs. A failed self-test never ran the payload. Without
 /// a report the payload's CPU is unknown, unless the VMM never started, the guest never
 /// spoke, or the box stopped the row. A report no guest can mean (more CPU than the row had,
-/// a signal past the exit codes) is a fault, not data. The box ended the row when the guest
-/// hit the wall timeout, the watch said stop, or the guest missed the host's deadline. The
-/// output links come with the hash that covers them.
+/// an exit code outside 0 to 255, a signal outside 1 to 127) is a fault, not data. The box
+/// ended the row when the guest hit the wall timeout, the watch said stop, or the guest missed
+/// the host's deadline. The output links come with the hash that covers them.
 pub fn outcome_of(res: Result<VmOutcome, VmError>, wall_seconds: f64, cpus: u32) -> RowOutcome {
     let o = match res {
         Ok(o) => o,
@@ -416,15 +416,17 @@ pub fn outcome_of(res: Result<VmOutcome, VmError>, wall_seconds: f64, cpus: u32)
             selftest.failed().join(" and ")
         ))
     } else {
+        let reported = |what: String| Exit::Infra(format!("the guest reported {what}"));
         match (r.end, r.pack_refused.as_deref()) {
             (None, _) => Exit::Infra("the guest ran no payload".into()),
+            (Some(End::Code(c)), _) if !(0..=255).contains(&c) => {
+                reported(format!("exit code {c}"))
+            }
+            (Some(End::Signal(s)), _) if !(1..=127).contains(&s) => reported(format!("signal {s}")),
             (Some(End::Code(0)), Some(why)) => Exit::Void(format!("cannot pack output: {why}")),
             (Some(End::Code(0)), None) => Exit::Ok,
             (Some(End::Code(c)), _) => Exit::Payload(c),
-            (Some(End::Signal(s)), _) => 128i32.checked_add(s).map_or_else(
-                || Exit::Infra(format!("the guest reported signal {s}")),
-                Exit::Payload,
-            ),
+            (Some(End::Signal(s)), _) => Exit::Payload(128 + s),
             (Some(End::Timeout), _) => Exit::Payload(TIMEOUT_CODE),
         }
     };

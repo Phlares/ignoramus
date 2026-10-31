@@ -1179,10 +1179,28 @@ fn a_refused_pack_is_reported_without_outputs() {
     assert_eq!(o.output_hash, "");
     assert_eq!(
         o.report.pack_refused.as_deref(),
-        Some("outputs exceed the output limit of 8388608 bytes")
+        Some("\"outputs exceed the output limit of 8388608 bytes\"")
     );
     assert_eq!(fs::read_dir(&rig.out).unwrap().count(), 0);
     rig.pid_gone();
+}
+
+#[test]
+fn a_refused_packs_reason_is_capped_and_escaped() {
+    let rig = Rig::sleeper();
+    let h = rig.guest(|s, c| {
+        hello(s);
+        read_job(s, c);
+        let mut r = report("", Some(End::Code(0)));
+        if let ToHost::Report(r) = &mut r {
+            r.pack_refused = Some("\u{7}".repeat(150_000));
+        }
+        write_frame(s, &r).unwrap();
+    });
+    let res = rig.run();
+    h.join().unwrap();
+    let why = res.unwrap().report.pack_refused.unwrap();
+    assert_eq!(why, format!("\"{}...\"", r"\u{7}".repeat(200)));
 }
 
 /// Sends a frame that never ends, one byte every 2 ms, until the host hangs up or 10 s pass.

@@ -349,7 +349,7 @@ fn a_sparse_output_is_the_payloads_result() {
         assert_eq!(o.report.end, Some(End::Code(0)), "{script}");
         assert_eq!(
             o.report.pack_refused.as_deref(),
-            Some("outputs exceed the output limit of 16777216 bytes"),
+            Some("\"outputs exceed the output limit of 16777216 bytes\""),
             "{script}"
         );
         assert_eq!(o.output_hash, "", "{script}");
