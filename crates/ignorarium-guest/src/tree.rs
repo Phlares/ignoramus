@@ -138,8 +138,10 @@ impl Entry {
     }
 }
 
-/// `None` when the path stopped being a regular file between listing and open.
-fn open_regular(path: &Path) -> io::Result<Option<File>> {
+/// The regular file at `path`, open for reading, without following a link or blocking on a
+/// FIFO. `None` when the path names anything else, as when it stopped being a regular file
+/// between listing and open.
+pub fn open_regular(path: &Path) -> io::Result<Option<File>> {
     let f = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -152,7 +154,8 @@ fn open_regular(path: &Path) -> io::Result<Option<File>> {
     Ok(f.metadata()?.file_type().is_file().then_some(f))
 }
 
-pub(crate) fn sha256_hex(mut r: impl Read) -> io::Result<String> {
+/// SHA-256 of what `r` yields, streamed.
+pub fn sha256_hex(mut r: impl Read) -> io::Result<String> {
     let mut h = Sha256::new();
     io::copy(&mut r, &mut h)?;
     Ok(hex::encode(h.finalize()))

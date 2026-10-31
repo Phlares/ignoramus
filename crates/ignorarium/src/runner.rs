@@ -15,6 +15,7 @@ use crate::payload::{self, PayloadError};
 use crate::planlog::store::{Leaf, LogError, PlanLog};
 use crate::prior::same_data;
 use crate::records::{self, RecordDraft, RecordError, VerifyError};
+use crate::redact::Redact;
 use crate::schedule::{self, CONFIRMATION_STAGE, Row, SELECTION_STAGE, Schedule, ScheduleError};
 use crate::spec::model::{Mode, Param, Role, SELECTED, Spec, param_path};
 use crate::store::Store;
@@ -22,6 +23,7 @@ use crate::stream::{LogName, StreamError};
 use crate::view::{self, ViewError};
 use crate::{analysis, canon, keys, spec, sys, values};
 use ed25519_dalek::SigningKey;
+use ignorarium_guest::image;
 use serde_json::{Value, json};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -46,6 +48,7 @@ const RECIPE: &str = "env";
 const HOST: &str = "host";
 /// The lowest level that runs rows only in the study's environment image.
 const IMAGE_LEVEL: u8 = 2;
+const NO_IMAGE: &str = "level 2 runs rows in the study's environment image";
 
 pub struct RunPlan {
     pub home: Home,
@@ -75,6 +78,9 @@ pub struct RunPlan {
     pub meter: Box<dyn CostMeter>,
     /// Interval between `heartbeat` events while a row runs.
     pub heartbeat: Duration,
+    /// The study root, the box home and the user's home as `<root>`, `<home>` and `~`: a
+    /// backend's message reaches the records through it.
+    pub redact: Redact,
 }
 
 /// Each input path with its `(exact, normalized)` hashes, in spec order; `None` while the
@@ -115,6 +121,8 @@ pub enum RunError {
     EnvironmentPin(String),
     /// The environment cannot be built or extracted.
     Environment(String),
+    /// A folder of the study cannot become a level 2 disk as it is: what, and why.
+    Disk(String),
     NoKey,
     /// Another run of this study holds the run lock.
     Busy,
@@ -181,6 +189,7 @@ impl fmt::Display for RunError {
                 write!(f, "pins.environment {p:?} is not a store digest")
             }
             RunError::Environment(e) => write!(f, "environment: {e}"),
+            RunError::Disk(e) => write!(f, "level 2 cannot make a disk of {e}; rename it"),
             RunError::NoKey => write!(f, "the box key does not exist"),
             RunError::Busy => write!(f, "another run of this study is in progress"),
             RunError::Unsafe(p) => write!(f, "{p} is a symbolic link"),
@@ -276,7 +285,8 @@ pub fn up_to(backends: Vec<Box<dyn Backend>>, max: u8) -> Vec<Box<dyn Backend>> 
 /// Load a registered study, check its payload copy and its stored inputs, build its input
 /// view, gate its late data, write its schedule, and pick the highest backend that meets
 /// `scope.min_isolation` and can run the study: level 2 and up run rows only in the study's
-/// environment image, so a study without one runs at the highest level below. Every input
+/// environment image, so a study without one runs at the highest level below, and one
+/// `run.isolation` event names the levels it skipped. Every input
 /// in the view is hashed in full here, once per `run` or `resume`; before each attempt the
 /// run only compares the view's stamps (see `stale`).
 /// The first prepare that gets this far signs an `inputs` record of every input's digest,
@@ -331,15 +341,16 @@ pub fn prepare_with(
     } else {
         (None, HOST.into())
     };
+    // Level 2 and up run rows only in an environment image.
+    let mut skipped = Vec::new();
     if rootfs.is_none() {
+        skipped = (fit.iter().map(|b| b.level()))
+            .filter(|&l| l >= IMAGE_LEVEL)
+            .collect();
         fit.retain(|b| b.level() < IMAGE_LEVEL);
     }
     let backend = fit.into_iter().max_by_key(|b| b.level()).ok_or_else(|| {
-        RunError::Environment(
-            "level 2 runs rows in the study's environment image; \
-             add env/ or set pins.environment"
-                .into(),
-        )
+        RunError::Environment(format!("{NO_IMAGE}; add env/ or set pins.environment"))
     })?;
 
     let leaf = register.leaf;
@@ -363,6 +374,15 @@ pub fn prepare_with(
     let present = present(&inputs);
     let view = view::build(&store, &dir, &present).map_err(view_error)?;
     let view_seen = view::verify(&view, &present).map_err(view_error)?;
+    if backend.level() >= IMAGE_LEVEL {
+        let folders = [
+            (&view, "the input view"),
+            (&dir.join(payload::DIR), "the payload folder"),
+        ];
+        for (folder, what) in folders {
+            image::check_source(folder).map_err(|e| RunError::Disk(format!("{what}: {e}")))?;
+        }
+    }
     gate_late_data(home, &spec, log, leaf, &key, &inputs)?;
     let rows = expand_rows(&spec, &spec_hash)?;
     let schedule = Schedule::new(&spec_hash, rows);
@@ -372,6 +392,16 @@ pub fn prepare_with(
         let draft = RecordDraft::new(study_id, INPUTS, body);
         records::append(&dir.join("records.jsonl"), &key, draft)?;
     }
+    if !skipped.is_empty() {
+        let attrs = json!({
+            "level": backend.level(),
+            "skipped": skipped,
+            "reason": format!("{NO_IMAGE}; the study has no env/ and no pins.environment"),
+        });
+        emit_event(&dir, &spec_hash, None, "run.isolation", "warn", attrs)?;
+    }
+    let user = std::env::home_dir().unwrap_or_default();
+    let redact = Redact::new(&[(root, "<root>"), (&home.root, "<home>"), (&user, "~")]);
     Ok(RunPlan {
         home: home.clone(),
         study_id: study_id.into(),
@@ -390,6 +420,7 @@ pub fn prepare_with(
         environment,
         meter: Box::new(HostMeter::new(machine.rate_usd_per_hour)),
         heartbeat: HEARTBEAT,
+        redact,
     })
 }
 
@@ -1307,6 +1338,8 @@ fn attempt_row(
                 ended: false,
                 output_links: Vec::new(),
             });
+        // Every backend text reaches the records from here.
+        redacted(&plan.redact, &mut o);
         // A row the box ended, or whose meter cannot read, is charged a bound. A meter that
         // cannot read also pauses the run once the row is recorded.
         (o.cpu_seconds, bound) = charge(&o, plan.backend.cpus(), books.per_row.cpu_seconds);
@@ -1446,6 +1479,16 @@ fn attempt_row(
         _ => unknown.then(|| unknown_cpu(row)),
     };
     Ok((exit, halt))
+}
+
+/// `o` with the host paths in its texts replaced.
+fn redacted(r: &Redact, o: &mut RowOutcome) {
+    if let Exit::Infra(why) | Exit::Void(why) = &mut o.exit {
+        *why = r.text(why);
+    }
+    if let Some(why) = &mut o.cpu_unknown {
+        *why = r.text(why);
+    }
 }
 
 /// The CPU seconds to charge for an attempt, and whether that figure is a bound. A row the

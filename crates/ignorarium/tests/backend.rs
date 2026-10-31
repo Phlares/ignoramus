@@ -269,10 +269,9 @@ fn a_symlinked_output_dir_is_refused() {
     j.output_dir = ln;
     // The box made a real folder, so a link there is the payload's doing: void, no retry.
     let o = Level0.run_row(&j, &|| true).unwrap();
-    assert!(
-        matches!(&o.exit, Exit::Void(why) if why.starts_with("cannot hash output: ")),
-        "{:?}",
-        o.exit
+    assert_eq!(
+        o.exit,
+        Exit::Void("cannot hash output: top dir is a link".into())
     );
     assert_eq!(o.output_hash, "");
 }

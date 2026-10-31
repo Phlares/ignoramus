@@ -599,6 +599,65 @@ fn level2_runs_a_study_that_has_an_environment() {
     assert_eq!(plan.environment, digest);
     let root = store_of(&lab).root.join("rootfs").join(&digest);
     assert_eq!(plan.rootfs.as_deref(), Some(root.as_path()));
+    // Level 2 ran it, so no level was skipped.
+    let events = common::events_of(&lab.home.study_dir("img"));
+    assert!(named(&events, "run.isolation").is_empty());
+}
+
+/// The template with `payload/` holding `files` (path below the study root, contents) and
+/// the environment `digest` pinned.
+fn pinned_with(
+    lab: &Lab,
+    id: &str,
+    digest: &str,
+    files: &[(&str, &str)],
+    edit: fn(String) -> String,
+) {
+    let d = digest.to_string();
+    let spec =
+        move |t: String| edit(t.replace("environment = \"\"", &format!("environment = \"{d}\"")));
+    common::register_study(lab, id, spec, files, common::PAYLOAD);
+}
+
+#[test]
+fn level2_refuses_a_lost_and_found_that_is_not_a_folder() {
+    // ext4 keeps the name `lost+found` at the top of a disk for a folder; a file there cannot
+    // go onto a level 2 disk. That is the study's to fix, so it is refused before any row.
+    let lab = lab();
+    let digest = small_image(&store_of(&lab));
+    let in_payload = [
+        ("data/example.txt", "calibration"),
+        ("payload/lost+found", "x"),
+    ];
+    pinned_with(&lab, "lf-payload", &digest, &in_payload, |t| t);
+    let as_input = |t: String| t.replace("path = \"data/example.txt\"", "path = \"lost+found\"");
+    pinned_with(
+        &lab,
+        "lf-input",
+        &digest,
+        &[("lost+found", "calibration")],
+        as_input,
+    );
+    for (id, what) in [
+        ("lf-payload", "the payload folder"),
+        ("lf-input", "the input view"),
+    ] {
+        let work = common::work_of(&lab.home, id);
+        let both: Vec<Box<dyn Backend>> = vec![Box::new(Stub(1)), Box::new(Stub(2))];
+        let err = prepare_with(&lab.home, id, &work, both).err().unwrap();
+        assert!(matches!(&err, RunError::Disk(_)), "{err}");
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "level 2 cannot make a disk of {what}: lost+found at its top is not a folder, \
+                 and ext4 keeps that name for one; rename it"
+            )
+        );
+        assert!(!lab.home.study_dir(id).join("schedule.json").exists());
+        // Level 1 binds the folders as they are.
+        let plan = prepare_with(&lab.home, id, &work, vec![Box::new(Stub(1))]).unwrap();
+        assert_eq!(plan.backend.level(), 1);
+    }
 }
 
 #[test]

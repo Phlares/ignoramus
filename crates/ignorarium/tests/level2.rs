@@ -1282,7 +1282,13 @@ fn prepare_refuses_level2_without_an_environment() {
     // Refused before the schedule: no row can start.
     let schedule = |id: &str| lab.home.study_dir(id).join("schedule.json");
     assert!(!schedule("needs2").exists());
-    // A lower minimum runs at the highest level that needs no image, on the host root.
+    let chosen = |id: &str| {
+        let events = common::events_of(&lab.home.study_dir(id));
+        (common::named(&events, "run.isolation").into_iter().cloned()).collect::<Vec<_>>()
+    };
+    assert!(chosen("needs2").is_empty());
+    // A lower minimum runs at the highest level that needs no image, on the host root, and
+    // one event says why level 2 did not run it.
     for id in ["needs1", "needs0"] {
         let plan = prepare(id).unwrap();
         assert_eq!(
@@ -1291,7 +1297,24 @@ fn prepare_refuses_level2_without_an_environment() {
             "{id}"
         );
         assert!(schedule(id).exists());
+        let events = chosen(id);
+        assert_eq!(events.len(), 1, "{id}");
+        assert_eq!(events[0]["level"], "warn");
+        assert_eq!(
+            events[0]["attrs"],
+            json!({
+                "level": 1,
+                "skipped": [2],
+                "reason": "level 2 runs rows in the study's environment image; \
+                           the study has no env/ and no pins.environment"
+            })
+        );
     }
+    // No level skipped, no event.
+    let lower: Vec<Box<dyn Backend>> = vec![Box::new(Level0), Box::new(Level1::new())];
+    let work = common::work_of(&lab.home, "needs1");
+    runner::prepare_with(&lab.home, "needs1", &work, lower).unwrap();
+    assert_eq!(chosen("needs1").len(), 1);
     // With level 2 alone, nothing is left to run a study without an image.
     let only2 = Level2::with(PathBuf::new(), PathBuf::new(), PathBuf::new());
     let work = common::work_of(&lab.home, "needs0");

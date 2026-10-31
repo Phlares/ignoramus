@@ -176,6 +176,30 @@ fn ext4_keeps_a_lost_and_found_of_the_source() {
 }
 
 #[test]
+fn ext4_refuses_a_lost_and_found_that_is_not_a_folder() {
+    // ext4 keeps that name at the top of a disk for a folder; mkfs.ext4 -d fails on a file.
+    let d = tempfile::tempdir().unwrap();
+    for (case, make) in [("file", false), ("link", true)] {
+        let src = d.path().join(case);
+        fs::create_dir(&src).unwrap();
+        if make {
+            symlink(&src, src.join("lost+found")).unwrap();
+        } else {
+            fs::write(src.join("lost+found"), "x").unwrap();
+        }
+        let img = d.path().join(format!("{case}.ext4"));
+        let e = ext4(Some(&src), &img, 16).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::InvalidInput, "{case}");
+        assert_eq!(
+            e.to_string(),
+            "lost+found at its top is not a folder, and ext4 keeps that name for one"
+        );
+        // Refused before the image is made.
+        assert!(!img.exists(), "{case}");
+    }
+}
+
+#[test]
 fn ext4_holds_the_source_tree() {
     let d = tempfile::tempdir().unwrap();
     let src = d.path().join("src");

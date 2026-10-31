@@ -21,6 +21,7 @@ pub mod planlog;
 pub mod power;
 pub mod prior;
 pub mod records;
+pub mod redact;
 pub mod rules;
 pub mod runner;
 pub mod scan;

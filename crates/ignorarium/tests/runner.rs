@@ -203,6 +203,73 @@ fn the_pick_waits_for_every_selection_row() {
     assert!(selections_of(&lab, "partial").is_empty());
 }
 
+const NO_HOST_PATHS: &str = "a_backend_message_reaches_records_without_host_paths";
+
+/// A backend's messages name the study root, the box home and the user's home, each as given
+/// (through a link) and as its real path. The signed records hold placeholders instead.
+#[test]
+fn a_backend_message_reaches_records_without_host_paths() {
+    use std::os::unix::fs::symlink;
+    let linked = |d: &std::path::Path, real: &str, link: &str| {
+        std::fs::create_dir(d.join(real)).unwrap();
+        symlink(d.join(real), d.join(link)).unwrap();
+        d.join(link)
+    };
+    if !common::is_child(NO_HOST_PATHS) {
+        let d = tempfile::TempDir::new().unwrap();
+        let user = linked(d.path(), "real-user", "user");
+        let envs = [("HOME", user.as_os_str())];
+        // The crate folder, where the template's relative path starts.
+        let here = std::env::current_dir().unwrap();
+        assert!(common::in_child(NO_HOST_PATHS, &here, &envs));
+        return;
+    }
+    let d = tempfile::TempDir::new().unwrap();
+    let root = linked(d.path(), "real", "lab");
+    let home = ignorarium::home::Home::open_at(&root.join("home")).unwrap();
+    std::fs::write(home.root.join("machine.toml"), "max_level = 1\n").unwrap();
+    let lab = Lab {
+        _dir: d,
+        home,
+        root,
+    };
+    plain(&lab, "paths");
+    let work = common::work_of(&lab.home, "paths");
+    let user = std::env::home_dir().unwrap();
+    let mut spellings = Vec::new();
+    for p in [&work, &lab.home.root, &user] {
+        let real = std::fs::canonicalize(p).unwrap();
+        assert_ne!(&real, p);
+        spellings.extend([p.display().to_string(), real.display().to_string()]);
+    }
+    let [r1, r2, h1, h2, u1, u2] = &spellings[..] else {
+        unreachable!()
+    };
+    let msg = format!("r {r1}/x {r2}/x h {h1}/y {h2}/y u {u1}/z {u2}/z");
+    let want = "r <root>/x <root>/x h <home>/y <home>/y u ~/z ~/z";
+    let (mut b, _) = fake(vec![Exit::Infra(msg.clone()), Exit::Void(msg.clone())]);
+    b.unknown = Some(msg);
+    let plan = prepare_with(&lab.home, "paths", &work, vec![Box::new(b)]).unwrap();
+    let paused = "row 0 has an unknown CPU count; it is charged the row estimate";
+    assert_eq!(run(&plan).unwrap(), RunStatus::Paused(paused.into()));
+    let spend = kind_of(&lab, "paths", "spend");
+    let row = rows_of(&lab, "paths");
+    assert_eq!((spend.len(), row.len()), (1, 1));
+    let reason = format!("infrastructure fault: {want}");
+    assert_eq!(
+        (&spend[0].body["reason"], &spend[0].body["cpu_unknown"]),
+        (&serde_json::json!(reason), &serde_json::json!(want))
+    );
+    assert_eq!(
+        (&row[0].body["reason"], &row[0].body["cpu_unknown"]),
+        (&serde_json::json!(want), &serde_json::json!(want))
+    );
+    for record in [&spend[0], &row[0]] {
+        let text = record.body.to_string();
+        assert!(spellings.iter().all(|p| !text.contains(p)), "{text}");
+    }
+}
+
 /// Runs level 0, then replaces the exit with the next scripted one.
 struct Fake {
     script: RefCell<VecDeque<Exit>>,
@@ -211,6 +278,8 @@ struct Fake {
     panic_at: Option<u64>,
     level: u8,
     wall: Option<f64>,
+    /// Every attempt reports its CPU count unknown, for this reason.
+    unknown: Option<String>,
 }
 
 impl Backend for Fake {
@@ -238,6 +307,7 @@ impl Backend for Fake {
         if self.panic_at == Some(index) {
             panic!("crash after the sandbox exits");
         }
+        o.cpu_unknown.clone_from(&self.unknown);
         Ok(match self.script.borrow_mut().pop_front() {
             Some(exit) => RowOutcome { exit, ..o },
             None => o,
@@ -254,6 +324,7 @@ fn fake(script: Vec<Exit>) -> (Fake, Rc<RefCell<Vec<u64>>>) {
         panic_at: None,
         level: 0,
         wall: None,
+        unknown: None,
     };
     (b, seen)
 }

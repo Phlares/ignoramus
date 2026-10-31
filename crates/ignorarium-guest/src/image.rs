@@ -170,6 +170,9 @@ fn debugfs_end(stderr: &str) -> io::Result<()> {
 /// more: mke2fs always makes `lost+found` (mode 0700, owned by root), which the guest's user
 /// could not read, so it goes unless `src` has its own.
 pub fn ext4(src: Option<&Path>, dest: &Path, size_mib: u64) -> io::Result<()> {
+    if let Some(src) = src {
+        check_source(src)?;
+    }
     File::create(dest)?.set_len(size_mib << 20)?;
     let mut cmd = Command::new("mkfs.ext4");
     // One inode per block: the size formula gives every entry at least a block.
@@ -197,6 +200,18 @@ pub fn ext4(src: Option<&Path>, dest: &Path, size_mib: u64) -> io::Result<()> {
 
 const LOST_FOUND: &str = "lost+found";
 
+/// Refuses a folder `ext4` cannot copy whole: one whose top holds a `lost+found` that is not
+/// a folder, a name ext4 keeps for one.
+pub fn check_source(src: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(src.join(LOST_FOUND)) {
+        Ok(m) if !m.is_dir() => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{LOST_FOUND} at its top is not a folder, and ext4 keeps that name for one"),
+        )),
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::debugfs_end;
@@ -209,6 +224,15 @@ mod tests {
         assert_eq!(
             e.unwrap_err().to_string(),
             "debugfs failed: rmdir: directory not empty"
+        );
+        // An image debugfs cannot open: one character from the banner's prefix.
+        let open = "debugfs: No such file or directory while trying to open /x/i.ext4";
+        let e = debugfs_end(&format!(
+            "debugfs 1.47.0 (5-Feb-2023)\n{open}\nrmdir: Filesystem not open\n"
+        ));
+        assert_eq!(
+            e.unwrap_err().to_string(),
+            format!("debugfs failed: {open}")
         );
     }
 }
