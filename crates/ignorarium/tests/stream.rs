@@ -540,6 +540,34 @@ fn a_stream_that_lacks_a_registered_slot_is_refused() {
 }
 
 #[test]
+fn a_test_stream_rolled_back_past_its_first_epoch_is_refused() {
+    let lab = lab();
+    let k = key(&lab);
+    let records = HomeRecords {
+        home: lab.home.clone(),
+        key: Ok(Some(k.verifying_key())),
+    };
+    let log = Log::of(&lab.home, LogName::Test);
+    for i in 1..=10 {
+        let id = format!("t{i:02}");
+        let next = log.open(&k, &id, FIRST).unwrap();
+        registered(&lab, &id, alpha("testlog", next.slot, next.level));
+    }
+    let first_epoch = bytes(&lab, "testlog");
+    // Slot 11 opens epoch 2, and its register record names it by its number over the log.
+    let next = log.open(&k, "t11", FIRST).unwrap();
+    assert_eq!((next.slot, next.level), (11, FIRST));
+    registered(&lab, "t11", alpha("testlog", 11, next.level));
+    assert_eq!(records.stream_next("testlog").unwrap().slot, 12);
+    // A copy from before epoch 2 lacks slot 11.
+    std::fs::write(path(&lab, "testlog"), &first_epoch).unwrap();
+    assert_eq!(
+        records.stream_next("testlog"),
+        Err("the stream lacks slot 11 of study t11 at level 0.005".to_string())
+    );
+}
+
+#[test]
 fn a_register_between_the_reads_of_a_check_is_no_lack() {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
