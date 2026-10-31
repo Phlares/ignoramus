@@ -8,7 +8,7 @@ The plan takes estimates from a study that ran other code, and declares no devia
 
 ## Fix
 
-Pin the source study's payload, environment and model and calibration inputs, or add a `[[pins.deviations]]` entry with `from`, `reason` and `timing`.
+Pin the source study's payload, environment and model and calibration inputs, or add a `[[pins.deviations]]` entry with `from`, `reason` and `timing`. A deviation names a study that a confirmatory hypothesis with a claim takes estimates from, and gives a reason.
 
 ## Why
 

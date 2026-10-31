@@ -5,7 +5,7 @@ use super::{CliError, Ctx, Done};
 use crate::backend::output::file_digest;
 use crate::canon::to_canonical;
 use crate::derived::{Alpha, PinDeviated, REGISTER, Register, Resolved};
-use crate::diag::render_human;
+use crate::diag::{printable, render_human};
 use crate::estimate::defaults_json;
 use crate::files::{self, WriteOnceError, write_once};
 use crate::home::Home;
@@ -348,23 +348,14 @@ fn deviated(a: &Assessed, spec: &Spec) -> Vec<PinDeviated> {
 }
 
 /// `deviates from <study> in <parts, or nothing> (<timing>): <reason>`, which a person
-/// approves with the plan. A control character in the reason prints as its escape, so the
-/// reason stays on its line.
+/// approves with the plan. The reason stays on its line and in its order.
 fn deviates(d: &PinDeviated) -> String {
     let parts = if d.differs.is_empty() {
         "nothing".into()
     } else {
         d.differs.join(", ")
     };
-    let reason: String = (d.reason.chars())
-        .map(|c| {
-            if c.is_control() {
-                c.escape_default().to_string()
-            } else {
-                c.to_string()
-            }
-        })
-        .collect();
+    let reason = printable(&d.reason);
     format!(
         "deviates from {} in {parts} ({}): {reason}",
         d.from, d.timing
@@ -677,6 +668,35 @@ mod tests {
             conf["alpha"],
             json!({ "log": "testlog", "slot": 2, "level": 0.01 })
         );
+    }
+
+    #[test]
+    fn a_deviation_line_escapes_what_could_reorder_or_split_it() {
+        let line = |reason: &str| {
+            deviates(&PinDeviated {
+                from: "pilot".into(),
+                reason: reason.into(),
+                timing: "after-results".into(),
+                differs: vec!["payload".into(), "inputs".into()],
+            })
+        };
+        let head = "deviates from pilot in payload, inputs (after-results): ";
+        assert_eq!(line("a newer café"), format!("{head}a newer café"));
+        // Control characters, the line and paragraph separators and every bidirectional
+        // control; their neighbours print as they are.
+        let hidden = [
+            '\n', '\r', '\u{1b}', '\u{7f}', '\u{85}', '\u{61c}', '\u{200e}', '\u{200f}',
+            '\u{2028}', '\u{2029}', '\u{202a}', '\u{202d}', '\u{202e}', '\u{2066}', '\u{2069}',
+        ];
+        for c in hidden {
+            let shown = c.escape_default().to_string();
+            assert_eq!(line(&format!("a{c}b")), format!("{head}a{shown}b"), "{c:?}");
+        }
+        for c in [
+            '\u{61b}', '\u{200d}', '\u{2010}', '\u{2027}', '\u{202f}', '\u{206a}',
+        ] {
+            assert_eq!(line(&format!("a{c}b")), format!("{head}a{c}b"), "{c:?}");
+        }
     }
 
     #[test]

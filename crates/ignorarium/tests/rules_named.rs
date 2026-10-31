@@ -197,6 +197,9 @@ fn ok() -> Value {
 
 type Edit = (&'static str, Option<Value>);
 
+/// Removes the base plan's deviation.
+const UNDECLARED: Edit = ("/pins/deviations", None);
+
 /// A deviation from study `from`, made before the confirmation data were collected.
 fn deviation(from: &str) -> Value {
     json!({
@@ -279,12 +282,13 @@ fn and(mut a: Vec<Edit>, b: Vec<Edit>) -> Vec<Edit> {
     a
 }
 
-/// An exploratory plan with `h1()` and the descriptive `P1`, and `extra`.
+/// An exploratory plan with `h1()` and the descriptive `P1`, no deviation, and `extra`.
 fn exploring(extra: Vec<Edit>) -> Vec<Edit> {
     and(
         vec![
             ("/study/mode", j(json!("exploratory"))),
             ("/question/hypotheses", j(json!([h1(), descriptive("P1")]))),
+            UNDECLARED,
         ],
         extra,
     )
@@ -320,6 +324,7 @@ fn faults() -> Vec<Fault> {
         f(
             vec![
                 ("/study/mode", j(json!("exploratory"))),
+                UNDECLARED,
                 ("/study/label", j(json!("replicated"))),
             ],
             vec![("E-LBL-001", "study.label")],
@@ -366,7 +371,8 @@ fn faults() -> Vec<Fault> {
                 STRAY,
             ],
         ),
-        // A mistyped or malformed reference is the generic rules'.
+        // A mistyped or malformed reference is the generic rules'; the deviation from pilot
+        // then names a study the plan takes no estimates from.
         f(vec![hyp("estimates", j(json!("pilot")))], vec![STRAY]),
         f(vec![hyp("estimates", j(json!({})))], vec![STRAY]),
         f(
@@ -452,10 +458,11 @@ fn faults() -> Vec<Fault> {
             vec![("/pins/deviations/0/from", j(json!("Pilot")))],
             vec![SAME],
         ),
-        // An exploratory plan takes no estimates, and its deviations are not read.
+        // An exploratory plan takes no estimates, so it may declare no deviation, not even
+        // from the study its hypothesis names.
         f(
-            exploring(vec![("/pins/deviations/0/from", j(json!("nobody")))]),
-            vec![],
+            exploring(vec![("/pins/deviations", j(json!([deviation("pilot")])))]),
+            vec![STRAY],
         ),
         // No confirmation input leaves the stratum with no data and the gate with no cluster.
         f(
@@ -477,6 +484,7 @@ fn faults() -> Vec<Fault> {
         f(
             unstaged(vec![
                 ("/study/mode", j(json!("exploratory"))),
+                UNDECLARED,
                 ("/inputs", j(json!([inputs(0, 5)[0]]))),
             ]),
             vec![
@@ -665,7 +673,7 @@ fn faults() -> Vec<Fault> {
             vec![("E-CNF-003", "question.hypotheses[0].estimates")],
         ),
         // A confirmatory hypothesis needs a claim; the rules that size and split a claim skip
-        // it, so the one fault gives one diagnostic.
+        // it. Without a claim it takes no estimates, so the deviation from pilot is stray.
         f(
             vec![hyp("claim", None)],
             vec![STRAY, ("E-CNF-006", "question.hypotheses[0].claim")],
@@ -2237,6 +2245,7 @@ fn confirmatory_rules_do_not_fire_in_exploratory_mode() {
     let dir = study_dir();
     let s = edited(&[
         ("/study/mode", j(json!("exploratory"))),
+        UNDECLARED,
         hyp("claim", None),
         hyp("alpha_share", j(json!(0.0))),
         hyp("strata", j(json!([]))),
@@ -2629,6 +2638,7 @@ fn freshness_skips_missing_unsafe_and_exploratory_inputs() {
     let (prior, seen) = fake(Some(ABC), None);
     let mut s = with_input("d.txt", "", "confirmation");
     set(&mut s, "/study/mode", j(json!("exploratory")));
+    set(&mut s, "/pins/deviations", None);
     assert!(fresh(&s, dir.path(), prior).is_empty());
     assert!(seen.borrow().is_empty());
 }
@@ -2764,7 +2774,7 @@ fn a_named_rule_gates_on_when_like_a_generic_one() {
 }
 
 #[test]
-fn bal_brief_is_refused_with_three_codes() {
+fn bal_brief_is_refused_with_four_codes() {
     let dir = Path::new("tests/fixtures/specs");
     let s = spec_at("tests/fixtures/specs/bal-brief.toml");
     let confirm = std::fs::read(dir.join("bal-confirm.txt")).unwrap();
@@ -2784,7 +2794,7 @@ fn bal_brief_is_refused_with_three_codes() {
     };
     let d = rules::check_named(&s, v0(), &c);
     let codes: BTreeSet<_> = d.iter().map(|x| x.code.as_str()).collect();
-    for want in ["E-CNF-002", "E-CNF-005", "E-CNF-006"] {
+    for want in ["E-REF-003", "E-CNF-002", "E-CNF-005", "E-CNF-006"] {
         assert!(codes.contains(want), "{want}: {codes:?}");
     }
     let power = d.iter().find(|x| x.code == "E-CNF-002").unwrap();
@@ -3414,6 +3424,7 @@ fn a_confirmation_input_without_units_is_refused() {
     );
     // The same in exploratory mode.
     set(&mut s, "/study/mode", j(json!("exploratory")));
+    set(&mut s, "/pins/deviations", None);
     let d = named(&s, dir.path());
     assert_eq!(codes_paths(&d), [("E-UNT-001", "inputs[5].units")]);
     // A mistyped count is the type rule's.
@@ -3451,6 +3462,7 @@ fn the_row_cap_counts_units_conditions_and_repeats_per_stage() {
     let at = |upc: u64, units: u64, repeats: u64| {
         edited(&[
             ("/study/mode", j(json!("exploratory"))),
+            UNDECLARED,
             ("/design/units_per_cluster", j(json!(upc))),
             ("/inputs", j(inputs(1, units))),
             ("/design/repeats", j(json!(repeats))),
@@ -3757,11 +3769,22 @@ fn an_estimates_study_that_has_not_finished_waits_while_a_param_waits_too() {
 const REF003: &str =
     "The plan takes estimates from a study that ran other code, and declares no deviation from it.";
 
-/// The problem E-REF-003 states at a hypothesis whose study `pilot` ran `payload` in
-/// `environment`, when this plan differs in `parts`.
-fn ran(payload: &str, environment: &str, parts: &str) -> String {
+/// The problem E-REF-003 states at a hypothesis whose study `pilot` ran `i`, when this plan
+/// differs in `parts`: the inputs are listed when they differ, and `""` prints as `none`.
+fn ran(i: &Instrument, parts: &str) -> String {
+    let none = |x: &str| if x.is_empty() { "none" } else { x }.to_string();
+    let listed: Vec<String> = (i.inputs.iter())
+        .map(|(path, role, sha)| format!("{path} ({role}, {})", none(sha)))
+        .collect();
+    let inputs = match (parts.contains("inputs"), listed.is_empty()) {
+        (false, _) => String::new(),
+        (true, true) => ", and no model or calibration input".into(),
+        (true, false) => format!(", and model and calibration inputs {}", listed.join(", ")),
+    };
     format!(
-        "{REF003} Study pilot ran payload {payload}, environment {environment}; this plan differs in {parts}."
+        "{REF003} Study pilot ran payload {}, environment {}{inputs}; this plan differs in {parts}.",
+        none(&i.payload),
+        none(&i.environment)
     )
 }
 
@@ -3813,10 +3836,7 @@ fn a_declared_deviation_clears_the_hit() {
     assert!(named(&ok(), dir.path()).is_empty());
     let d = named(&edited(&[("/pins/deviations", None)]), dir.path());
     assert_eq!(codes_paths(&d), [SAME]);
-    assert_eq!(
-        d[0].problem,
-        ran(&i.payload, &i.environment, "payload, environment, inputs")
-    );
+    assert_eq!(d[0].problem, ran(&i, "payload, environment, inputs"));
     // Each hypothesis that takes estimates from the study is reported, and one deviation
     // covers them all.
     let two = and(shared(&[0.5, 0.5]), vec![("/pins/deviations", None)]);
@@ -3834,7 +3854,9 @@ fn a_declared_deviation_clears_the_hit() {
     assert_eq!(codes_paths(&d), [SAME, STRAY]);
     assert_eq!(
         d[1].problem,
-        format!("{REF003} No hypothesis with a claim takes estimates from study nobody.")
+        format!(
+            "{REF003} Only a confirmatory hypothesis with a claim takes estimates, and none takes them from study nobody."
+        )
     );
     // A hypothesis without a claim takes no estimates, whatever it names: it is not reported,
     // and a deviation from its study alone names a study the plan takes no estimates from.
@@ -3895,8 +3917,41 @@ fn each_part_that_differs_is_named() {
     ] {
         let d = ref003(dir.path(), &matched(edits.clone()), i.clone());
         assert_eq!(codes_paths(&d), [SAME], "{edits:?}");
-        assert_eq!(d[0].problem, ran(&i.payload, &i.environment, parts));
+        assert_eq!(d[0].problem, ran(&i, parts));
     }
+    // The detail names the study's inputs, so the plan can pin them.
+    let d = ref003(
+        dir.path(),
+        &matched(vec![("/inputs/0/sha256", j(json!(o)))]),
+        i.clone(),
+    );
+    assert_eq!(
+        d[0].problem,
+        format!(
+            "{REF003} Study pilot ran payload {}, environment {}, and model and calibration inputs model/m.bin (model, {}); this plan differs in inputs.",
+            "cd".repeat(32),
+            "ef".repeat(32),
+            sha256_hex(common::MODEL)
+        )
+    );
+    let d = ref003(
+        dir.path(),
+        &matched(vec![("/pins/payload", j(json!(o)))]),
+        i.clone(),
+    );
+    assert!(!d[0].problem.contains("model/m.bin"), "{}", d[0].problem);
+    // A path from the study's records prints on one line, in its order.
+    let turned = Instrument {
+        inputs: vec![("model/\u{202e}m.bin".into(), "model".into(), o.into())],
+        ..i.clone()
+    };
+    let d = ref003(dir.path(), &matched(vec![]), turned);
+    assert!(
+        d[0].problem
+            .contains(&format!("inputs model/\\u{{202e}}m.bin (model, {o});")),
+        "{}",
+        d[0].problem
+    );
     // Selection and confirmation inputs are data, not code.
     let data = matched(vec![("/inputs/2/sha256", j(json!(o)))]);
     assert!(ref003(dir.path(), &data, i.clone()).is_empty());
@@ -3917,19 +3972,16 @@ fn each_part_that_differs_is_named() {
     second["sha256"] = json!(o);
     let listed = matched(vec![("/inputs/2", j(second))]);
     assert!(ref003(dir.path(), &listed, two.clone()).is_empty());
-    let missing = ref003(dir.path(), &matched(vec![]), two);
-    assert_eq!(
-        missing[0].problem,
-        ran(&i.payload, &i.environment, "inputs")
-    );
+    let missing = ref003(dir.path(), &matched(vec![]), two.clone());
+    assert_eq!(missing[0].problem, ran(&two, "inputs"));
     // An empty pin pins nothing, even where the study names no digest.
     let unpinned = Instrument {
         inputs: vec![("model/m.bin".into(), "model".into(), String::new())],
         ..i.clone()
     };
     let empty = matched(vec![("/inputs/0/sha256", j(json!("")))]);
-    let d = ref003(dir.path(), &empty, unpinned);
-    assert_eq!(d[0].problem, ran(&i.payload, &i.environment, "inputs"));
+    let d = ref003(dir.path(), &empty, unpinned.clone());
+    assert_eq!(d[0].problem, ran(&unpinned, "inputs"));
 }
 
 #[test]
@@ -3944,16 +3996,19 @@ fn a_source_without_one_environment_needs_a_deviation() {
                 ..i.clone()
             };
             let edits = matched(vec![("/pins/environment", j(json!(pin)))]);
-            let d = ref003(dir.path(), &edits, source);
+            let d = ref003(dir.path(), &edits, source.clone());
             assert_eq!(codes_paths(&d), [SAME], "{theirs:?} {pin:?}");
-            assert_eq!(d[0].problem, ran(&i.payload, shown, "environment"));
+            assert_eq!(d[0].problem, ran(&source, "environment"));
+            assert!(d[0].problem.contains(&format!(", environment {shown};")));
         }
     }
     // A study recorded before its analysis named the code differs in every part.
     let d = ref003(dir.path(), &matched(vec![]), Instrument::default());
     assert_eq!(
         d[0].problem,
-        ran("none", "none", "payload, environment, inputs")
+        format!(
+            "{REF003} Study pilot ran payload none, environment none, and no model or calibration input; this plan differs in payload, environment, inputs."
+        )
     );
 }
 
@@ -4173,4 +4228,9 @@ fn a_deviation_names_a_study_a_reason_and_a_known_timing() {
     for (edits, want) in cases {
         assert_eq!(at(edits.clone()), want, "{edits:?}");
     }
+    let rule = v0().iter().find(|r| r.code == "E-REF-003").unwrap();
+    assert_eq!(
+        rule.instruction,
+        "Pin the source study's payload, environment and model and calibration inputs, or add a `[[pins.deviations]]` entry with `from`, `reason` and `timing`. A deviation names a study that a confirmatory hypothesis with a claim takes estimates from, and gives a reason."
+    );
 }

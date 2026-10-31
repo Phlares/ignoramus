@@ -1208,4 +1208,35 @@ fn register_records_each_deviation_with_what_differs() {
         out.contains("\ndeviates from my-pilot in nothing (before-collection): one\\nline\n"),
         "{out}"
     );
+    // A plan that pins the study's code needs no deviation, and records and prints none.
+    let undeclared = |t: String| -> String {
+        let deviation = ["[[pins.deviations]]", "from = ", "reason = ", "timing = "];
+        let kept: Vec<&str> = (t.lines())
+            .filter(|l| !deviation.iter().any(|k| l.starts_with(k)))
+            .collect();
+        format!("{}\n", kept.join("\n"))
+    };
+    let (body, out) = registered(&|t| undeclared(t.replacen("sha256 = \"\"", &pin, 1)));
+    assert_eq!(body["deviations"], json!([]));
+    assert!(!out.contains("deviates"), "{out}");
+}
+
+#[test]
+fn an_exploratory_plan_with_a_deviation_is_refused() {
+    let (f, spec) = setup("numeric-ablation", |t| {
+        ["[[pins.deviations]]", "from = ", "reason = ", "timing = "]
+            .iter()
+            .fold(t, |t, k| t.replace(&format!("# {k}"), k))
+    });
+    common::pilot(&f.home, vec![common::arm_a()]);
+    let (r, out) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap().code, 1, "{out}");
+    assert!(
+        out.contains(
+            "error[E-REF-003] pins.deviations[0].from: The plan takes estimates from a study that ran other code, and declares no deviation from it. Only a confirmatory hypothesis with a claim takes estimates, and none takes them from study my-pilot.\n"
+        ),
+        "{out}"
+    );
+    assert!(!out.contains(PROMPT), "{out}");
+    assert!(!f.home.study_dir("my-study").exists());
 }

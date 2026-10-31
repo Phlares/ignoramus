@@ -29,6 +29,28 @@ pub struct Diagnostic {
     pub sources: Vec<String>,
 }
 
+/// `text` as a terminal shows it on one line and in its own order: each control character,
+/// line or paragraph separator and bidirectional control (Unicode's Bidi_Control set) as its
+/// escape.
+pub fn printable(text: &str) -> String {
+    let hidden = |c: char| {
+        c.is_control()
+            || matches!(
+                c,
+                '\u{61c}' | '\u{200e}' | '\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+            )
+    };
+    (text.chars())
+        .map(|c| {
+            if hidden(c) {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
 /// One block per diagnostic, a blank line between blocks.
 pub fn render_human(diags: &[Diagnostic]) -> String {
     diags

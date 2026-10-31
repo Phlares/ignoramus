@@ -7,7 +7,7 @@ use super::{BoxRecords, Check, NoRecords, Rule, has_format, is_study_id};
 use crate::derived::{
     ANALYSIS, Alpha, Analysis, Estimate, Instrument, Selection, StudyState, contrast_key,
 };
-use crate::diag::Diagnostic;
+use crate::diag::{Diagnostic, printable};
 use crate::inputs::{self, Found, input_path};
 use crate::payload;
 use crate::power::{required_clusters, z};
@@ -1289,12 +1289,21 @@ impl Pinned {
     }
 }
 
-/// `Study <s> ran payload <hash>, environment <digest>; this plan differs in <parts>.` A
-/// part the study recorded as `""` prints as `none`.
+/// `Study <s> ran payload <hash>, environment <digest>; this plan differs in <parts>.`, with
+/// the study's model and calibration inputs after the environment when they differ, so the
+/// plan can pin them. A value the study recorded as `""` prints as `none`.
 fn ran(b: &Borrowed) -> String {
     let shown = |x: &str| if x.is_empty() { "none" } else { x }.to_string();
+    let listed: Vec<String> = (b.instrument.inputs.iter())
+        .map(|(path, role, sha)| format!("{} ({role}, {})", printable(path), shown(sha)))
+        .collect();
+    let inputs = match (b.differs.contains(&"inputs"), listed.is_empty()) {
+        (false, _) => String::new(),
+        (true, true) => ", and no model or calibration input".into(),
+        (true, false) => format!(", and model and calibration inputs {}", listed.join(", ")),
+    };
     format!(
-        "Study {} ran payload {}, environment {}; this plan differs in {}.",
+        "Study {} ran payload {}, environment {}{inputs}; this plan differs in {}.",
         b.study,
         shown(&b.instrument.payload),
         shown(&b.instrument.environment),
@@ -1321,13 +1330,11 @@ fn estimates_same_code(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
         .collect()
 }
 
-/// E-REF-003, at a deviation's `from` in a confirmatory study: a study id that no hypothesis
-/// with a claim takes estimates from. An exploratory study takes no estimates, so its
-/// deviations are not read; a `from` that is not a study id is the generic rules'.
+/// E-REF-003, at a deviation's `from`: a study id that no confirmatory hypothesis with a claim
+/// takes estimates from. An exploratory study takes none, so it declares no deviation, and a
+/// recorded deviation always means the box compared the code. A `from` that is not a study id
+/// is the generic rules'.
 fn deviation_borrowed(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
-    if !confirmatory(spec) {
-        return vec![];
-    }
     let sources = sources(spec);
     (nodes(spec, pat).into_iter())
         .filter_map(|(path, v)| {
@@ -1337,7 +1344,7 @@ fn deviation_borrowed(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
             Some(Hit {
                 path,
                 detail: Some(format!(
-                    "No hypothesis with a claim takes estimates from study {from}."
+                    "Only a confirmatory hypothesis with a claim takes estimates, and none takes them from study {from}."
                 )),
             })
         })
