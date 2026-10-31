@@ -143,8 +143,8 @@ pub enum RunError {
         path: String,
         label: String,
     },
-    /// In a confirmatory plan, a selection input and a confirmation input hold the same data;
-    /// one of them was absent when `check` compared them.
+    /// In a confirmatory plan, a confirmation input holds the same data as a selection or
+    /// calibration input; one of them was absent when `check` compared them.
     DataShared {
         path: String,
         other: String,
@@ -742,8 +742,8 @@ pub fn progress(
     })
 }
 
-/// In a confirmatory plan, refuse a selection input and a confirmation input that hold the
-/// same data (E-CNF-004): `check` cannot compare a file that was absent at registration, and a
+/// In a confirmatory plan, refuse a confirmation input that holds the same data as a selection
+/// or calibration input (E-CNF-004): `check` cannot compare a file that was absent at registration, and a
 /// late copy of a registered file has a registered hash. Then a selection or confirmation
 /// input that the registered plan leaf did not hold is late: refuse it if another study used
 /// it, else record it under this study's id once. The study's own leaves, its plan leaf and
@@ -769,9 +769,12 @@ fn gate_late_data(
         .filter_map(|(i, (_, h))| Some((i.path.as_str(), i.role, h.as_ref()?)))
         .collect();
     if spec.study.mode == Mode::Confirmatory {
-        for (path, role, hashes) in &clusters {
-            let other = (clusters.iter()).find(|(_, r, h)| r != role && same_data(h, hashes));
-            if let Some((other, _, _)) = other {
+        let held: Vec<(&str, &(String, String))> = (spec.inputs.iter().zip(all))
+            .filter(|(i, _)| matches!(i.role, Role::Selection | Role::Calibration))
+            .filter_map(|(i, (_, h))| Some((i.path.as_str(), h.as_ref()?)))
+            .collect();
+        for (path, _, hashes) in clusters.iter().filter(|(_, r, _)| *r == Role::Confirmation) {
+            if let Some((other, _)) = held.iter().find(|(_, h)| same_data(h, hashes)) {
                 return Err(RunError::DataShared {
                     path: (*path).into(),
                     other: (*other).into(),

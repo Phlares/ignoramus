@@ -84,10 +84,7 @@ const NAMED: &[(&str, NamedFn)] = &[
     ("estimates-from-record", estimates_from_record),
     ("reference-finished", reference_finished),
     ("reference-not-self", reference_not_self),
-    (
-        "selection-confirmation-disjoint",
-        selection_confirmation_disjoint,
-    ),
+    ("confirmation-disjoint", confirmation_disjoint),
     ("data-fresh", data_fresh),
     ("units-declared", units_declared),
     ("row-cap", row_cap),
@@ -1201,27 +1198,35 @@ fn reference_not_self(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     hits
 }
 
-/// At `inputs`: no confirmation input. At `inputs[*].<field>`: a confirmation input holds a
-/// selection input's data: the same exact hash, or the same normalized hash (text that differs
-/// only in case and spacing). An empty normalized hash (not UTF-8 text) matches nothing.
-fn selection_confirmation_disjoint(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+/// At `inputs`: no confirmation input. At `inputs[*].<field>`: a confirmation input holds the
+/// data of a selection or calibration input: the same exact hash, or the same normalized hash
+/// (text that differs only in case and spacing). An empty normalized hash (not UTF-8 text)
+/// matches nothing. The detail names the first such input in spec order.
+fn confirmation_disjoint(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     if !pat.contains('.') {
         return flag(spec, pat, |v| {
             v.as_array()
                 .is_some_and(|a| !a.iter().any(|i| role(i) == Some("confirmation")))
         });
     }
-    let selection: Vec<(String, String)> = nodes(spec, "inputs[*]")
+    let held: Vec<(String, &str, (String, String))> = nodes(spec, "inputs[*]")
         .into_iter()
-        .filter(|(_, i)| role(i) == Some("selection"))
-        .filter_map(|(_, i)| input_hashes(ctx, i))
+        .filter_map(|(p, i)| match role(i)? {
+            r @ ("selection" | "calibration") => Some((p, r, input_hashes(ctx, i)?)),
+            _ => None,
+        })
         .collect();
-    let shared = |h: &(String, String)| selection.iter().any(|s| same_data(s, h));
     with_parent(spec, pat)
         .into_iter()
         .filter(|(_, input, _)| role(input) == Some("confirmation"))
-        .filter(|(_, input, _)| input_hashes(ctx, input).is_some_and(|h| shared(&h)))
-        .map(|(path, _, _)| hit(path))
+        .filter_map(|(path, input, _)| {
+            let h = input_hashes(ctx, input)?;
+            let (other, r, _) = held.iter().find(|(_, _, s)| same_data(s, &h))?;
+            Some(Hit {
+                path,
+                detail: Some(format!("It holds the data of {other}, a {r} input.")),
+            })
+        })
         .collect()
 }
 

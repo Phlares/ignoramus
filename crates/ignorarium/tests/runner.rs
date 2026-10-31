@@ -1375,6 +1375,48 @@ fn a_late_input_with_the_data_of_the_other_role_is_refused() {
 }
 
 #[test]
+fn a_late_calibration_copy_of_a_confirmation_input_is_refused() {
+    let lab = lab();
+    staged_pilot(&lab);
+    let (cal, conf) = ("data/example.txt", "data/confirm.txt");
+    // The calibration input is absent at registration, then written with the confirmation
+    // text: once exactly, once in other case and spacing.
+    // Each study has its own confirmation text: another study's use of it is refused.
+    for (id, held, late) in [
+        ("late-exact", "Held  Text", "Held  Text"),
+        ("late-near", "Kept  Text", "kept text"),
+    ] {
+        let dir = register_study(&lab, id, confirmatory_staged, &[(conf, held)], PAYLOAD);
+        std::fs::write(common::work(&lab, id).join(cal), late).unwrap();
+        let err = prepare_with(
+            &lab.home,
+            id,
+            &common::work_of(&lab.home, id),
+            vec![Box::new(Level0)],
+        )
+        .err()
+        .unwrap_or_else(|| panic!("{id}: prepare should refuse"));
+        match err {
+            RunError::DataShared { path, other } => {
+                assert_eq!((path, other), (conf.into(), cal.into()))
+            }
+            e => panic!("{id}: {e}"),
+        }
+        assert!(!dir.join("schedule.json").exists(), "{id}");
+    }
+    // Other calibration data passes.
+    register_study(
+        &lab,
+        "apart",
+        confirmatory_staged,
+        &[(conf, "Third  Text")],
+        PAYLOAD,
+    );
+    std::fs::write(common::work(&lab, "apart").join(cal), "other text").unwrap();
+    plan_of(&lab, "apart");
+}
+
+#[test]
 fn a_late_near_copy_of_the_studys_own_data_is_not_an_earlier_use() {
     let lab = lab();
     let (sel, conf) = ("data/select.txt", "data/confirm.txt");

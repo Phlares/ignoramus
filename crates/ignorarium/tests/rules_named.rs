@@ -3180,16 +3180,63 @@ fn two_paths_with_the_same_bytes_are_not_disjoint() {
     assert_eq!(codes_paths(&d), [("E-CNF-004", "inputs[2].sha256")]);
     assert_eq!(
         d[0].problem,
-        "The plan has no confirmation input, or a confirmation input holds the same data as a selection input."
+        "The plan has no confirmation input, or a confirmation input holds the same data as a selection or calibration input. It holds the data of inputs[1], a selection input."
     );
     assert!(named(&pair("data/s.txt", "data/d.txt"), dir.path()).is_empty());
     // A selection input that is not there shares nothing.
     assert!(named(&pair("data/none.txt", "data/c.txt"), dir.path()).is_empty());
-    // Only confirmation inputs are compared, and only with selection inputs.
+    // Only confirmation inputs are flagged: a calibration input may hold a selection
+    // input's data.
     let mut s = pair("data/d.txt", "data/c.txt");
-    set(&mut s, "/inputs/0/path", j(json!("data/s.txt")));
-    set(&mut s, "/inputs/3/path", j(json!("data/s.txt")));
+    set(&mut s, "/inputs/0/path", j(json!("data/d.txt")));
     assert!(named(&s, dir.path()).is_empty());
+}
+
+#[test]
+fn a_calibration_input_with_the_confirmation_data_is_not_disjoint() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data/s.txt", b"selection text");
+    write(dir.path(), "data/c.txt", b"one text");
+    write(dir.path(), "data/k.txt", b"one text");
+    write(dir.path(), "data/u.txt", b"ONE  TEXT");
+    write(dir.path(), "data/d.txt", b"another text");
+    let mut s = pair("data/s.txt", "data/c.txt");
+    set(&mut s, "/inputs/0/path", j(json!("data/k.txt")));
+    let d = named(&s, dir.path());
+    assert_eq!(codes_paths(&d), [("E-CNF-004", "inputs[2].sha256")]);
+    assert!(
+        d[0].problem
+            .ends_with(" It holds the data of inputs[0], a calibration input."),
+        "{}",
+        d[0].problem
+    );
+    // The same text in other case and spacing.
+    set(&mut s, "/inputs/0/path", j(json!("data/u.txt")));
+    let d = named(&s, dir.path());
+    assert_eq!(codes_paths(&d), [("E-CNF-004", "inputs[2].sha256")]);
+    // Other data passes.
+    set(&mut s, "/inputs/0/path", j(json!("data/d.txt")));
+    assert!(named(&s, dir.path()).is_empty());
+    // A calibration input that is not there shares nothing.
+    set(&mut s, "/inputs/0/path", j(json!("data/none.txt")));
+    assert!(named(&s, dir.path()).is_empty());
+}
+
+#[test]
+fn an_exploratory_plan_may_calibrate_on_its_confirmation_text() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data/s.txt", b"selection text");
+    write(dir.path(), "data/c.txt", b"one text");
+    write(dir.path(), "data/k.txt", b"one text");
+    let mut s = pair("data/s.txt", "data/c.txt");
+    set(&mut s, "/inputs/0/path", j(json!("data/k.txt")));
+    assert_eq!(codes_paths(&named(&s, dir.path())).len(), 1);
+    set(&mut s, "/study/mode", j(json!("exploratory")));
+    assert!(
+        named(&s, dir.path()).iter().all(|d| d.code != "E-CNF-004"),
+        "{:?}",
+        named(&s, dir.path())
+    );
 }
 
 #[test]
