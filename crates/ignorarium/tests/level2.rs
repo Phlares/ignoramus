@@ -951,6 +951,9 @@ fn a_row_removes_its_scratch_folder_and_a_dead_box_s() {
     ] {
         fs::create_dir_all(tmp.join(name).join("work")).unwrap();
     }
+    // A link with a dead box's scratch name is not a folder of this user: it stays.
+    let link = format!("ignorarium-vm-{dead}-1");
+    std::os::unix::fs::symlink(tmp.join("other"), tmp.join(&link)).unwrap();
     let (b, job) = fake_box(&dir);
     let o = b.run_row(&job, &|| true).unwrap();
     assert!(boot_failed(&o.exit), "{o:?}");
@@ -963,7 +966,9 @@ fn a_row_removes_its_scratch_folder_and_a_dead_box_s() {
         .unwrap();
     let scratch = tmp.join(format!("ignorarium-vm-{}-0", std::process::id()));
     assert_eq!(Path::new(initramfs), scratch.join("initramfs.cpio"));
-    assert_eq!(names(&tmp), ["ignorarium-vm-1-0", "other"]);
+    let mut kept = vec!["ignorarium-vm-1-0".to_string(), link, "other".into()];
+    kept.sort();
+    assert_eq!(names(&tmp), kept);
 }
 
 #[test]
