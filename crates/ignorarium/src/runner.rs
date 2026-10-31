@@ -340,12 +340,14 @@ fn resolved_params(
     spec: &Spec,
     register: &Register,
 ) -> Result<BTreeMap<String, Value>, RunError> {
-    for hash in register.resolved.iter().flat_map(|r| &r.records) {
-        let found = records::find(home, &key.verifying_key(), hash)
-            .map_err(|e| RunError::Records(e.to_string()))?;
-        if found.is_none() {
-            return Err(RunError::Records(format!("frozen record {hash} is gone")));
-        }
+    let frozen: Vec<&str> = (register.resolved.iter())
+        .flat_map(|r| &r.records)
+        .map(String::as_str)
+        .collect();
+    let found = records::find(home, &key.verifying_key(), &frozen)
+        .map_err(|e| RunError::Records(e.to_string()))?;
+    if let Some(hash) = frozen.iter().find(|h| !found.contains_key(**h)) {
+        return Err(RunError::Records(format!("frozen record {hash} is gone")));
     }
     let mut out = BTreeMap::new();
     for (i, c) in spec.design.conditions.iter().enumerate() {

@@ -6,6 +6,7 @@ use crate::keys::{sign_hex, verify_hex};
 use crate::time::now_rfc3339;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 
@@ -286,19 +287,28 @@ pub fn logs(home: &Home) -> io::Result<Vec<(String, std::path::PathBuf)>> {
     Ok(out)
 }
 
-/// The record with this hash, from any study log in the box, read in sorted folder order.
-/// A log that fails verification is an error that names its study, never skipped.
-pub fn find(home: &Home, key: &VerifyingKey, hash: &str) -> Result<Option<Record>, VerifyError> {
-    // Every log is verified, even after a match: a box with a damaged log answers nothing.
-    let mut found = None;
+/// The records with these hashes, by hash, from any study log in the box; a hash no log
+/// holds is left out. Each log is read once, in sorted folder order, and every one is
+/// verified, even after the last match: a box with a damaged log answers nothing, and the
+/// error names its study. No hash reads no log.
+pub fn find(
+    home: &Home,
+    key: &VerifyingKey,
+    hashes: &[&str],
+) -> Result<BTreeMap<String, Record>, VerifyError> {
+    let mut found = BTreeMap::new();
+    if hashes.is_empty() {
+        return Ok(found);
+    }
     for (study, log) in logs(home)? {
         let read = read_all(&log, key).map_err(|cause| VerifyError::In {
             study,
             cause: Box::new(cause),
         })?;
         for r in read {
-            if found.is_none() && self::hash(&r) == hash {
-                found = Some(r);
+            let h = self::hash(&r);
+            if hashes.contains(&h.as_str()) {
+                found.entry(h).or_insert(r);
             }
         }
     }

@@ -8,6 +8,7 @@ use ignorarium::keys::{self, KeyError};
 use ignorarium::records::{self, Record, RecordDraft, VerifyError};
 use ignorarium::time::rfc3339_from_unix_millis;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Barrier;
 
@@ -941,28 +942,32 @@ fn hash_equals_the_stored_hash() {
 }
 
 #[test]
-fn find_returns_the_record_with_that_hash_from_any_study() {
+fn find_returns_the_record_with_each_hash_from_any_study() {
     let k = key(1);
     let (_d, home, first, second) = two_studies(&k);
     let v = k.verifying_key();
-    assert_eq!(
-        records::find(&home, &v, &records::hash(&second)).unwrap(),
-        Some(second)
-    );
-    assert_eq!(
-        records::find(&home, &v, &records::hash(&first)).unwrap(),
-        Some(first)
-    );
+    let (h1, h2) = (records::hash(&first), records::hash(&second));
+    let found = records::find(&home, &v, &[&h2, &h1]).unwrap();
+    assert_eq!(found, BTreeMap::from([(h1, first), (h2, second)]));
 }
 
 #[test]
-fn find_returns_none_for_an_unknown_hash() {
+fn find_leaves_out_an_unknown_hash() {
+    let k = key(1);
+    let (_d, home, first, _) = two_studies(&k);
+    let h1 = records::hash(&first);
+    let found = records::find(&home, &k.verifying_key(), &[&"0".repeat(64), &h1]).unwrap();
+    assert_eq!(found, BTreeMap::from([(h1, first)]));
+}
+
+#[test]
+fn find_reads_no_log_for_no_hash() {
     let k = key(1);
     let (_d, home, ..) = two_studies(&k);
-    assert_eq!(
-        records::find(&home, &k.verifying_key(), &"0".repeat(64)).unwrap(),
-        None
-    );
+    let damaged = home.study_dir("b").join("records.jsonl");
+    std::fs::write(&damaged, "not a record\n").unwrap();
+    let found = records::find(&home, &k.verifying_key(), &[]).unwrap();
+    assert!(found.is_empty());
 }
 
 #[test]
@@ -975,7 +980,7 @@ fn find_fails_on_a_log_that_does_not_verify() {
         .unwrap()
         .replace("\"n\":2", "\"n\":9");
     std::fs::write(&p, damaged).unwrap();
-    let err = records::find(&home, &k.verifying_key(), &records::hash(&first)).unwrap_err();
+    let err = records::find(&home, &k.verifying_key(), &[&records::hash(&first)]).unwrap_err();
     assert!(matches!(err, VerifyError::In { .. }), "{err}");
     assert_eq!(err.to_string(), "study b: record 0: hash does not match");
 }
@@ -987,9 +992,10 @@ fn find_fails_when_the_studies_folder_cannot_be_read() {
     let home = Home::open_at(&d.path().join("home")).unwrap();
     let v = key(1).verifying_key();
     std::fs::remove_dir(home.root.join("studies")).unwrap();
-    assert_eq!(records::find(&home, &v, &"0".repeat(64)).unwrap(), None);
+    let none = "0".repeat(64);
+    assert!(records::find(&home, &v, &[&none]).unwrap().is_empty());
     std::fs::write(home.root.join("studies"), "x").unwrap();
-    let err = records::find(&home, &v, &"0".repeat(64)).unwrap_err();
+    let err = records::find(&home, &v, &[&none]).unwrap_err();
     assert!(matches!(err, VerifyError::Io(_)), "{err}");
 }
 
@@ -1013,6 +1019,7 @@ fn find_skips_entries_that_are_not_study_folders() {
     let k = key(1);
     let (_d, home, first, _) = two_studies(&k);
     std::fs::write(home.root.join("studies/notes.txt"), "x").unwrap();
-    let got = records::find(&home, &k.verifying_key(), &records::hash(&first)).unwrap();
-    assert_eq!(got, Some(first));
+    let h1 = records::hash(&first);
+    let got = records::find(&home, &k.verifying_key(), &[&h1]).unwrap();
+    assert_eq!(got, BTreeMap::from([(h1, first)]));
 }
