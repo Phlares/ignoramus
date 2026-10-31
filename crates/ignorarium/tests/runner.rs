@@ -276,13 +276,13 @@ fn run_writes_one_record_per_row_in_order() {
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
     let key = keys::load(&lab.home).unwrap().unwrap();
     let log = dir.join("records.jsonl");
-    // Register, 6 rows, then the analysis, estimate and verdict records.
-    assert_eq!(records::verify(&log, &key.verifying_key()).unwrap(), 10);
+    // Register, inputs, 6 rows, then the analysis, estimate and verdict records.
+    assert_eq!(records::verify(&log, &key.verifying_key()).unwrap(), 11);
     let rows = rows_of(&lab, "s1");
     assert_eq!(rows.len(), 6);
     for (i, r) in rows.iter().enumerate() {
         assert_eq!(r.row, Some(i as u64));
-        assert_eq!(r.seq, i as u64 + 1);
+        assert_eq!(r.seq, i as u64 + 2);
         let row = &plan.schedule.rows[i];
         assert_eq!(r.body["condition"], row.condition.as_str());
         assert_eq!(r.body["unit"], row.unit.as_str());
@@ -320,10 +320,10 @@ fn resume_skips_only_recorded_rows() {
     let lab = lab();
     let dir = plain(&lab, "s2");
     run(&plan_of(&lab, "s2")).unwrap();
-    // Keep the register record and rows 0..3.
+    // Keep the register and inputs records and rows 0..3.
     let log = dir.join("records.jsonl");
     let text = std::fs::read_to_string(&log).unwrap();
-    let kept: String = text.split_inclusive('\n').take(4).collect();
+    let kept: String = text.split_inclusive('\n').take(5).collect();
     std::fs::write(&log, kept).unwrap();
     std::fs::rename(dir.join("run"), dir.join("run-old")).unwrap();
     let mut plan = plan_of(&lab, "s2");
@@ -687,6 +687,87 @@ fn a_late_unpinned_input_is_read_from_the_root_and_gated() {
     let uses = log.uses(&hashes.0, &hashes.1).unwrap();
     assert_eq!(uses.len(), 1);
     assert_eq!(uses[0].1.label, "study:late-root");
+}
+
+#[test]
+fn the_first_prepare_freezes_every_input_and_a_resume_on_other_bytes_is_refused() {
+    let lab = lab();
+    let dir = register_study(&lab, "frozen", conf_input, &[], PAYLOAD);
+    let conf = common::work(&lab, "frozen").join("data/conf.txt");
+    std::fs::write(&conf, "first text").unwrap();
+    plan_of(&lab, "frozen");
+    // One signed record holds each input's digest at the first prepare, or none when absent.
+    let first = sha256_hex(b"first text");
+    let frozen = kind_of(&lab, "frozen", "inputs");
+    assert_eq!(frozen.len(), 1);
+    assert_eq!(
+        frozen[0].body,
+        serde_json::json!({ "inputs": [["data/example.txt", null], ["data/conf.txt", first]] })
+    );
+    // A resume on the same bytes adds no record.
+    plan_of(&lab, "frozen");
+    assert_eq!(kind_of(&lab, "frozen", "inputs").len(), 1);
+    // Other bytes, the file gone, or an input absent at first that is there now: refused,
+    // before the view or the plan log change.
+    let view = std::fs::read(dir.join("in/data/conf.txt")).unwrap();
+    let example = common::work(&lab, "frozen").join("data/example.txt");
+    let changes: [(&str, &dyn Fn(), &dyn Fn()); 3] = [
+        (
+            "data/conf.txt",
+            &|| std::fs::write(&conf, "second text").unwrap(),
+            &|| std::fs::write(&conf, "first text").unwrap(),
+        ),
+        (
+            "data/conf.txt",
+            &|| std::fs::remove_file(&conf).unwrap(),
+            &|| std::fs::write(&conf, "first text").unwrap(),
+        ),
+        (
+            "data/example.txt",
+            &|| std::fs::write(&example, "new file").unwrap(),
+            &|| std::fs::remove_file(&example).unwrap(),
+        ),
+    ];
+    let log = PlanLog::open(&lab.home.root.join("planlog")).unwrap();
+    let second = file_hashes(b"second text");
+    for (path, change, undo) in changes {
+        change();
+        let err = err_of(&lab, "frozen");
+        assert!(matches!(&err, RunError::InputFrozen(p) if p == path), "{err}");
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "input {path} differs from what the study's first run read; \
+                 put that back, or register the plan again as a new study"
+            )
+        );
+        assert_eq!(std::fs::read(dir.join("in/data/conf.txt")).unwrap(), view);
+        assert!(log.uses(&second.0, &second.1).unwrap().is_empty());
+        undo();
+        plan_of(&lab, "frozen");
+    }
+    assert_eq!(kind_of(&lab, "frozen", "inputs").len(), 1);
+}
+
+#[test]
+fn a_refused_first_prepare_freezes_nothing() {
+    let lab = lab();
+    // Another study used the late file first: the gate refuses, and the study is not yet
+    // tied to those bytes.
+    register_study(&lab, "early", conf_input, &[], PAYLOAD);
+    register_study(&lab, "later", conf_input, &[], PAYLOAD);
+    for id in ["early", "later"] {
+        std::fs::write(common::work(&lab, id).join("data/conf.txt"), "shared").unwrap();
+    }
+    plan_of(&lab, "early");
+    assert!(matches!(
+        err_of(&lab, "later"),
+        RunError::DataReused { .. }
+    ));
+    assert!(kind_of(&lab, "later", "inputs").is_empty());
+    std::fs::write(common::work(&lab, "later").join("data/conf.txt"), "own").unwrap();
+    plan_of(&lab, "later");
+    assert_eq!(kind_of(&lab, "later", "inputs").len(), 1);
 }
 
 #[test]
@@ -1617,10 +1698,10 @@ fn alerts_crossed_by_earlier_sessions_stay_silent_on_resume() {
     plan.backend = slow();
     plan.meter = Box::new(FakeMeter::new(vec![cost(0.0, 0.0)]));
     run(&plan).unwrap();
-    // Keep the register record and rows 0 and 1: 2000 s of 3600 s, past 0.50.
+    // Keep the register and inputs records and rows 0 and 1: 2000 s of 3600 s, past 0.50.
     let log = dir.join("records.jsonl");
     let text = std::fs::read_to_string(&log).unwrap();
-    let kept: String = text.split_inclusive('\n').take(3).collect();
+    let kept: String = text.split_inclusive('\n').take(4).collect();
     std::fs::write(&log, kept).unwrap();
     let mut plan = plan_of(&lab, "b4b");
     plan.backend = slow();
@@ -1702,10 +1783,10 @@ fn spend_survives_a_resume_through_the_signed_records() {
     b.wall = Some(100.0);
     plan.backend = Box::new(b);
     run(&plan).unwrap();
-    // Keep the register record and rows 0..3, as a crash would.
+    // Keep the register and inputs records and rows 0..3, as a crash would.
     let log = dir.join("records.jsonl");
     let text = std::fs::read_to_string(&log).unwrap();
-    let kept: String = text.split_inclusive('\n').take(4).collect();
+    let kept: String = text.split_inclusive('\n').take(5).collect();
     std::fs::write(&log, kept).unwrap();
     let mut resumed = plan_of(&lab, "b5");
     let (mut b, _) = fake(vec![]);
@@ -2130,13 +2211,13 @@ fn a_finished_run_writes_each_record_once_and_heals_a_crash() {
     );
     let plan = plan_of(&lab, "fin");
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
-    // Register, 6 rows, the analysis record, one estimate per hypothesis, then one verdict per
+    // Register, inputs, 6 rows, the analysis record, one estimate per hypothesis, then one verdict per
     // hypothesis.
     let kinds = ["analysis", "estimate", "estimate", "verdict", "verdict"];
     assert_eq!(after_the_rows(&lab, "fin"), kinds);
     assert!(finished(&lab, "fin"));
     let all = common::records_of(&lab, "fin");
-    let a = Analysis::of(&all[7]).unwrap();
+    let a = Analysis::of(&all[8]).unwrap();
     let version = env!("CARGO_PKG_VERSION");
     assert_eq!(
         (a.box_version.as_str(), a.estimates, a.verdicts, a.slot),
@@ -2144,7 +2225,7 @@ fn a_finished_run_writes_each_record_once_and_heals_a_crash() {
     );
     // Neither hypothesis has a claim: each gets verdict `none`.
     let verdicts = |all: &[records::Record]| -> Vec<(String, String)> {
-        (all[10..].iter())
+        (all[11..].iter())
             .map(|r| Verdict::of(r).unwrap())
             .map(|v| (v.hypothesis, v.verdict))
             .collect()
@@ -2159,7 +2240,7 @@ fn a_finished_run_writes_each_record_once_and_heals_a_crash() {
     stored["design"]["power"] = serde_json::json!(0.95);
     assert_ne!(a.commit, analysis::commit(&stored, version).unwrap());
     assert_ne!(a.commit, analysis::commit(&stored, "9.9.9").unwrap());
-    let es: Vec<Estimate> = all[8..10]
+    let es: Vec<Estimate> = all[9..11]
         .iter()
         .map(|r| Estimate::of(r).unwrap())
         .collect();
@@ -2172,17 +2253,17 @@ fn a_finished_run_writes_each_record_once_and_heals_a_crash() {
     }
     // A second run adds nothing.
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
-    assert_eq!(common::records_of(&lab, "fin").len(), 12);
+    assert_eq!(common::records_of(&lab, "fin").len(), 13);
     // A crash after any record of the tail: the next run adds what is missing, once.
-    for kept in [12, 11, 10, 9, 8] {
+    for kept in [13, 12, 11, 10, 9] {
         keep_records(&dir, kept);
-        assert_eq!(finished(&lab, "fin"), kept == 12, "kept {kept}");
+        assert_eq!(finished(&lab, "fin"), kept == 13, "kept {kept}");
         assert_eq!(run(&plan).unwrap(), RunStatus::Done);
         assert_eq!(after_the_rows(&lab, "fin"), kinds, "kept {kept}");
         assert!(finished(&lab, "fin"));
         let all = common::records_of(&lab, "fin");
         assert_eq!(
-            all[8..10]
+            all[9..11]
                 .iter()
                 .map(|r| Estimate::of(r).unwrap().hypothesis)
                 .collect::<Vec<_>>(),
@@ -2192,7 +2273,7 @@ fn a_finished_run_writes_each_record_once_and_heals_a_crash() {
         assert_eq!(verdicts(&all), [none("H1"), none("H2")], "kept {kept}");
     }
     // A crash after the last row and before the analysis record: it is written first.
-    keep_records(&dir, 7);
+    keep_records(&dir, 8);
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
     assert_eq!(after_the_rows(&lab, "fin"), kinds);
 }
@@ -2260,7 +2341,7 @@ fn finished_study(lab: &Lab, id: &str) -> (std::path::PathBuf, RunPlan, Vec<reco
 fn an_analysis_record_that_does_not_parse_is_an_error() {
     let lab = lab();
     let (dir, plan, _) = finished_study(&lab, "badan");
-    keep_records(&dir, 7);
+    keep_records(&dir, 8);
     append_record(
         &lab,
         "badan",
@@ -2272,14 +2353,14 @@ fn an_analysis_record_that_does_not_parse_is_an_error() {
         other => panic!("{other:?}"),
     }
     // Nothing was written after it.
-    assert_eq!(common::records_of(&lab, "badan").len(), 8);
+    assert_eq!(common::records_of(&lab, "badan").len(), 9);
 }
 
 #[test]
 fn finish_refuses_when_the_spec_changed_since_registration() {
     let lab = lab();
     let (dir, plan, _) = finished_study(&lab, "moved");
-    keep_records(&dir, 7);
+    keep_records(&dir, 8);
     let path = dir.join("spec.toml");
     let text = std::fs::read_to_string(&path).unwrap();
     std::fs::write(&path, text.replace("power = 0.8", "power = 0.9")).unwrap();
@@ -2287,7 +2368,7 @@ fn finish_refuses_when_the_spec_changed_since_registration() {
         analysis::finish(&plan),
         Err(RunError::SpecChanged)
     ));
-    assert_eq!(common::records_of(&lab, "moved").len(), 7);
+    assert_eq!(common::records_of(&lab, "moved").len(), 8);
 }
 
 #[test]
@@ -2300,9 +2381,9 @@ fn a_heal_by_another_box_version_is_refused_only_when_it_adds_something() {
         b
     };
     // The old box wrote the analysis record and one of the two estimates.
-    keep_records(&dir, 7);
-    append_record(&lab, "vers", "analysis", old(&all[7]));
-    append_record(&lab, "vers", "estimate", all[8].body.clone());
+    keep_records(&dir, 8);
+    append_record(&lab, "vers", "analysis", old(&all[8]));
+    append_record(&lab, "vers", "estimate", all[9].body.clone());
     match run(&plan) {
         Err(RunError::Records(why)) => {
             assert!(
@@ -2312,16 +2393,16 @@ fn a_heal_by_another_box_version_is_refused_only_when_it_adds_something() {
         }
         other => panic!("{other:?}"),
     }
-    assert_eq!(common::records_of(&lab, "vers").len(), 9);
+    assert_eq!(common::records_of(&lab, "vers").len(), 10);
     // With every estimate there and a verdict missing, it is still refused.
-    append_record(&lab, "vers", "estimate", all[9].body.clone());
-    append_record(&lab, "vers", "verdict", all[10].body.clone());
-    assert!(matches!(run(&plan), Err(RunError::Records(_))));
-    assert_eq!(common::records_of(&lab, "vers").len(), 11);
-    // With every record there, nothing is added and nothing is refused.
+    append_record(&lab, "vers", "estimate", all[10].body.clone());
     append_record(&lab, "vers", "verdict", all[11].body.clone());
-    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert!(matches!(run(&plan), Err(RunError::Records(_))));
     assert_eq!(common::records_of(&lab, "vers").len(), 12);
+    // With every record there, nothing is added and nothing is refused.
+    append_record(&lab, "vers", "verdict", all[12].body.clone());
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(common::records_of(&lab, "vers").len(), 13);
 }
 
 /// `staged`, with arm-b's `bits` taken from study `chooser`.

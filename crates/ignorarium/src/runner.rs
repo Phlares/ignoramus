@@ -4,7 +4,7 @@ use crate::backend::rootfs;
 use crate::backend::{self, Backend, Exit, Probe, RowJob, RowOutcome, Watch};
 use crate::budget::{Alerts, Cost, CostMeter, Decision, HostMeter, decide, dimension_name};
 use crate::control::{self, ControlError, ControlFile, RunLock, Signal, State};
-use crate::derived::{REGISTER, Register, SELECTION, Selection};
+use crate::derived::{INPUTS, Inputs, REGISTER, Register, SELECTION, Selection};
 use crate::environ::{Builder, Built, Recipe};
 use crate::estimate::{apply_defaults, estimate};
 use crate::events::{self, Event};
@@ -101,6 +101,9 @@ pub enum RunError {
     InputMissing(String),
     /// A registered input's stored copy no longer has its registered bytes, by input path.
     InputChanged(String),
+    /// An input differs from the `inputs` record of the study's first prepare: other bytes,
+    /// gone, or there now while it was absent then. By input path.
+    InputFrozen(String),
     /// `pins.environment` names an image that is not in the store.
     EnvironmentMissing(String),
     /// `pins.environment` is not a store digest (64 lowercase hex characters).
@@ -154,6 +157,11 @@ impl fmt::Display for RunError {
             RunError::InputChanged(p) => write!(
                 f,
                 "the stored copy of input {p} no longer has the bytes it was registered with"
+            ),
+            RunError::InputFrozen(p) => write!(
+                f,
+                "input {p} differs from what the study's first run read; \
+                 put that back, or register the plan again as a new study"
             ),
             RunError::EnvironmentMissing(d) => {
                 write!(f, "the pinned environment {d} is not in the store")
@@ -248,6 +256,9 @@ pub fn up_to(backends: Vec<Box<dyn Backend>>, max: u8) -> Vec<Box<dyn Backend>> 
 /// view, gate its late data, write its schedule, and pick the highest backend that meets
 /// `scope.min_isolation`. Every input in the view is hashed in full here, once per `run` or
 /// `resume`; before each attempt the run only compares the view's stamps (see `stale`).
+/// The first prepare that gets this far signs an `inputs` record of every input's digest,
+/// or its absence; a later one whose inputs differ is refused before anything changes, so
+/// every row of a study runs on the same bytes.
 pub fn prepare_with(
     home: &Home,
     study_id: &str,
@@ -303,6 +314,17 @@ pub fn prepare_with(
         .as_str();
     let machine = machine::load(&home.root).map_err(io)?;
     let inputs = held_inputs(&store, &key, &spec, &register)?;
+    let now = Inputs {
+        inputs: (inputs.iter())
+            .map(|(p, h)| (p.clone(), h.as_ref().map(|h| h.0.clone())))
+            .collect(),
+    };
+    let frozen = all.iter().find_map(Inputs::of);
+    if let Some(frozen) = &frozen
+        && let Some((path, _)) = now.inputs.iter().find(|i| !frozen.inputs.contains(i))
+    {
+        return Err(RunError::InputFrozen(path.clone()));
+    }
     let params = resolved_params(home, &key, &spec, &register)?;
     let present = present(&inputs);
     let view = view::build(&store, &dir, &present).map_err(view_error)?;
@@ -311,6 +333,11 @@ pub fn prepare_with(
     let rows = expand_rows(&spec, &spec_hash)?;
     let schedule = Schedule::new(&spec_hash, rows);
     schedule::write_once(&dir, &schedule)?;
+    if frozen.is_none() {
+        let body = serde_json::to_value(&now).map_err(io)?;
+        let draft = RecordDraft::new(study_id, INPUTS, body);
+        records::append(&dir.join("records.jsonl"), &key, draft)?;
+    }
     Ok(RunPlan {
         home: home.clone(),
         study_id: study_id.into(),

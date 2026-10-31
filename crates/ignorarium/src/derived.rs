@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 
 pub const ANALYSIS: &str = "analysis";
 pub const ESTIMATE: &str = "estimate";
+pub const INPUTS: &str = "inputs";
 pub const REGISTER: &str = "register";
 pub const SELECTION: &str = "selection";
 pub const VERDICT: &str = "verdict";
@@ -91,6 +92,21 @@ impl Register {
     /// `None` for another kind of record, or a body that does not parse.
     pub fn of(r: &Record) -> Option<Register> {
         body_of(r, REGISTER)
+    }
+}
+
+/// The bytes a study runs on, fixed at its first prepare: each input by path, in spec order,
+/// with the digest of its stored copy, or `None` for an input that was absent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Inputs {
+    pub inputs: Vec<(String, Option<String>)>,
+}
+
+impl Inputs {
+    /// `None` for another kind of record, or a body that does not parse.
+    pub fn of(r: &Record) -> Option<Inputs> {
+        body_of(r, INPUTS)
     }
 }
 

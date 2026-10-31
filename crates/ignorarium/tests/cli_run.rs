@@ -545,7 +545,7 @@ fn stop_sends_its_request_before_it_reads_a_torn_log() {
         .code(2);
     assert_eq!(
         err(&a),
-        "error: the stop request is sent, but records of torn: line 1 is not a whole record\n"
+        "error: the stop request is sent, but records of torn: line 2 is not a whole record\n"
     );
     assert_eq!(
         ControlFile::of(&lab.home, id).peek().unwrap(),
