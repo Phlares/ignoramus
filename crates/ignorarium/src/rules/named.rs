@@ -244,24 +244,28 @@ fn input_path_safe(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     })
 }
 
-/// An input whose path lies inside another input's path (`data/a` and `data/a/b`).
+/// An input whose path lies inside another input's path (`data/a` and `data/a/b`), or that
+/// names an earlier input's file in another spelling (`data/a` and `data//a/`): empty segments
+/// are skipped when a path is read. Two equal strings are E-UNQ-001's.
 fn input_path_nested(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
-    let all: Vec<(String, Vec<&str>)> = nodes(spec, pat)
+    let all: Vec<(String, &str, Vec<&str>)> = nodes(spec, pat)
         .into_iter()
         .filter_map(|(p, v)| {
-            Some((
-                p,
-                v.as_str()?.split('/').filter(|s| !s.is_empty()).collect(),
-            ))
+            let raw = v.as_str()?;
+            Some((p, raw, raw.split('/').filter(|s| !s.is_empty()).collect()))
         })
         .collect();
-    all.iter()
-        .filter(|(_, inner)| {
-            all.iter().any(|(_, outer)| {
-                !outer.is_empty() && outer.len() < inner.len() && inner.starts_with(outer)
-            })
+    let within = |i: usize| {
+        let (_, raw, inner) = &all[i];
+        (all.iter().enumerate()).any(|(j, (_, other, outer))| {
+            // Shorter, or as long and listed earlier.
+            let before = (outer.len(), j) < (inner.len(), i);
+            other != raw && !outer.is_empty() && before && inner.starts_with(outer)
         })
-        .map(|(p, _)| hit(p.clone()))
+    };
+    (0..all.len())
+        .filter(|&i| within(i))
+        .map(|i| hit(all[i].0.clone()))
         .collect()
 }
 

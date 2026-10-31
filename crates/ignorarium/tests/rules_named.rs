@@ -3053,6 +3053,11 @@ fn an_input_inside_another_inputs_path_is_refused() {
     // A shared name prefix is not a shared folder.
     assert!(with_second("data/a", "data/ab").is_empty());
     assert!(with_second("data/a", "data/b/a").is_empty());
+    // Another spelling of the same path names the same file: the later input is flagged.
+    for other in ["data//a", "data/a/", "data//a//"] {
+        assert_eq!(codes_paths(&with_second("data/a", other)), nested, "{other}");
+        assert_eq!(codes_paths(&with_second(other, "data/a")), nested, "{other}");
+    }
 }
 
 #[test]
