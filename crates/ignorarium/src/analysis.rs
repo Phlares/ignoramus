@@ -578,10 +578,10 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
             let promised = Analysis::of(&all[at])
                 .ok_or_else(|| RunError::Records("the analysis record does not parse".into()))?;
             let after = &all[at + 1..];
-            have.extend(after.iter().filter_map(Estimate::of).map(|e| identity(&e)));
+            have.extend(after.iter().filter_map(Estimate::of).map(|e| e.identity()));
             let verdicts = after.iter().filter_map(Verdict::of);
             recorded.extend(verdicts.map(|v| (v.hypothesis.clone(), v)));
-            let missing = wanted.iter().any(|e| !have.contains(&identity(e)))
+            let missing = wanted.iter().any(|e| !have.contains(&e.identity()))
                 || judged.iter().any(|v| !recorded.contains_key(&v.hypothesis));
             if promised.box_version != version && missing {
                 return Err(RunError::Records(format!(
@@ -601,7 +601,7 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
             append(plan, &log, ANALYSIS, &body)?;
         }
     }
-    for e in wanted.iter().filter(|e| !have.contains(&identity(e))) {
+    for e in wanted.iter().filter(|e| !have.contains(&e.identity())) {
         append(plan, &log, ESTIMATE, e)?;
     }
     for v in judged
@@ -622,11 +622,6 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
         }
     }
     Ok(())
-}
-
-/// What makes an estimate distinct: its hypothesis, contrast and stratum.
-fn identity(e: &Estimate) -> (String, String, String) {
-    (e.hypothesis.clone(), e.key_hash.clone(), e.stratum.clone())
 }
 
 fn append(plan: &RunPlan, log: &Path, kind: &str, body: &impl Serialize) -> Result<(), RunError> {

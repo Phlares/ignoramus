@@ -43,6 +43,15 @@ impl Estimate {
     pub fn of(r: &Record) -> Option<Estimate> {
         body_of(r, ESTIMATE)
     }
+
+    /// What makes an estimate distinct: its hypothesis, contrast and stratum.
+    pub fn identity(&self) -> (String, String, String) {
+        (
+            self.hypothesis.clone(),
+            self.key_hash.clone(),
+            self.stratum.clone(),
+        )
+    }
 }
 
 /// What `register` records about a plan. A confirmatory plan carries `timestamp = "pending"`.
@@ -234,7 +243,7 @@ impl StudyState {
         let estimates: BTreeSet<(String, String, String)> = after
             .iter()
             .filter_map(Estimate::of)
-            .map(|e| (e.hypothesis, e.key_hash, e.stratum))
+            .map(|e| e.identity())
             .collect();
         let verdicts: BTreeSet<String> = after
             .iter()
