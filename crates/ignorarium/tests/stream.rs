@@ -540,6 +540,48 @@ fn a_stream_that_lacks_a_registered_slot_is_refused() {
 }
 
 #[test]
+fn a_register_between_the_reads_of_a_check_is_no_lack() {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    // Study b's log is a FIFO, so check waits inside its read of the register records while
+    // b opens slot 1 and writes the register record that names it. Check reads the stream
+    // after that, so it finds slot 1 there.
+    let lab = lab();
+    let k = key(&lab);
+    let records = HomeRecords {
+        home: lab.home.clone(),
+        key: Ok(Some(k.verifying_key())),
+    };
+    let scratch = lab.root.join("scratch.jsonl");
+    let mut body = common::finished(vec![])[0].1.clone();
+    body["alpha"] = serde_json::to_value(alpha("testlog", 1, FIRST)).unwrap();
+    records::append(&scratch, &k, RecordDraft::new("b", "register", body)).unwrap();
+    let line = std::fs::read(&scratch).unwrap();
+    let log = lab.home.study_dir("b").join("records.jsonl");
+    std::fs::create_dir_all(lab.home.study_dir("b")).unwrap();
+    let made = std::process::Command::new("mkfifo").arg(&log).status();
+    assert!(made.unwrap().success());
+    let check = std::thread::spawn(move || records.stream_next("testlog"));
+    // A write end opens only once check holds the read end.
+    let mut fifo = loop {
+        let opened = (std::fs::OpenOptions::new().write(true))
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&log);
+        match opened {
+            Ok(f) => break f,
+            Err(e) if e.raw_os_error() == Some(libc::ENXIO) && !check.is_finished() => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Err(e) => panic!("{e}; check: {:?}", check.join()),
+        }
+    };
+    Log::of(&lab.home, LogName::Test).open(&k, "b", FIRST).unwrap();
+    fifo.write_all(&line).unwrap();
+    drop(fifo);
+    assert_eq!(check.join().unwrap().unwrap().slot, 2);
+}
+
+#[test]
 fn a_slot_closes_once_with_a_finite_e_value() {
     let lab = lab();
     let k = key(&lab);

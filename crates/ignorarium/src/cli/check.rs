@@ -107,16 +107,19 @@ impl BoxRecords for HomeRecords {
 
     /// A stream with no log is empty and needs no key. Each slot a signed `register` record
     /// of the box names must be in the stream, so a stream log that was moved, cut or rolled
-    /// back is an error, never a fresh budget.
+    /// back is an error, never a fresh budget. The register records are read first: a slot
+    /// opens before its record is written, so a stream read after them holds every slot they
+    /// name, even while another study registers.
     fn stream_next(&self, log: &str) -> Result<Next, String> {
         let name = LogName::parse(log).map_err(|e| e.to_string())?;
+        let held = self.held()?;
         let stream = Log::of(&self.home, name);
         let all = match self.key_for(stream.path())? {
             None => vec![],
             Some(key) => records::read_all(stream.path(), key)
                 .map_err(|e| StreamError::from(e).to_string())?,
         };
-        stream::next_of(name, &all, &self.held()?).map_err(|e| e.to_string())
+        stream::next_of(name, &all, &held).map_err(|e| e.to_string())
     }
 
     fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String> {
