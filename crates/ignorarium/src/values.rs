@@ -1,9 +1,9 @@
 //! The values a row reports. The payload writes `values.json` in its output folder: one JSON
 //! object with one finite number for each measure of the spec. The file is untrusted output.
 use crate::backend::output::{hash_rows, open_regular, tree_rows};
+use crate::canon::sha256_hex;
 use serde::Deserialize;
 use serde::de::{Deserializer, MapAccess, Visitor};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Read;
@@ -108,6 +108,6 @@ pub fn read(out_dir: &Path, measures: &[&str]) -> Result<(BTreeMap<String, f64>,
     }
     match measures.iter().find(|m| !got.contains_key(**m)) {
         Some(m) => Err(format!("missing measure {m}")),
-        None => Ok((got, hex::encode(Sha256::digest(&bytes)))),
+        None => Ok((got, sha256_hex(&bytes))),
     }
 }
