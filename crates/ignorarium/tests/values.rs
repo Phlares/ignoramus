@@ -1,5 +1,6 @@
 use ignorarium::backend::output_hash;
 use ignorarium::values::{self, FILE, LIMIT};
+use ignorarium_guest::tree;
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
@@ -65,17 +66,37 @@ fn non_finite_extra_or_missing_values_are_refused() {
 fn values_must_be_covered_by_the_output_hash() {
     let d = dir_with(r#"{"ppl": 1}"#);
     let hash = output_hash(d.path()).unwrap();
-    let got = values::read_covered(d.path(), &["ppl"], &hash).unwrap();
+    let got = values::read_covered(d.path(), &["ppl"], &hash, &[]).unwrap();
     assert_eq!(got.get("ppl"), Some(&1.0));
     // A process that rewrites the file after the hash was taken breaks the match.
     fs::write(d.path().join(FILE), r#"{"ppl": 2}"#).unwrap();
-    let e = values::read_covered(d.path(), &["ppl"], &hash).unwrap_err();
+    let e = values::read_covered(d.path(), &["ppl"], &hash, &[]).unwrap_err();
     assert!(e.contains("changed"), "{e}");
     // So does a file added after the hash, even with the same values.
     let d = dir_with(r#"{"ppl": 1}"#);
     let hash = output_hash(d.path()).unwrap();
     fs::write(d.path().join("extra"), "x").unwrap();
-    assert!(values::read_covered(d.path(), &["ppl"], &hash).is_err());
+    assert!(values::read_covered(d.path(), &["ppl"], &hash, &[]).is_err());
+}
+
+#[test]
+fn the_links_a_folder_lacks_count_toward_its_hash() {
+    // A level 2 row: the guest's output held `latest -> values.json`; the host made no link.
+    let guest = dir_with(r#"{"ppl": 1}"#);
+    std::os::unix::fs::symlink(FILE, guest.path().join("latest")).unwrap();
+    let hash = output_hash(guest.path()).unwrap();
+    let host = dir_with(r#"{"ppl": 1}"#);
+    let latest = tree::link_row(b"latest", FILE.as_bytes());
+    let got = values::read_covered(host.path(), &["ppl"], &hash, &[latest]).unwrap();
+    assert_eq!(got.get("ppl"), Some(&1.0));
+    // Without the link's row the folder does not hash to the row's hash.
+    let e = values::read_covered(host.path(), &["ppl"], &hash, &[]).unwrap_err();
+    assert_eq!(e, "values.json changed after the output was hashed");
+    // A `values.json` the guest made a link is no regular file, as at levels 0 and 1.
+    let empty = TempDir::new().unwrap();
+    let as_link = [tree::link_row(FILE.as_bytes(), b"elsewhere")];
+    let e = values::read_covered(empty.path(), &["ppl"], &hash, &as_link).unwrap_err();
+    assert_eq!(e, "values.json is not a regular file");
 }
 
 #[test]

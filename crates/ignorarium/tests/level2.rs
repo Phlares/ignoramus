@@ -3,19 +3,22 @@
 //! cannot run level 2.
 mod common;
 use common::{in_child, is_child, write_exec};
+use ignorarium::backend::level0::Level0;
 use ignorarium::backend::level1::Level1;
 use ignorarium::backend::level2::{Level2, guest_job, outcome_of, rootfs_disk, selftest_of};
 use ignorarium::backend::selftest::SelfTest;
 use ignorarium::backend::{
     Backend, Exit, Probe, RowJob, RowOutcome, TIMEOUT_CODE, Watch, output_hash, rootfs,
 };
-use ignorarium::runner::{self, RunStatus};
+use ignorarium::runner::{self, RunError, RunStatus};
 use ignorarium::store::Store;
 use ignorarium_guest::host::{Timings, VmError, VmOutcome};
 use ignorarium_guest::image::{KERNEL, VMM, sha256_file};
+use ignorarium_guest::pack::Link;
 use ignorarium_guest::proto::{self, End, Report};
 use ignorarium_guest::{pack, tree};
 use rustix::process::{Pid, getpgid, test_kill_process_group};
+use serde_json::json;
 use std::cell::{Cell, RefCell};
 use std::ffi::OsStr;
 use std::fs::{self, File, Permissions};
@@ -225,6 +228,14 @@ fn the_defaults_size_each_row_s_machine() {
         (b.boot_timeout, b.exit_timeout, b.report_slack),
         (secs(30), secs(10), secs(30))
     );
+}
+
+#[test]
+fn level2_cpus_is_the_vm_vcpu_count() {
+    let mut b = Level2::with(PathBuf::new(), PathBuf::new(), PathBuf::new());
+    assert_eq!(b.cpus(), 1);
+    b.cpus = 3;
+    assert_eq!(b.cpus(), 3);
 }
 
 #[test]
@@ -454,12 +465,13 @@ fn ran(end: Option<End>, selftest: proto::SelfTest) -> Result<VmOutcome, VmError
     })
 }
 
-/// The result, then the exit, CPU seconds, whether the CPU is unknown, the self-test and
-/// the output hash it maps to.
+/// The result, then the exit, CPU seconds, whether the CPU is unknown, whether the box ended
+/// the row, the self-test and the output hash it maps to.
 type Case = (
     Result<VmOutcome, VmError>,
     Exit,
     f64,
+    bool,
     bool,
     Option<SelfTest>,
     &'static str,
@@ -489,6 +501,7 @@ fn outcome_of_maps_every_guest_ending() {
             Exit::Ok,
             0.75,
             false,
+            false,
             ok,
             "h",
         ),
@@ -496,6 +509,7 @@ fn outcome_of_maps_every_guest_ending() {
             ran(Some(End::Code(3)), passing()),
             Exit::Payload(3),
             0.75,
+            false,
             false,
             ok,
             "h",
@@ -505,6 +519,7 @@ fn outcome_of_maps_every_guest_ending() {
             Exit::Payload(137),
             0.75,
             false,
+            false,
             ok,
             "h",
         ),
@@ -513,6 +528,7 @@ fn outcome_of_maps_every_guest_ending() {
             Exit::Payload(TIMEOUT_CODE),
             0.75,
             false,
+            true,
             ok,
             "h",
         ),
@@ -520,6 +536,7 @@ fn outcome_of_maps_every_guest_ending() {
             ran(None, no_route),
             infra("guest self-test failed: connect was not blocked"),
             0.75,
+            false,
             false,
             Some(mapped(false, true)),
             "",
@@ -529,6 +546,7 @@ fn outcome_of_maps_every_guest_ending() {
             infra("the guest ran no payload"),
             0.75,
             false,
+            false,
             ok,
             "",
         ),
@@ -537,23 +555,42 @@ fn outcome_of_maps_every_guest_ending() {
             Exit::Void("cannot pack output: too big".into()),
             0.75,
             false,
+            false,
             ok,
             "",
         ),
-        (refused(End::Code(3)), Exit::Payload(3), 0.75, false, ok, ""),
+        (
+            refused(End::Code(3)),
+            Exit::Payload(3),
+            0.75,
+            false,
+            false,
+            ok,
+            "",
+        ),
         (
             Err(VmError::Boot("b".into())),
             infra("boot failed: b"),
             0.0,
             false,
+            false,
             None,
             "",
         ),
-        (Err(VmError::Stopped), Exit::Stopped, 0.0, false, None, ""),
+        (
+            Err(VmError::Stopped),
+            Exit::Stopped,
+            0.0,
+            false,
+            true,
+            None,
+            "",
+        ),
         (
             Err(VmError::Timeout("t".into())),
             infra("timed out: t"),
             0.0,
+            true,
             true,
             None,
             "",
@@ -563,6 +600,7 @@ fn outcome_of_maps_every_guest_ending() {
             infra("guest error: g"),
             0.0,
             true,
+            false,
             None,
             "",
         ),
@@ -574,6 +612,7 @@ fn outcome_of_maps_every_guest_ending() {
             infra("output hash mismatch: guest said a, host computed b"),
             0.0,
             true,
+            false,
             None,
             "",
         ),
@@ -581,6 +620,7 @@ fn outcome_of_maps_every_guest_ending() {
             io(io::ErrorKind::InvalidInput),
             infra("host I/O error: x"),
             0.0,
+            false,
             false,
             None,
             "",
@@ -590,11 +630,12 @@ fn outcome_of_maps_every_guest_ending() {
             infra("host I/O error: x"),
             0.0,
             true,
+            false,
             None,
             "",
         ),
     ];
-    for (i, (res, exit, cpu, unknown, selftest, hash)) in table.into_iter().enumerate() {
+    for (i, (res, exit, cpu, unknown, ended, selftest, hash)) in table.into_iter().enumerate() {
         let o = outcome_of(res, 2.5, 1);
         assert_eq!(o.exit, exit, "case {i}");
         assert_eq!(o.cpu_seconds, cpu, "case {i}");
@@ -603,10 +644,39 @@ fn outcome_of_maps_every_guest_ending() {
             unknown.then_some(NO_REPORT),
             "case {i}"
         );
+        assert_eq!(o.ended, ended, "case {i}");
         assert_eq!(o.selftest, selftest, "case {i}");
         assert_eq!(o.output_hash, hash, "case {i}");
         assert_eq!(o.wall_seconds, 2.5, "case {i}");
+        assert_eq!(o.output_links, [], "case {i}");
     }
+}
+
+#[test]
+fn outcome_of_keeps_the_output_links_with_the_hash() {
+    let linked = |end: End, refused: bool| {
+        let mut res = ran(Some(end), passing());
+        if let Ok(o) = &mut res {
+            let link = |path: &[u8], target: &[u8]| Link {
+                path: path.into(),
+                target: target.into(),
+            };
+            o.links = vec![link(b"latest", b"values.json"), link(b"sub/up", b"../x")];
+            if refused {
+                o.report.pack_refused = Some("too big".into());
+            }
+        }
+        outcome_of(res, 2.5, 1).output_links
+    };
+    let rows = [
+        tree::link_row(b"latest", b"values.json"),
+        tree::link_row(b"sub/up", b"../x"),
+    ];
+    assert_eq!(linked(End::Code(0), false), rows);
+    assert_eq!(linked(End::Code(3), false), rows);
+    // No hash, no links: they belong to the output the hash covers.
+    assert_eq!(linked(End::Code(0), true), []);
+    assert_eq!(linked(End::Code(3), true), []);
 }
 
 fn with_cpu(cpu_seconds: f64) -> Result<VmOutcome, VmError> {
@@ -628,7 +698,7 @@ fn outcome_of_refuses_a_report_no_guest_can_mean() {
         let why =
             format!("the guest reported {cpu} CPU seconds, outside 0 to 5 for 2 vCPUs over 2.5 s");
         assert_eq!(o.exit, Exit::Infra(why), "{cpu}");
-        assert_eq!(o.cpu_seconds, 0.0);
+        assert_eq!((o.cpu_seconds, o.ended), (0.0, false));
         assert_eq!(
             o.cpu_unknown.as_deref(),
             Some(
@@ -684,7 +754,8 @@ fn rootfs_disk_is_built_once() {
 }
 
 /// Levels 0 and 1 hash an output folder with `output_hash`; level 2's guest and host hash the
-/// pack stream with the guest crate's rows. Without links, the four agree.
+/// pack stream with the guest crate's rows. The four agree, links included, and the folder the
+/// host unpacks, with the rows of the links it never makes, hashes the same.
 #[test]
 fn the_output_hash_is_one_function_at_every_level() {
     let d = TempDir::new().unwrap();
@@ -693,6 +764,9 @@ fn the_output_hash_is_one_function_at_every_level() {
     fs::create_dir_all(src.join("sub")).unwrap();
     fs::write(src.join("sub/b"), vec![7u8; 5000]).unwrap();
     fs::create_dir(src.join("e")).unwrap();
+    for (link, target) in [("latest", "/tmp/x"), ("up", "../x"), ("rel", "a.txt")] {
+        std::os::unix::fs::symlink(target, src.join(link)).unwrap();
+    }
     let fifo = std::process::Command::new("mkfifo")
         .arg(src.join("p"))
         .status()
@@ -709,7 +783,12 @@ fn the_output_hash_is_one_function_at_every_level() {
     let out = TempDir::new().unwrap();
     let unpacked = pack::unpack(&mut stream.as_slice(), out.path(), u64::MAX).unwrap();
     assert_eq!((&packed.hash, &unpacked.hash), (&want, &want));
-    assert_eq!(output_hash(out.path()).unwrap(), want);
+    assert_ne!(output_hash(out.path()).unwrap(), want);
+    let mut rows = tree::tree_rows(out.path()).unwrap();
+    let links = unpacked.links.iter();
+    rows.extend(links.map(|l| tree::link_row(&l.path, &l.target)));
+    assert_eq!(rows.len(), 9);
+    assert_eq!(tree::hash_rows(&rows).unwrap(), want);
 }
 
 /// Records each `started` call with the process group of the pid at that moment.
@@ -811,6 +890,20 @@ fn fake_box(dir: &Path) -> (Level2, RowJob) {
         ..RowJob::default()
     };
     (b, job)
+}
+
+#[test]
+fn a_disk_that_cannot_be_built_names_the_environment_by_its_digest() {
+    // The reason can reach a signed spend record, so it holds no path of the box's home.
+    let d = TempDir::new().unwrap();
+    let (b, mut job) = fake_box(d.path());
+    let digest = "cd".repeat(32);
+    job.rootfs = Some(d.path().join("store/rootfs").join(&digest));
+    let o = b.run_row(&job, &|| true).unwrap();
+    let why = format!(
+        "cannot build the disk of environment {digest}: No such file or directory (os error 2)"
+    );
+    assert_eq!(o.exit, Exit::Infra(why));
 }
 
 fn boot_failed(exit: &Exit) -> bool {
@@ -1082,6 +1175,180 @@ fn filling_out_is_the_payloads_result() {
 }
 
 #[test]
+fn level1_and_level2_give_the_same_output_hash() {
+    let Some(r) = ready() else { return };
+    if common::skip_level1() {
+        return;
+    }
+    let script = "printf data > data; mkdir sub; printf x > sub/x; \
+                  ln -s /tmp/x latest; ln -s ../x up; mkfifo p";
+    let (_d1, job1) = row(&r, script, LONG);
+    let (_d2, job2) = row(&r, script, LONG);
+    let box_exe = env!("CARGO_BIN_EXE_ignorarium");
+    let level1 = Level1::with(Level1::new().bwrap, box_exe.into());
+    let o1 = level1.run_row(&job1, &|| true).unwrap();
+    let o2 = r.level2.run_row(&job2, &|| true).unwrap();
+    assert_eq!(
+        (&o1.exit, &o2.exit),
+        (&Exit::Ok, &Exit::Ok),
+        "{o1:?} {o2:?}"
+    );
+    assert_eq!(o1.output_hash, o2.output_hash);
+    assert_eq!(o1.output_hash, output_hash(&job1.output_dir).unwrap());
+    assert_eq!(o1.output_links, []);
+    let links = [
+        tree::link_row(b"latest", b"/tmp/x"),
+        tree::link_row(b"up", b"../x"),
+    ];
+    assert_eq!(o2.output_links, links);
+    // Level 2 records its links and makes none.
+    for name in ["latest", "up"] {
+        assert!(fs::symlink_metadata(job2.output_dir.join(name)).is_err());
+    }
+}
+
+/// `t` with `from` replaced by `to`. `from` must be there, so a changed template fails here
+/// instead of registering a study that differs from the one meant.
+fn swap(t: String, from: &str, to: &str) -> String {
+    assert!(t.contains(from), "the template has no {from:?}");
+    t.replace(from, to)
+}
+
+/// Registers study `id` at `min_isolation`, `units` units per cluster, `pins.environment` =
+/// `digest`, running `payload`; `edit` changes the spec text last.
+fn register_pinned(
+    lab: &common::Lab,
+    id: &str,
+    (min_isolation, units, digest): (u8, u32, &str),
+    payload: &str,
+    edit: impl Fn(String) -> String,
+) {
+    let spec = |t: String| {
+        let t = swap(
+            t,
+            "min_isolation = 0",
+            &format!("min_isolation = {min_isolation}"),
+        );
+        let t = swap(
+            t,
+            "units_per_cluster = 3",
+            &format!("units_per_cluster = {units}"),
+        );
+        edit(swap(
+            t,
+            "environment = \"\"",
+            &format!("environment = \"{digest}\""),
+        ))
+    };
+    let before = [("data/example.txt", "calibration")];
+    common::register_study(lab, id, spec, &before, payload);
+}
+
+/// A lab whose machine reaches level 2, so a study may ask for it.
+fn level2_lab() -> common::Lab {
+    let lab = common::lab();
+    fs::write(lab.home.root.join("machine.toml"), "max_level = 2\n").unwrap();
+    lab
+}
+
+#[test]
+fn prepare_refuses_level2_without_an_environment() {
+    let lab = level2_lab();
+    let all = || -> Vec<Box<dyn Backend>> {
+        let level2 = Level2::with(PathBuf::new(), PathBuf::new(), PathBuf::new());
+        vec![Box::new(Level0), Box::new(Level1::new()), Box::new(level2)]
+    };
+    for (id, min) in [("needs2", 2), ("needs1", 1), ("needs0", 0)] {
+        let spec = |t| swap(t, "min_isolation = 0", &format!("min_isolation = {min}"));
+        common::register_study(&lab, id, spec, &[], common::PAYLOAD);
+    }
+    let prepare =
+        |id: &str| runner::prepare_with(&lab.home, id, &common::work_of(&lab.home, id), all());
+    let err = prepare("needs2").err().unwrap();
+    assert!(matches!(&err, RunError::Environment(_)), "{err}");
+    assert_eq!(
+        err.to_string(),
+        "environment: level 2 runs rows in the study's environment image; \
+         add env/ or set pins.environment"
+    );
+    // Refused before the schedule: no row can start.
+    let schedule = |id: &str| lab.home.study_dir(id).join("schedule.json");
+    assert!(!schedule("needs2").exists());
+    // A lower minimum runs at the highest level that needs no image, on the host root.
+    for id in ["needs1", "needs0"] {
+        let plan = prepare(id).unwrap();
+        assert_eq!(
+            (plan.backend.level(), plan.rootfs, plan.environment),
+            (1, None, "host".to_string()),
+            "{id}"
+        );
+        assert!(schedule(id).exists());
+    }
+    // With level 2 alone, nothing is left to run a study without an image.
+    let only2 = Level2::with(PathBuf::new(), PathBuf::new(), PathBuf::new());
+    let work = common::work_of(&lab.home, "needs0");
+    let err = runner::prepare_with(&lab.home, "needs0", &work, vec![Box::new(only2)]);
+    assert!(matches!(err, Err(RunError::Environment(_))));
+}
+
+/// Copies the whole input view to the output, records its params, writes the template's
+/// measure and links `latest` to it.
+const VIEW_PAYLOAD: &str = "#!/bin/sh\nset -e\n\
+    cp -R \"$IGNORARIUM_IN\" \"$IGNORARIUM_OUT/in\"\n\
+    printf '%s' \"$IGNORARIUM_PARAMS\" > \"$IGNORARIUM_OUT/params\"\n\
+    printf '{\"ppl\": 1.5}' > \"$IGNORARIUM_OUT/values.json\"\n\
+    ln -s values.json \"$IGNORARIUM_OUT/latest\"\n";
+
+#[test]
+fn a_level2_study_reads_the_sealed_view_and_records_values() {
+    let Some(r) = ready() else { return };
+    let lab = level2_lab();
+    let store = Store::open(&lab.home.root).unwrap();
+    let digest = store
+        .put_reader(&mut File::open(&r.image).unwrap())
+        .unwrap();
+    let id = "view2";
+    let params = |t| swap(t, "# params = { bits = 4 }", "params = { bits = 4 }");
+    register_pinned(&lab, id, (2, 1, &digest), VIEW_PAYLOAD, params);
+    let work = common::work_of(&lab.home, id);
+    let plan = runner::prepare_with(&lab.home, id, &work, vec![Box::new(Level2::new())]).unwrap();
+    assert_eq!(runner::run(&plan).unwrap(), RunStatus::Done);
+    let dir = lab.home.study_dir(id);
+    let view = tree::tree_rows(&dir.join("in")).unwrap();
+    let names: Vec<&str> = view.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(names, ["data/example.txt"]);
+    let rows = common::rows_of(&lab, id);
+    let mut conditions: Vec<&str> = rows
+        .iter()
+        .map(|r| r.body["condition"].as_str().unwrap())
+        .collect();
+    conditions.sort();
+    assert_eq!(conditions, ["arm-a", "exact"]);
+    for rec in &rows {
+        let b = &rec.body;
+        assert_eq!(b["exit"], "ok", "{b}");
+        assert_eq!(
+            (&b["isolation"], &b["environment"]),
+            (&json!(2), &json!(digest))
+        );
+        assert_eq!(b["values"], json!({ "ppl": 1.5 }));
+        let out = dir.join(format!("run/rows/{}/out", rec.row.unwrap()));
+        assert_eq!(tree::tree_rows(&out.join("in")).unwrap(), view);
+        let params = if b["condition"] == "arm-a" {
+            r#"{"bits":4}"#
+        } else {
+            "{}"
+        };
+        assert_eq!(fs::read_to_string(out.join("params")).unwrap(), params);
+        // The host makes no link; the row's hash covers the one the guest made.
+        assert!(fs::symlink_metadata(out.join("latest")).is_err());
+        let mut all = tree::tree_rows(&out).unwrap();
+        all.push(tree::link_row(b"latest", b"values.json"));
+        assert_eq!(b["output_hash"], tree::hash_rows(&all).unwrap());
+    }
+}
+
+#[test]
 fn registered_lists_levels_0_1_and_2() {
     let levels: Vec<u8> = ignorarium::backend::registered()
         .iter()
@@ -1129,6 +1396,9 @@ impl Backend for Timed {
     fn launcher(&self) -> String {
         self.inner.launcher()
     }
+    fn cpus(&self) -> u32 {
+        self.inner.cpus()
+    }
     fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> io::Result<RowOutcome> {
         let (o, timings) = self.inner.run_timed(job, watch)?;
         if let Some(t) = timings {
@@ -1142,36 +1412,6 @@ const OVERHEAD_TRIALS: usize = 11;
 const OVERHEAD_ROWS: usize = 4;
 /// Two-sided 95% Student t for the 10 kept trials (9 degrees of freedom).
 const T95_9: f64 = 2.262;
-
-/// Registers a study of four rows at `min_isolation`, pinned to the environment `digest`.
-fn register_overhead(lab: &common::Lab, id: &str, min_isolation: u8, digest: &str) {
-    let work = lab.root.join(format!("work-{id}"));
-    fs::create_dir_all(work.join("data")).unwrap();
-    fs::write(work.join("data/example.txt"), "calibration").unwrap();
-    let text = fs::read_to_string("../../templates/numeric-ablation.toml")
-        .unwrap()
-        .replace("id = \"my-study\"", &format!("id = \"{id}\""))
-        .replace(
-            "min_isolation = 1",
-            &format!("min_isolation = {min_isolation}"),
-        )
-        .replace("units_per_cluster = 1", "units_per_cluster = 2")
-        .replace("environment = \"\"", &format!("environment = \"{digest}\""));
-    let spec_path = work.join("spec.toml");
-    fs::write(&spec_path, text).unwrap();
-    let hash = ignorarium::spec::load(&spec_path).unwrap().hash;
-    let typed = format!("{}\n", &hash["sha256:".len()..][..8]);
-    let mut out = Vec::new();
-    let mut input = io::Cursor::new(typed.into_bytes());
-    let done = ignorarium::cli::register::run(&spec_path, &lab.home, &mut input, &mut out, true)
-        .unwrap_or_else(|e| panic!("{}: {}", e.msg, String::from_utf8_lossy(&out)));
-    assert_eq!(done.code, 0, "{}", String::from_utf8_lossy(&out));
-    let dir = lab.home.study_dir(id);
-    fs::create_dir_all(dir.join("payload")).unwrap();
-    write_exec(&dir.join("payload/run"), common::PAYLOAD);
-    fs::create_dir_all(dir.join("data")).unwrap();
-    fs::write(dir.join("data/example.txt"), "calibration").unwrap();
-}
 
 /// The wall time of each row of study `id` but the first, in milliseconds; every row is `ok`.
 fn kept_walls(lab: &common::Lab, id: &str) -> Vec<f64> {
@@ -1217,9 +1457,7 @@ fn overhead_through_the_runner() {
     if let Some(why) = common::no_level1() {
         panic!("the overhead needs level 1: {why}");
     }
-    let lab = common::lab();
-    // Registration refuses a minimum the machine file does not reach.
-    fs::write(lab.home.root.join("machine.toml"), "max_level = 2\n").unwrap();
+    let lab = level2_lab();
     let store = Store::open(&lab.home.root).unwrap();
     let digest = store
         .put_reader(&mut File::open(&r.image).unwrap())
@@ -1234,7 +1472,8 @@ fn overhead_through_the_runner() {
         let order = if trial % 2 == 0 { [1, 2] } else { [2, 1] };
         for level in order {
             let id = format!("overhead-l{level}-t{trial}");
-            register_overhead(&lab, &id, level, &digest);
+            // Two units per cluster: 2 units x 2 conditions = 4 rows.
+            register_pinned(&lab, &id, (level, 2, &digest), common::PAYLOAD, |t| t);
             let backend: Box<dyn Backend> = if level == 1 {
                 Box::new(Level1::with(Level1::new().bwrap, box_exe.into()))
             } else {
@@ -1243,7 +1482,8 @@ fn overhead_through_the_runner() {
                     boots: boots.clone(),
                 })
             };
-            let plan = runner::prepare_with(&lab.home, &id, vec![backend]).unwrap();
+            let work = common::work_of(&lab.home, &id);
+            let plan = runner::prepare_with(&lab.home, &id, &work, vec![backend]).unwrap();
             assert_eq!(runner::run(&plan).unwrap(), RunStatus::Done, "{id}");
             walls[level as usize - 1] = kept_walls(&lab, &id);
         }

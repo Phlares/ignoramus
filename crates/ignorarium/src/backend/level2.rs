@@ -2,12 +2,14 @@
 //! `ignorarium_guest::host::run_row`. The environment, the inputs and the payload's folder
 //! reach the guest as read-only disks; the outputs come back as a pack. Cloud Hypervisor:
 //! <https://github.com/cloud-hypervisor/cloud-hypervisor>.
+use super::rootfs;
 use super::selftest::{Call, SelfTest};
 use super::{Backend, Exit, Probe, RowJob, RowOutcome, TIMEOUT_CODE, Watch};
 use crate::files::temp_beside;
 use ignorarium_guest::host::{self, HostJob, Timings, Vm, VmError, VmOutcome};
 use ignorarium_guest::image::{self, KERNEL, Pin, VMM, check_pin, has_interp};
 use ignorarium_guest::proto::{self, End, GUEST_IN, GUEST_OUT, GUEST_PAYLOAD};
+use ignorarium_guest::tree;
 use rustix::io::Errno;
 use rustix::process::{Pid, geteuid, test_kill_process};
 use std::fs;
@@ -165,6 +167,8 @@ impl Level2 {
                 output_hash: String::new(),
                 selftest: None,
                 cpu_unknown: None,
+                ended: false,
+                output_links: Vec::new(),
             };
             Ok((o, None))
         };
@@ -181,7 +185,10 @@ impl Level2 {
         }
         let rootfs = match rootfs_disk(root) {
             Ok(d) => d,
-            Err(e) => return infra(format!("cannot build the disk of {}: {e}", root.display())),
+            Err(e) => {
+                let name = rootfs::name_of(root);
+                return infra(format!("cannot build the disk of environment {name}: {e}"));
+            }
         };
         if !watch.tick() {
             return ended(Err(VmError::Stopped));
@@ -279,6 +286,11 @@ impl Backend for Level2 {
         }
     }
 
+    /// The vCPUs of each row's machine.
+    fn cpus(&self) -> u32 {
+        self.cpus
+    }
+
     fn launcher(&self) -> String {
         let v = self.version.get_or_init(|| version(&self.vmm));
         v.clone()
@@ -347,7 +359,9 @@ pub fn selftest_of(t: &proto::SelfTest) -> SelfTest {
 /// started, for a machine of `cpus` vCPUs. A failed self-test never ran the payload. Without
 /// a report the payload's CPU is unknown, unless the VMM never started, the guest never
 /// spoke, or the box stopped the row. A report no guest can mean (more CPU than the row had,
-/// a signal past the exit codes) is a fault, not data.
+/// a signal past the exit codes) is a fault, not data. The box ended the row when the guest
+/// hit the wall timeout, the watch said stop, or the guest missed the host's deadline. The
+/// output links come with the hash that covers them.
 pub fn outcome_of(res: Result<VmOutcome, VmError>, wall_seconds: f64, cpus: u32) -> RowOutcome {
     let o = match res {
         Ok(o) => o,
@@ -357,6 +371,7 @@ pub fn outcome_of(res: Result<VmOutcome, VmError>, wall_seconds: f64, cpus: u32)
                 VmError::Io(io) if io.kind() == io::ErrorKind::InvalidInput => None,
                 _ => Some(NO_REPORT.to_string()),
             };
+            let ended = matches!(e, VmError::Stopped | VmError::Timeout(_));
             let exit = match e {
                 VmError::Stopped => Exit::Stopped,
                 e => Exit::Infra(e.to_string()),
@@ -368,6 +383,8 @@ pub fn outcome_of(res: Result<VmOutcome, VmError>, wall_seconds: f64, cpus: u32)
                 output_hash: String::new(),
                 selftest: None,
                 cpu_unknown,
+                ended,
+                output_links: Vec::new(),
             };
         }
     };
@@ -386,8 +403,11 @@ pub fn outcome_of(res: Result<VmOutcome, VmError>, wall_seconds: f64, cpus: u32)
             output_hash: String::new(),
             selftest: Some(selftest),
             cpu_unknown: Some(BAD_CPU.into()),
+            ended: false,
+            output_links: Vec::new(),
         };
     }
+    let ended = r.end == Some(End::Timeout);
     let exit = if !selftest.ok() {
         Exit::Infra(format!(
             "guest self-test failed: {} was not blocked",
@@ -406,9 +426,13 @@ pub fn outcome_of(res: Result<VmOutcome, VmError>, wall_seconds: f64, cpus: u32)
             (Some(End::Timeout), _) => Exit::Payload(TIMEOUT_CODE),
         }
     };
-    let output_hash = match exit {
-        Exit::Ok | Exit::Payload(_) if r.pack_refused.is_none() => o.output_hash,
-        _ => String::new(),
+    let hashed = matches!(exit, Exit::Ok | Exit::Payload(_)) && r.pack_refused.is_none();
+    let (output_hash, output_links) = if hashed {
+        let links = o.links.iter();
+        let rows = links.map(|l| tree::link_row(&l.path, &l.target)).collect();
+        (o.output_hash, rows)
+    } else {
+        (String::new(), Vec::new())
     };
     RowOutcome {
         exit,
@@ -417,6 +441,8 @@ pub fn outcome_of(res: Result<VmOutcome, VmError>, wall_seconds: f64, cpus: u32)
         output_hash,
         selftest: Some(selftest),
         cpu_unknown: None,
+        ended,
+        output_links,
     }
 }
 

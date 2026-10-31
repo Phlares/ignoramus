@@ -65,7 +65,8 @@ fn probe_writes_machine_toml_and_prints_the_level() {
     )
     .unwrap();
     // The highest level that probes available here.
-    let want = match (Level2::new().probe(), no_level1()) {
+    let level2 = Level2::new().probe();
+    let want = match (&level2, no_level1()) {
         (Probe::Available, _) => 2,
         (_, None) => 1,
         _ => 0,
@@ -74,6 +75,12 @@ fn probe_writes_machine_toml_and_prints_the_level() {
     let out = text(&a);
     assert!(out.contains(&format!("max level: {want}")), "{out}");
     assert!(out.contains("level 2 ("), "{out}");
+    // An unavailable level 2 says why, its first fault on its own line.
+    if let Probe::Unavailable(why) = &level2 {
+        let first = why.split("; ").next().unwrap();
+        let line = out.lines().find(|l| l.starts_with("level 2 (")).unwrap();
+        assert!(line.contains(&format!("): unavailable: {first}")), "{out}");
+    }
     let kvm = if Path::new("/dev/kvm").exists() {
         "present"
     } else {

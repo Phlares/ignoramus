@@ -2,7 +2,7 @@
 //! IPC, UTS and cgroup namespaces, an empty read-only root with read-only binds of the
 //! environment, the input folder and the payload, one writable output folder, and a
 //! seccomp filter. See the bubblewrap manual: <https://github.com/containers/bubblewrap>.
-use super::rootfs::KEPT;
+use super::rootfs::{self, KEPT};
 use super::selftest::SelfTest;
 use super::{
     Backend, Exit, Probe, RowJob, RowOutcome, TIMEOUT_CODE, Watch, host_cpus, outcome, supervise,
@@ -481,8 +481,8 @@ pub fn row_args(job: &RowJob) -> Result<Sandbox, String> {
     let root = job.rootfs.as_deref().unwrap_or(Path::new("/"));
     if !root.is_dir() {
         return Err(format!(
-            "environment root {} is not a folder",
-            root.display()
+            "the root of environment {} is not a folder",
+            rootfs::name_of(root)
         ));
     }
     let mut mounts = root_mounts(root);

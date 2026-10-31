@@ -1462,11 +1462,13 @@ fn the_highest_backend_that_meets_min_isolation_runs() {
             .backend
             .level()
     };
-    assert_eq!(pick("lvl0", &[2, 0, 1]), 2);
+    // Level 2 runs rows only in an environment image, and these studies have none.
+    assert_eq!(pick("lvl0", &[2, 0, 1]), 1);
     assert_eq!(pick("lvl0", &[0, 1]), 1);
     assert_eq!(pick("lvl0", &[1, 0]), 1);
     assert_eq!(pick("lvl0", &[0]), 0);
-    assert_eq!(pick("lvl1", &[2, 0, 1]), 2);
+    assert_eq!(pick("lvl0", &[0, 2]), 0);
+    assert_eq!(pick("lvl1", &[2, 0, 1]), 1);
     assert_eq!(pick("lvl1", &[0, 1]), 1);
     let only0 = prepare_with(
         &lab.home,
@@ -2106,6 +2108,7 @@ fn outcome(cpu: f64, wall: f64, ended: bool, unknown: bool) -> RowOutcome {
         selftest: None,
         cpu_unknown: unknown.then(|| "unreadable".to_string()),
         ended,
+        output_links: Vec::new(),
     }
 }
 

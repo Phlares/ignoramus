@@ -171,9 +171,11 @@ fn output_hash_records_links_and_nested_files_without_following() {
     std::fs::write(d.path().join("a/b/c"), b"x").unwrap();
     std::fs::write(d.path().join("z"), b"y").unwrap();
     std::os::unix::fs::symlink("/etc/hostname", d.path().join("a/ln")).unwrap();
+    // A link's digest is the SHA-256 of its target bytes.
     let m = format!(
-        "[[\"a/b/c\",\"file\",\"{}\"],[\"a/ln\",\"link\",\"\"],[\"z\",\"file\",\"{}\"]]",
+        "[[\"a/b/c\",\"file\",\"{}\"],[\"a/ln\",\"link\",\"{}\"],[\"z\",\"file\",\"{}\"]]",
         sha(b"x"),
+        sha(b"/etc/hostname"),
         sha(b"y")
     );
     assert_eq!(output_hash(d.path()).unwrap(), sha(m.as_bytes()));

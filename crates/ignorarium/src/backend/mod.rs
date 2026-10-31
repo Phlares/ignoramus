@@ -54,14 +54,18 @@ pub struct RowOutcome {
     pub cpu_seconds: f64,
     pub wall_seconds: f64,
     pub output_hash: String,
-    /// What the level 1 self-test found before the row; `None` at level 0 and when it
-    /// printed nothing readable.
+    /// What the sandbox's self-test found before the row; `None` at level 0 and when it
+    /// reported nothing readable.
     pub selftest: Option<selftest::SelfTest>,
     /// Why the CPU count is missing the sandbox's own processes, when it is.
     pub cpu_unknown: Option<String>,
     /// The box ended the row: the watch said stop, or the wall timeout passed. The CPU
     /// count then misses what the killed processes used.
     pub ended: bool,
+    /// The rows of the output links that `output_hash` covers and the output folder lacks:
+    /// level 2 records each link its guest packed and makes none. Empty at levels 0 and 1,
+    /// whose output folders hold their links.
+    pub output_links: Vec<output::TreeRow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,6 +164,7 @@ pub fn outcome(
         selftest: None,
         cpu_unknown: None,
         ended,
+        output_links: Vec::new(),
     }
 }
 

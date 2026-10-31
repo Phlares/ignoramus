@@ -44,6 +44,8 @@ const REAPED: &str = "SIGCHLD is ignored; the box cannot see a row end";
 const RECIPE: &str = "env";
 /// The environment name of a run on the host root.
 const HOST: &str = "host";
+/// The lowest level that runs rows only in the study's environment image.
+const IMAGE_LEVEL: u8 = 2;
 
 pub struct RunPlan {
     pub home: Home,
@@ -273,8 +275,10 @@ pub fn up_to(backends: Vec<Box<dyn Backend>>, max: u8) -> Vec<Box<dyn Backend>> 
 
 /// Load a registered study, check its payload copy and its stored inputs, build its input
 /// view, gate its late data, write its schedule, and pick the highest backend that meets
-/// `scope.min_isolation`. Every input in the view is hashed in full here, once per `run` or
-/// `resume`; before each attempt the run only compares the view's stamps (see `stale`).
+/// `scope.min_isolation` and can run the study: level 2 and up run rows only in the study's
+/// environment image, so a study without one runs at the highest level below. Every input
+/// in the view is hashed in full here, once per `run` or `resume`; before each attempt the
+/// run only compares the view's stamps (see `stale`).
 /// The first prepare that gets this far signs an `inputs` record of every input's digest,
 /// or its absence; a later one whose inputs differ is refused before anything changes, so
 /// every row of a study runs on the same bytes. `root` is the study root found where the
@@ -301,18 +305,16 @@ pub fn prepare_with(
 
     let have: Vec<u8> = backends.iter().map(|b| b.level()).collect();
     let need = spec.scope.min_isolation;
-    let backend = backends
-        .into_iter()
-        .filter(|b| b.level() >= need)
-        .max_by_key(|b| b.level())
-        .ok_or(RunError::NoBackend { need, have })?;
+    let mut fit: Vec<_> = backends.into_iter().filter(|b| b.level() >= need).collect();
+    let top = fit.iter().map(|b| b.level()).max();
+    let top = top.ok_or(RunError::NoBackend { need, have })?;
 
     let (payload, payload_sha256) = read_payload(&dir)?;
     if payload_sha256 != register.payload {
         return Err(RunError::PayloadChanged);
     }
     let store = Store::open(&home.root).map_err(io)?;
-    let (rootfs, environment) = if backend.level() >= 1 {
+    let (rootfs, environment) = if top >= 1 {
         let pin = spec.pins.environment.trim();
         let found = environment(&store, &dir, pin, Builder::detect().as_ref())?;
         if let Some(b) = &found.built {
@@ -329,6 +331,16 @@ pub fn prepare_with(
     } else {
         (None, HOST.into())
     };
+    if rootfs.is_none() {
+        fit.retain(|b| b.level() < IMAGE_LEVEL);
+    }
+    let backend = fit.into_iter().max_by_key(|b| b.level()).ok_or_else(|| {
+        RunError::Environment(
+            "level 2 runs rows in the study's environment image; \
+             add env/ or set pins.environment"
+                .into(),
+        )
+    })?;
 
     let leaf = register.leaf;
     let log = LogName::parse(&register.log)
@@ -1293,6 +1305,7 @@ fn attempt_row(
                 selftest: None,
                 cpu_unknown: None,
                 ended: false,
+                output_links: Vec::new(),
             });
         // A row the box ended, or whose meter cannot read, is charged a bound. A meter that
         // cannot read also pauses the run once the row is recorded.
@@ -1364,7 +1377,12 @@ fn attempt_row(
             .iter()
             .map(|o| o.measure.as_str())
             .collect();
-        match values::read_covered(&out_dir, &measures, &outcome.output_hash) {
+        match values::read_covered(
+            &out_dir,
+            &measures,
+            &outcome.output_hash,
+            &outcome.output_links,
+        ) {
             Ok(v) => values = Some(v),
             Err(why) => outcome.exit = Exit::Void(format!("values: {why}")),
         }

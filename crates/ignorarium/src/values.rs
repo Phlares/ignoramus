@@ -1,6 +1,6 @@
 //! The values a row reports. The payload writes `values.json` in its output folder: one JSON
 //! object with one finite number for each measure of the spec. The file is untrusted output.
-use crate::backend::output::{hash_rows, open_regular, tree_rows};
+use crate::backend::output::{TreeRow, hash_rows, open_regular, tree_rows};
 use crate::canon::sha256_hex;
 use serde::Deserialize;
 use serde::de::{Deserializer, MapAccess, Visitor};
@@ -44,15 +44,22 @@ fn clip(s: &str) -> String {
     }
 }
 
-/// `read`, for a row whose output hashed to `output_hash`: refused when the folder no
-/// longer hashes to it, or when the bytes parsed are not the bytes the hash covered.
+/// `read`, for a row whose output hashed to `output_hash`: refused when the folder, with the
+/// rows of the `links` it lacks (a level 2 host makes none), no longer hashes to it, or when
+/// the bytes parsed are not the bytes the hash covered. A `values.json` among the links is
+/// not a regular file, as `read` finds a link at levels 0 and 1.
 pub fn read_covered(
     out_dir: &Path,
     measures: &[&str],
     output_hash: &str,
+    links: &[TreeRow],
 ) -> Result<BTreeMap<String, f64>, String> {
+    if links.iter().any(|r| r.path == FILE) {
+        return Err(format!("{FILE} is not a regular file"));
+    }
     let (values, digest) = read(out_dir, measures)?;
-    let rows = tree_rows(out_dir).map_err(|e| format!("cannot hash output: {e}"))?;
+    let mut rows = tree_rows(out_dir).map_err(|e| format!("cannot hash output: {e}"))?;
+    rows.extend_from_slice(links);
     let covered = (rows.iter().find(|r| r.path == FILE)).is_some_and(|r| r.digest == digest);
     let same = hash_rows(&rows).is_ok_and(|h| h == output_hash);
     if covered && same {

@@ -589,6 +589,19 @@ fn a_pinned_environment_in_the_store_becomes_the_root() {
 }
 
 #[test]
+fn level2_runs_a_study_that_has_an_environment() {
+    let lab = lab();
+    let digest = small_image(&store_of(&lab));
+    pinned(&lab, "img", &digest);
+    let all: Vec<Box<dyn Backend>> = vec![Box::new(Stub(0)), Box::new(Stub(2)), Box::new(Stub(1))];
+    let plan = prepare_with(&lab.home, "img", &common::work_of(&lab.home, "img"), all).unwrap();
+    assert_eq!(plan.backend.level(), 2);
+    assert_eq!(plan.environment, digest);
+    let root = store_of(&lab).root.join("rootfs").join(&digest);
+    assert_eq!(plan.rootfs.as_deref(), Some(root.as_path()));
+}
+
+#[test]
 fn level0_ignores_the_environment() {
     let lab = lab();
     let dir = pinned(&lab, "zero", ABSENT);
