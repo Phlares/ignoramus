@@ -1151,9 +1151,8 @@ fn the_level_splits_by_alpha_share() {
         ]
     );
     assert!(e3 >= 1.0 / LEVEL);
-    // The study's e-value is the mean of the claims' e-values, weighted by their shares.
-    let mean = 0.75 * e1 + 0.25 * e3;
-    assert!((study.unwrap() - mean).abs() < 1e-9, "{study:?} {mean}");
+    // The study's e-value is the largest claim e-value times its share.
+    assert_eq!(study, Some((0.75 * e1).max(0.25 * e3)));
     // A claim without a share leaves the level unsplit: every claim fails, and the study
     // closes with e-value 0.
     v["question"]["hypotheses"][2]
@@ -1170,6 +1169,42 @@ fn the_level_splits_by_alpha_share() {
         );
     }
     assert_eq!((vs[1].reason.as_deref(), study), (None, Some(0.0)));
+}
+
+#[test]
+fn a_study_whose_claims_all_fail_is_no_stream_discovery() {
+    // H1 holds code and H2 article, each with half the slot's level, so each needs about
+    // 400. With 15 and 13 clusters at -1 they reach 292 and 130 and both fail, though their
+    // mean, 211, passes 1 / level.
+    let mut v = ignorarium::spec::load("../../templates/numeric-ablation.toml".as_ref())
+        .unwrap()
+        .value;
+    v["study"]["mode"] = json!("confirmatory");
+    v["outcomes"][0]["paired"] = json!("difference");
+    v["design"]["reference"] = json!("base");
+    let mut h1 = v["question"]["hypotheses"][0].clone();
+    h1["strata"] = json!(["code"]);
+    h1["claim"] = json!({ "below": 0.0 });
+    h1["statistic"] = json!({ "mean": [-1.0, 1.0] });
+    h1["alpha_share"] = json!(0.5);
+    let mut h2 = h1.clone();
+    h2["id"] = json!("H2");
+    h2["strata"] = json!(["article"]);
+    v["question"]["hypotheses"] = json!([h1, h2]);
+    let spec = Spec::from_value(&v).unwrap();
+    let groups = [same("c", "code", 15, -1.0), same("a", "article", 13, -1.0)].concat();
+    let (p, clusters) = data(&spec, &groups);
+    let dir = tempfile::TempDir::new().unwrap();
+    let home = Home::open_at(dir.path()).unwrap();
+    let key = keys::load_or_create(&home).unwrap();
+    let log = Log::of(&home, LogName::Plan);
+    let slot = log.open(&key, "s", 0.0).unwrap();
+    let (vs, study) = decided(&spec, &p, &clusters, Some(slot.level));
+    let (e1, e2) = (strong(15), strong(13));
+    assert!(vs.iter().all(|v| v.verdict == "fail"), "{vs:?}");
+    assert!(0.5 * e1 + 0.5 * e2 >= 1.0 / slot.level);
+    assert_eq!(study, Some(0.5 * e1));
+    assert!(!log.close(&key, "s", slot.slot, study.unwrap()).unwrap());
 }
 
 #[test]
@@ -1222,11 +1257,12 @@ fn an_e_value_too_large_for_a_float_is_kept_finite() {
     );
 
     // Five claims at the largest float, with shares whose float sum is 1: their weighted mean
-    // overflows, so the study's e-value is clamped once more, and the stream takes it.
+    // would overflow, but the study's e-value is the largest share times it, which stays
+    // finite, and the stream takes it.
     let shares = [0.1, 0.12, 0.48, 0.25, 0.05];
     assert_eq!(shares.iter().sum::<f64>(), 1.0);
     let merged = tree::decide(LEVEL, &shares, &[Some(f64::MAX); 5]).unwrap();
-    assert_eq!(merged.e_value, f64::INFINITY);
+    assert_eq!(merged.e_value, 0.48 * f64::MAX);
     let mut v = below_zero_value("confirmatory", &[]);
     let h = v["question"]["hypotheses"][0].clone();
     let five: Vec<Value> = (shares.iter().enumerate())
@@ -1244,12 +1280,12 @@ fn an_e_value_too_large_for_a_float_is_kept_finite() {
         vs.iter()
             .all(|v| v.verdict == "pass" && v.e_value == Some(f64::MAX))
     );
-    assert_eq!(study, Some(f64::MAX));
+    assert_eq!(study, Some(0.48 * f64::MAX));
     let dir = tempfile::TempDir::new().unwrap();
     let home = Home::open_at(dir.path()).unwrap();
     let key = keys::load_or_create(&home).unwrap();
     let log = Log::of(&home, LogName::Plan);
     let slot = log.open(&key, "s", 0.0).unwrap().slot;
     // A discovery at the slot's level.
-    assert!(log.close(&key, "s", slot, f64::MAX).unwrap());
+    assert!(log.close(&key, "s", slot, study.unwrap()).unwrap());
 }

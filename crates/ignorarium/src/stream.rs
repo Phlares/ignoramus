@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// The false discovery rate the stream keeps over every claim it confirms.
+/// The false discovery rate the stream keeps over the studies it counts as discoveries.
 pub const ALPHA: f64 = 0.05;
 /// The slots that share alpha; a slot after them has level 0.
 pub const M: u64 = 10;

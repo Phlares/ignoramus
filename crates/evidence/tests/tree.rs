@@ -14,7 +14,18 @@ fn all_ran_splits_by_weight() {
     let v = decide(ALPHA, &W, &[Some(32.0), Some(63.9), Some(64.0)]).unwrap();
     assert_eq!(v.levels, vec![1.0 / 32.0, 1.0 / 64.0, 1.0 / 64.0]);
     assert_eq!(v.rejected, vec![true, false, true]);
-    close_to(v.e_value, (2.0 * 32.0 + 63.9 + 64.0) / 4.0, 1e-12);
+    // The largest share-weighted e-value: 32 x 2/4 and 64 x 1/4, not the mean 39.975.
+    assert_eq!(v.e_value, 16.0);
+}
+
+#[test]
+fn rejections_below_their_own_level_make_no_tree_rejection() {
+    // Two halves of level 0.005 each need 400. At 300 and 150 neither is rejected, though
+    // their weighted mean, 225, passes 1 / 0.005.
+    let v = decide(0.005, &[0.5, 0.5], &[Some(300.0), Some(150.0)]).unwrap();
+    assert_eq!(v.rejected, vec![false, false]);
+    assert_eq!(v.e_value, 150.0);
+    assert!(v.e_value < 1.0 / 0.005);
 }
 
 #[test]
@@ -37,23 +48,31 @@ fn root_alone_gets_the_whole_level() {
 }
 
 #[test]
-fn tree_e_value_reaches_one_over_alpha_when_any_is_rejected() {
+fn tree_e_value_reaches_one_over_alpha_exactly_when_one_is_rejected() {
     let cases = [
         [Some(32.0), Some(63.9), Some(64.0)],
         [Some(25.0), None, Some(47.0)],
         [Some(16.0), None, None],
         [Some(0.0), Some(0.0), Some(64.0)],
         [None, Some(f64::INFINITY), Some(0.0)],
+        [Some(31.9), Some(63.9), Some(63.9)],
+        [Some(1.0), Some(1.0), Some(1.0)],
     ];
     let mut rejections = 0;
     for e in cases {
         let v = decide(ALPHA, &W, &e).unwrap();
-        if v.rejected.iter().any(|&r| r) {
-            rejections += 1;
-            assert!(v.e_value >= 1.0 / ALPHA, "{e:?} -> {}", v.e_value);
-        }
+        let any = v.rejected.iter().any(|&r| r);
+        rejections += usize::from(any);
+        assert_eq!(v.e_value >= 1.0 / ALPHA, any, "{e:?} -> {}", v.e_value);
     }
     assert_eq!(rejections, 5);
+    // Share 1/5 at level 0.005 needs 1 / 0.001: the float just below it is not rejected,
+    // though 0.2 times it rounds to 200.
+    let e = 999.9999999999999;
+    assert_eq!(0.2 * e, 200.0);
+    let v = decide(0.005, &[3.0, 1.0, 1.0], &[Some(0.0), Some(e), Some(0.0)]).unwrap();
+    assert_eq!(v.rejected, vec![false; 3]);
+    assert!(v.e_value < 200.0, "{}", v.e_value);
 }
 
 #[test]
@@ -120,11 +139,12 @@ fn tiny_weight_share_does_not_make_a_nan_e_value() {
     .unwrap();
     assert_eq!(v.levels[0], 0.0);
     assert_eq!(v.rejected, vec![false; 3]);
-    assert_eq!(v.e_value, f64::INFINITY);
+    // Level 0 rejects nothing, so the e-value stays below 1/alpha: 1 x 1, the second share.
+    assert_eq!(v.e_value, 1.0);
 }
 
 #[test]
-fn huge_weights_keep_the_mean_finite() {
+fn huge_weights_keep_the_e_value_finite() {
     let v = decide(1e-12, &[1e300, 1e300], &[Some(1e10), Some(0.0)]).unwrap();
     assert_eq!(v.e_value, 5e9);
     assert_eq!(v.rejected, vec![false, false]);

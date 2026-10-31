@@ -11,13 +11,15 @@ pub struct Verdict {
     pub levels: Vec<f64>,
     /// Whether each hypothesis is rejected, in the order of the weights.
     pub rejected: Vec<bool>,
-    /// The merged tree e-value.
+    /// The merged tree e-value: the largest share-weighted e-value.
     pub e_value: f64,
 }
 
 /// `weights` cover every hypothesis the tree declares. `None` in `e_values` means the
 /// hypothesis never ran. A hypothesis that ran gets level `alpha * (w / W_ran)`; one
-/// that did not gets 0. `e_value` is the weighted mean of the e-values that ran.
+/// that did not gets 0. `e_value` is the largest `(w / W_ran) * e` over the hypotheses that
+/// ran. It is at most their weighted mean, so it is an e-value when every hypothesis that
+/// ran is null, and it reaches `1 / alpha` exactly when some hypothesis is rejected.
 ///
 /// Validity needs one condition: the set of hypotheses that ran must not depend on the
 /// data any of their e-values come from. For example, decide which hypotheses run from
@@ -63,23 +65,17 @@ pub fn decide(alpha: f64, weights: &[f64], e_values: &[Option<f64>]) -> Result<V
         .zip(e_values)
         .map(|(&l, e)| l > 0.0 && e.is_some_and(|e| e >= 1.0 / l))
         .collect();
-    // A ran weight is positive, so an infinite e-value makes the mean infinite even
-    // when its share underflows to 0.
-    let e_value = if e_values.iter().flatten().any(|e| e.is_infinite()) {
-        f64::INFINITY
-    } else {
-        weights
-            .iter()
-            .zip(e_values)
-            .filter_map(|(&w, e)| e.map(|e| share(w) * e))
-            .sum()
-    };
-    // Rounding: in exact arithmetic the mean already reaches 1/alpha when any
-    // hypothesis is rejected; the clamp only fixes the last bit.
+    // `max` skips the NaN of a share that underflows to 0 times an infinite e-value.
+    let e_value = (weights.iter().zip(e_values))
+        .filter_map(|(&w, e)| e.map(|e| share(w) * e))
+        .fold(0.0, f64::max);
+    // In exact arithmetic `share * e` reaches 1/alpha exactly when `e` reaches its level's
+    // 1/level; the clamp fixes the last bit in either direction.
+    let bar = 1.0 / alpha;
     let e_value = if rejected.iter().any(|&r| r) {
-        e_value.max(1.0 / alpha)
+        e_value.max(bar)
     } else {
-        e_value
+        e_value.min(bar.next_down())
     };
     Ok(Verdict {
         levels,

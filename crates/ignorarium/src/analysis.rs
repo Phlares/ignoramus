@@ -367,15 +367,13 @@ pub fn verdicts(
 }
 
 /// The e-value a confirmatory study closes its stream slot with, from its verdicts `vs`: the
-/// tree's merged e-value over the tested ones at `level`, kept finite, or 0 when the tree
-/// cannot decide. `None` for an exploratory study.
+/// tree's merged e-value over the tested ones at `level`, the largest `alpha_share` x e, or 0
+/// when the tree cannot decide. It reaches 1 / `level` exactly when a claim passes, so the
+/// stream counts a discovery only for a study with a passing claim. A verdict's e-value is
+/// finite, and a share is at most 1, so this is finite too. `None` for an exploratory study.
 pub fn study_e_value(spec: &Spec, vs: &[Verdict], level: Option<f64>) -> Option<f64> {
     let confirmatory = spec.study.mode == Mode::Confirmatory;
-    confirmatory.then(|| {
-        tree_of(spec, vs, level)
-            .1
-            .map_or(0.0, |t| finite(t.e_value))
-    })
+    confirmatory.then(|| tree_of(spec, vs, level).1.map_or(0.0, |t| t.e_value))
 }
 
 /// The tested verdicts of `vs`, by index, and the tree's decision over them at `level`, each
