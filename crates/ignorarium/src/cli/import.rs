@@ -31,10 +31,7 @@ pub fn run(ctx: &Ctx, source: &str, files: &[PathBuf]) -> Run {
         let shown = f.display().to_string();
         // Each call is its own provenance: a repeated import adds another record.
         let fault = |e| CliError::usage(format!("{shown}: {e}"));
-        let (digest, meta) = store.import(f).map_err(fault)?;
-        store
-            .sign_import(&key, &digest, &meta, source, f)
-            .map_err(fault)?;
+        let (digest, _) = store.import_recorded(f, &key, source).map_err(fault)?;
         out(&format!("{digest}  {shown}\n"))?;
     }
     Ok(Done::exit(0))

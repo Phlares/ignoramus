@@ -1756,6 +1756,47 @@ fn import_prints_digests_and_signs_one_record_per_file() {
 }
 
 #[test]
+fn import_writes_no_meta_when_its_record_cannot_be_signed() {
+    let (d, home, _) = setup(|t| t);
+    let (a, b) = (d.path().join("a.txt"), d.path().join("b.txt"));
+    std::fs::write(&a, "first").unwrap();
+    std::fs::write(&b, "second").unwrap();
+    bin(&home)
+        .args(["import", "--source", "s"])
+        .arg(&a)
+        .assert()
+        .code(0);
+    // A torn last line, as a crash in mid-write leaves it: no record can be appended.
+    let log = home.join("store/imports.jsonl");
+    let whole = std::fs::read(&log).unwrap();
+    std::fs::write(&log, [&whole[..], b"{\"rec"].concat()).unwrap();
+    bin(&home)
+        .args(["import", "--source", "s"])
+        .arg(&b)
+        .assert()
+        .code(2);
+    // A meta would tell a later register that the blob already has its record.
+    let digest = ignorarium::canon::sha256_hex(b"second");
+    let meta = home.join("store/meta").join(format!("{digest}.json"));
+    assert!(!meta.exists());
+    // With the log whole again, the import signs its record, then writes the meta.
+    std::fs::write(&log, &whole).unwrap();
+    bin(&home)
+        .args(["import", "--source", "s"])
+        .arg(&b)
+        .assert()
+        .code(0);
+    assert!(meta.exists());
+    let key = ignorarium::keys::load(&Home::open_at(&home).unwrap())
+        .unwrap()
+        .unwrap()
+        .verifying_key();
+    let recs = ignorarium::records::read_all(&log, &key).unwrap();
+    assert_eq!(recs.len(), 2);
+    assert_eq!(recs[1].body["digest"], digest.as_str());
+}
+
+#[test]
 fn import_refuses_a_bad_file_before_it_adds_anything() {
     let (d, home, _) = setup(|t| t);
     let good = d.path().join("good.txt");

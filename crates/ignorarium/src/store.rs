@@ -198,9 +198,24 @@ impl Store {
         Ok((digest, meta))
     }
 
+    /// `import`, with one signed `import` record (see `sign_import`) for this call whether the
+    /// store knew the blob or not: each call is its own provenance. As in `import_signed`, the
+    /// record is signed before the meta is written.
+    pub fn import_recorded(
+        &self,
+        file: &Path,
+        key: &SigningKey,
+        source: &str,
+    ) -> Result<(String, Meta), StoreError> {
+        let (digest, meta) = self.stream_in(file, NORMALIZE_LIMIT)?;
+        self.sign_import(key, &digest, &meta, source, file)?;
+        self.write_meta(&digest, &meta)?;
+        Ok((digest, meta))
+    }
+
     /// One signed `import` record in `imports.jsonl` that names `source` and the file's
     /// name, never its path.
-    pub fn sign_import(
+    fn sign_import(
         &self,
         key: &SigningKey,
         digest: &str,
