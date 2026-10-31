@@ -405,9 +405,27 @@ pub fn arm_a() -> serde_json::Value {
     estimate(&[("arm-a", 1.0, serde_json::json!({}))], "", 4.0, Some(0.1))
 }
 
-/// The records of a finished study, as (kind, body): its register record, an analysis record
-/// that promises `estimates`, and the estimates.
+/// The instrument `finished` names: the payload of its register record, an image
+/// environment and one model input.
+pub fn instrument() -> derived::Instrument {
+    derived::Instrument {
+        payload: "cd".repeat(32),
+        environment: "ef".repeat(32),
+        inputs: vec![("model/m.bin".into(), "model".into(), "01".repeat(32))],
+    }
+}
+
+/// `finished_with` the common `instrument`.
 pub fn finished(estimates: Vec<serde_json::Value>) -> Vec<(&'static str, serde_json::Value)> {
+    finished_with(instrument(), estimates)
+}
+
+/// The records of a finished study, as (kind, body): its register record, an analysis record
+/// that names `instrument` and promises `estimates`, and the estimates.
+pub fn finished_with(
+    instrument: derived::Instrument,
+    estimates: Vec<serde_json::Value>,
+) -> Vec<(&'static str, serde_json::Value)> {
     let register = derived::Register {
         spec_hash: format!("sha256:{}", "ab".repeat(32)),
         leaf: 0,
@@ -426,6 +444,7 @@ pub fn finished(estimates: Vec<serde_json::Value>) -> Vec<(&'static str, serde_j
         estimates: estimates.len() as u64,
         verdicts: 0,
         slot: None,
+        instrument,
     };
     let head = [
         ("register", serde_json::to_value(register).unwrap()),

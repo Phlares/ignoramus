@@ -1,6 +1,6 @@
 use ignorarium::canon::{sha256_hex, to_canonical};
 use ignorarium::derived::{
-    Alpha, Analysis, Estimate, Register, Selection, StudyState, contrast_key,
+    Alpha, Analysis, Estimate, Instrument, Register, Selection, StudyState, contrast_key,
 };
 use ignorarium::records::Record;
 use ignorarium::spec::model::{Direction, Outcome, Paired};
@@ -226,7 +226,11 @@ fn a_contrast_key_orders_two_weights_of_one_condition() {
 fn analysis_body() -> Value {
     json!({
         "commit": "c".repeat(64), "box_version": "0.1.0", "estimates": 2, "verdicts": 1,
-        "slot": 3
+        "slot": 3,
+        "instrument": {
+            "payload": "p".repeat(64), "environment": "host",
+            "inputs": [["data/m.bin", "model", "d".repeat(64)]]
+        }
     })
 }
 
@@ -241,6 +245,11 @@ fn an_analysis_record_states_what_follows_it() {
             estimates: 2,
             verdicts: 1,
             slot: Some(3),
+            instrument: Instrument {
+                payload: "p".repeat(64),
+                environment: "host".into(),
+                inputs: vec![("data/m.bin".into(), "model".into(), "d".repeat(64))],
+            },
         }
     );
     assert_eq!(serde_json::to_value(&a).unwrap(), analysis_body());
@@ -257,6 +266,37 @@ fn an_analysis_record_states_what_follows_it() {
         b.as_object_mut().unwrap().remove(field);
         assert_eq!(Analysis::of(&rec("analysis", b)), None, "{field}");
     }
+}
+
+#[test]
+fn an_analysis_record_from_before_the_instrument_names_an_empty_one() {
+    // A box that wrote no instrument still leaves a finished study.
+    let mut b = analysis_body();
+    b.as_object_mut().unwrap().remove("instrument");
+    b["estimates"] = json!(0);
+    b["verdicts"] = json!(0);
+    b["slot"] = Value::Null;
+    let a = Analysis::of(&rec("analysis", b.clone())).unwrap();
+    let empty = Instrument {
+        payload: String::new(),
+        environment: String::new(),
+        inputs: vec![],
+    };
+    assert_eq!(a.instrument, empty);
+    let all = vec![at(0, "register", register_body()), at(1, "analysis", b)];
+    assert_eq!(
+        StudyState::of(Some(all), |_, _| panic!("no slot to ask for")),
+        Ok(StudyState::Finished(vec![]))
+    );
+    // An instrument that is there must be whole.
+    for field in ["payload", "environment", "inputs"] {
+        let mut b = analysis_body();
+        b["instrument"].as_object_mut().unwrap().remove(field);
+        assert_eq!(Analysis::of(&rec("analysis", b)), None, "{field}");
+    }
+    let mut b = analysis_body();
+    b["instrument"]["extra"] = json!(1);
+    assert_eq!(Analysis::of(&rec("analysis", b)), None);
 }
 
 /// A record whose hash is its own: `seq` tells two records with one body apart.

@@ -1,13 +1,21 @@
+mod common;
+
 use evidence::claim::{Bound, Statistic, e_value, order};
 use evidence::rng::Rng;
 use evidence::{Tail, tree};
 use ignorarium::analysis::{
-    Paired, distinct_clusters, estimates, paired, select, study_e_value, verdicts,
+    Paired, distinct_clusters, estimates, instrument, paired, select, study_e_value, verdicts,
 };
-use ignorarium::derived::{BoundResult, Candidate, Estimate, Selection, Verdict, contrast_key};
+use ignorarium::backend::level0::Level0;
+use ignorarium::canon::sha256_hex;
+use ignorarium::derived::{
+    Analysis, BoundResult, Candidate, Estimate, Instrument, Register, Selection, Verdict,
+    contrast_key,
+};
 use ignorarium::home::Home;
 use ignorarium::keys;
 use ignorarium::records::Record;
+use ignorarium::runner::{RunStatus, prepare_with, run};
 use ignorarium::seed::seed;
 use ignorarium::spec::model::{Direction, Role, SelectionRule, Spec};
 use ignorarium::stream::{Log, LogName};
@@ -1288,4 +1296,138 @@ fn an_e_value_too_large_for_a_float_is_kept_finite() {
     let slot = log.open(&key, "s", 0.0).unwrap().slot;
     // A discovery at the slot's level.
     assert!(log.close(&key, "s", slot, study.unwrap()).unwrap());
+}
+
+// ---- the instrument ----
+
+/// The template with the inputs `(path, role)`, in that order.
+fn with_inputs(inputs: &[(&str, &str)]) -> Spec {
+    let mut v = ignorarium::spec::load("../../templates/numeric-ablation.toml".as_ref())
+        .unwrap()
+        .value;
+    let first = v["inputs"][0].clone();
+    v["inputs"] = (inputs.iter())
+        .map(|(path, role)| {
+            let mut i = first.clone();
+            i["path"] = json!(path);
+            i["role"] = json!(role);
+            i
+        })
+        .collect();
+    Spec::from_value(&v).unwrap()
+}
+
+/// A model input at `path`, as spec text.
+fn model_input(path: &str) -> String {
+    format!(
+        "[[inputs]]
+path = \"{path}\"
+sha256 = \"\"
+role = \"model\"
+[inputs.licence]
+spdx = \"\"
+type = \"unspecified\"
+source = \"\"
+creators = []
+
+"
+    )
+}
+
+#[test]
+fn the_analysis_record_names_the_instrument() {
+    let lab = common::lab();
+    // In spec order the calibration input comes before the model input.
+    let model = model_input("data/a.bin");
+    let edit = |t: String| t.replacen("[pins]", &format!("{model}[pins]"), 1);
+    let before = [
+        ("data/example.txt", "calibration"),
+        ("data/a.bin", "weights"),
+    ];
+    common::register_study(&lab, "named", edit, &before, common::PAYLOAD);
+    let work = common::work(&lab, "named");
+    let plan = prepare_with(&lab.home, "named", &work, vec![Box::new(Level0)]).unwrap();
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let all = common::records_of(&lab, "named");
+    let register = all.iter().find_map(Register::of).unwrap();
+    assert_eq!(register.payload.len(), 64);
+    let analysis = all.iter().find_map(Analysis::of).unwrap();
+    let held = |path: &str, role: &str, text: &str| {
+        (
+            path.to_string(),
+            role.to_string(),
+            sha256_hex(text.as_bytes()),
+        )
+    };
+    let instrument = Instrument {
+        payload: register.payload,
+        environment: "host".into(),
+        inputs: vec![
+            held("data/a.bin", "model", "weights"),
+            held("data/example.txt", "calibration", "calibration"),
+        ],
+    };
+    assert_eq!(analysis.instrument, instrument);
+}
+
+#[test]
+fn only_model_and_calibration_inputs_enter_the_instrument() {
+    let spec = with_inputs(&[
+        ("model/m.bin", "model"),
+        ("data/sel.txt", "selection"),
+        ("data/conf.txt", "confirmation"),
+        ("data/cal.txt", "calibration"),
+        ("model/absent.bin", "model"),
+        ("data/absent.txt", "calibration"),
+    ]);
+    let d = |c: &str| c.repeat(64);
+    let h = |exact: &str, normalized: &str| Some((d(exact), d(normalized)));
+    // By path, in another order than the spec's: the digest is the stored copy's.
+    let hashes = vec![
+        ("data/cal.txt".to_string(), h("3", "c")),
+        ("data/sel.txt".to_string(), h("1", "a")),
+        ("data/conf.txt".to_string(), h("2", "b")),
+        ("model/m.bin".to_string(), h("4", "e")),
+        ("model/absent.bin".to_string(), None),
+        ("data/absent.txt".to_string(), None),
+    ];
+    let got = instrument(&spec, "the payload", &hashes, &[]);
+    let want = [
+        ("data/cal.txt", "calibration", d("3")),
+        ("model/m.bin", "model", d("4")),
+    ]
+    .map(|(p, r, d)| (p.to_string(), r.to_string(), d));
+    assert_eq!(got.inputs, want);
+    assert_eq!(got.payload, "the payload");
+    // With no row there is no environment.
+    assert_eq!(got.environment, "");
+}
+
+#[test]
+fn rows_in_two_environments_give_no_environment() {
+    let spec = with_inputs(&[]);
+    let image = "ab".repeat(32);
+    let ran = |environment: Option<&str>| {
+        let mut r = ok("a#0", "base", 0, 1.0);
+        if let Some(e) = environment {
+            r.body["environment"] = json!(e);
+        }
+        r
+    };
+    let named = |rows: &[Record]| instrument(&spec, "p", &vec![], rows).environment;
+    assert_eq!(named(&[ran(Some("host")), ran(Some("host"))]), "host");
+    assert_eq!(named(&[ran(Some(&image))]), image);
+    // A study resumed in a rebuilt environment names none.
+    assert_eq!(named(&[ran(Some("host")), ran(Some(&image))]), "");
+    assert_eq!(named(&[ran(Some(&image)), ran(Some("host"))]), "");
+    // A row that names no environment is not in the others'.
+    assert_eq!(named(&[ran(Some("host")), ran(None)]), "");
+    assert_eq!(named(&[ran(None)]), "");
+    // A record of another kind is no row.
+    let spend = Record {
+        kind: "spend".into(),
+        ..ran(Some(&image))
+    };
+    assert_eq!(named(&[ran(Some("host")), spend.clone()]), "host");
+    assert_eq!(named(&[spend]), "");
 }

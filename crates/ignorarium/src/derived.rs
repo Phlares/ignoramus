@@ -185,6 +185,22 @@ pub struct Analysis {
     /// `null`, never left out.
     #[serde(deserialize_with = "Option::deserialize")]
     pub slot: Option<u64>,
+    /// The code the estimates describe. A record written before the field existed reads as
+    /// an empty one, so its study stays finished.
+    #[serde(default)]
+    pub instrument: Instrument,
+}
+
+/// The code a finished run measured with: the payload folder's tree hash, the environment
+/// every row ran in (`"host"` or the image's store digest; `""` when the rows name more than
+/// one or none), and each model and calibration input present as (path, role, store digest),
+/// sorted by path.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Instrument {
+    pub payload: String,
+    pub environment: String,
+    pub inputs: Vec<(String, String, String)>,
 }
 
 impl Analysis {

@@ -2,12 +2,12 @@
 //! condition's value for the same unit and repeat.
 use crate::canon::{sha256_hex, to_canonical};
 use crate::derived::{
-    ANALYSIS, Analysis, BoundResult, Candidate, ESTIMATE, Estimate, Register, Selection, VERDICT,
-    Verdict, contrast_key,
+    ANALYSIS, Analysis, BoundResult, Candidate, ESTIMATE, Estimate, Instrument, Register,
+    Selection, VERDICT, Verdict, contrast_key,
 };
 use crate::prior::same_data;
 use crate::records::{self, Record, RecordDraft};
-use crate::runner::{RunError, RunPlan, stored_spec};
+use crate::runner::{InputHashes, RunError, RunPlan, stored_spec};
 use crate::schedule::SELECTION_STAGE;
 use crate::seed::seed;
 use crate::spec::model::{
@@ -530,13 +530,40 @@ pub fn commit(spec: &Value, box_version: &str) -> Result<String, RunError> {
     Ok(sha256_hex(&bytes))
 }
 
+/// The `Instrument` of a run whose register record names `payload`: the environment its
+/// `rows` name, and each model and calibration input of `spec` with a digest in `inputs`.
+pub fn instrument(spec: &Spec, payload: &str, inputs: &InputHashes, rows: &[Record]) -> Instrument {
+    let mut named = (rows.iter())
+        .filter(|r| r.kind == "row")
+        .map(|r| r.body["environment"].as_str());
+    let environment = match named.next().flatten() {
+        Some(first) if named.all(|e| e == Some(first)) => first,
+        _ => "",
+    };
+    let mut built: Vec<(String, String, String)> = (spec.inputs.iter())
+        .filter(|i| matches!(i.role, Role::Model | Role::Calibration))
+        .filter_map(|i| {
+            let (_, hashes) = inputs.iter().find(|(p, _)| *p == i.path)?;
+            let role = json!(i.role).as_str()?.to_string();
+            Some((i.path.clone(), role, hashes.as_ref()?.0.clone()))
+        })
+        .collect();
+    built.sort();
+    Instrument {
+        payload: payload.into(),
+        environment: environment.into(),
+        inputs: built,
+    }
+}
+
 /// When every scheduled row has a record, add what the study's results still lack: the
-/// `analysis` record first, which states how many records follow it, then each estimate and
-/// each verdict it promises, and last, for a study that holds a stream slot, the close of that
-/// slot with the e-value its verdict records give (`study_e_value`). A call after a crash adds
-/// only what is missing; a complete study gets nothing. A log whose analysis record another
-/// box version wrote is refused when it lacks an estimate or a verdict. The close takes its
-/// e-value from the signed records alone, so it is added whatever box wrote them.
+/// `analysis` record first, which names the `instrument` and states how many records follow
+/// it, then each estimate and each verdict it promises, and last, for a study that holds a
+/// stream slot, the close of that slot with the e-value its verdict records give
+/// (`study_e_value`). A call after a crash adds only what is missing; a complete study gets
+/// nothing. A log whose analysis record another box version wrote is refused when it lacks an
+/// estimate or a verdict. The close takes its e-value from the signed records alone, so it is
+/// added whatever box wrote them.
 pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
     let dir = plan.home.study_dir(&plan.study_id);
     let log = dir.join("records.jsonl");
@@ -558,7 +585,8 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
         &clusters,
         selection.as_ref(),
     );
-    let alpha = all.iter().find_map(Register::of).and_then(|r| r.alpha);
+    let register = all.iter().find_map(Register::of);
+    let alpha = register.as_ref().and_then(|r| r.alpha.clone());
     let level = alpha.as_ref().map(|a| a.level);
     let judged = verdicts(&plan.spec, &pairs, &clusters, &plan.spec_hash, level);
     let (_, value, hash, _) = stored_spec(&dir)?;
@@ -586,12 +614,14 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
             }
         }
         None => {
+            let payload = register.as_ref().map_or("", |r| r.payload.as_str());
             let body = Analysis {
                 commit: commit(&value, version)?,
                 box_version: version.into(),
                 estimates: wanted.len() as u64,
                 verdicts: judged.len() as u64,
                 slot: alpha.as_ref().map(|a| a.slot),
+                instrument: instrument(&plan.spec, payload, &plan.inputs, &all),
             };
             append(plan, &log, ANALYSIS, &body)?;
         }
