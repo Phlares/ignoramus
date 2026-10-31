@@ -967,17 +967,17 @@ fn channel_errors_hold_no_raw_guest_bytes() {
 
 /// (output disk, data limit, the least guest memory that holds them): `/out` takes half the
 /// disk and `/tmp` all of it, both in guest memory, beside the payload's data and the
-/// guest's own 256 MiB, and the kernel keeps about 1/40 of the memory (its page data,
-/// reserves and page tables), so the sum is over 39/40 of the machine. A part of a MiB counts
+/// guest's own 320 MiB, and the kernel keeps about 1/32 of the memory (its page data, zone
+/// reserves and page tables), so the sum is over 31/32 of the machine. A part of a MiB counts
 /// as a whole one.
 const SIZES: [(u64, Option<u64>, u32); 4] = [
-    // (32 + 64 + 256) x 40 / 39 = 361.03
-    (64, None, 362),
-    // (38 + 32 + 64 + 256) x 40 / 39 = 400 exactly, and one byte more needs one MiB more.
-    (64, Some(38 << 20), 400),
-    (64, Some((38 << 20) + 1), 401),
-    // (1.5 + 3 + 256) x 40 / 39 = 267.2
-    (3, None, 268),
+    // (32 + 64 + 320) x 32 / 31 = 429.4
+    (64, None, 430),
+    // (18 + 32 + 64 + 320) x 32 / 31 = 448 exactly, and one byte more needs one MiB more.
+    (64, Some(18 << 20), 448),
+    (64, Some((18 << 20) + 1), 449),
+    // (1.5 + 3 + 320) x 32 / 31 = 334.97
+    (3, None, 335),
 ];
 
 #[test]
@@ -995,7 +995,7 @@ fn a_vm_smaller_than_what_its_guest_holds_is_refused_before_boot() {
         let msg = refused_before_boot(&rig, &rig.work);
         let want = format!(
             "a guest memory of {} MiB cannot hold the row: its data limit, /out and /tmp of \
-             the {out_mib} MiB output disk, 256 MiB for the guest and the kernel's reserve \
+             the {out_mib} MiB output disk, 320 MiB for the guest and the kernel's reserve \
              need {need} MiB",
             need - 1
         );

@@ -30,19 +30,21 @@ use std::time::{Duration, Instant};
 
 pub const REPORT_SLACK: Duration = Duration::from_secs(30);
 
-/// Guest memory, in MiB, for the guest's kernel, the agent and the page cache.
-pub const GUEST_MIB: u32 = 256;
+/// Guest memory, in MiB, for the guest's kernel, the agent and the page cache, with room
+/// for the agent's boot floor (`agent::steps::FLOOR`).
+pub const GUEST_MIB: u32 = 320;
 
 /// The guest memory, in MiB, that a row needs: the payload's data limit in bytes (none
 /// counts 0), the `/out` and `/tmp` tmpfs of an output disk of `out_mib` (their pages live in
-/// guest memory, outside the data limit) and `GUEST_MIB`, over 39/40 of the machine: the
-/// kernel's page data, reserves and page tables grow with it, about 1/43 as measured. A part
-/// of a MiB counts as a whole. The agent checks the guest it boots against the same parts.
+/// guest memory, outside the data limit) and `GUEST_MIB`, over 31/32 of the machine: the
+/// kernel's page data, zone reserves and page tables grow with it, about 1/32 as measured. A
+/// part of a MiB counts as a whole. The agent checks the guest it boots against the same
+/// parts.
 pub fn needed_mem_mib(data_limit: Option<u64>, out_mib: u64) -> u64 {
     let held = (data_limit.unwrap_or(0))
         .saturating_add(tmpfs_bytes(out_mib.saturating_mul(1 << 20)))
         .saturating_add(u64::from(GUEST_MIB) << 20);
-    held.saturating_mul(40).div_ceil(39 << 20)
+    held.saturating_mul(32).div_ceil(31 << 20)
 }
 
 /// What the caller hears while a row runs.

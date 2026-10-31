@@ -1297,18 +1297,18 @@ fn the_vm_holds_the_cap_the_out_disk_and_the_guest() {
     // No declared memory: today's machine.
     assert_eq!(b.vm_mem_mib(&job(None)), 1024);
     // The cap, /out (half the 256 MiB output disk), /tmp (all of it) and the guest's own,
-    // over the 39/40 of the machine that the kernel's own reserve leaves.
-    assert_eq!(GUEST_MIB, 256);
-    // (2048 + 128 + 256 + 256) x 40 / 39 = 2756.9
-    assert_eq!(b.vm_mem_mib(&job(Some(2048))), 2757);
-    // (64 + 640) x 40 / 39 = 722.05
-    assert_eq!(b.vm_mem_mib(&job(Some(64))), 723);
+    // over the 31/32 of the machine that the kernel's own reserve leaves.
+    assert_eq!(GUEST_MIB, 320);
+    // (2048 + 128 + 256 + 320) x 32 / 31 = 2840.8
+    assert_eq!(b.vm_mem_mib(&job(Some(2048))), 2841);
+    // (64 + 704) x 32 / 31 = 792.8
+    assert_eq!(b.vm_mem_mib(&job(Some(64))), 793);
     b.out_mib = 16;
-    // (2048 + 8 + 16 + 256) x 40 / 39 = 2387.7
-    assert_eq!(b.vm_mem_mib(&job(Some(2048))), 2388);
-    // /out of an odd disk takes a part of a MiB: (2048 + 1.5 + 3 + 256) x 40 / 39 = 2367.7
+    // (2048 + 8 + 16 + 320) x 32 / 31 = 2469.2
+    assert_eq!(b.vm_mem_mib(&job(Some(2048))), 2470);
+    // /out of an odd disk takes a part of a MiB: (2048 + 1.5 + 3 + 320) x 32 / 31 = 2449.03
     b.out_mib = 3;
-    assert_eq!(b.vm_mem_mib(&job(Some(2048))), 2368);
+    assert_eq!(b.vm_mem_mib(&job(Some(2048))), 2450);
     b.mem_mib = 4096;
     assert_eq!(b.vm_mem_mib(&job(None)), 4096);
     // No machine has that much; the host refuses the largest size there is.
@@ -1327,15 +1327,15 @@ fn level2_is_unfit_for_a_machine_larger_than_the_host() {
             format!("MemTotal: {kb:>14} kB\nMemFree: 1 kB\n"),
         )
     };
-    // A cap of 2048 MiB needs a 2757 MiB machine: 2823168 kB.
-    host(2823168).unwrap();
+    // A cap of 2048 MiB needs a 2841 MiB machine: 2909184 kB.
+    host(2909184).unwrap();
     assert_eq!(b.unfit(Some(2048)), None);
     assert_eq!(b.unfit(None), None);
-    host(2823167).unwrap();
+    host(2909183).unwrap();
     assert_eq!(
         b.unfit(Some(2048)).unwrap(),
-        "a level 2 machine for rows of 2048 MiB needs 2757 MiB, more than the host's MemTotal \
-         of 2756 MiB"
+        "a level 2 machine for rows of 2048 MiB needs 2841 MiB, more than the host's MemTotal \
+         of 2840 MiB"
     );
     // Without a cap the machine is 1024 MiB.
     host(1024 * 1024 - 1).unwrap();
@@ -1455,7 +1455,7 @@ with open(os.environ["IGNORARIUM_OUT"] + "/load", "r+") as f:
 
 /// Runs `FULL_LOAD` under a cap of `cap_mib` and checks what the guest kept for itself: the
 /// machine less what was still available and what the payload and both tmpfs held. The
-/// formula gives the guest `GUEST_MIB` and the kernel's reserve, 1/40 of the machine; a
+/// formula gives the guest `GUEST_MIB` and the kernel's reserve, 1/32 of the machine; a
 /// guest that needs more kills the payload (137) or the agent refuses the row at boot. One
 /// line of what it measured, `Err` when the row failed or a check did not hold.
 fn full_load(r: &Ready, cap_mib: u32, timeout: Duration) -> Result<String, String> {
@@ -1488,7 +1488,7 @@ fn full_load(r: &Ready, cap_mib: u32, timeout: Duration) -> Result<String, Strin
     let machine = u64::from(size) << 10;
     let held = anon + tmp_fill + out_fill + 8;
     let own = machine.saturating_sub(available + held);
-    let share = u64::from(GUEST_MIB << 10) + machine / 40;
+    let share = u64::from(GUEST_MIB << 10) + machine / 32;
     // What the row may hold: the cap and both tmpfs.
     let row_kb = u64::from(cap_mib + 128 + 256) << 10;
     let at_boot = meminfo_kb(&start, "MemAvailable");
@@ -1514,12 +1514,12 @@ fn full_load(r: &Ready, cap_mib: u32, timeout: Duration) -> Result<String, Strin
 #[test]
 fn a_row_near_its_memory_with_full_tmpfs_runs_at_level_2() {
     let Some(r) = ready() else { return };
-    // (256 + 128 + 256 + 256) x 40 / 39 = 918.97
+    // (256 + 128 + 256 + 320) x 32 / 31 = 990.97
     let job = RowJob {
         memory_mib: Some(256),
         ..RowJob::default()
     };
-    assert_eq!(r.level2.vm_mem_mib(&job), 919);
+    assert_eq!(r.level2.vm_mem_mib(&job), 991);
     let line = full_load(&r, 256, LONG).unwrap();
     println!("{line}");
 }
@@ -1532,22 +1532,22 @@ fn host_available_mib() -> u64 {
     ) >> 10
 }
 
-/// The kernel's reserve grows with the machine, and past 4 GiB a bounce buffer would take
-/// 64 MiB more. Rows at their cap with both tmpfs full, in machines of about 1, 3 and 7 GiB,
-/// or the largest this host backs with a fifth of its available memory to spare; a host that
-/// cannot back a machine past 4 GiB fails the test. Alone, on a KVM host:
+/// The kernel's reserve grows with the machine, and a zone past 4 GiB adds its own. Rows at
+/// their cap with both tmpfs full, in machines from about 1 to 7 GiB, each cap no larger than
+/// this host backs with a fifth of its available memory to spare; a host that cannot back a
+/// machine past 4 GiB fails the test. Alone, on a KVM host:
 /// `cargo test --test level2 large_rows -- --ignored --nocapture`.
 #[test]
 #[ignore = "boots machines of up to 7 GiB"]
-fn large_rows_at_their_cap_with_full_tmpfs_run_at_1_3_and_7_gib() {
+fn large_rows_at_their_cap_with_full_tmpfs_run_from_1_to_7_gib() {
     let Some(r) = ready() else { return };
-    let room = host_available_mib() * 4 / 5 * 39 / 40;
-    let largest = room.saturating_sub(640) / 256 * 256;
+    let room = host_available_mib() * 4 / 5 * 31 / 32;
+    let largest = room.saturating_sub(704) / 256 * 256;
     assert!(
         largest >= 4096,
         "this host backs a cap of only {largest} MiB"
     );
-    let runs: Vec<_> = [384, 2304, 6144]
+    let runs: Vec<_> = [256, 384, 2048, 2304, 6144]
         .map(|cap: u64| full_load(&r, u32::try_from(cap.min(largest)).unwrap(), LONG * 10))
         .into_iter()
         .collect();
