@@ -4,6 +4,7 @@ use crate::sys;
 use rustix::process::{Pid, Signal, WaitId, WaitIdOptions, kill_process_group, waitid};
 use std::io;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -14,21 +15,23 @@ pub struct Ran {
     pub cpu_seconds: f64,
 }
 
-/// Runs `job.argv` as the current user. When this returns, no process of the payload's
-/// group is left.
+/// Runs `job.argv` as the current user, in `/`. When this returns, no process of the
+/// payload's group is left.
 pub fn run(job: &Job) -> io::Result<Ran> {
-    run_as(job, None)
+    run_as(job, None, Path::new("/"))
 }
 
-/// Runs `job.argv` as `user` (uid, gid) when given. Changing the user needs root.
-pub fn run_as(job: &Job, user: Option<(u32, u32)>) -> io::Result<Ran> {
-    run_watched(job, user, exited)
+/// Runs `job.argv` in the folder `cwd`, as `user` (uid, gid) when given. Changing the user
+/// needs root.
+pub fn run_as(job: &Job, user: Option<(u32, u32)>, cwd: &Path) -> io::Result<Ran> {
+    run_watched(job, user, cwd, exited)
 }
 
 /// `run_as` with the exit check passed in, so a test can make it fail.
 fn run_watched(
     job: &Job,
     user: Option<(u32, u32)>,
+    cwd: &Path,
     mut exited: impl FnMut(Pid) -> io::Result<bool>,
 ) -> io::Result<Ran> {
     let Some((program, args)) = job.argv.split_first() else {
@@ -38,7 +41,7 @@ fn run_watched(
     let mut cmd = Command::new(program);
     cmd.args(args).env_clear().envs(job.env.iter().cloned());
     cmd.env(SEED_ENV, &job.seed_hex)
-        .current_dir("/")
+        .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -98,7 +101,7 @@ fn timed_out(
 }
 
 /// True once the process has exited. It stays unreaped (`WNOWAIT`).
-fn exited(pid: Pid) -> io::Result<bool> {
+pub(crate) fn exited(pid: Pid) -> io::Result<bool> {
     let opts = WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT;
     Ok(waitid(WaitId::Pid(pid), opts)?.is_some())
 }
@@ -145,7 +148,7 @@ mod tests {
             timeout_ms: 30_000,
         };
         let mut leader = None;
-        let err = run_watched(&job, None, |pid| {
+        let err = run_watched(&job, None, std::path::Path::new("/"), |pid| {
             leader = Some(pid);
             // Fail once the background child exists, so the group kill has a member to reach.
             let t = Instant::now();

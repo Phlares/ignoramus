@@ -1,4 +1,4 @@
-use ignorarium_guest::image::{Pin, check_pin, ext4, initramfs, sha256_file, size_mib};
+use ignorarium_guest::image::{Pin, check_pin, ext4, has_interp, initramfs, sha256_file, size_mib};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::ErrorKind;
@@ -155,10 +155,48 @@ fn root_names(img: &Path) -> Vec<String> {
     let mut names: Vec<String> = debugfs(img, "ls -p /")
         .lines()
         .filter_map(|l| l.split('/').nth(5).map(str::to_string))
-        .filter(|n| !matches!(n.as_str(), "." | ".." | "lost+found"))
+        .filter(|n| !matches!(n.as_str(), "." | ".."))
         .collect();
     names.sort();
     names
+}
+
+#[test]
+fn ext4_keeps_a_lost_and_found_of_the_source() {
+    // The image root holds the source and nothing more: mke2fs's own `lost+found` (mode 0700,
+    // owned by root) goes, and one the source holds stays with what it holds.
+    let d = tempfile::tempdir().unwrap();
+    let src = d.path().join("src");
+    fs::create_dir_all(src.join("lost+found")).unwrap();
+    fs::write(src.join("lost+found/f"), "kept\n").unwrap();
+    let img = d.path().join("i.ext4");
+    ext4(Some(&src), &img, size_mib(&src).unwrap()).unwrap();
+    assert_eq!(root_names(&img), ["lost+found"]);
+    assert_eq!(debugfs(&img, "cat /lost+found/f"), "kept\n");
+}
+
+#[test]
+fn ext4_refuses_a_lost_and_found_that_is_not_a_folder() {
+    // ext4 keeps that name at the top of a disk for a folder; mkfs.ext4 -d fails on a file.
+    let d = tempfile::tempdir().unwrap();
+    for (case, make) in [("file", false), ("link", true)] {
+        let src = d.path().join(case);
+        fs::create_dir(&src).unwrap();
+        if make {
+            symlink(&src, src.join("lost+found")).unwrap();
+        } else {
+            fs::write(src.join("lost+found"), "x").unwrap();
+        }
+        let img = d.path().join(format!("{case}.ext4"));
+        let e = ext4(Some(&src), &img, 16).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::InvalidInput, "{case}");
+        assert_eq!(
+            e.to_string(),
+            "lost+found at its top is not a folder, and ext4 keeps that name for one"
+        );
+        // Refused before the image is made.
+        assert!(!img.exists(), "{case}");
+    }
 }
 
 #[test]
@@ -214,4 +252,37 @@ fn sha256_file_matches_a_known_vector() {
         sha256_file(&f).unwrap(),
         "98ea6e4f216f2fb4b69fff9b3a44842c38686ca685f3f55dc48c5d3fb1107be4"
     );
+}
+
+/// A 64-bit little-endian ELF header with one program header of each type in `types`.
+fn elf(types: &[u32]) -> Vec<u8> {
+    let mut b = vec![0u8; 64];
+    b[..6].copy_from_slice(b"\x7fELF\x02\x01");
+    b[0x20..0x28].copy_from_slice(&64u64.to_le_bytes());
+    b[0x36..0x38].copy_from_slice(&56u16.to_le_bytes());
+    b[0x38..0x3a].copy_from_slice(&(types.len() as u16).to_le_bytes());
+    for t in types {
+        let mut ph = vec![0u8; 56];
+        ph[..4].copy_from_slice(&t.to_le_bytes());
+        b.extend(ph);
+    }
+    b
+}
+
+#[test]
+fn has_interp_tells_static_from_dynamic() {
+    const PT_LOAD: u32 = 1;
+    const PT_INTERP: u32 = 3;
+    assert!(has_interp(&fs::read("/bin/sh").unwrap()).unwrap());
+    assert!(!has_interp(&elf(&[PT_LOAD])).unwrap());
+    assert!(has_interp(&elf(&[PT_LOAD, PT_INTERP])).unwrap());
+    let cut = &elf(&[PT_LOAD, PT_INTERP])[..64 + 56 + 2];
+    let mut elf32 = elf(&[PT_INTERP]);
+    elf32[4] = 1;
+    let mut big_endian = elf(&[PT_INTERP]);
+    big_endian[5] = 2;
+    for bad in [&b"not elf"[..], &elf(&[])[..40], cut, &elf32, &big_endian] {
+        let e = has_interp(bad).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::InvalidData, "{e}");
+    }
 }

@@ -17,12 +17,14 @@ fn report() -> Report {
             only_loopback: true,
             route_blocked: true,
             host_path_blocked: false,
+            io_uring_errno: Some(1),
         },
         clock_unix_nanos: 42,
         end: Some(End::Signal(9)),
         payload_wall_ns: 7,
         cpu_seconds: 0.25,
         output_hash: "00".repeat(32),
+        pack_refused: Some("too big".into()),
     }
 }
 
@@ -125,11 +127,12 @@ fn seed_hex_must_be_64_lowercase_hex() {
 }
 
 #[test]
-fn selftest_ok_needs_all_three() {
+fn selftest_ok_needs_every_check() {
     let t = SelfTest {
         only_loopback: true,
         route_blocked: true,
         host_path_blocked: true,
+        io_uring_errno: Some(libc::EPERM),
     };
     assert!(t.ok());
     assert!(
@@ -153,6 +156,16 @@ fn selftest_ok_needs_all_three() {
         }
         .ok()
     );
+}
+
+#[test]
+fn a_call_is_denied_absent_or_open_by_its_errno() {
+    assert_eq!(Call::of(Some(libc::EPERM)), Call::Denied);
+    assert_eq!(Call::of(Some(libc::ENOSYS)), Call::Absent);
+    assert_eq!(Call::of(Some(libc::EAFNOSUPPORT)), Call::Absent);
+    assert_eq!(Call::of(Some(libc::EACCES)), Call::Open);
+    assert_eq!(Call::of(Some(libc::EINVAL)), Call::Open);
+    assert_eq!(Call::of(None), Call::Open);
 }
 
 /// A message whose JSON body is exactly `n` bytes.

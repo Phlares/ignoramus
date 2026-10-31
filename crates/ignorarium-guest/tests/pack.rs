@@ -1,19 +1,28 @@
 mod common;
 use common::{entry, file, link, pack, packed};
-use ignorarium_guest::pack::{unpack, write};
-use ignorarium_guest::tree::tree_hash;
+use ignorarium_guest::pack::{ENTRY_MAX, Link, out_caps, unpack, write};
+use ignorarium_guest::tree::{hash_rows, link_row, row, tree_hash, tree_rows};
+use rustix::fs::{Mode, OFlags};
+use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt, symlink};
 use std::path::Path;
 use std::process::Command;
 
-fn round_trip(src: &std::path::Path) {
+/// Packs and unpacks `src`. Both sides hash `src`, and what unpack made, with the links it
+/// recorded, is `src`. Returns the folder unpack made.
+fn round_trip(src: &Path) -> tempfile::TempDir {
     let out = tempfile::tempdir().unwrap();
-    unpack(&mut packed(src).as_slice(), out.path(), 1 << 30).unwrap();
-    assert_eq!(tree_hash(out.path()).unwrap(), tree_hash(src).unwrap());
+    let u = unpack(&mut packed(src).as_slice(), out.path(), 1 << 30).unwrap();
+    assert_eq!(u.hash, tree_hash(src).unwrap());
+    let mut rows = tree_rows(out.path()).unwrap();
+    rows.extend(u.links.iter().map(|l| link_row(&l.path, &l.target)));
+    rows.sort();
+    assert_eq!(rows, tree_rows(src).unwrap());
+    out
 }
 
 #[test]
@@ -34,10 +43,12 @@ fn pack_round_trip_keeps_the_tree() {
             .unwrap()
             .success()
     );
-    round_trip(p);
-    let out = tempfile::tempdir().unwrap();
-    unpack(&mut packed(p).as_slice(), out.path(), 1 << 30).unwrap();
+    let out = round_trip(p);
     assert!(out.path().join("empty").is_dir());
+    // An "other" entry comes back as a FIFO that only its owner may open.
+    let fifo = fs::symlink_metadata(out.path().join("f")).unwrap();
+    assert!(fifo.file_type().is_fifo());
+    assert_eq!(fifo.permissions().mode() & 0o7777, 0o600);
 }
 
 #[test]
@@ -78,7 +89,7 @@ fn the_pack_lists_names_in_byte_order() {
 fn an_empty_dir_packs_to_magic_and_end() {
     let d = tempfile::tempdir().unwrap();
     let mut v = Vec::new();
-    assert_eq!(write(d.path(), &mut v, u64::MAX).unwrap(), 9);
+    assert_eq!(write(d.path(), &mut v, u64::MAX).unwrap().bytes, 9);
     assert_eq!(v, b"IGNPACK1e");
 }
 
@@ -143,52 +154,83 @@ fn many_empty_dirs_meet_the_same_limit_on_both_sides() {
     same_limit_on_both_sides(d.path(), 300);
 }
 
+/// Each link's path and target, in pack order: names in byte order, a folder before what it
+/// holds.
+const LINKS: [(&[u8], &[u8]); 6] = [
+    (b"deep", b"a/../../.."),
+    (b"gone", b"nowhere"),
+    (b"latest", b"/tmp/x"),
+    (b"raw", b"\xff/x"),
+    (b"sub/back", b"../.."),
+    (b"up", b"../x"),
+];
+
 #[test]
-fn link_targets_must_be_relative_without_parent_steps() {
-    let refused: [(&[u8], &[u8]); 7] = [
-        (b"a", b"/etc"),
-        (b"a", b"../x"),
-        (b"a", b"../b"),
-        (b"d/a", b"../b"),
-        (b"d/a", b"../../x"),
-        (b"d/a", b"x/../y"),
-        // With `l -> .` this chain stays inside by a lexical count, yet climbs out when followed.
-        (b"d/m", b"../l/l/../.."),
-    ];
-    for (path, target) in refused {
-        let bytes = pack(&[entry(b'd', b"d"), link(b"l", b"."), link(path, target)]);
-        let out = tempfile::tempdir().unwrap();
-        let e = unpack(&mut bytes.as_slice(), out.path(), 1 << 20).unwrap_err();
-        assert_eq!(e.kind(), ErrorKind::InvalidData, "{e}");
-        let named = format!("{:?}", String::from_utf8_lossy(path));
-        assert!(e.to_string().contains(&named), "{e}");
-        assert!(fs::symlink_metadata(out.path().join(OsStr::from_bytes(path))).is_err());
+fn any_link_target_is_carried_as_data() {
+    let src = tempfile::tempdir().unwrap();
+    fs::write(src.path().join("a.txt"), "hi\n").unwrap();
+    fs::create_dir(src.path().join("sub")).unwrap();
+    let at = |root: &Path, path: &[u8]| root.join(OsStr::from_bytes(path));
+    for (path, target) in LINKS {
+        symlink(OsStr::from_bytes(target), at(src.path(), path)).unwrap();
     }
-    let ok = pack(&[
-        entry(b'd', b"d"),
-        link(b"l", b"."),
-        link(b"d/a", b"b"),
-        link(b"d/c", b"./b/c"),
-    ]);
+    let mut v = Vec::new();
+    let p = write(src.path(), &mut v, u64::MAX).unwrap();
     let out = tempfile::tempdir().unwrap();
-    unpack(&mut ok.as_slice(), out.path(), 1 << 20).unwrap();
-    for (path, target) in [("l", "."), ("d/a", "b"), ("d/c", "./b/c")] {
-        assert_eq!(
-            fs::read_link(out.path().join(path)).unwrap(),
-            Path::new(target)
-        );
+    let u = unpack(&mut v.as_slice(), out.path(), 1 << 20).unwrap();
+    let want: Vec<Link> = LINKS
+        .iter()
+        .map(|(path, target)| Link {
+            path: path.to_vec(),
+            target: target.to_vec(),
+        })
+        .collect();
+    assert_eq!(u.links, want);
+    for (path, _) in LINKS {
+        let made = fs::symlink_metadata(at(out.path(), path));
+        assert_eq!(made.unwrap_err().kind(), ErrorKind::NotFound, "{path:?}");
     }
+    assert_eq!(fs::read(out.path().join("a.txt")).unwrap(), b"hi\n");
+    assert!(out.path().join("sub").is_dir());
+    let hash = tree_hash(src.path()).unwrap();
+    assert_eq!((&p.hash, &u.hash), (&hash, &hash));
+    // A target that is not UTF-8 is hashed as its raw bytes.
+    let rows = tree_rows(src.path()).unwrap();
+    let raw = rows.iter().find(|r| r.path == "raw").unwrap();
+    assert_eq!(raw.digest, hex::encode(Sha256::digest(b"\xff/x")));
 }
 
 #[test]
-fn write_refuses_a_link_that_unpack_would_refuse() {
-    for target in ["/etc", "../b", "x/../y"] {
-        let d = tempfile::tempdir().unwrap();
-        symlink(target, d.path().join("a")).unwrap();
-        let e = write(d.path(), &mut Vec::new(), u64::MAX).unwrap_err();
-        assert_eq!(e.kind(), ErrorKind::InvalidData, "{target}");
-        assert!(e.to_string().contains("\"a\""), "{e}");
+fn empty_nul_and_overlong_targets_are_still_refused() {
+    let long = [b't'; 4096];
+    let cases: [(&[u8], &str); 3] = [
+        (b"", "empty link target"),
+        (b"a\0b", "link target holds a NUL byte"),
+        (&long, "link target is too long"),
+    ];
+    for (target, why) in cases {
+        assert_eq!(
+            refusal(&pack(&[link(b"l", target)])),
+            format!("entry \"l\": {why}")
+        );
     }
+    // 4095 bytes and its NUL fill `PATH_MAX`: the longest target Linux makes.
+    let longest = pack(&[link(b"l", &[b't'; 4095])]);
+    let out = tempfile::tempdir().unwrap();
+    let u = unpack(&mut longest.as_slice(), out.path(), 1 << 20).unwrap();
+    assert_eq!(u.links[0].target, [b't'; 4095]);
+}
+
+#[test]
+fn a_child_under_a_link_is_still_refused() {
+    let under = pack(&[link(b"a", b"/x"), file(b"a/b", b"x")]);
+    assert_eq!(
+        refusal(&under),
+        "entry \"a/b\": parent is not an earlier directory"
+    );
+    // Nothing is made for the link, so only the path list stops a second entry at its path.
+    let again = pack(&[link(b"a", b"x"), file(b"a", b"y")]);
+    assert_eq!(refusal(&again), "entry \"a\": duplicate path");
 }
 
 #[test]
@@ -202,23 +244,69 @@ fn bytes_after_the_end_are_ignored() {
     assert_eq!(tree_hash(out.path()).unwrap(), tree_hash(d.path()).unwrap());
 }
 
-/// Sixteen 255-byte parts: every prefix is a legal path, but the last is too long once
-/// joined to any `dest`.
-fn deep_pack() -> Vec<u8> {
+/// `n` folders of `len`-byte parts, one in the other, and a file `x` as the last part: a
+/// file path of `n * len + n - 1` bytes. Returns the pack and the file's path.
+fn deep_pack(n: usize, len: usize) -> (Vec<u8>, Vec<u8>) {
     let mut parts = Vec::new();
     let mut path = Vec::new();
-    for i in 0..16 {
+    for i in 0..n {
         if i > 0 {
             path.push(b'/');
         }
-        path.extend_from_slice(&[b'p'; 255]);
-        parts.push(if i < 15 {
+        path.extend(std::iter::repeat_n(b'p', len));
+        parts.push(if i < n - 1 {
             entry(b'd', &path)
         } else {
             file(&path, b"x")
         });
     }
-    pack(&parts)
+    (pack(&parts), path)
+}
+
+/// The bytes of the file at `rel` below `dir`, opened relative to `dir`, so the whole path
+/// may be past `PATH_MAX`.
+fn read_below(dir: &Path, rel: &[u8]) -> Vec<u8> {
+    let at = rustix::fs::open(dir, OFlags::DIRECTORY | OFlags::RDONLY, Mode::empty()).unwrap();
+    let f = rustix::fs::openat(&at, OsStr::from_bytes(rel), OFlags::RDONLY, Mode::empty());
+    let mut bytes = Vec::new();
+    fs::File::from(f.unwrap()).read_to_end(&mut bytes).unwrap();
+    bytes
+}
+
+#[test]
+fn a_path_of_4095_bytes_unpacks_below_any_dest_and_4096_is_refused() {
+    // The host makes each entry relative to `dest`, so the length of `dest` does not count.
+    let top = tempfile::tempdir().unwrap();
+    let dest = top.path().join("d".repeat(250));
+    fs::create_dir(&dest).unwrap();
+    let (longest, path) = deep_pack(16, 255);
+    assert_eq!(path.len(), 4095);
+    let u = unpack(&mut longest.as_slice(), &dest, 1 << 20).unwrap();
+    let digest = hex::encode(Sha256::digest(b"x"));
+    assert_eq!(u.hash, hash_rows(&[row(&path, "file", digest)]).unwrap());
+    assert_eq!(read_below(&dest, &path), b"x");
+    // 4096 bytes and the NUL do not fit in `PATH_MAX`.
+    let (over, path) = deep_pack(17, 240);
+    assert_eq!(path.len(), 4096);
+    let msg = refusal(&over);
+    assert!(msg.ends_with(": path is too long"), "{msg}");
+}
+
+#[test]
+fn a_tree_past_path_max_is_refused_as_what_the_payload_left() {
+    // A payload can make it with calls relative to a folder; the walk cannot name its end.
+    let d = tempfile::tempdir().unwrap();
+    let part = "d".repeat(200);
+    let mut at = rustix::fs::open(d.path(), OFlags::DIRECTORY | OFlags::RDONLY, Mode::empty());
+    for _ in 0..21 {
+        let fd = at.unwrap();
+        rustix::fs::mkdirat(&fd, part.as_str(), Mode::from_raw_mode(0o755)).unwrap();
+        at = rustix::fs::openat(&fd, part.as_str(), OFlags::DIRECTORY, Mode::empty());
+    }
+    let e = write(d.path(), &mut Vec::new(), 1 << 30).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::InvalidData, "{e}");
+    let msg = e.to_string();
+    assert!(msg.starts_with("an output path is too long: "), "{msg}");
 }
 
 #[test]
@@ -257,7 +345,6 @@ fn hostile_packs_are_refused() {
         ),
         ("lone slash", pack(&[entry(b'd', b"/")]), 1 << 20),
         ("long part", pack(&[file(&[b'p'; 256], b"x")]), 1 << 20),
-        ("empty link target", pack(&[link(b"l", b"")]), 1 << 20),
         ("nul", pack(&[file(b"a\0b", b"x")]), 1 << 20),
         ("long", pack(&[file(&long_name, b"x")]), 1 << 20),
         ("dup", pack(&[file(b"a", b"x"), file(b"a", b"y")]), 1 << 20),
@@ -269,6 +356,11 @@ fn hostile_packs_are_refused() {
         (
             "under link",
             pack(&[link(b"l", b"."), file(b"l/x", b"x")]),
+            1 << 20,
+        ),
+        (
+            "link under link",
+            pack(&[link(b"a", b"sub"), link(b"a/b", b"/etc")]),
             1 << 20,
         ),
         (
@@ -296,13 +388,6 @@ fn hostile_packs_are_refused() {
         ("bad kind", pack(&[entry(b'z', b"a")]), 1 << 20),
         ("truncated path", b"IGNPACK1f\0\0\0\x09ab".to_vec(), 1 << 20),
         ("no end", b"IGNPACK1".to_vec(), 1 << 20),
-        ("link target nul", pack(&[link(b"l", b"a\0b")]), 1 << 20),
-        (
-            "link target at the path limit",
-            pack(&[link(b"l", &[b't'; 4096])]),
-            1 << 20,
-        ),
-        ("path past the limit with dest", deep_pack(), 1 << 20),
     ];
     for (name, bytes, limit) in cases {
         let outer = tempfile::tempdir().unwrap();
@@ -403,4 +488,27 @@ fn a_bad_link_target_field_names_the_entry() {
     cut.extend_from_slice(b"ab");
     let msg = refusal(&pack(&[cut]));
     assert!(msg.starts_with("entry \"l\": "), "{msg}");
+}
+
+#[test]
+fn a_full_out_always_fits_the_pack() {
+    // An entry's block, a link entry's kind and two lengths, a 4096-byte path and a
+    // 4095-byte target: the most one entry adds besides file data.
+    assert_eq!(ENTRY_MAX, 4096 + 1 + 4 + 4096 + 4 + 4095);
+    assert_eq!(out_caps(1 << 20), (1 << 19, (1 << 19) / ENTRY_MAX));
+    for limit in [1 << 20, (1 << 20) + 1, 16 << 20, 256 << 20] {
+        let (bytes, inodes) = out_caps(limit);
+        assert!(inodes >= 2, "{limit}: {inodes} inodes");
+        // tmpfs rounds its size up to a page, and its root takes one inode. The pack
+        // adds its magic and end byte.
+        let worst = 9 + bytes.next_multiple_of(4096) + (inodes - 1) * ENTRY_MAX;
+        assert!(
+            worst <= limit,
+            "{limit}: a full /out packs to {worst} bytes"
+        );
+    }
+    let d = tempfile::tempdir().unwrap();
+    let (bytes, _) = out_caps(1 << 20);
+    fs::write(d.path().join("full"), vec![1u8; bytes as usize]).unwrap();
+    write(d.path(), &mut Vec::new(), 1 << 20).unwrap();
 }

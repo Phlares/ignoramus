@@ -3,9 +3,11 @@
 //! `IGNORARIUM_VM_VMM` (the VMM binary), `IGNORARIUM_VM_KERNEL` (its guest kernel) and
 //! `IGNORARIUM_VM_ROOTFS` (an ext4 image of the environment: a merged-usr root with `sh`,
 //! coreutils, `setsid` and Python with numpy).
+mod common;
+use common::write_exec;
 use ignorarium_guest::agent::steps::now_nanos;
 use ignorarium_guest::host::{HostJob, REPORT_SLACK, Vm, VmError, VmOutcome, run_row};
-use ignorarium_guest::image::initramfs;
+use ignorarium_guest::image::{has_interp, initramfs};
 use ignorarium_guest::proto::End;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -26,20 +28,6 @@ fn var(name: &str) -> PathBuf {
         .unwrap_or_else(|| panic!("set {name}; see the top of tests/vm.rs"))
 }
 
-/// True when the ELF file names a program interpreter, so it needs a dynamic loader.
-fn has_interp(elf: &[u8]) -> bool {
-    const PT_INTERP: u32 = 3;
-    assert!(elf.starts_with(b"\x7fELF\x02\x01"), "not a 64-bit LE ELF");
-    let le = |at: usize, n: usize| {
-        elf[at..at + n]
-            .iter()
-            .rev()
-            .fold(0usize, |v, &b| v << 8 | b as usize)
-    };
-    let (phoff, size, count) = (le(0x20, 8), le(0x36, 2), le(0x38, 2));
-    (0..count).any(|i| le(phoff + i * size, 4) == PT_INTERP as usize)
-}
-
 struct Row {
     dir: tempfile::TempDir,
     vm: Vm,
@@ -47,18 +35,23 @@ struct Row {
 }
 
 impl Row {
-    /// A row that runs `script` with `/bin/sh -c`. The input dir holds `data.txt`.
+    /// A row that runs `script` with `/bin/sh -c`. The input dir holds `data.txt`; the
+    /// payload dir starts empty.
     fn sh(script: &str) -> Row {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
-        for d in ["in", "out", "work"] {
+        for d in ["in", "out", "work", "payload"] {
             fs::create_dir(p.join(d)).unwrap();
+        }
+        // The payload runs as another user, so both trees must be open to others.
+        for d in ["in", "payload"] {
+            fs::set_permissions(p.join(d), fs::Permissions::from_mode(0o755)).unwrap();
         }
         fs::write(p.join("in/data.txt"), "input bytes\n").unwrap();
         let agent = Path::new(env!("CARGO_BIN_EXE_ignorarium-guest"));
         let bytes = fs::read(agent).unwrap();
         assert!(
-            !has_interp(&bytes),
+            !has_interp(&bytes).unwrap(),
             "{} is linked dynamically, so it cannot run as /init; build it static: {STATIC_BUILD}",
             agent.display()
         );
@@ -80,6 +73,7 @@ impl Row {
             argv: ["/bin/sh", "-c", script].map(String::from).to_vec(),
             env: vec![("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into())],
             input_dir: p.join("in"),
+            payload_dir: p.join("payload"),
             output_dir: p.join("out"),
             seed: SEED,
             wall_timeout: secs(60),
@@ -88,7 +82,7 @@ impl Row {
     }
 
     fn try_run(&self) -> Result<VmOutcome, VmError> {
-        let res = run_row(&self.vm, &self.job, &self.dir.path().join("work"));
+        let res = run_row(&self.vm, &self.job, &self.dir.path().join("work"), &|| true);
         if let Ok(o) = &res {
             eprintln!("{:?}", o.timings);
         }
@@ -124,6 +118,8 @@ fn a_row_runs_in_a_fresh_vm() {
         st.only_loopback && st.route_blocked && st.host_path_blocked,
         "{st:?}"
     );
+    // The agent switches io_uring off, so the guest kernel refuses it to every process.
+    assert_eq!(st.io_uring_errno, Some(libc::EPERM), "{st:?}");
     assert_eq!(o.report.end, Some(End::Code(0)));
     assert_eq!(o.output_hash, o.report.output_hash);
     assert_eq!(row.out("seed"), hex::encode(SEED));
@@ -167,7 +163,7 @@ fn the_payload_view_is_the_documented_layout() {
     let o = row.run();
     assert_eq!(
         row.out("root"),
-        "bin\ndev\netc\nin\nlib\nlib64\nout\nproc\ntmp\nusr\n"
+        "bin\ndev\netc\nin\nlib\nlib64\nout\npayload\nproc\ntmp\nusr\n"
     );
     assert_eq!(row.out("dev"), "full\nnull\nrandom\ntty\nurandom\nzero\n");
     assert_eq!(row.out("bin"), "usr/bin\n");
@@ -180,6 +176,7 @@ fn the_payload_view_is_the_documented_layout() {
         "/etc ro,nosuid,nodev,relatime",
         "/in ro,nosuid,nodev,relatime",
         "/out rw,nosuid,nodev,relatime",
+        "/payload ro,nosuid,nodev,relatime",
         "/proc rw,nosuid,nodev,noexec,relatime",
         "/tmp rw,nosuid,nodev,relatime",
         "/usr ro,nosuid,nodev,relatime",
@@ -301,19 +298,76 @@ fn errors_after_connect_come_back_as_failures() {
     let mut row = Row::sh("");
     row.job.argv = vec!["/no/such/program".into()];
     guest_failed(&row, "No such file");
-    // The file fills the 16 MiB output disk, so the pack, with its headers, does not fit.
-    let row = Row::sh("head -c 16M /dev/zero > /out/big");
-    guest_failed(&row, "outputs exceed the output limit of 16777216 bytes");
 }
 
 #[test]
 #[ignore = "boots a VM; see the top of the file"]
-fn an_input_dir_closed_to_others_is_still_readable() {
-    // The image root does not take the mode of the input dir, so only the entries below it
-    // need other-read.
-    let row = Row::sh("cat /in/data.txt > /out/copy");
-    fs::set_permissions(&row.job.input_dir, fs::Permissions::from_mode(0o700)).unwrap();
+fn the_payload_folder_is_read_only_at_slash_payload() {
+    let mut row = Row::sh("");
+    let script = concat!(
+        "#!/bin/sh\n",
+        "printf %s \"$0\" > /out/argv0\n",
+        "if touch /payload/x 2> /dev/null; then echo wrote; else echo refused; fi > /out/touch\n",
+    );
+    write_exec(&row.job.payload_dir.join("run"), script);
+    row.job.argv = vec!["/payload/run".into()];
     let o = row.run();
     assert_eq!(o.report.end, Some(End::Code(0)));
-    assert_eq!(row.out("copy"), "input bytes\n");
+    assert_eq!(row.out("argv0"), "/payload/run");
+    assert_eq!(row.out("touch"), "refused\n");
+}
+
+#[test]
+#[ignore = "boots a VM; see the top of the file"]
+fn the_payload_starts_in_out() {
+    // As at level 1, so a payload that writes a relative path works at both levels.
+    let row = Row::sh("pwd > /out/pwd; echo rel > relative");
+    let o = row.run();
+    assert_eq!(o.report.end, Some(End::Code(0)));
+    assert_eq!(
+        row.out("pwd"),
+        "/out
+"
+    );
+    assert_eq!(
+        row.out("relative"),
+        "rel
+"
+    );
+}
+
+#[test]
+#[ignore = "boots a VM; see the top of the file"]
+fn an_output_tree_past_path_max_is_the_payloads_result() {
+    // 21 folders of 200 bytes, made with relative calls: the walk cannot name the deepest.
+    // A shell's `cd` goes by the whole path, so Python makes them.
+    let o = Row::sh(
+        "python3 -c 'import os\nos.chdir(\"/out\")\nfor _ in range(21):\n    \
+         os.mkdir(\"0\" * 200)\n    os.chdir(\"0\" * 200)\nopen(\"f\", \"w\").write(\"x\")'",
+    )
+    .run();
+    assert_eq!(o.report.end, Some(End::Code(0)));
+    let why = o.report.pack_refused.unwrap_or_default();
+    assert!(why.starts_with("\"an output path is too long: "), "{why}");
+    assert_eq!(o.output_hash, "");
+}
+
+#[test]
+#[ignore = "boots a VM; see the top of the file"]
+fn a_sparse_output_is_the_payloads_result() {
+    // A sparse file and hard links take less of /out than they take of the pack: the pack
+    // refuses them, and the payload's own run stands.
+    for script in [
+        "truncate -s 1G /out/sparse",
+        "head -c 6M /dev/zero > /out/a; ln /out/a /out/b; ln /out/a /out/c",
+    ] {
+        let o = Row::sh(script).run();
+        assert_eq!(o.report.end, Some(End::Code(0)), "{script}");
+        assert_eq!(
+            o.report.pack_refused.as_deref(),
+            Some("\"outputs exceed the output limit of 16777216 bytes\""),
+            "{script}"
+        );
+        assert_eq!(o.output_hash, "", "{script}");
+    }
 }

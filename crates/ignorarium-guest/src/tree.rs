@@ -1,40 +1,70 @@
 //! Directory trees: one walk, and the output hash, SHA-256 of the rows
-//! `[relpath, kind, digest]` sorted as whole rows.
-use serde_json::{Value, json};
+//! `[relpath, kind, digest]` sorted as whole rows. A file's digest is the SHA-256 of its
+//! bytes and a link's the SHA-256 of its target bytes; other kinds have none.
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, FileType, OpenOptions};
 use std::io::{self, Read};
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-pub fn tree_hash(dir: &Path) -> io::Result<String> {
+/// One entry below a folder: its path as text, `file`, `link` or `other`, and its digest.
+/// Folders have no row.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TreeRow {
+    pub path: String,
+    pub kind: &'static str,
+    pub digest: String,
+}
+
+/// The row of the entry at `rel`, the `/`-separated path bytes below the folder.
+pub fn row(rel: &[u8], kind: &'static str, digest: String) -> TreeRow {
+    TreeRow {
+        path: rel_text(rel),
+        kind,
+        digest,
+    }
+}
+
+/// A link's row. The target is never followed: the row records where the link points.
+pub fn link_row(rel: &[u8], target: &[u8]) -> TreeRow {
+    row(rel, "link", hex::encode(Sha256::digest(target)))
+}
+
+/// The rows of every entry below `dir`, sorted. A linked `dir` is an error.
+pub fn tree_rows(dir: &Path) -> io::Result<Vec<TreeRow>> {
     if fs::symlink_metadata(dir)?.file_type().is_symlink() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "top dir is a link",
         ));
     }
-    let mut rows: Vec<(String, &str, String)> = Vec::new();
+    let mut rows = Vec::new();
     walk(dir, &mut |rel, path, ty| {
-        let (kind, digest) = if ty.is_dir() {
-            return Ok(());
-        } else if ty.is_symlink() {
-            ("link", String::new())
-        } else if ty.is_file()
-            && let Some(f) = open_regular(path)?
-        {
-            ("file", sha256_hex(f)?)
-        } else {
-            ("other", String::new())
-        };
-        rows.push((rel_text(rel), kind, digest));
+        rows.push(match Entry::of(path, ty)? {
+            Entry::Dir => return Ok(()),
+            Entry::Link(target) => link_row(rel, &target),
+            Entry::File(f) => row(rel, "file", sha256_hex(f)?),
+            Entry::Other => row(rel, "other", String::new()),
+        });
         Ok(())
     })?;
     rows.sort();
-    let rows: Vec<Value> = rows.into_iter().map(|(p, k, d)| json!([p, k, d])).collect();
-    let bytes = serde_json::to_vec(&Value::Array(rows))?;
-    Ok(hex::encode(Sha256::digest(bytes)))
+    Ok(rows)
+}
+
+/// SHA-256 of the rows as compact JSON, taken in sorted order whatever order they come in.
+/// The JSON goes straight into the hasher, so no copy of it is held.
+pub fn hash_rows(rows: &[TreeRow]) -> io::Result<String> {
+    let mut rows: Vec<_> = rows.iter().map(|r| (&r.path, r.kind, &r.digest)).collect();
+    rows.sort();
+    let mut h = Sha256::new();
+    serde_json::to_writer(&mut h, &rows)?;
+    Ok(hex::encode(h.finalize()))
+}
+
+pub fn tree_hash(dir: &Path) -> io::Result<String> {
+    hash_rows(&tree_rows(dir)?)
 }
 
 /// `rel` as text, part by part; a part that is not UTF-8 becomes `!bytes:<hex>`.
@@ -79,8 +109,39 @@ fn walk_below(
     Ok(())
 }
 
-/// `None` when the path stopped being a regular file between listing and open.
-pub(crate) fn open_regular(path: &Path) -> io::Result<Option<File>> {
+/// What a walked entry is, read without following a link. The hash and the pack both decide
+/// an entry's kind here, so they cannot disagree.
+pub(crate) enum Entry {
+    Dir,
+    /// The target bytes.
+    Link(Vec<u8>),
+    /// Open for reading.
+    File(File),
+    Other,
+}
+
+impl Entry {
+    /// The entry at `path`, which the walk listed as `ty`. A file that stopped being a regular
+    /// file after the listing is `Other`.
+    pub(crate) fn of(path: &Path, ty: FileType) -> io::Result<Entry> {
+        Ok(if ty.is_dir() {
+            Entry::Dir
+        } else if ty.is_symlink() {
+            Entry::Link(fs::read_link(path)?.into_os_string().into_vec())
+        } else if ty.is_file()
+            && let Some(f) = open_regular(path)?
+        {
+            Entry::File(f)
+        } else {
+            Entry::Other
+        })
+    }
+}
+
+/// The regular file at `path`, open for reading, without following a link or blocking on a
+/// FIFO. `None` when the path names anything else, as when it stopped being a regular file
+/// between listing and open.
+pub fn open_regular(path: &Path) -> io::Result<Option<File>> {
     let f = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -93,7 +154,8 @@ pub(crate) fn open_regular(path: &Path) -> io::Result<Option<File>> {
     Ok(f.metadata()?.file_type().is_file().then_some(f))
 }
 
-pub(crate) fn sha256_hex(mut r: impl Read) -> io::Result<String> {
+/// SHA-256 of what `r` yields, streamed.
+pub fn sha256_hex(mut r: impl Read) -> io::Result<String> {
     let mut h = Sha256::new();
     io::copy(&mut r, &mut h)?;
     Ok(hex::encode(h.finalize()))

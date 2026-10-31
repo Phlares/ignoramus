@@ -7,11 +7,10 @@ pub mod steps;
 
 use crate::pack;
 use crate::proto::{
-    CONTROL_PORT, GUEST_OUT, HOST_CID, Job, Report, SERIAL_IN, SERIAL_OUT, SERIAL_ROOTFS, SelfTest,
-    ToHost, read_frame, seed_from_hex, write_frame,
+    CONTROL_PORT, GUEST_OUT, HOST_CID, Job, Report, SERIAL_IN, SERIAL_OUT, SERIAL_PAYLOAD,
+    SERIAL_ROOTFS, SelfTest, ToHost, read_frame, seed_from_hex, write_frame,
 };
 use crate::sys::{kill_all_others, vsock_connect};
-use crate::tree::tree_hash;
 use payload::Ran;
 use rustix::io::Errno;
 use rustix::mount::MountFlags;
@@ -26,7 +25,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::thread::sleep;
 use std::time::Duration;
-use steps::{disk_by_serial, disk_bytes, mix_seed, now_nanos, set_clock};
+use steps::{disable_io_uring, disk_by_serial, disk_bytes, mix_seed, now_nanos, set_clock};
 
 /// The payload's user and group: `nobody` and `nogroup` in Debian-based images.
 pub const PAYLOAD_UID: u32 = 65534;
@@ -66,9 +65,11 @@ fn run() -> io::Result<()> {
             _ => {}
         }
     }
+    disable_io_uring(Path::new("/proc/sys/kernel/io_uring_disabled"))?;
     let sys_block = Path::new("/sys/block");
     let disk = |serial| disk_by_serial(sys_block, serial);
     let (rootfs, inputs, out) = (disk(SERIAL_ROOTFS)?, disk(SERIAL_IN)?, disk(SERIAL_OUT)?);
+    let payload = disk(SERIAL_PAYLOAD)?;
     let env = Path::new("/env");
     fs::create_dir_all(env)?;
     sandbox::mount_fs(&rootfs, env, "ext4", MountFlags::RDONLY, "")?;
@@ -76,7 +77,7 @@ fn run() -> io::Result<()> {
     // comes with the last close of a block device, must put the pack on the disk.
     let mut out_disk = OpenOptions::new().write(true).open(&out)?;
     let out_bytes = disk_bytes(sys_block, &out)?;
-    sandbox::build(env, Path::new("/sandbox"), &inputs, out_bytes)?;
+    sandbox::build(env, Path::new("/sandbox"), &inputs, &payload, out_bytes)?;
 
     let mut chan = File::from(connect()?);
     let agent = env!("CARGO_PKG_VERSION").to_string();
@@ -127,15 +128,22 @@ fn row(chan: &mut File, out_disk: &mut File, out_bytes: u64) -> io::Result<Repor
         std::env::set_current_dir("/")?;
         // Inherited by the payload, so no setuid file gives it root again.
         set_no_new_privs(true)?;
-        let ran = payload::run_as(&job, Some((PAYLOAD_UID, PAYLOAD_GID)))?;
+        // The payload starts in its output folder, as at level 1.
+        let out = Path::new(GUEST_OUT);
+        let ran = payload::run_as(&job, Some((PAYLOAD_UID, PAYLOAD_GID)), out)?;
         kill_all_others()?;
         reap_all()?;
-        let out = Path::new(GUEST_OUT);
-        let hash = tree_hash(out)?;
         let mut w = BufWriter::new(out_disk);
-        pack::write(out, &mut w, out_bytes)?;
+        let packed = match pack::write(out, &mut w, out_bytes) {
+            Ok(p) => p,
+            // Over the limit, or an entry the pack does not carry: what the payload left.
+            Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                return Ok((ran, Err(e.to_string())));
+            }
+            Err(e) => return Err(e),
+        };
         w.into_inner()?.sync_all()?;
-        Ok((ran, hash))
+        Ok((ran, Ok(packed.hash)))
     })
 }
 
@@ -151,22 +159,27 @@ fn reap_all() -> io::Result<()> {
     }
 }
 
-/// Runs the payload only when the self-test passed. `run` returns the run and its output hash.
+/// Runs the payload only when the self-test passed. `run` returns the run, and the output
+/// hash or why the pack refused the outputs.
 pub fn gate(
     selftest: SelfTest,
     clock_unix_nanos: u64,
-    run: impl FnOnce() -> io::Result<(Ran, String)>,
+    run: impl FnOnce() -> io::Result<(Ran, Result<String, String>)>,
 ) -> io::Result<Report> {
-    let (end, payload_wall_ns, cpu_seconds, output_hash) = if selftest.ok() {
-        let (ran, hash) = run()?;
+    let (end, payload_wall_ns, cpu_seconds, packed) = if selftest.ok() {
+        let (ran, packed) = run()?;
         (
             Some(ran.end),
             ran.wall.as_nanos() as u64,
             ran.cpu_seconds,
-            hash,
+            packed,
         )
     } else {
-        (None, 0, 0.0, String::new())
+        (None, 0, 0.0, Ok(String::new()))
+    };
+    let (output_hash, pack_refused) = match packed {
+        Ok(hash) => (hash, None),
+        Err(why) => (String::new(), Some(why)),
     };
     Ok(Report {
         selftest,
@@ -175,6 +188,7 @@ pub fn gate(
         payload_wall_ns,
         cpu_seconds,
         output_hash,
+        pack_refused,
     })
 }
 

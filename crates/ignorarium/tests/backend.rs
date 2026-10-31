@@ -171,9 +171,11 @@ fn output_hash_records_links_and_nested_files_without_following() {
     std::fs::write(d.path().join("a/b/c"), b"x").unwrap();
     std::fs::write(d.path().join("z"), b"y").unwrap();
     std::os::unix::fs::symlink("/etc/hostname", d.path().join("a/ln")).unwrap();
+    // A link's digest is the SHA-256 of its target bytes.
     let m = format!(
-        "[[\"a/b/c\",\"file\",\"{}\"],[\"a/ln\",\"link\",\"\"],[\"z\",\"file\",\"{}\"]]",
+        "[[\"a/b/c\",\"file\",\"{}\"],[\"a/ln\",\"link\",\"{}\"],[\"z\",\"file\",\"{}\"]]",
         sha(b"x"),
+        sha(b"/etc/hostname"),
         sha(b"y")
     );
     assert_eq!(output_hash(d.path()).unwrap(), sha(m.as_bytes()));
@@ -267,10 +269,9 @@ fn a_symlinked_output_dir_is_refused() {
     j.output_dir = ln;
     // The box made a real folder, so a link there is the payload's doing: void, no retry.
     let o = Level0.run_row(&j, &|| true).unwrap();
-    assert!(
-        matches!(&o.exit, Exit::Void(why) if why.starts_with("cannot hash output: ")),
-        "{:?}",
-        o.exit
+    assert_eq!(
+        o.exit,
+        Exit::Void("cannot hash output: top dir is a link".into())
     );
     assert_eq!(o.output_hash, "");
 }
@@ -387,7 +388,7 @@ fn within<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
 #[test]
 fn waits_on_a_process_that_is_not_a_child_fail_at_once() {
     let me = std::process::id();
-    assert!(within(move || sys::wait4(me, true)).is_err());
+    assert!(within(move || sys::wait4(me)).is_err());
     assert!(within(move || sys::has_exited(me)).is_err());
 }
 
@@ -421,6 +422,10 @@ fn every_registered_backend_reports_each_sandbox_start_as_a_leader() {
     let box_exe = env!("CARGO_BIN_EXE_ignorarium");
     for b in ignorarium::backend::registered() {
         let level = b.level();
+        // Level 2 needs an environment image; its leaders are covered in tests/level2.rs.
+        if level == 2 {
+            continue;
+        }
         let b: Box<dyn Backend> = if level == 1 {
             Box::new(level1::Level1::with(bwrap.clone(), box_exe.into()))
         } else {

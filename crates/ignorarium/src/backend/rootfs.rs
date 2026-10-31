@@ -164,6 +164,16 @@ pub fn from_store(store: &Store, store_digest: &str) -> Result<PathBuf, RootfsEr
     from_store_capped(store, store_digest, LIMITS)
 }
 
+/// The environment whose root is `root`, named for a reason that can reach a record: the
+/// last part of the path, the store digest for a root `from_store` publishes, so no path of
+/// the box's home goes in.
+pub fn name_of(root: &Path) -> String {
+    root.file_name().map_or_else(
+        || root.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
+}
+
 /// `from_store` with other limits. An image over one fails the call and publishes nothing.
 pub fn from_store_capped(
     store: &Store,

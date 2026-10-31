@@ -203,6 +203,87 @@ fn the_pick_waits_for_every_selection_row() {
     assert!(selections_of(&lab, "partial").is_empty());
 }
 
+const NO_HOST_PATHS: &str = "a_backend_message_reaches_records_without_host_paths";
+
+/// A backend's messages name the study root, the box home and the user's home, each as given
+/// (through a link) and as its real path. The signed records hold placeholders instead.
+#[test]
+fn a_backend_message_reaches_records_without_host_paths() {
+    use std::os::unix::fs::symlink;
+    let linked = |d: &std::path::Path, real: &str, link: &str| {
+        std::fs::create_dir(d.join(real)).unwrap();
+        symlink(d.join(real), d.join(link)).unwrap();
+        d.join(link)
+    };
+    if !common::is_child(NO_HOST_PATHS) {
+        let d = tempfile::TempDir::new().unwrap();
+        let user = linked(d.path(), "real-user", "user");
+        let envs = [("HOME", user.as_os_str())];
+        // The crate folder, where the template's relative path starts.
+        let here = std::env::current_dir().unwrap();
+        assert!(common::in_child(NO_HOST_PATHS, &here, &envs));
+        return;
+    }
+    let d = tempfile::TempDir::new().unwrap();
+    let root = linked(d.path(), "real", "lab");
+    let home = ignorarium::home::Home::open_at(&root.join("home")).unwrap();
+    std::fs::write(home.root.join("machine.toml"), "max_level = 1\n").unwrap();
+    let lab = Lab {
+        _dir: d,
+        home,
+        root,
+    };
+    plain(&lab, "paths");
+    let work = common::work_of(&lab.home, "paths");
+    let user = std::env::home_dir().unwrap();
+    let mut spellings = Vec::new();
+    for p in [&work, &lab.home.root, &user] {
+        let real = std::fs::canonicalize(p).unwrap();
+        assert_ne!(&real, p);
+        spellings.extend([p.display().to_string(), real.display().to_string()]);
+    }
+    let [r1, r2, h1, h2, u1, u2] = &spellings[..] else {
+        unreachable!()
+    };
+    let msg = format!("r {r1}/x {r2}/x h {h1}/y {h2}/y u {u1}/z {u2}/z");
+    let want = "r <root>/x <root>/x h <home>/y <home>/y u ~/z ~/z";
+    let (mut b, _) = fake(vec![Exit::Infra(msg.clone()), Exit::Void(msg.clone())]);
+    b.unknown = Some(msg);
+    let plan = prepare_with(&lab.home, "paths", &work, vec![Box::new(b)]).unwrap();
+    let paused = "row 0 has an unknown CPU count; it is charged the row estimate";
+    assert_eq!(run(&plan).unwrap(), RunStatus::Paused(paused.into()));
+    let spend = kind_of(&lab, "paths", "spend");
+    let row = rows_of(&lab, "paths");
+    assert_eq!((spend.len(), row.len()), (1, 1));
+    let reason = format!("infrastructure fault: {want}");
+    assert_eq!(
+        (&spend[0].body["reason"], &spend[0].body["cpu_unknown"]),
+        (&serde_json::json!(reason), &serde_json::json!(want))
+    );
+    assert_eq!(
+        (&row[0].body["reason"], &row[0].body["cpu_unknown"]),
+        (&serde_json::json!(want), &serde_json::json!(want))
+    );
+    for record in [&spend[0], &row[0]] {
+        let text = record.body.to_string();
+        assert!(spellings.iter().all(|p| !text.contains(p)), "{text}");
+    }
+}
+
+#[test]
+fn a_pause_for_an_unavailable_backend_names_no_host_path() {
+    let lab = lab();
+    plain(&lab, "probe-paths");
+    let mut plan = plan_of(&lab, "probe-paths");
+    let (mut b, _) = fake(vec![Exit::Infra("box fault".into())]);
+    b.probe = Probe::Unavailable(format!("{}/vmm is gone", lab.home.root.display()));
+    plan.backend = Box::new(b);
+    let why = "backend unavailable: <home>/vmm is gone";
+    assert_eq!(run(&plan).unwrap(), RunStatus::Paused(why.into()));
+    let ev = events_of(&lab.home.study_dir("probe-paths"));
+    assert_eq!(named(&ev, "run.pause")[0]["attrs"]["reason"], why);
+}
+
 /// Runs level 0, then replaces the exit with the next scripted one.
 struct Fake {
     script: RefCell<VecDeque<Exit>>,
@@ -211,6 +292,9 @@ struct Fake {
     panic_at: Option<u64>,
     level: u8,
     wall: Option<f64>,
+    /// Every attempt reports its CPU count unknown, for this reason.
+    unknown: Option<String>,
+    agent: Option<String>,
 }
 
 impl Backend for Fake {
@@ -219,6 +303,9 @@ impl Backend for Fake {
     }
     fn launcher(&self) -> String {
         "process".into()
+    }
+    fn agent_sha256(&self) -> Option<String> {
+        self.agent.clone()
     }
     fn level(&self) -> u8 {
         self.level
@@ -238,6 +325,7 @@ impl Backend for Fake {
         if self.panic_at == Some(index) {
             panic!("crash after the sandbox exits");
         }
+        o.cpu_unknown.clone_from(&self.unknown);
         Ok(match self.script.borrow_mut().pop_front() {
             Some(exit) => RowOutcome { exit, ..o },
             None => o,
@@ -254,6 +342,8 @@ fn fake(script: Vec<Exit>) -> (Fake, Rc<RefCell<Vec<u64>>>) {
         panic_at: None,
         level: 0,
         wall: None,
+        unknown: None,
+        agent: None,
     };
     (b, seen)
 }
@@ -303,6 +393,7 @@ fn run_writes_one_record_per_row_in_order() {
         assert_eq!(r.body["attempts"], 1);
         assert_eq!(r.body["isolation"], 0);
         assert_eq!(r.body["launcher"], "process");
+        assert_eq!(r.body.get("agent_sha256"), None);
         assert_eq!(r.body["payload_sha256"], plan.payload_sha256.as_str());
         assert_eq!(r.body["data_hashes"].as_array().unwrap().len(), 1);
         assert_eq!(r.body["output_hash"].as_str().unwrap().len(), 64);
@@ -1462,11 +1553,13 @@ fn the_highest_backend_that_meets_min_isolation_runs() {
             .backend
             .level()
     };
-    assert_eq!(pick("lvl0", &[2, 0, 1]), 2);
+    // Level 2 runs rows only in an environment image, and these studies have none.
+    assert_eq!(pick("lvl0", &[2, 0, 1]), 1);
     assert_eq!(pick("lvl0", &[0, 1]), 1);
     assert_eq!(pick("lvl0", &[1, 0]), 1);
     assert_eq!(pick("lvl0", &[0]), 0);
-    assert_eq!(pick("lvl1", &[2, 0, 1]), 2);
+    assert_eq!(pick("lvl0", &[0, 2]), 0);
+    assert_eq!(pick("lvl1", &[2, 0, 1]), 1);
     assert_eq!(pick("lvl1", &[0, 1]), 1);
     let only0 = prepare_with(
         &lab.home,
@@ -1479,6 +1572,50 @@ fn the_highest_backend_that_meets_min_isolation_runs() {
     assert!(
         matches!(&only0, RunError::NoBackend { need: 1, have } if *have == [0]),
         "{only0}"
+    );
+}
+
+fn probed_at(level: u8, probe: Probe) -> Box<dyn Backend> {
+    let (mut b, _) = fake(vec![]);
+    (b.level, b.probe) = (level, probe);
+    Box::new(b)
+}
+
+#[test]
+fn only_the_levels_this_host_can_run_are_candidates() {
+    // Level 2 is available and level 1 is not, as on a host that blocks user namespaces.
+    let lab = lab();
+    plain(&lab, "gap0");
+    register_study(&lab, "gap1", need_isolation, &[], PAYLOAD);
+    let blocked = || Probe::Unavailable("user namespaces are blocked".into());
+    let gap = || vec![fake_at(0), probed_at(1, blocked()), fake_at(2)];
+    let prepare = |id: &str, all| prepare_with(&lab.home, id, &common::work_of(&lab.home, id), all);
+    // Level 2 needs an image these studies lack, and level 1 cannot run here.
+    let err = prepare("gap1", gap()).err().unwrap();
+    assert_eq!(
+        err.to_string(),
+        "environment: level 2 runs rows in the study's environment image; \
+         add env/ or set pins.environment"
+    );
+    assert!(!lab.home.study_dir("gap1").join("schedule.json").exists());
+    let plan = prepare("gap0", gap()).unwrap();
+    assert_eq!(plan.backend.level(), 0);
+    let ev = events_of(&lab.home.study_dir("gap0"));
+    assert_eq!(
+        named(&ev, "run.isolation")[0]["attrs"],
+        serde_json::json!({
+            "level": 0,
+            "skipped": [2],
+            "reason": "level 2 runs rows in the study's environment image; \
+                       the study has no env/ and no pins.environment"
+        })
+    );
+    // What the host has is what it can run.
+    let err = prepare("gap1", vec![fake_at(0), probed_at(1, blocked())]);
+    let err = err.err().unwrap();
+    assert!(
+        matches!(&err, RunError::NoBackend { need: 1, have } if *have == [0]),
+        "{err}"
     );
 }
 
@@ -2075,6 +2212,26 @@ fn run_start_names_the_isolation_and_the_launcher() {
     assert_eq!(starts.len(), 1);
     assert_eq!(starts[0]["attrs"]["isolation"], 0);
     assert_eq!(starts[0]["attrs"]["launcher"], "process");
+    assert_eq!(starts[0]["attrs"].get("agent_sha256"), None);
+}
+
+#[test]
+fn the_agent_a_backend_runs_is_named_next_to_the_launcher() {
+    let lab = lab();
+    let dir = plain(&lab, "agent");
+    let mut plan = plan_of(&lab, "agent");
+    let (mut b, _) = fake(vec![]);
+    let agent = "ab".repeat(32);
+    b.agent = Some(agent.clone());
+    plan.backend = Box::new(b);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let ev = events_of(&dir);
+    assert_eq!(named(&ev, "run.start")[0]["attrs"]["agent_sha256"], agent);
+    let rows = rows_of(&lab, "agent");
+    assert_eq!(rows.len(), 6);
+    for r in rows {
+        assert_eq!(r.body["agent_sha256"], agent);
+    }
 }
 
 #[test]
@@ -2106,6 +2263,8 @@ fn outcome(cpu: f64, wall: f64, ended: bool, unknown: bool) -> RowOutcome {
         selftest: None,
         cpu_unknown: unknown.then(|| "unreadable".to_string()),
         ended,
+        output_links: Vec::new(),
+        box_cpu_seconds: 0.0,
     }
 }
 

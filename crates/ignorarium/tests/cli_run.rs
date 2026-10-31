@@ -3,10 +3,13 @@
 mod common;
 use assert_cmd::Command;
 use common::{Lab, kind_of, lab, no_level1, plain, register_study, with_payload};
+use ignorarium::backend::level2::Level2;
+use ignorarium::backend::{Backend, Probe};
 use ignorarium::cli::status::blind_order;
 use ignorarium::control::{ControlFile, RunLock, Signal, State};
 use ignorarium::keys;
 use serde_json::Value;
+use std::path::Path;
 use std::time::Duration;
 
 fn bin(lab: &Lab) -> Command {
@@ -61,14 +64,31 @@ fn probe_writes_machine_toml_and_prints_the_level() {
         "max_level = 0\nrate_usd_per_hour = 2.5\n",
     )
     .unwrap();
-    // Level 1 where bubblewrap can run here, else level 0.
-    let want = u8::from(no_level1().is_none());
+    // The highest level that probes available here.
+    let level2 = Level2::new().probe();
+    let want = match (&level2, no_level1()) {
+        (Probe::Available, _) => 2,
+        (_, None) => 1,
+        _ => 0,
+    };
     let a = bin(&lab).arg("probe").assert().code(0);
     let out = text(&a);
     assert!(out.contains(&format!("max level: {want}")), "{out}");
-    assert!(out.contains("/dev/kvm"), "{out}");
+    assert!(out.contains("level 2 ("), "{out}");
+    // An unavailable level 2 says why, its first fault on its own line.
+    if let Probe::Unavailable(why) = &level2 {
+        let first = why.split("; ").next().unwrap();
+        let line = out.lines().find(|l| l.starts_with("level 2 (")).unwrap();
+        assert!(line.contains(&format!("): unavailable: {first}")), "{out}");
+    }
+    let kvm = if Path::new("/dev/kvm").exists() {
+        "present"
+    } else {
+        "absent"
+    };
+    assert!(out.ends_with(&format!("/dev/kvm: {kvm}\n")), "{out}");
     assert!(out.contains("level 0 (process): available\n"), "{out}");
-    if want == 1 {
+    if want >= 1 {
         assert!(out.contains("): available\n"), "{out}");
         assert!(out.contains("level 1 (bubblewrap 0."), "{out}");
     }
@@ -232,6 +252,23 @@ fn run_refuses_when_the_machine_is_below_min_isolation() {
     let e = err(&a);
     assert!(e.contains("level 2"), "{e}");
     assert!(e.contains("ignorarium probe"), "{e}");
+    assert!(kind_of(&lab, "hi", "row").is_empty());
+    // The file allows level 2, but it cannot run here now: the level named is one that can.
+    std::fs::write(lab.home.root.join("machine.toml"), "max_level = 2\n").unwrap();
+    let mut run = bin_at(&lab, "hi");
+    for var in [
+        "IGNORARIUM_VM_VMM",
+        "IGNORARIUM_VM_KERNEL",
+        "IGNORARIUM_VM_AGENT",
+    ] {
+        run.env_remove(var);
+    }
+    let e = err(&run.args(["run", "hi"]).assert().code(1));
+    assert!(
+        e.contains("needs isolation level 2; this machine reaches level "),
+        "{e}"
+    );
+    assert!(!e.contains("reaches level 2"), "{e}");
     assert!(kind_of(&lab, "hi", "row").is_empty());
 }
 

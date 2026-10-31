@@ -3,8 +3,11 @@ mod common;
 use common::write_exec;
 use ignorarium_guest::agent::payload::{self, Ran};
 use ignorarium_guest::agent::selftest::{self, route_blocked};
-use ignorarium_guest::agent::steps::{disk_by_serial, disk_bytes, mix_seed, now_nanos, set_clock};
+use ignorarium_guest::agent::steps::{
+    disable_io_uring, disk_by_serial, disk_bytes, mix_seed, now_nanos, set_clock,
+};
 use ignorarium_guest::agent::{gate, sandbox};
+use ignorarium_guest::pack;
 use ignorarium_guest::proto::{End, Job, SEED_ENV, SelfTest};
 use rustix::process::{Pid, Signal, kill_process_group};
 use std::cell::Cell;
@@ -252,7 +255,117 @@ fn selftest_with(ok: bool) -> SelfTest {
         only_loopback: true,
         route_blocked: true,
         host_path_blocked: ok,
+        io_uring_errno: Some(libc::EPERM),
     }
+}
+
+#[test]
+fn selftest_tries_io_uring_setup() {
+    let d = net_with(&["lo"]);
+    let t = selftest::run(d.path(), || Err(io::Error::other("refused")));
+    assert_eq!(
+        t.io_uring_errno,
+        ignorarium_guest::sys::io_uring_setup_errno()
+    );
+}
+
+const NO_FDS: &str = "IGNORARIUM_TEST_NO_FDS";
+
+/// Outside a guest the answer is the host kernel's. Where io_uring is on, the call works,
+/// and a process with no descriptor left gets `EMFILE`.
+#[test]
+fn io_uring_setup_errno_is_the_kernels_answer() {
+    use ignorarium_guest::sys::io_uring_setup_errno;
+    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+    if std::env::var_os(NO_FDS).is_some() {
+        let max = getrlimit(Resource::Nofile).maximum;
+        setrlimit(
+            Resource::Nofile,
+            Rlimit {
+                current: Some(0),
+                maximum: max,
+            },
+        )
+        .unwrap();
+        assert_eq!(io_uring_setup_errno(), Some(libc::EMFILE));
+        return;
+    }
+    let switch = fs::read_to_string("/proc/sys/kernel/io_uring_disabled");
+    if !switch.is_ok_and(|v| v.trim() == "0") {
+        println!("skip: io_uring is off or absent on this kernel");
+        return;
+    }
+    assert_eq!(io_uring_setup_errno(), None);
+    let me = std::env::current_exe().unwrap();
+    let child = std::process::Command::new(me)
+        .args(["--exact", "io_uring_setup_errno_is_the_kernels_answer"])
+        .env(NO_FDS, "1")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&child.stdout);
+    assert!(
+        child.status.success() && text.contains("1 passed"),
+        "{text}"
+    );
+}
+
+#[test]
+fn the_guest_counts_io_uring_as_blocked_only_when_refused() {
+    // The filter's answer, or a kernel without the call; any other errno leaves it open.
+    let cases = [
+        (Some(libc::EPERM), true),
+        (Some(libc::ENOSYS), true),
+        (Some(libc::EAFNOSUPPORT), true),
+        (Some(libc::EACCES), false),
+        (Some(libc::EINVAL), false),
+        (None, false),
+    ];
+    for (io_uring_errno, ok) in cases {
+        let t = SelfTest {
+            io_uring_errno,
+            ..selftest_with(true)
+        };
+        assert_eq!(t.ok(), ok, "{io_uring_errno:?}");
+    }
+}
+
+#[test]
+fn disable_io_uring_sets_the_switch_for_every_process() {
+    let d = tempfile::tempdir().unwrap();
+    let switch = d.path().join("io_uring_disabled");
+    fs::write(&switch, "0").unwrap();
+    disable_io_uring(&switch).unwrap();
+    assert_eq!(fs::read_to_string(&switch).unwrap(), "2");
+    // A kernel without the switch is left as it is.
+    disable_io_uring(&d.path().join("absent")).unwrap();
+    assert!(!d.path().join("absent").exists());
+    assert!(disable_io_uring(d.path()).is_err());
+}
+
+#[test]
+fn payload_runs_in_the_folder_it_is_given() {
+    let d = tempfile::tempdir().unwrap();
+    let j = sh("pwd > \"$OUT/pwd\"; echo rel > relative", d.path());
+    assert_eq!(
+        payload::run_as(&j, None, d.path()).unwrap().end,
+        End::Code(0)
+    );
+    let pwd = fs::read_to_string(d.path().join("pwd")).unwrap();
+    assert_eq!(Path::new(pwd.trim()), d.path());
+    assert_eq!(
+        fs::read_to_string(d.path().join("relative")).unwrap(),
+        "rel
+"
+    );
+}
+
+fn ran_with(packed: Result<&str, &str>) -> io::Result<(Ran, Result<String, String>)> {
+    let ran = Ran {
+        end: End::Code(0),
+        wall: Duration::from_millis(5),
+        cpu_seconds: 0.25,
+    };
+    Ok((ran, packed.map(str::to_string).map_err(str::to_string)))
 }
 
 #[test]
@@ -260,19 +373,13 @@ fn gate_runs_the_payload_only_after_a_passing_selftest() {
     let called = Cell::new(false);
     let ran = || {
         called.set(true);
-        Ok((
-            Ran {
-                end: End::Code(0),
-                wall: Duration::from_millis(5),
-                cpu_seconds: 0.25,
-            },
-            "abc".to_string(),
-        ))
+        ran_with(Ok("abc"))
     };
     let failed = gate(selftest_with(false), 42, ran).unwrap();
     assert!(!called.get());
     assert_eq!((failed.end, failed.output_hash.as_str()), (None, ""));
     assert_eq!(failed.clock_unix_nanos, 42);
+    assert_eq!(failed.pack_refused, None);
 
     let passed = gate(selftest_with(true), 42, ran).unwrap();
     assert!(called.get());
@@ -280,15 +387,34 @@ fn gate_runs_the_payload_only_after_a_passing_selftest() {
     assert_eq!(passed.output_hash, "abc");
     assert_eq!(passed.payload_wall_ns, 5_000_000);
     assert_eq!(passed.cpu_seconds, 0.25);
+    assert_eq!(passed.pack_refused, None);
 }
 
 #[test]
-fn the_view_refuses_an_output_size_of_zero() {
-    // A tmpfs of size 0 has no limit.
+fn gate_reports_a_refused_pack_as_the_payloads_result() {
+    let r = gate(selftest_with(true), 42, || ran_with(Err("too big"))).unwrap();
+    assert_eq!(r.end, Some(End::Code(0)));
+    assert_eq!(r.output_hash, "");
+    assert_eq!(r.pack_refused.as_deref(), Some("too big"));
+    assert_eq!(r.cpu_seconds, 0.25);
+}
+
+#[test]
+fn the_view_refuses_an_output_size_that_leaves_out_uncapped() {
+    // A tmpfs cap of 0 is no cap, and below two of the largest entries the inode cap is 0.
     let d = tempfile::tempdir().unwrap();
     let view = d.path().join("view");
     let none = Path::new("/nonexistent");
-    let err = sandbox::build(none, &view, none, 0).unwrap_err();
-    assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
-    assert!(!view.exists());
+    for out_bytes in [0, 2 * pack::ENTRY_MAX - 1] {
+        let err = sandbox::build(none, &view, none, none, out_bytes).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+        assert!(!view.exists());
+    }
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skipped the upper side: running as root, the build would mount");
+        return;
+    }
+    // Past the check, the first mount needs root.
+    let err = sandbox::build(none, &view, none, none, 2 * pack::ENTRY_MAX).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
 }

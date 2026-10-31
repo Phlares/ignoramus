@@ -516,17 +516,33 @@ fn row_args_bind_folders_read_only_and_recreate_links() {
             "a",
         ])
     );
-    // An environment root that is not a folder is refused.
-    for bad in [root.join("etc"), d.path().join("missing")] {
-        job.rootfs = Some(bad.clone());
+    // An environment root that is not a folder is refused, the environment named by the last
+    // part of its root.
+    for (bad, name) in [
+        (root.join("etc"), "etc"),
+        (d.path().join("missing"), "missing"),
+    ] {
+        job.rootfs = Some(bad);
         assert_eq!(
             row_args(&job).err(),
-            Some(format!(
-                "environment root {} is not a folder",
-                bad.display()
-            ))
+            Some(format!("the root of environment {name} is not a folder"))
         );
     }
+}
+
+#[test]
+fn a_missing_environment_root_is_named_by_its_digest() {
+    // The reason can reach a signed spend record, so it holds no path of the box's home.
+    let home = TempDir::new().unwrap();
+    let digest = "ab".repeat(32);
+    let (_r, mut job) = row("true", LONG);
+    job.rootfs = Some(home.path().join("store/rootfs").join(&digest));
+    let why = row_args(&job).err().unwrap();
+    assert_eq!(
+        why,
+        format!("the root of environment {digest} is not a folder")
+    );
+    assert!(!why.contains("store/rootfs"), "{why}");
 }
 
 #[test]
@@ -696,10 +712,7 @@ fn a_bad_bind_is_an_infra_fault_with_bwraps_reason() {
     let o = b.run_row(&job, &|| true).unwrap();
     assert_eq!(
         o.exit,
-        Exit::Infra(format!(
-            "environment root {} is not a folder",
-            d.path().join("no-root").display()
-        ))
+        Exit::Infra("the root of environment no-root is not a folder".into())
     );
     assert!(!job.output_dir.join("ran").exists());
     // A missing output folder cannot be bound.
@@ -1033,6 +1046,8 @@ impl Backend for BreakEvents {
             selftest: self.selftest.then_some(passed),
             cpu_unknown: self.unknown.then(|| UNKNOWN.into()),
             ended: false,
+            output_links: Vec::new(),
+            box_cpu_seconds: 0.0,
         })
     }
 }
@@ -1162,6 +1177,8 @@ impl Backend for BreakAtRetry {
             selftest: None,
             cpu_unknown: Some(UNKNOWN.into()),
             ended: false,
+            output_links: Vec::new(),
+            box_cpu_seconds: 0.0,
         })
     }
 }

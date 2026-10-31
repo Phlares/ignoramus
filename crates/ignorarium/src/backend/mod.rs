@@ -1,6 +1,7 @@
 //! Backends run one schedule row in isolation and report what happened.
 pub mod level0;
 pub mod level1;
+pub mod level2;
 pub(crate) mod output;
 pub mod rootfs;
 pub mod seccomp;
@@ -53,14 +54,39 @@ pub struct RowOutcome {
     pub cpu_seconds: f64,
     pub wall_seconds: f64,
     pub output_hash: String,
-    /// What the level 1 self-test found before the row; `None` at level 0 and when it
-    /// printed nothing readable.
+    /// What the sandbox's self-test found before the row; `None` at level 0 and when it
+    /// reported nothing readable.
     pub selftest: Option<selftest::SelfTest>,
     /// Why the CPU count is missing the sandbox's own processes, when it is.
     pub cpu_unknown: Option<String>,
     /// The box ended the row: the watch said stop, or the wall timeout passed. The CPU
     /// count then misses what the killed processes used.
     pub ended: bool,
+    /// The rows of the output links that `output_hash` covers and the output folder lacks:
+    /// level 2 records each link its guest packed and makes none. Empty at levels 0 and 1,
+    /// whose output folders hold their links.
+    pub output_links: Vec<output::TreeRow>,
+    /// CPU the box spent on the row outside `cpu_seconds`: level 2's VMM, its boot included.
+    /// The host meter and the records count it as the box's spend. Zero at levels 0 and 1.
+    pub box_cpu_seconds: f64,
+}
+
+impl RowOutcome {
+    /// A row that ended with `exit` after `wall_seconds` with no CPU count, output or
+    /// self-test.
+    pub fn failed(exit: Exit, wall_seconds: f64) -> RowOutcome {
+        RowOutcome {
+            exit,
+            cpu_seconds: 0.0,
+            wall_seconds,
+            output_hash: String::new(),
+            selftest: None,
+            cpu_unknown: None,
+            ended: false,
+            output_links: Vec::new(),
+            box_cpu_seconds: 0.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,27 +95,25 @@ pub enum Probe {
     Unavailable(String),
 }
 
-/// What a backend tells the box while a row runs.
-pub trait Watch {
-    /// Called over and over while the row runs. `false` means stop the row now.
-    fn tick(&self) -> bool;
-    /// A supervised process group now runs, led by `pid`. Called once for every group, in
-    /// order: a level 1 row starts its self-test group and then its own. Each call replaces
-    /// the last; the earlier group is already killed and reaped.
-    fn started(&self, _pid: u32) {}
-}
-
-impl<F: Fn() -> bool> Watch for F {
-    fn tick(&self) -> bool {
-        self()
-    }
-}
+/// What a backend tells the box while a row runs: the guest crate's watch, so level 2 hands
+/// the runner's watch to `host::run_row`. `tick` runs over and over while the row runs.
+/// `started` runs once for every supervised process group, in order: a level 1 row starts
+/// its self-test group and then its own. Each call replaces the last; the earlier group is
+/// already killed and reaped. Level 2 keeps `reaped` for itself, to fill
+/// `RowOutcome::box_cpu_seconds`.
+pub use ignorarium_guest::host::Watch;
 
 pub trait Backend {
     fn level(&self) -> u8;
     fn probe(&self) -> Probe;
     /// What starts the payload, recorded beside the isolation level.
     fn launcher(&self) -> String;
+    /// The hex SHA-256 of the program that sets up the payload inside the sandbox, recorded
+    /// beside the launcher: level 2's guest agent. `None` for a backend without one, or while
+    /// it cannot be read.
+    fn agent_sha256(&self) -> Option<String> {
+        None
+    }
     /// How many CPUs a row may use at once.
     fn cpus(&self) -> u32;
     fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> io::Result<RowOutcome>;
@@ -97,7 +121,11 @@ pub trait Backend {
 
 /// Every backend this build knows, lowest level first.
 pub fn registered() -> Vec<Box<dyn Backend>> {
-    vec![Box::new(level0::Level0), Box::new(level1::Level1::new())]
+    vec![
+        Box::new(level0::Level0),
+        Box::new(level1::Level1::new()),
+        Box::new(level2::Level2::new()),
+    ]
 }
 
 /// The CPUs this host gives a row: what the OS reports, 1 when it cannot.
@@ -155,6 +183,8 @@ pub fn outcome(
         selftest: None,
         cpu_unknown: None,
         ended,
+        output_links: Vec::new(),
+        box_cpu_seconds: 0.0,
     }
 }
 
@@ -201,9 +231,8 @@ pub fn supervise(mut cmd: Command, job: &RowJob, start: Instant, watch: &dyn Wat
         // Kill the leader alone so the reap below cannot hang.
         let _ = child.kill();
     }
-    let reaped = match sys::wait4(pid, true) {
-        Ok(Some(r)) => r,
-        Ok(None) => return Supervised::failed("wait returned early".into()),
+    let reaped = match sys::wait4(pid) {
+        Ok(r) => r,
         Err(e) => return Supervised::failed(format!("wait failed: {e}")),
     };
     let ended = ended_by_box.is_some();
