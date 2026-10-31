@@ -18,7 +18,7 @@ use crate::records::{self, RecordDraft, RecordError, VerifyError};
 use crate::schedule::{self, CONFIRMATION_STAGE, Row, SELECTION_STAGE, Schedule, ScheduleError};
 use crate::spec::model::{Mode, Param, Role, SELECTED, Spec, param_path};
 use crate::store::Store;
-use crate::stream::StreamError;
+use crate::stream::{LogName, StreamError};
 use crate::view::{self, ViewError};
 use crate::{analysis, canon, keys, spec, sys, values};
 use ed25519_dalek::SigningKey;
@@ -298,14 +298,9 @@ pub fn prepare_with(
     };
 
     let leaf = register.leaf;
-    let log = match register.log.as_str() {
-        l @ ("planlog" | "testlog") => l,
-        other => {
-            return Err(RunError::Records(format!(
-                "register record names log {other:?}"
-            )));
-        }
-    };
+    let log = LogName::parse(&register.log)
+        .map_err(|_| RunError::Records(format!("register record names log {:?}", register.log)))?
+        .as_str();
     let machine = machine::load(&home.root).map_err(io)?;
     let inputs = held_inputs(&store, &key, &spec, &register)?;
     let params = resolved_params(home, &key, &spec, &register)?;
