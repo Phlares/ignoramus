@@ -20,6 +20,8 @@ use evidence::power::{Plan, Stratum, WORK, clusters_needed, mean_sd, simulate};
 use evidence::rng::Rng;
 use evidence::{Error, Tail};
 use serde_json::{Value, json};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub struct CheckCtx {
@@ -36,6 +38,8 @@ pub struct CheckCtx {
     /// The hash the register record and the schedule hold for this spec. It seeds the power
     /// gate, so every check of one spec gives the same power.
     pub spec_hash: [u8; 32],
+    /// What the power gate found, so the power report shows the simulation the rules ran.
+    pub gates: Gates,
 }
 
 impl CheckCtx {
@@ -51,6 +55,7 @@ impl CheckCtx {
                 root: root.join("store"),
             },
             spec_hash: [0; 32],
+            gates: Gates::default(),
         }
     }
 }
@@ -356,7 +361,7 @@ fn power_met(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
             path: path.clone(),
             detail: Some(detail),
         };
-        match gate(spec, ctx, h, design) {
+        match ctx.gates.of(spec, &path, || gate(spec, ctx, h, design)) {
             None => {}
             Some(Gate::Floor(short)) => out.extend(short.into_iter().map(|(group, have, need)| {
                 let group = group_name(&group);
@@ -463,10 +468,12 @@ pub fn power(spec: &Value, ctx: &CheckCtx) -> Vec<Power> {
     nodes(spec, "question.hypotheses[*]")
         .into_iter()
         .filter(|(_, h)| has_claim(h))
-        .filter_map(|(_, h)| match gate(spec, ctx, h, design)? {
-            Gate::Simulated(p) => Some(p),
-            _ => None,
-        })
+        .filter_map(
+            |(path, h)| match ctx.gates.of(spec, &path, || gate(spec, ctx, h, design))? {
+                Gate::Simulated(p) => Some(p),
+                _ => None,
+            },
+        )
         .collect()
 }
 
@@ -539,12 +546,36 @@ fn stream_level(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
 }
 
 /// What the power gate finds for one hypothesis.
+#[derive(Clone)]
 enum Gate {
     /// The z floor fails in these groups: (stratum, clusters, clusters a z-test needs).
     Floor(Vec<(String, u64, u64)>),
     Simulated(Power),
     /// The simulation refused its plan; the text says why.
     Fault(String),
+}
+
+/// The gate's findings by hypothesis path, for the one spec they came from. A finding is
+/// computed once per spec and path; another spec starts the memo afresh.
+#[derive(Default)]
+pub struct Gates(RefCell<(Value, BTreeMap<String, Option<Gate>>)>);
+
+impl Gates {
+    /// The finding at `path` of `spec`, from `find` the first time it is asked for.
+    fn of(&self, spec: &Value, path: &str, find: impl FnOnce() -> Option<Gate>) -> Option<Gate> {
+        let found = {
+            let mut memo = self.0.borrow_mut();
+            if memo.0 != *spec {
+                *memo = (spec.clone(), BTreeMap::new());
+            }
+            memo.1.get(path).cloned()
+        };
+        found.unwrap_or_else(|| {
+            let g = find();
+            self.0.borrow_mut().1.insert(path.into(), g.clone());
+            g
+        })
+    }
 }
 
 /// The power gate of hypothesis `h`. It simulates the test the box runs (`evidence::claim`) at

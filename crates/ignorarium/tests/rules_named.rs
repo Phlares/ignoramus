@@ -1959,6 +1959,52 @@ impl BoxRecords for Torn {
     }
 }
 
+/// A box that counts the reads of a study's records.
+struct Counted {
+    studies: common::Studies,
+    reads: Rc<std::cell::Cell<u32>>,
+}
+
+impl BoxRecords for Counted {
+    fn study(&self, id: &str) -> Result<Option<Vec<records::Record>>, String> {
+        self.reads.set(self.reads.get() + 1);
+        self.studies.study(id)
+    }
+
+    fn stream_next(&self, log: &str) -> Result<Next, String> {
+        self.studies.stream_next(log)
+    }
+
+    fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String> {
+        self.studies.stream_closed(log, study, slot)
+    }
+}
+
+#[test]
+fn the_power_report_shows_the_simulation_the_rules_ran() {
+    let dir = study_dir();
+    let reads = Rc::new(std::cell::Cell::new(0));
+    let counted = CheckCtx {
+        records: Box::new(Counted {
+            studies: holding(pilot_estimates()),
+            reads: reads.clone(),
+        }),
+        ..ctx(dir.path())
+    };
+    assert!(rules::check_named(&ok(), v0(), &counted).is_empty());
+    let read = reads.get();
+    let power = rules::power(&ok(), &counted);
+    assert_eq!(power.len(), 1);
+    // A second simulation would read the pilot's estimates again.
+    assert_eq!(reads.get(), read);
+    // Another plan in the same check context is simulated on its own.
+    let other = edited(&near());
+    let fresh = rules::power(&other, &ctx(dir.path()));
+    assert_ne!(fresh, power);
+    assert_eq!(rules::power(&other, &counted), fresh);
+    assert!(reads.get() > read);
+}
+
 #[test]
 fn every_rule_of_one_check_sees_one_stream_read() {
     let dir = study_dir();
