@@ -25,24 +25,9 @@ pub struct SelfTest {
     pub io_uring_absent: bool,
 }
 
-/// What one call did: `EPERM` is the filter's answer; a missing feature counts as blocked
-/// but is reported as absent; success or any other errno leaves the call open.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Call {
-    Denied,
-    Absent,
-    Open,
-}
-
-impl Call {
-    pub fn of(errno: Option<i32>) -> Call {
-        match errno {
-            Some(libc::EPERM) => Call::Denied,
-            Some(libc::ENOSYS | libc::EAFNOSUPPORT) => Call::Absent,
-            _ => Call::Open,
-        }
-    }
-}
+/// What one call did: `EPERM` is the filter's answer. The guest's self-test reads its
+/// io_uring call by the same rule.
+pub use ignorarium_guest::proto::Call;
 
 impl SelfTest {
     pub fn ok(&self) -> bool {
@@ -152,16 +137,6 @@ mod tests {
         assert!(!connect_blocked(&lo_only(), open));
         assert!(!connect_blocked(&eth, closed));
         assert!(!connect_blocked(&eth, open));
-    }
-
-    #[test]
-    fn a_call_is_denied_absent_or_open_by_its_errno() {
-        assert_eq!(Call::of(Some(libc::EPERM)), Call::Denied);
-        assert_eq!(Call::of(Some(libc::ENOSYS)), Call::Absent);
-        assert_eq!(Call::of(Some(libc::EAFNOSUPPORT)), Call::Absent);
-        assert_eq!(Call::of(Some(libc::EACCES)), Call::Open);
-        assert_eq!(Call::of(Some(libc::EINVAL)), Call::Open);
-        assert_eq!(Call::of(None), Call::Open);
     }
 
     fn all() -> SelfTest {

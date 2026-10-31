@@ -158,6 +158,16 @@ fn selftest_ok_needs_every_check() {
     );
 }
 
+#[test]
+fn a_call_is_denied_absent_or_open_by_its_errno() {
+    assert_eq!(Call::of(Some(libc::EPERM)), Call::Denied);
+    assert_eq!(Call::of(Some(libc::ENOSYS)), Call::Absent);
+    assert_eq!(Call::of(Some(libc::EAFNOSUPPORT)), Call::Absent);
+    assert_eq!(Call::of(Some(libc::EACCES)), Call::Open);
+    assert_eq!(Call::of(Some(libc::EINVAL)), Call::Open);
+    assert_eq!(Call::of(None), Call::Open);
+}
+
 /// A message whose JSON body is exactly `n` bytes.
 fn failed_of_len(n: usize) -> ToHost {
     let bare = serde_json::to_vec(&ToHost::Failed { reason: "".into() })

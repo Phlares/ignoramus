@@ -39,16 +39,27 @@ impl SelfTest {
         self.only_loopback
             && self.route_blocked
             && self.host_path_blocked
-            && self.io_uring_blocked()
+            && Call::of(self.io_uring_errno) != Call::Open
     }
+}
 
-    /// `EPERM` is a refusal; `ENOSYS` and `EAFNOSUPPORT` mean the kernel lacks the call. Any
-    /// other errno leaves it open. The box reads a level 1 sandbox's call the same way.
-    fn io_uring_blocked(&self) -> bool {
-        matches!(
-            self.io_uring_errno,
-            Some(libc::EPERM | libc::ENOSYS | libc::EAFNOSUPPORT)
-        )
+/// What one call did, by its errno: `EPERM` is a refusal; a missing feature (`ENOSYS`,
+/// `EAFNOSUPPORT`) counts as blocked but is reported as absent; success or any other errno
+/// leaves the call open. The box reads a level 1 sandbox's calls by the same rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Call {
+    Denied,
+    Absent,
+    Open,
+}
+
+impl Call {
+    pub fn of(errno: Option<i32>) -> Call {
+        match errno {
+            Some(libc::EPERM) => Call::Denied,
+            Some(libc::ENOSYS | libc::EAFNOSUPPORT) => Call::Absent,
+            _ => Call::Open,
+        }
     }
 }
 
