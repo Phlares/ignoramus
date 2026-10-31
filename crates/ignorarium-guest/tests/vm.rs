@@ -340,9 +340,10 @@ fn the_payload_starts_in_out() {
 #[ignore = "boots a VM; see the top of the file"]
 fn an_output_tree_past_path_max_is_the_payloads_result() {
     // 21 folders of 200 bytes, made with relative calls: the walk cannot name the deepest.
+    // A shell's `cd` goes by the whole path, so Python makes them.
     let o = Row::sh(
-        "cd /out && p=$(printf '%0200d' 0) && for i in $(seq 21); do mkdir $p && cd $p; done \
-         && echo x > f",
+        "python3 -c 'import os\nos.chdir(\"/out\")\nfor _ in range(21):\n    \
+         os.mkdir(\"0\" * 200)\n    os.chdir(\"0\" * 200)\nopen(\"f\", \"w\").write(\"x\")'",
     )
     .run();
     assert_eq!(o.report.end, Some(End::Code(0)));
