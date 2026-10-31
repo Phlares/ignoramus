@@ -50,7 +50,7 @@ fn the_first_slot_gets_0_005() {
         slot: 1,
         level: FIRST,
     };
-    assert_eq!(log.next(&k.verifying_key()).unwrap(), first);
+    assert_eq!(common::next_slot(&lab.home, LogName::Plan, &k.verifying_key()).unwrap(), first);
     assert!(!path(&lab, "planlog").exists());
     assert_eq!(stream::shown(FIRST), "0.005");
     assert_eq!(log.open(&k, "first", FIRST).unwrap(), first);
@@ -73,7 +73,7 @@ fn the_first_slot_gets_0_005() {
         slot: 2,
         level: FIRST,
     };
-    assert_eq!(log.next(&k.verifying_key()).unwrap(), second);
+    assert_eq!(common::next_slot(&lab.home, LogName::Plan, &k.verifying_key()).unwrap(), second);
     assert_eq!(log.open(&k, "second", FIRST).unwrap(), second);
     assert_eq!(
         kinds(&lab, "planlog"),
@@ -93,7 +93,7 @@ fn a_discovery_doubles_the_next_level() {
     assert!(log.close(&k, "a", 1, 200.0).unwrap());
     let doubled = 0.010000000000000002;
     assert_eq!(
-        log.next(&vk).unwrap(),
+        common::next_slot(&lab.home, LogName::Plan, &vk).unwrap(),
         Next {
             slot: 3,
             level: doubled
@@ -103,7 +103,7 @@ fn a_discovery_doubles_the_next_level() {
     // Slot 2 opened before the discovery: its level stays 0.005, and 199.9 misses it.
     assert!(!log.close(&k, "b", 2, 199.9).unwrap());
     assert_eq!(
-        log.next(&vk).unwrap(),
+        common::next_slot(&lab.home, LogName::Plan, &vk).unwrap(),
         Next {
             slot: 3,
             level: doubled
@@ -143,7 +143,7 @@ fn the_eleventh_slot_is_refused() {
         slot: 11,
         level: 0.0,
     };
-    assert_eq!(log.next(&k.verifying_key()).unwrap(), beyond);
+    assert_eq!(common::next_slot(&lab.home, LogName::Plan, &k.verifying_key()).unwrap(), beyond);
     assert_eq!(stream::shown(0.0), "0");
     let before = bytes(&lab, "planlog");
     // Level 0 is refused even when the check asked for no more.
@@ -232,11 +232,11 @@ fn a_test_study_uses_the_test_stream() {
     // The plan log's stream is untouched: its first slot is still free.
     assert!(!path(&lab, "planlog").exists());
     let plans = Log::of(&lab.home, LogName::Plan);
-    assert_eq!(plans.next(&k.verifying_key()).unwrap().slot, 1);
+    assert_eq!(common::next_slot(&lab.home, LogName::Plan, &k.verifying_key()).unwrap().slot, 1);
     // A test stream's records copied over the plan stream do not replay there.
     std::fs::copy(path(&lab, "testlog"), path(&lab, "planlog")).unwrap();
     assert!(matches!(
-        plans.next(&k.verifying_key()),
+        common::next_slot(&lab.home, LogName::Plan, &k.verifying_key()),
         Err(StreamError::Replay { seq: 1, .. })
     ));
 }
@@ -306,7 +306,7 @@ fn a_config_record_that_differs_is_an_error() {
         let log = Log::of(&lab.home, LogName::Plan);
         let before = bytes(&lab, "planlog");
         assert!(
-            matches!(log.next(&k.verifying_key()), Err(StreamError::Config)),
+            matches!(common::next_slot(&lab.home, LogName::Plan, &k.verifying_key()), Err(StreamError::Config)),
             "{bodies:?}"
         );
         assert!(matches!(log.open(&k, "b", 0.0), Err(StreamError::Config)));
@@ -358,7 +358,7 @@ fn a_record_that_does_not_follow_from_the_replay_is_an_error() {
         let bodies: Vec<Planted> = std::iter::once(config()).chain(rest).collect();
         plant(&lab, "planlog", &bodies);
         let last = bodies.len() as u64 - 1;
-        let got = Log::of(&lab.home, LogName::Plan).next(&k.verifying_key());
+        let got = common::next_slot(&lab.home, LogName::Plan, &k.verifying_key());
         assert!(
             matches!(got, Err(StreamError::Replay { seq, .. }) if seq == last),
             "{what}: {got:?}"
@@ -382,7 +382,7 @@ fn the_test_stream_starts_a_new_epoch_after_its_tenth_slot() {
         slot: 11,
         level: FIRST,
     };
-    assert_eq!(log.next(&vk).unwrap(), first_of_two);
+    assert_eq!(common::next_slot(&lab.home, LogName::Test, &vk).unwrap(), first_of_two);
     assert_eq!(log.open(&k, "t11", FIRST).unwrap(), first_of_two);
     let all = all(&lab, "testlog");
     let tail: Vec<(&str, &Value)> = all[all.len() - 2..]
@@ -405,10 +405,10 @@ fn the_test_stream_starts_a_new_epoch_after_its_tenth_slot() {
         slot: 12,
         level: FIRST,
     };
-    assert_eq!(log.next(&vk).unwrap(), second);
+    assert_eq!(common::next_slot(&lab.home, LogName::Test, &vk).unwrap(), second);
     // A discovery in epoch 2 doubles its next level.
     assert!(log.close(&k, "t11", 11, 200.0).unwrap());
-    assert_eq!(log.next(&vk).unwrap().level, 2.0 * FIRST);
+    assert_eq!(common::next_slot(&lab.home, LogName::Test, &vk).unwrap().level, 2.0 * FIRST);
     assert!(log.closed(&vk, "t01", 1).unwrap());
     assert!(log.closed(&vk, "t11", 11).unwrap());
     assert!(!log.closed(&vk, "t03", 3).unwrap());
@@ -439,7 +439,7 @@ fn an_epoch_starts_only_after_a_full_test_epoch_and_never_in_the_plan_stream() {
         bodies.push(epoch(n));
         plant(&lab, log, &bodies);
         let name = LogName::parse(log).unwrap();
-        let got = Log::of(&lab.home, name).next(&k.verifying_key());
+        let got = common::next_slot(&lab.home, name, &k.verifying_key());
         let last = bodies.len() as u64 - 1;
         assert!(
             matches!(got, Err(StreamError::Replay { seq, .. }) if seq == last),
@@ -453,7 +453,7 @@ fn an_epoch_starts_only_after_a_full_test_epoch_and_never_in_the_plan_stream() {
     bodies.extend(tens("testlog"));
     bodies.push(epoch(2));
     plant(&lab, "testlog", &bodies);
-    let got = Log::of(&lab.home, LogName::Test).next(&k.verifying_key());
+    let got = common::next_slot(&lab.home, LogName::Test, &k.verifying_key());
     assert_eq!(
         got.unwrap(),
         Next {

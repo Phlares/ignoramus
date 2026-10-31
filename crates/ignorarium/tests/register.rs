@@ -637,9 +637,7 @@ fn check_shows_the_level_and_register_spends_it() {
     );
     // The next plan would get slot 2.
     let key = keys::load(&f.home).unwrap().unwrap();
-    let next = Log::of(&f.home, LogName::Plan)
-        .next(&key.verifying_key())
-        .unwrap();
+    let next = common::next_slot(&f.home, LogName::Plan, &key.verifying_key()).unwrap();
     assert_eq!((next.slot, next.level), (2, FIRST));
     // An exploratory plan takes no slot.
     let (f, spec) = setup("numeric-ablation", same);

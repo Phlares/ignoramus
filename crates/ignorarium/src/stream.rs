@@ -353,12 +353,6 @@ impl Log {
         replay(self.log, &records::read_all(&self.path, key)?)
     }
 
-    /// The slot and level the stream would give a study that opened a slot now. Writes
-    /// nothing.
-    pub fn next(&self, key: &VerifyingKey) -> Result<Next, StreamError> {
-        next_of(self.log, &records::read_all(&self.path, key)?, &[])
-    }
-
     /// Open the next slot for `study`, under the log's lock: the config first when the log
     /// is empty, then the slot with its level. Refused, with nothing written, when the level
     /// is 0 or below `at_least`.

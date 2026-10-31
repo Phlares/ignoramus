@@ -516,6 +516,18 @@ impl BoxRecords for Streamed {
     }
 }
 
+/// The slot and level the stream of `log` in the box at `home` would give next, from its
+/// records alone: no register record is checked against it, as `HomeRecords::stream_next`
+/// does.
+pub fn next_slot(
+    home: &Home,
+    log: stream::LogName,
+    key: &ed25519_dalek::VerifyingKey,
+) -> Result<stream::Next, stream::StreamError> {
+    let all = records::read_all(stream::Log::of(home, log).path(), key)?;
+    stream::next_of(log, &all, &[])
+}
+
 /// Sign `bodies` into the record log of study `id` in the box at `home`. Returns the hash of
 /// each record.
 pub fn plant(home: &Home, id: &str, bodies: &[(&str, serde_json::Value)]) -> Vec<String> {
