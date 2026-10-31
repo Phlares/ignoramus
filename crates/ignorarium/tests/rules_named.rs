@@ -1,7 +1,7 @@
 mod common;
 
 use ignorarium::canon::sha256_hex;
-use ignorarium::derived::Instrument;
+use ignorarium::derived::{Carried, Instrument, Recheck};
 use ignorarium::diag::{Diagnostic, Severity};
 use ignorarium::prior::{NoPriorUse, PriorError, PriorUse, normalized_sha256};
 use ignorarium::records;
@@ -3814,6 +3814,7 @@ fn matching_pins_need_no_deviation() {
             study: "pilot".into(),
             analysis: analysis.clone(),
             instrument: common::instrument(),
+            recheck_passed: false,
             differs: vec![],
         }]
     );
@@ -3824,6 +3825,7 @@ fn matching_pins_need_no_deviation() {
             study: "pilot".into(),
             analysis,
             instrument: common::instrument(),
+            recheck_passed: false,
             differs: vec!["payload", "environment", "inputs"],
         }]
     );
@@ -4123,12 +4125,14 @@ fn the_studies_borrowed_from_are_the_finished_ones_each_once_first_mention_first
                 study: "early".into(),
                 analysis: early_hash,
                 instrument: early,
+                recheck_passed: false,
                 differs: parts.clone(),
             },
             Borrowed {
                 study: "pilot".into(),
                 analysis: pilot_hash,
                 instrument: common::instrument(),
+                recheck_passed: false,
                 differs: parts,
             },
         ]
@@ -4233,4 +4237,200 @@ fn a_deviation_names_a_study_a_reason_and_a_known_timing() {
         rule.instruction,
         "Pin the source study's payload, environment and model and calibration inputs, or add a `[[pins.deviations]]` entry with `from`, `reason` and `timing`. A deviation names a study that a confirmatory hypothesis with a claim takes estimates from, and gives a reason."
     );
+}
+
+// ---- the determinism check a plan carries ----
+
+/// A recheck whose two copies matched their originals.
+fn passed_check() -> Recheck {
+    Recheck {
+        rows: 2,
+        mismatched: vec![],
+        uncompared: vec![],
+        carried_from: None,
+    }
+}
+
+/// A study in a hand-built box: its id and its records.
+type Held = (&'static str, Result<Vec<records::Record>, String>);
+
+/// The finished study `id` that ran `instrument` with `recheck`, and the hash of its
+/// analysis record.
+fn checked(id: &'static str, instrument: Instrument, recheck: Option<Recheck>) -> (Held, String) {
+    let finished = common::finished_with(instrument, recheck, pilot_estimates());
+    let records = common::records_for(id, &finished);
+    let analysis = records::hash(&records[1]);
+    ((id, Ok(records)), analysis)
+}
+
+/// `matched` with `pins.deterministic`, then `extra`.
+fn steady(extra: Vec<Edit>) -> Vec<Edit> {
+    matched(and(vec![("/pins/deterministic", j(json!(true)))], extra))
+}
+
+fn carry(study: &str, record: &str) -> Option<Carried> {
+    Some(Carried {
+        study: study.into(),
+        record: record.into(),
+    })
+}
+
+#[test]
+fn a_borrower_with_other_inputs_still_carries() {
+    let dir = study_dir();
+    let i = common::instrument();
+    let (pilot, analysis) = checked("pilot", i.clone(), Some(passed_check()));
+    let c = with_box(dir.path(), common::Studies(vec![pilot]));
+    let spec = edited(&steady(vec![]));
+    let found = Borrowed {
+        study: "pilot".into(),
+        analysis: analysis.clone(),
+        instrument: i.clone(),
+        recheck_passed: true,
+        differs: vec![],
+    };
+    assert_eq!(rules::borrowed(&spec, &c), [found]);
+    assert_eq!(rules::carried(&spec, &c), carry("pilot", &analysis));
+    // Other model or calibration inputs need a deviation, and the code that ran is the same.
+    let other = Instrument {
+        inputs: vec![],
+        ..i.clone()
+    };
+    let declared = steady(vec![("/pins/deviations", j(json!([deviation("pilot")])))]);
+    let (pilot, analysis) = checked("pilot", other, Some(passed_check()));
+    let c = with_box(dir.path(), common::Studies(vec![pilot]));
+    let spec = edited(&declared);
+    assert_eq!(rules::borrowed(&spec, &c)[0].differs, ["inputs"]);
+    assert!(rules::check_named(&spec, v0(), &c).is_empty());
+    assert_eq!(rules::carried(&spec, &c), carry("pilot", &analysis));
+}
+
+#[test]
+fn only_a_deterministic_plan_whose_rows_run_in_the_pinned_environment_carries() {
+    let dir = study_dir();
+    let (pilot, analysis) = checked("pilot", common::instrument(), Some(passed_check()));
+    let c = with_box(dir.path(), common::Studies(vec![pilot]));
+    let carried = |edits: Vec<Edit>| rules::carried(&edited(&edits), &c);
+    for level in [1, 2, 3] {
+        let at = steady(vec![("/scope/min_isolation", j(json!(level)))]);
+        assert_eq!(carried(at), carry("pilot", &analysis), "{level}");
+    }
+    // A plan that runs no recheck carries none.
+    assert_eq!(carried(matched(vec![])), None);
+    let unset = steady(vec![("/pins/deterministic", j(json!(false)))]);
+    assert_eq!(carried(unset), None);
+    // Level 0 runs rows on the host, whatever pins.environment names, and min_isolation 0
+    // lets a host without level 1 run them there.
+    let host = steady(vec![("/scope/min_isolation", j(json!(0)))]);
+    assert_eq!(carried(host), None);
+    // An exploratory plan takes no estimates.
+    let exploring = steady(vec![("/study/mode", j(json!("exploratory")))]);
+    assert_eq!(carried(exploring), None);
+}
+
+#[test]
+fn a_borrower_with_another_payload_runs_its_own_rechecks() {
+    let dir = study_dir();
+    let i = common::instrument();
+    let other = "ab".repeat(32);
+    let o = other.as_str();
+    let ran = |payload: &str, environment: &str| Instrument {
+        payload: payload.into(),
+        environment: environment.into(),
+        ..i.clone()
+    };
+    let (p, e) = (i.payload.as_str(), i.environment.as_str());
+    for (edits, source) in [
+        // Another payload pinned, or another payload run.
+        (vec![("/pins/payload", j(json!(o)))], ran(p, e)),
+        (vec![], ran(o, e)),
+        // Another environment, none pinned, or a study whose rows ran on the host or in two
+        // environments.
+        (vec![("/pins/environment", j(json!(o)))], ran(p, e)),
+        (vec![("/pins/environment", j(json!("")))], ran(p, e)),
+        (
+            vec![("/pins/environment", j(json!("host")))],
+            ran(p, "host"),
+        ),
+        (vec![("/pins/environment", j(json!("")))], ran(p, "")),
+    ] {
+        let declared = and(
+            edits,
+            vec![("/pins/deviations", j(json!([deviation("pilot")])))],
+        );
+        let (pilot, _) = checked("pilot", source.clone(), Some(passed_check()));
+        let c = with_box(dir.path(), common::Studies(vec![pilot]));
+        let found = rules::carried(&edited(&steady(declared.clone())), &c);
+        assert_eq!(found, None, "{declared:?} {source:?}");
+    }
+    // A plan that takes estimates from two studies carries the check of the first that ran
+    // its code.
+    let claimed = |id: &str, from: &str| {
+        let mut h = h1();
+        h["id"] = json!(id);
+        h["estimates"] = json!({ "from": from });
+        h["alpha_share"] = json!(0.5);
+        h
+    };
+    let both = |first: &str, second: &str| {
+        let hs = json!([claimed("H1", first), claimed("H2", second)]);
+        let ds = json!([deviation(first), deviation(second)]);
+        edited(&steady(vec![
+            ("/question/hypotheses", j(hs)),
+            ("/pins/deviations", j(ds)),
+        ]))
+    };
+    let (early, _) = checked("early", ran(o, e), Some(passed_check()));
+    let (pilot, pilot_hash) = checked("pilot", ran(p, e), Some(passed_check()));
+    let (late, late_hash) = checked("late", ran(p, e), Some(passed_check()));
+    let c = with_box(dir.path(), common::Studies(vec![early, pilot, late]));
+    let carried = |first: &str, second: &str| rules::carried(&both(first, second), &c);
+    assert_eq!(carried("early", "pilot"), carry("pilot", &pilot_hash));
+    assert_eq!(carried("late", "pilot"), carry("late", &late_hash));
+}
+
+#[test]
+fn a_failed_check_is_not_carried() {
+    let dir = study_dir();
+    let spec = edited(&steady(vec![]));
+    let failed = [
+        // A study that declared no determinism, one whose copy differed, one whose copy was
+        // not compared, and one that compared nothing.
+        None,
+        Some(Recheck {
+            mismatched: vec![7],
+            ..passed_check()
+        }),
+        Some(Recheck {
+            rows: 1,
+            uncompared: vec![6],
+            ..passed_check()
+        }),
+        Some(Recheck {
+            rows: 0,
+            ..passed_check()
+        }),
+    ];
+    for recheck in failed {
+        let (pilot, _) = checked("pilot", common::instrument(), recheck.clone());
+        let c = with_box(dir.path(), common::Studies(vec![pilot]));
+        let b = rules::borrowed(&spec, &c);
+        assert_eq!((b.len(), b[0].recheck_passed), (1, false), "{recheck:?}");
+        assert_eq!(rules::carried(&spec, &c), None, "{recheck:?}");
+    }
+}
+
+#[test]
+fn a_study_that_carried_passes_it_on() {
+    let dir = study_dir();
+    let carried = Recheck {
+        rows: 0,
+        carried_from: Some("first".into()),
+        ..passed_check()
+    };
+    let (pilot, analysis) = checked("pilot", common::instrument(), Some(carried));
+    let c = with_box(dir.path(), common::Studies(vec![pilot]));
+    let spec = edited(&steady(vec![]));
+    assert!(rules::borrowed(&spec, &c)[0].recheck_passed);
+    assert_eq!(rules::carried(&spec, &c), carry("pilot", &analysis));
 }

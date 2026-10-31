@@ -444,6 +444,7 @@ pub fn finished_with(
         inputs: vec![],
         resolved: vec![],
         deviations: vec![],
+        carries: None,
         alpha: None,
         timestamp: None,
     };

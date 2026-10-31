@@ -1,6 +1,6 @@
 //! `check`: load a spec, run every rule, and report. Shared with `review`.
 use super::{CliError, Ctx, Done, Run, out};
-use crate::derived::{Alpha, Register};
+use crate::derived::{Alpha, Carried, Register};
 use crate::diag::{Diagnostic, Severity, render_human};
 use crate::estimate::{Estimate, defaults_json, estimate};
 use crate::home::Home;
@@ -37,6 +37,12 @@ pub struct Assessed {
     pub ctx: CheckCtx,
     /// For a confirmatory plan, the slot and level the stream would give it now.
     pub stream: Option<Alpha>,
+    /// The passed determinism check the plan takes from a study that ran its code; `register`
+    /// freezes it.
+    pub carried: Option<Carried>,
+    /// For a plan that declares `pins.deterministic` and has an estimate, the recheck copies
+    /// its schedule holds.
+    pub rechecks: Option<usize>,
 }
 
 /// The code of a value that waits on a study that has not finished.
@@ -290,20 +296,36 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         diags,
         estimate: None,
         stream: rules::granted(&value, &cc).ok().flatten(),
+        carried: rules::carried(&value, &cc),
+        rechecks: None,
         value,
         ctx: cc,
     };
     if !a.has_errors() {
         let rows = Spec::from_value(&a.value).ok().and_then(|s| {
             let hash = spec::hash_bytes(&a.hash)?;
-            Some((schedule::rows(&s, &hash, s.pins.deterministic).ok()?, s))
+            let rechecks = s.pins.deterministic && a.carried.is_none();
+            Some((schedule::rows(&s, &hash, rechecks).ok()?, s))
         });
         match rows {
-            Some((rows, s)) => a.estimate = Some(estimate(&s, &machine, &rows)),
+            Some((rows, s)) => {
+                let copies = rows.iter().filter(|r| r.recheck_of.is_some()).count();
+                a.rechecks = s.pins.deterministic.then_some(copies);
+                a.estimate = Some(estimate(&s, &machine, &rows));
+            }
             None => a.diags.push(rules::schema_fault()),
         }
     }
     Ok(a)
+}
+
+/// `determinism: carried from <study>`, or `determinism: <n> recheck rows`.
+fn determinism_line(a: &Assessed) -> Option<String> {
+    let n = a.rechecks?;
+    Some(match &a.carried {
+        Some(c) => format!("determinism: carried from {}", c.study),
+        None => format!("determinism: {n} recheck rows"),
+    })
 }
 
 /// `<id>: <n> rows`, one per condition.
@@ -352,6 +374,9 @@ fn render(a: &Assessed) -> String {
         s.push_str(&format!("label: {}\n\n", e.label_earnable));
         s.push_str(&format!("defaults:\n{}\n", indented(default_lines(a))));
     }
+    if let Some(line) = determinism_line(a) {
+        s.push_str(&format!("{line}\n"));
+    }
     if let Some(granted) = &a.stream {
         s.push_str(&format!("{}\n", stream_line(granted)));
     }
@@ -394,11 +419,16 @@ fn render_json(a: &Assessed) -> Result<String, CliError> {
             })
         })
         .collect();
+    let recheck = a.rechecks.map(|rows| {
+        let from = a.carried.as_ref().map(|c| &c.study);
+        json!({ "carried_from": from, "rows": rows })
+    });
     let v = json!({
         "diagnostics": a.diags,
         "pending": a.pending(),
         "power": power,
         "stream": a.stream,
+        "recheck": recheck,
         "estimate": estimate,
         "defaults": defaults_json(&a.filled),
         "hash": a.hash,

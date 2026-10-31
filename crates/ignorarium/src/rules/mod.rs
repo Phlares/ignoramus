@@ -10,8 +10,8 @@ mod generic;
 mod named;
 pub use generic::{check_generic, safe_key};
 pub use named::{
-    Borrowed, CAP, CheckCtx, Gates, Lookup, Power, StratumInput, Taken, borrowed, check_named,
-    estimate_inputs, granted, power, selected_by,
+    Borrowed, CAP, CheckCtx, Gates, Lookup, Power, StratumInput, Taken, borrowed, carried,
+    check_named, estimate_inputs, granted, power, selected_by,
 };
 
 /// The records of a box, by study. An `Err` is a log that cannot be read or trusted.

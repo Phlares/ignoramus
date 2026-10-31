@@ -1,7 +1,7 @@
 use ignorarium::canon::{sha256_hex, to_canonical};
 use ignorarium::derived::{
-    Alpha, Analysis, Estimate, Instrument, PinDeviated, Recheck, Register, Selection, StudyState,
-    contrast_key,
+    Alpha, Analysis, Carried, Estimate, Instrument, PinDeviated, Recheck, Register, Selection,
+    StudyState, contrast_key,
 };
 use ignorarium::records::Record;
 use ignorarium::spec::model::{Direction, Outcome, Paired};
@@ -87,6 +87,7 @@ fn a_register_record_parses_with_its_root_identity() {
     assert!(r.deviations.is_empty());
     let mut now = register_body();
     now["deviations"] = json!([]);
+    now["carries"] = Value::Null;
     assert_eq!(serde_json::to_value(&r).unwrap(), now);
     assert_eq!(r.timestamp, None);
     assert_eq!(r.alpha, None);
@@ -125,6 +126,30 @@ fn a_register_record_parses_with_its_root_identity() {
     assert_eq!(r.alpha, Some(alpha));
     assert_eq!(serde_json::to_value(&r).unwrap(), b);
     b["alpha"]["extra"] = json!(1);
+    assert_eq!(Register::of(&rec("register", b)), None);
+}
+
+#[test]
+fn a_register_record_names_the_check_it_carries() {
+    // A record written before the field existed carries none.
+    let r = Register::of(&rec("register", register_body())).unwrap();
+    assert_eq!(r.carries, None);
+    let mut b = register_body();
+    b["deviations"] = json!([]);
+    b["carries"] = json!({ "study": "pilot", "record": "a".repeat(64) });
+    let r = Register::of(&rec("register", b.clone())).unwrap();
+    let carried = Carried {
+        study: "pilot".into(),
+        record: "a".repeat(64),
+    };
+    assert_eq!(r.carries, Some(carried));
+    assert_eq!(serde_json::to_value(&r).unwrap(), b);
+    for field in ["study", "record"] {
+        let mut c = b.clone();
+        c["carries"].as_object_mut().unwrap().remove(field);
+        assert_eq!(Register::of(&rec("register", c)), None, "{field}");
+    }
+    b["carries"]["extra"] = json!(1);
     assert_eq!(Register::of(&rec("register", b)), None);
 }
 

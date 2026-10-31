@@ -5,7 +5,7 @@
 use super::generic::{applies, diagnostic, join, join_key, plain_key, safe_key, select};
 use super::{BoxRecords, Check, NoRecords, Rule, has_format, is_study_id};
 use crate::derived::{
-    ANALYSIS, Alpha, Analysis, Estimate, Instrument, Selection, StudyState, contrast_key,
+    ANALYSIS, Alpha, Analysis, Carried, Estimate, Instrument, Selection, StudyState, contrast_key,
 };
 use crate::diag::{Diagnostic, printable};
 use crate::inputs::{self, Found, input_path};
@@ -13,6 +13,7 @@ use crate::payload;
 use crate::power::{required_clusters, z};
 use crate::prior::{PriorUse, same_data};
 use crate::records;
+use crate::runner::PINNED_LEVEL;
 use crate::schedule::ROW_CAP;
 use crate::seed::seed;
 use crate::spec::model::{Claim, Outcome, SELECTED, StatisticSpec};
@@ -1183,9 +1184,31 @@ pub struct Borrowed {
     /// The hash of the study's `analysis` record, which names its code.
     pub analysis: String,
     pub instrument: Instrument,
+    /// The study's `analysis` record holds a determinism check that passed.
+    pub recheck_passed: bool,
     /// The parts of the study's code this plan does not pin: a subset of `payload`,
     /// `environment`, `inputs`, in that order.
     pub differs: Vec<&'static str>,
+}
+
+/// The passed determinism check a plan that declares `pins.deterministic` takes instead of
+/// running its own: that of the first study in `borrowed` whose check passed and whose payload
+/// and environment the plan pins. The pins name what the study's rows ran, so the plan's rows
+/// must run in its pinned environment too: `scope.min_isolation` is `PINNED_LEVEL` or more,
+/// since a host without that level runs a plan at `min_isolation = 0` on its own root. Other
+/// model or calibration inputs do not bar a carry: they are data the code reads, not the code.
+pub fn carried(spec: &Value, ctx: &CheckCtx) -> Option<Carried> {
+    let declared = val(spec, "pins.deterministic") == Some(&Value::Bool(true));
+    let level = val(spec, "scope.min_isolation").and_then(Value::as_u64);
+    if !declared || level.is_none_or(|l| l < u64::from(PINNED_LEVEL)) {
+        return None;
+    }
+    (borrowed(spec, ctx).into_iter())
+        .find(|b| b.recheck_passed && b.differs.iter().all(|p| *p == "inputs"))
+        .map(|b| Carried {
+            study: b.study,
+            record: b.analysis,
+        })
 }
 
 /// The studies the confirmatory hypotheses with a claim take estimates from, each once, first
@@ -1210,16 +1233,16 @@ fn sources(spec: &Value) -> Vec<&str> {
 /// One per study in `sources` that has finished, with the parts of its code this plan does
 /// not pin. A study whose records cannot be read is E-CNF-003's.
 pub fn borrowed(spec: &Value, ctx: &CheckCtx) -> Vec<Borrowed> {
-    let finished: Vec<(&str, String, Instrument)> = (sources(spec).into_iter())
+    let finished: Vec<(&str, String, Analysis)> = (sources(spec).into_iter())
         .filter_map(|from| {
             let all = ctx.records.study(from).ok()??;
             let record = all.iter().find(|r| r.kind == ANALYSIS)?;
-            let analysis = records::hash(record);
-            let instrument = Analysis::of(record)?.instrument;
+            let hash = records::hash(record);
+            let analysis = Analysis::of(record)?;
             let state = StudyState::of(Some(all), |log, slot| {
                 ctx.records.stream_closed(log, from, slot)
             });
-            matches!(state, Ok(StudyState::Finished(_))).then_some((from, analysis, instrument))
+            matches!(state, Ok(StudyState::Finished(_))).then_some((from, hash, analysis))
         })
         .collect();
     if finished.is_empty() {
@@ -1227,11 +1250,12 @@ pub fn borrowed(spec: &Value, ctx: &CheckCtx) -> Vec<Borrowed> {
     }
     let pinned = Pinned::of(spec, &ctx.root);
     (finished.into_iter())
-        .map(|(study, analysis, instrument)| Borrowed {
+        .map(|(study, hash, a)| Borrowed {
             study: study.into(),
-            analysis,
-            differs: pinned.differs(&instrument),
-            instrument,
+            analysis: hash,
+            differs: pinned.differs(&a.instrument),
+            instrument: a.instrument,
+            recheck_passed: a.recheck.is_some_and(|r| r.passed()),
         })
         .collect()
 }

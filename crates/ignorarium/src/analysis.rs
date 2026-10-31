@@ -566,9 +566,10 @@ pub fn instrument(spec: &Spec, payload: &str, inputs: &InputHashes, rows: &[Reco
     }
 }
 
-/// The `Recheck` of a run of `spec` from its records; `None` unless the plan declares
-/// `pins.deterministic`. A copy counts as compared when its record's `same` is not `null`.
-fn recheck(spec: &Spec, records: &[Record]) -> Option<Recheck> {
+/// The `Recheck` of a run of `spec` from its records, which carries the check of the study
+/// `carried_from` names; `None` unless the plan declares `pins.deterministic`. A copy counts as
+/// compared when its record's `same` is not `null`.
+fn recheck(spec: &Spec, records: &[Record], carried_from: Option<String>) -> Option<Recheck> {
     let copies: Vec<&Record> = (records.iter())
         .filter(|r| r.kind == "row" && is_recheck(r))
         .collect();
@@ -585,7 +586,7 @@ fn recheck(spec: &Spec, records: &[Record]) -> Option<Recheck> {
             rows: (copies.len() - uncompared.len()) as u64,
             mismatched: with(json!(false)),
             uncompared,
-            carried_from: None,
+            carried_from,
         }
     })
 }
@@ -649,6 +650,8 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
         }
         None => {
             let payload = register.as_ref().map_or("", |r| r.payload.as_str());
+            let carried = register.as_ref().and_then(|r| r.carries.as_ref());
+            let carried_from = carried.map(|c| c.study.clone());
             let body = Analysis {
                 commit: commit(&value, version)?,
                 box_version: version.into(),
@@ -656,7 +659,7 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
                 verdicts: judged.len() as u64,
                 slot: alpha.as_ref().map(|a| a.slot),
                 instrument: instrument(&plan.spec, payload, &plan.inputs, &all),
-                recheck: recheck(&plan.spec, &all),
+                recheck: recheck(&plan.spec, &all, carried_from),
             };
             append(plan, &log, ANALYSIS, &body)?;
         }

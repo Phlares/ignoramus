@@ -79,6 +79,11 @@ pub struct Register {
     /// none.
     #[serde(default)]
     pub deviations: Vec<PinDeviated>,
+    /// The passed determinism check the plan takes instead of running its own; `None` for a
+    /// plan that runs its own or declares no determinism, and in a record written before the
+    /// field existed. Written as `null`.
+    #[serde(default)]
+    pub carries: Option<Carried>,
     /// The stream slot a confirmatory plan holds; `None` for an exploratory one. Written as
     /// `null`, never left out.
     #[serde(deserialize_with = "Option::deserialize")]
@@ -184,6 +189,15 @@ pub struct PinDeviated {
     pub reason: String,
     pub timing: String,
     pub differs: Vec<String>,
+}
+
+/// A passed determinism check that a plan takes from a study that ran the same payload in the
+/// same environment: the study, and the hash of its `analysis` record, which holds the check.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Carried {
+    pub study: String,
+    pub record: String,
 }
 
 /// The first record of a finished run. It states how many records follow it, so a reader can

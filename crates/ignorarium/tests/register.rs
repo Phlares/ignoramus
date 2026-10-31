@@ -1222,6 +1222,50 @@ fn register_records_each_deviation_with_what_differs() {
 }
 
 #[test]
+fn register_freezes_the_check_it_carries() {
+    let image = "ef".repeat(32);
+    // The confirmatory plan, which declares determinism and pins `image`, after my-pilot ran
+    // its payload in `image` with `recheck`. Returns the record body, the output and the hash
+    // of my-pilot's analysis record.
+    let registered = |recheck| {
+        let (f, spec) = setup("numeric-ablation", |t| {
+            common::confirmatory(t)
+                .replace("environment = \"\"", &format!("environment = \"{image}\""))
+                .replace("# deterministic = true", "deterministic = true")
+        });
+        let instrument = ignorarium::derived::Instrument {
+            payload: ignorarium::payload::tree_hash(&spec.parent().unwrap().join("payload"))
+                .unwrap(),
+            environment: image.clone(),
+            inputs: vec![],
+        };
+        let source = common::finished_with(instrument, recheck, vec![common::arm_a()]);
+        let analysis = common::plant(&f.home, "my-pilot", &source)[1].clone();
+        let (r, out) = go(&f, &spec, &answer(&spec), true);
+        assert_eq!(r.unwrap().code, 0, "{out}");
+        (body_of(&f), out, analysis)
+    };
+    let passed = ignorarium::derived::Recheck {
+        rows: 2,
+        mismatched: vec![],
+        uncompared: vec![],
+        carried_from: None,
+    };
+    let (body, out, analysis) = registered(Some(passed));
+    assert_eq!(
+        body["carries"],
+        json!({ "study": "my-pilot", "record": analysis })
+    );
+    let lines = format!("{REASON}\ncarries the determinism check of my-pilot\nstream: slot 1");
+    let at = out.find(&lines).unwrap_or_else(|| panic!("{out}"));
+    assert!(at < out.find(PROMPT).unwrap(), "{out}");
+    // A source with no passed check leaves nothing to carry.
+    let (body, out, _) = registered(None);
+    assert_eq!(body["carries"], Value::Null);
+    assert!(!out.contains("determinism check"), "{out}");
+}
+
+#[test]
 fn an_exploratory_plan_with_a_deviation_is_refused() {
     let (f, spec) = setup("numeric-ablation", |t| {
         ["[[pins.deviations]]", "from = ", "reason = ", "timing = "]

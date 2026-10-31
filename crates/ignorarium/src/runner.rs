@@ -45,6 +45,9 @@ const REAPED: &str = "SIGCHLD is ignored; the box cannot see a row end";
 const RECIPE: &str = "env";
 /// The environment name of a run on the host root.
 const HOST: &str = "host";
+/// The lowest level that runs rows in the environment `pins.environment` names; level 0 runs
+/// them on the host root.
+pub const PINNED_LEVEL: u8 = 1;
 /// The lowest level that runs rows only in the study's environment image.
 const IMAGE_LEVEL: u8 = 2;
 const NO_IMAGE: &str = "level 2 runs rows in the study's environment image";
@@ -339,7 +342,7 @@ pub fn prepare_with(
         return Err(RunError::PayloadChanged);
     }
     let store = Store::open(&home.root).map_err(io)?;
-    let (rootfs, environment) = if top >= 1 {
+    let (rootfs, environment) = if top >= PINNED_LEVEL {
         let pin = spec.pins.environment.trim();
         let found = environment(&store, &dir, pin, Builder::detect().as_ref())?;
         if let Some(b) = &found.built {
@@ -404,7 +407,7 @@ pub fn prepare_with(
         }
     }
     gate_late_data(home, &spec, log, leaf, &key, &inputs)?;
-    let rows = expand_rows(&spec, &spec_hash)?;
+    let rows = expand_rows(&spec, &spec_hash, Some(&register))?;
     let schedule = Schedule::new(&spec_hash, rows);
     schedule::write_once(&dir, &schedule)?;
     if frozen.is_none() {
@@ -465,16 +468,17 @@ fn image_unfit(rootfs: Option<&Path>) -> Result<Option<(String, String)>, RunErr
     }
 }
 
-/// Each condition's params by condition id. A reference takes the value `register` froze for it,
-/// and every record a frozen value comes from must still be in the box.
+/// Each condition's params by condition id. A reference takes the value `register` froze for it.
+/// The record of the determinism check the study carries, and every record a frozen value
+/// comes from, must still be in the box.
 fn resolved_params(
     home: &Home,
     key: &SigningKey,
     spec: &Spec,
     register: &Register,
 ) -> Result<BTreeMap<String, Value>, RunError> {
-    let frozen: Vec<&str> = (register.resolved.iter())
-        .flat_map(|r| &r.records)
+    let carried = register.carries.iter().map(|c| &c.record);
+    let frozen: Vec<&str> = (carried.chain(register.resolved.iter().flat_map(|r| &r.records)))
         .map(String::as_str)
         .collect();
     let found = records::find(home, &key.verifying_key(), &frozen)
@@ -686,8 +690,16 @@ pub(crate) fn stored_spec(dir: &Path) -> Result<(Spec, Value, [u8; 32], String),
     Ok((spec, value, hash, raw.hash))
 }
 
-fn expand_rows(spec: &Spec, hash: &[u8; 32]) -> Result<Vec<Row>, RunError> {
-    schedule::rows(spec, hash, spec.pins.deterministic).map_err(|e| RunError::Spec(e.to_string()))
+/// The schedule's rows, with a recheck copy per condition when the plan declares determinism
+/// and its register record carries no check.
+fn expand_rows(
+    spec: &Spec,
+    hash: &[u8; 32],
+    register: Option<&Register>,
+) -> Result<Vec<Row>, RunError> {
+    let carries = register.is_some_and(|r| r.carries.is_some());
+    schedule::rows(spec, hash, spec.pins.deterministic && !carries)
+        .map_err(|e| RunError::Spec(e.to_string()))
 }
 
 /// How far a study has run, from its signed records and its stored spec.
@@ -715,7 +727,8 @@ pub fn progress(
 ) -> Result<Progress, RunError> {
     let (spec, _, spec_hash, _) = stored_spec(&home.study_dir(study_id))?;
     let machine = machine::load(&home.root).map_err(io)?;
-    let rows = expand_rows(&spec, &spec_hash)?;
+    let register = all.iter().find_map(Register::of);
+    let rows = expand_rows(&spec, &spec_hash, register.as_ref())?;
     let tally = Tally::of(all);
     let mut conditions: BTreeMap<String, (u64, u64)> = BTreeMap::new();
     for r in &rows {

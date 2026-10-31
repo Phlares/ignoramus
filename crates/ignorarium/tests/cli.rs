@@ -1566,6 +1566,57 @@ fn check_shows_the_slot_and_level_the_stream_would_give() {
 }
 
 #[test]
+fn check_shows_where_determinism_comes_from() {
+    // A confirmatory plan that declares determinism and pins the payload and environment
+    // my-pilot ran, in a box where my-pilot's check passed, or holds none.
+    let i = common::instrument();
+    let pinned = |t: String| {
+        common::confirmatory(t)
+            .replace("# deterministic = true", "deterministic = true")
+            .replace("payload = \"\"", &format!("payload = \"{}\"", i.payload))
+            .replace(
+                "environment = \"\"",
+                &format!("environment = \"{}\"", i.environment),
+            )
+    };
+    let passed = ignorarium::derived::Recheck {
+        rows: 2,
+        mismatched: vec![],
+        uncompared: vec![],
+        carried_from: None,
+    };
+    let checked = |edit: &dyn Fn(String) -> String, recheck| {
+        let (d, home, spec) = setup(edit);
+        let pilot = common::finished_with(i.clone(), recheck, vec![common::arm_a()]);
+        common::plant(&Home::open_at(&home).unwrap(), "my-pilot", &pilot);
+        (check_out(&home, &spec, 0), check_json(&home, &spec, 0), d)
+    };
+    let (out, v, _d) = checked(&pinned, Some(passed));
+    assert!(
+        out.contains("\n\ndeterminism: carried from my-pilot\nstream: slot 1, level 0.005\n"),
+        "{out}"
+    );
+    assert_eq!(
+        v["recheck"],
+        json!({ "carried_from": "my-pilot", "rows": 0 })
+    );
+    assert_eq!(v["estimate"]["rows"], 30);
+    // A source without a passed check: the plan runs its own, one copy per condition id.
+    let (out, v, _d) = checked(&pinned, None);
+    assert!(
+        out.contains("\n\ndeterminism: 2 recheck rows\nstream: slot 1, level 0.005\n"),
+        "{out}"
+    );
+    assert_eq!(v["recheck"], json!({ "carried_from": null, "rows": 2 }));
+    assert_eq!(v["estimate"]["rows"], 32);
+    // A plan without determinism has no recheck.
+    let (out, v, _d) = checked(&common::confirmatory, None);
+    assert!(!out.contains("determinism"), "{out}");
+    assert_eq!(v["recheck"], Value::Null);
+    assert_eq!(v["estimate"]["rows"], 30);
+}
+
+#[test]
 fn check_refuses_a_plan_beyond_the_tenth_slot() {
     let (_d, home, spec) = setup(common::confirmatory);
     let box_home = Home::open_at(&home).unwrap();

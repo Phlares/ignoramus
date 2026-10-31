@@ -4,7 +4,7 @@ use super::check::{self, Assessed, PENDING};
 use super::{CliError, Ctx, Done};
 use crate::backend::output::file_digest;
 use crate::canon::to_canonical;
-use crate::derived::{Alpha, PinDeviated, REGISTER, Register, Resolved};
+use crate::derived::{Alpha, Carried, PinDeviated, REGISTER, Register, Resolved};
 use crate::diag::{printable, render_human};
 use crate::estimate::defaults_json;
 use crate::files::{self, WriteOnceError, write_once};
@@ -72,13 +72,14 @@ fn put(dir: &Path, name: &str, bytes: &[u8], mode: u32) -> Result<(), CliError> 
 
 /// What `register` freezes besides the spec: the identity of the study root, the payload
 /// folder's hash, the digest of the stored copy of each input present, the values taken
-/// from other studies, and the deviations from their code.
+/// from other studies, the deviations from their code, and the determinism check it carries.
 struct Frozen {
     root_id: String,
     payload: String,
     inputs: Vec<(String, String)>,
     resolved: Vec<Resolved>,
     deviations: Vec<PinDeviated>,
+    carries: Option<Carried>,
 }
 
 /// The body of the `register` record. A confirmatory plan holds the stream slot `alpha`, and
@@ -101,6 +102,7 @@ fn record_body(
         inputs: frozen.inputs.clone(),
         resolved: frozen.resolved.clone(),
         deviations: frozen.deviations.clone(),
+        carries: frozen.carries.clone(),
         timestamp: alpha.is_some().then(|| "pending".into()),
         alpha,
     })
@@ -180,6 +182,9 @@ pub fn run(
     for d in &deviations {
         writeln!(output, "{}", deviates(d)).map_err(say)?;
     }
+    if let Some(c) = &a.carried {
+        writeln!(output, "carries the determinism check of {}", c.study).map_err(say)?;
+    }
     if let Some(granted) = checked {
         writeln!(output, "{}", check::stream_line(granted)).map_err(say)?;
     }
@@ -199,6 +204,7 @@ pub fn run(
         inputs,
         resolved,
         deviations,
+        carries: a.carried.clone(),
     };
     let (leaf, alpha) = store(spec_path, home, &spec, &a, checked, &key, &frozen)?;
     if let (Some(approved), Some(spent)) = (checked, &alpha)
@@ -641,6 +647,10 @@ mod tests {
                 timing: "after-results".into(),
                 differs: vec!["environment".into()],
             }],
+            carries: Some(Carried {
+                study: "pilot".into(),
+                record: "ab".repeat(32),
+            }),
         };
         let exp = record_body("sha256:ab", 3, "planlog", &filled, &frozen, None).unwrap();
         assert_eq!(
@@ -654,6 +664,7 @@ mod tests {
                                   "value": { "": { "sd": 2.0, "icc": 0.1 } } }],
                    "deviations": [{ "from": "pilot", "reason": "r", "timing": "after-results",
                                     "differs": ["environment"] }],
+                   "carries": { "study": "pilot", "record": "ab".repeat(32) },
                    "alpha": null})
         );
         let slot = Alpha {
@@ -724,6 +735,8 @@ mod tests {
             input_hashes: vec![],
             ctx: rules::CheckCtx::empty(root),
             stream: None,
+            carried: None,
+            rechecks: None,
         };
         let e = resolve(&a, &[]).unwrap_err();
         assert_eq!(e.code, 1);
@@ -746,6 +759,8 @@ mod tests {
             input_hashes: vec![],
             ctx: rules::CheckCtx::empty(root),
             stream,
+            carried: None,
+            rechecks: None,
         };
         let at = |level: f64| Alpha {
             log: "planlog".into(),

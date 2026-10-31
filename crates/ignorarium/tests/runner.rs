@@ -9,7 +9,8 @@ use ignorarium::budget::{Cost, FakeMeter, MeterError};
 use ignorarium::canon::sha256_hex;
 use ignorarium::control::State;
 use ignorarium::derived::{
-    Analysis, BoundResult, Estimate, Recheck, Register, StudyState, Verdict, contrast_key,
+    Analysis, BoundResult, Carried, Estimate, Instrument, Recheck, Register, StudyState, Verdict,
+    contrast_key,
 };
 use ignorarium::planlog::store::PlanLog;
 use ignorarium::prior::{PriorUse, file_hashes};
@@ -3570,4 +3571,169 @@ fn a_copy_in_another_environment_or_level_is_not_compared() {
         assert!(r.mismatched.is_empty(), "{id}");
         assert!(!r.passed(), "{id}");
     }
+}
+
+// ---- a borrowing study carries a passed check of the same code ----
+
+/// The store digest of an environment image: a docker archive whose one layer holds one file.
+fn image(lab: &Lab) -> String {
+    let tar_of = |members: &[(&str, &[u8])]| {
+        let mut b = tar::Builder::new(Vec::new());
+        for (name, data) in members {
+            let mut h = tar::Header::new_gnu();
+            h.set_path(name).unwrap();
+            h.set_mode(0o644);
+            h.set_size(data.len() as u64);
+            h.set_cksum();
+            b.append(&h, *data).unwrap();
+        }
+        b.into_inner().unwrap()
+    };
+    let layer = tar_of(&[("etc/os-release", b"ID=test\n")]);
+    let manifest = br#"[{"Layers":["l0/layer.tar"]}]"#;
+    let archive = tar_of(&[("manifest.json", manifest), ("l0/layer.tar", &layer)]);
+    let store = ignorarium::store::Store::open(&lab.home.root).unwrap();
+    store.put(&archive).unwrap()
+}
+
+/// A recheck whose two copies matched their originals.
+fn passed_check() -> Recheck {
+    Recheck {
+        rows: 2,
+        mismatched: vec![],
+        uncompared: vec![],
+        carried_from: None,
+    }
+}
+
+/// What the calibration input `data/example.txt` holds.
+const CALIBRATION: &str = "calibration";
+
+/// Register `id`: `one_unit_each` with `pins.deterministic`, at `min_isolation = 1`, pinning
+/// `environment` and its calibration input, then `edit`; its source `my-pilot` ran its `JOB`
+/// payload and that input in `environment`, with `recheck`. Returns the hash of my-pilot's
+/// analysis record.
+fn borrowing(
+    lab: &Lab,
+    id: &str,
+    environment: &str,
+    recheck: Option<Recheck>,
+    edit: impl Fn(String) -> String,
+) -> String {
+    let payload = common::work(lab, id).join("payload");
+    std::fs::create_dir_all(&payload).unwrap();
+    common::write_exec(&payload.join("run"), JOB);
+    let calibration = sha256_hex(CALIBRATION.as_bytes());
+    let instrument = Instrument {
+        payload: ignorarium::payload::tree_hash(&payload).unwrap(),
+        environment: environment.into(),
+        inputs: vec![(
+            "data/example.txt".into(),
+            "calibration".into(),
+            calibration.clone(),
+        )],
+    };
+    let source = common::finished_with(instrument, recheck, vec![common::arm_a()]);
+    let analysis = common::plant(&lab.home, "my-pilot", &source)[1].clone();
+    let spec = |t: String| {
+        let t = need_isolation(deterministic(one_unit_each(t)));
+        edit(
+            t.replace(
+                "environment = \"\"",
+                &format!("environment = \"{environment}\""),
+            )
+            .replacen("sha256 = \"\"", &format!("sha256 = \"{calibration}\""), 1),
+        )
+    };
+    register_study(lab, id, spec, &[("data/example.txt", CALIBRATION)], JOB);
+    analysis
+}
+
+fn carries_of(lab: &Lab, id: &str) -> Option<Carried> {
+    Register::of(&kind_of(lab, id, "register")[0])
+        .unwrap()
+        .carries
+}
+
+#[test]
+fn a_matching_borrower_carries_a_passed_check() {
+    let lab = lab();
+    let env = image(&lab);
+    let analysis = borrowing(&lab, "carry", &env, Some(passed_check()), |t| t);
+    let carried = Carried {
+        study: "my-pilot".into(),
+        record: analysis,
+    };
+    assert_eq!(carries_of(&lab, "carry"), Some(carried));
+    let work = common::work(&lab, "carry");
+    let plan = prepare_with(&lab.home, "carry", &work, vec![fake_at(1)]).unwrap();
+    assert_eq!(
+        (plan.backend.level(), plan.environment.as_str()),
+        (1, &*env)
+    );
+    assert!(copies(&plan).is_empty());
+    assert_eq!(plan.schedule.rows.len(), 30);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let rows = rows_of(&lab, "carry");
+    assert_eq!(rows.len(), 30);
+    assert!(rows.iter().all(|r| r.body["environment"] == *env));
+    let r = recheck_in(&lab, "carry").unwrap();
+    let carried = Recheck {
+        rows: 0,
+        mismatched: vec![],
+        uncompared: vec![],
+        carried_from: Some("my-pilot".into()),
+    };
+    assert_eq!(r, carried);
+    assert!(r.passed());
+    // `status` counts the rows the study runs.
+    let all = common::records_of(&lab, "carry");
+    let p = ignorarium::runner::progress(&lab.home, "carry", &all).unwrap();
+    assert_eq!((p.done, p.total), (30, 30));
+}
+
+#[test]
+fn a_borrower_that_carries_nothing_runs_its_own_rechecks() {
+    let failed = Recheck {
+        mismatched: vec![7],
+        ..passed_check()
+    };
+    let host = |t: String| t.replace("min_isolation = 1", "min_isolation = 0");
+    // A source whose check failed, and a plan whose rows may run on the host, where its
+    // environment pin is not read.
+    for (id, recheck, level, ran_in) in [
+        ("failed", failed, 1, None),
+        ("host", passed_check(), 0, Some("host")),
+    ] {
+        let lab = lab();
+        let env = image(&lab);
+        let edit = |t: String| if level == 0 { host(t) } else { t };
+        borrowing(&lab, id, &env, Some(recheck), edit);
+        assert_eq!(carries_of(&lab, id), None, "{id}");
+        let work = common::work(&lab, id);
+        let plan = prepare_with(&lab.home, id, &work, vec![fake_at(level)]).unwrap();
+        assert_eq!(plan.environment, ran_in.unwrap_or(&env), "{id}");
+        assert_eq!(copies(&plan).len(), 2, "{id}");
+        assert_eq!(run(&plan).unwrap(), RunStatus::Done, "{id}");
+        assert_eq!(recheck_in(&lab, id), Some(passed_check()), "{id}");
+        let all = common::records_of(&lab, id);
+        let p = ignorarium::runner::progress(&lab.home, id, &all).unwrap();
+        assert_eq!((p.done, p.total), (32, 32), "{id}");
+    }
+}
+
+#[test]
+fn prepare_refuses_when_the_carried_record_is_gone() {
+    let lab = lab();
+    let env = image(&lab);
+    let analysis = borrowing(&lab, "gone", &env, Some(passed_check()), |t| t);
+    let log = lab.home.study_dir("my-pilot").join("records.jsonl");
+    std::fs::rename(&log, lab.root.join("my-pilot-records.jsonl")).unwrap();
+    let work = common::work(&lab, "gone");
+    let err = prepare_with(&lab.home, "gone", &work, vec![fake_at(1)])
+        .err()
+        .unwrap();
+    let why = format!("frozen record {analysis} is gone");
+    assert!(matches!(&err, RunError::Records(m) if *m == why), "{err}");
+    assert!(!lab.home.study_dir("gone").join("schedule.json").exists());
 }
