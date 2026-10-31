@@ -727,16 +727,15 @@ fn inside_range(h: &Value, margins: &[f64]) -> bool {
 }
 
 /// The units each confirmation cluster of `stratum` gives (every confirmation input for the
-/// pooled group `""`): its declared units, at most `per`. Inputs that hold the same data are
-/// one cluster; an input whose data cannot be read counts on its own. An input with no units
-/// is not counted: E-UNT-001 reports it.
+/// pooled group `""`): its declared units, at most `per`. As in `analysis::distinct_clusters`,
+/// an input that holds the same data as an earlier confirmation input, in any stratum, is no
+/// cluster; an input whose data cannot be read counts on its own. An input with no units is
+/// not counted: E-UNT-001 reports it.
 fn cluster_sizes(spec: &Value, ctx: &CheckCtx, stratum: &str, per: u64) -> Vec<u64> {
     let mut seen: Vec<(String, String)> = vec![];
     let mut sizes = vec![];
     for (_, input) in nodes(spec, "inputs[*]") {
-        let in_group =
-            stratum.is_empty() || input.get("stratum").and_then(Value::as_str) == Some(stratum);
-        if role(input) != Some("confirmation") || !in_group {
+        if role(input) != Some("confirmation") {
             continue;
         }
         let Some(units) = input
@@ -752,7 +751,11 @@ fn cluster_sizes(spec: &Value, ctx: &CheckCtx, stratum: &str, per: u64) -> Vec<u
             }
             seen.push(h);
         }
-        sizes.push(units.min(per));
+        let in_group =
+            stratum.is_empty() || input.get("stratum").and_then(Value::as_str) == Some(stratum);
+        if in_group {
+            sizes.push(units.min(per));
+        }
     }
     sizes
 }

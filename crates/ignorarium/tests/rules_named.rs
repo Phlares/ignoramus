@@ -1471,6 +1471,38 @@ fn two_confirmation_inputs_with_the_same_data_count_once() {
 }
 
 #[test]
+fn a_copy_in_another_stratum_is_not_a_cluster_of_that_stratum() {
+    // 26 code texts and 26 article texts, but the first article text is a copy of the first
+    // code text. The analysis keeps the earlier input of a same-data pair, so article has 25.
+    let mut list = inputs(0, 1).as_array().unwrap().clone();
+    list[1]["stratum"] = json!("code");
+    let dir = study_dir();
+    for i in 0..52 {
+        let stratum = if i < 26 { "code" } else { "article" };
+        let path = format!("texts/c{i:02}.txt");
+        let text = if i == 26 { 0 } else { i };
+        write(dir.path(), &path, format!("text {text}").as_bytes());
+        let mut c = input(&path, "confirmation", 1);
+        c["stratum"] = json!(stratum);
+        list.push(c);
+    }
+    let mut e = and(near(), vec![
+        ("/inputs", j(Value::Array(list))),
+        ("/design/units_per_cluster", j(json!(1))),
+    ]);
+    e.push(hyp("strata", j(json!(["code", "article"]))));
+    let got: Vec<String> = (named(&edited(&e), dir.path()).into_iter())
+        .map(|d| d.problem)
+        .collect();
+    let short = |s: &str, n: u64| {
+        format!(
+            "The confirmation sample is too small. Stratum {s} has {n} of the 47 clusters the power gate needs."
+        )
+    };
+    assert_eq!(got, [short("code", 26), short("article", 25)]);
+}
+
+#[test]
 fn the_power_gate_uses_the_harmonic_mean_of_the_picked_units_per_cluster() {
     // 11 clusters of 5 units; k of them hold 1 unit. The estimate is the unweighted mean of
     // the cluster means, so a cluster mean has variance sd^2 (icc + (1 - icc) / m) on average
