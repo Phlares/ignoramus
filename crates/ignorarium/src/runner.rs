@@ -1377,7 +1377,10 @@ fn attempt_row(
             None
         } else {
             match plan.backend.probe() {
-                Probe::Unavailable(why) => Some(Halt::Pause(format!("backend unavailable: {why}"))),
+                Probe::Unavailable(why) => {
+                    let why = plan.redact.text(&why);
+                    Some(Halt::Pause(format!("backend unavailable: {why}")))
+                }
                 // The gate fails only on an alert write, held as any failed event write is.
                 Probe::Available => gate(plan, dir, books).unwrap_or_else(|e| {
                     watch.keep(Err(e));

@@ -8,14 +8,19 @@ use std::path::Path;
 pub struct Redact(Vec<(String, &'static str)>);
 
 impl Redact {
-    /// Each folder of `named` in its given spelling and its canonical one (links resolved),
-    /// as `placeholder`. Only absolute spellings that name a folder count: a relative one or
-    /// `/` would match inside any path.
+    /// Each folder of `named` in its given spelling, its absolute one (a relative folder
+    /// joined to the working folder) and its canonical one (links resolved), as
+    /// `placeholder`. Only absolute spellings count: a relative one or `/` would match inside
+    /// any path.
     pub fn new(named: &[(&Path, &'static str)]) -> Redact {
         let mut all: Vec<(String, &'static str)> = Vec::new();
         for &(folder, placeholder) in named {
+            let abs = std::path::absolute(folder).ok();
             let real = std::fs::canonicalize(folder).ok();
-            for p in [Some(folder), real.as_deref()].into_iter().flatten() {
+            for p in [Some(folder), abs.as_deref(), real.as_deref()]
+                .into_iter()
+                .flatten()
+            {
                 let text = p.to_string_lossy();
                 let text = text.trim_end_matches('/');
                 if p.is_absolute() && !text.is_empty() && !all.iter().any(|(t, _)| t == text) {
@@ -48,5 +53,13 @@ mod tests {
         ]);
         assert_eq!(r.text("/u/box/x /u/y u/z /w"), "<home>/x ~/y u/z /w");
         assert_eq!(Redact::default().text("/u/x"), "/u/x");
+    }
+
+    #[test]
+    fn a_relative_folder_counts_in_its_absolute_spelling() {
+        let rel = Path::new("no-such-folder/box");
+        let abs = std::path::absolute(rel).unwrap();
+        let r = Redact::new(&[(rel, "<home>")]);
+        assert_eq!(r.text(&format!("{}/x", abs.display())), "<home>/x");
     }
 }

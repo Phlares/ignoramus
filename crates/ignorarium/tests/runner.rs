@@ -270,6 +270,20 @@ fn a_backend_message_reaches_records_without_host_paths() {
     }
 }
 
+#[test]
+fn a_pause_for_an_unavailable_backend_names_no_host_path() {
+    let lab = lab();
+    plain(&lab, "probe-paths");
+    let mut plan = plan_of(&lab, "probe-paths");
+    let (mut b, _) = fake(vec![Exit::Infra("box fault".into())]);
+    b.probe = Probe::Unavailable(format!("{}/vmm is gone", lab.home.root.display()));
+    plan.backend = Box::new(b);
+    let why = "backend unavailable: <home>/vmm is gone";
+    assert_eq!(run(&plan).unwrap(), RunStatus::Paused(why.into()));
+    let ev = events_of(&lab.home.study_dir("probe-paths"));
+    assert_eq!(named(&ev, "run.pause")[0]["attrs"]["reason"], why);
+}
+
 /// Runs level 0, then replaces the exit with the next scripted one.
 struct Fake {
     script: RefCell<VecDeque<Exit>>,
