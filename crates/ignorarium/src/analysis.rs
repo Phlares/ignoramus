@@ -35,11 +35,7 @@ impl Paired {
         self.entry(unit, condition, outcome).map(|(mean, _)| mean)
     }
 
-    /// The number of repeats that pair; 0 when none does.
-    pub fn repeats(&self, unit: &str, condition: &str, outcome: &str) -> u32 {
-        self.entry(unit, condition, outcome).map_or(0, |(_, n)| n)
-    }
-
+    /// The mean and the number of repeats that pair; `None` when no repeat does.
     fn entry(&self, unit: &str, condition: &str, outcome: &str) -> Option<(f64, u32)> {
         let key = (unit.to_string(), condition.to_string(), outcome.to_string());
         self.by_key.get(&key).copied()
@@ -263,12 +259,13 @@ fn group(
             let mut xs = Vec::new();
             for &i in &c.picked {
                 let unit = units::key(&c.path, i);
-                let whole =
-                    (contrast.keys()).all(|cond| paired.repeats(&unit, cond, outcome) >= repeats);
                 let x = (contrast.iter())
-                    .map(|(cond, w)| Some(w * paired.get(&unit, cond, outcome)?))
+                    .map(|(cond, w)| {
+                        let (mean, n) = paired.entry(&unit, cond, outcome)?;
+                        (n >= repeats).then_some(w * mean)
+                    })
                     .sum::<Option<f64>>();
-                match x.filter(|_| whole) {
+                match x {
                     Some(x) => xs.push(x),
                     None => incomplete += 1,
                 }
