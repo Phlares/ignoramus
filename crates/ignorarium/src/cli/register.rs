@@ -70,9 +70,11 @@ fn put(dir: &Path, name: &str, bytes: &[u8], mode: u32) -> Result<(), CliError> 
     Ok(())
 }
 
-/// What `register` freezes besides the spec: the payload folder's hash, the digest of the
-/// stored copy of each input present, and the values taken from other studies.
+/// What `register` freezes besides the spec: the identity of the study root, the payload
+/// folder's hash, the digest of the stored copy of each input present, and the values taken
+/// from other studies.
 struct Frozen {
+    root_id: String,
     payload: String,
     inputs: Vec<(String, String)>,
     resolved: Vec<Resolved>,
@@ -85,19 +87,15 @@ fn record_body(
     leaf: u64,
     log: &str,
     filled: &[(String, Value)],
-    root: &Path,
     frozen: &Frozen,
     alpha: Option<Alpha>,
 ) -> Result<Value, CliError> {
-    let root = root
-        .to_str()
-        .ok_or_else(|| CliError::usage("the study root is not valid text"))?;
     serde_json::to_value(Register {
         spec_hash: hash.into(),
         leaf,
         log: log.into(),
         defaults: defaults_json(filled),
-        root: root.into(),
+        root_id: frozen.root_id.clone(),
         payload: frozen.payload.clone(),
         inputs: frozen.inputs.clone(),
         resolved: frozen.resolved.clone(),
@@ -190,6 +188,7 @@ pub fn run(
     let blobs = Store::open(&home.root).map_err(|e| io("store", e))?;
     let inputs = hold_inputs(&blobs, &key, &spec, &a)?;
     let frozen = Frozen {
+        root_id: Register::root_id(&key, &a.root).map_err(|e| io("study root", e))?,
         payload,
         inputs,
         resolved,
@@ -507,15 +506,7 @@ fn store(
             key,
         )
         .map_err(|e| io(log, e))?;
-    let body = record_body(
-        &a.hash,
-        leaf,
-        log,
-        &a.filled,
-        &a.root,
-        frozen,
-        alpha.clone(),
-    )?;
+    let body = record_body(&a.hash, leaf, log, &a.filled, frozen, alpha.clone())?;
     records::append(
         &dir.join("records.jsonl"),
         key,
@@ -596,8 +587,8 @@ mod tests {
     #[test]
     fn only_a_confirmatory_record_is_pending_and_holds_its_slot() {
         let filled = [("design.power".to_string(), json!(0.8))];
-        let root = Path::new("/work/study");
         let frozen = Frozen {
+            root_id: "12".repeat(32),
             payload: "ab".repeat(32),
             inputs: vec![("data/x.txt".into(), "cd".repeat(32))],
             resolved: vec![Resolved {
@@ -607,12 +598,12 @@ mod tests {
                 value: json!({ "": { "sd": 2.0, "icc": 0.1 } }),
             }],
         };
-        let exp = record_body("sha256:ab", 3, "planlog", &filled, root, &frozen, None).unwrap();
+        let exp = record_body("sha256:ab", 3, "planlog", &filled, &frozen, None).unwrap();
         assert_eq!(
             exp,
             json!({"spec_hash": "sha256:ab", "leaf": 3, "log": "planlog",
                    "defaults": [{"path": "design.power", "value": 0.8}],
-                   "root": "/work/study", "payload": "ab".repeat(32),
+                   "root_id": "12".repeat(32), "payload": "ab".repeat(32),
                    "inputs": [["data/x.txt", "cd".repeat(32)]],
                    "resolved": [{ "path": "question.hypotheses[0].estimates",
                                   "study": "pilot", "records": ["ef".repeat(32)],
@@ -624,16 +615,7 @@ mod tests {
             slot: 2,
             level: 0.01,
         };
-        let conf = record_body(
-            "sha256:ab",
-            3,
-            "testlog",
-            &filled,
-            root,
-            &frozen,
-            Some(slot),
-        );
-        let conf = conf.unwrap();
+        let conf = record_body("sha256:ab", 3, "testlog", &filled, &frozen, Some(slot)).unwrap();
         assert_eq!(conf["timestamp"], "pending");
         assert_eq!(conf["log"], "testlog");
         assert_eq!(

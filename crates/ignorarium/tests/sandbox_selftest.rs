@@ -85,7 +85,7 @@ fn a_run_logs_the_self_test_of_every_row() {
     let lab = lab();
     let dir = plain(&lab, "selftest");
     let b = Level1::with(Level1::new().bwrap, BOX.into());
-    let plan = prepare_with(&lab.home, "selftest", vec![Box::new(b)]).unwrap();
+    let plan = prepare_with(&lab.home, "selftest", &common::work_of(&lab.home, "selftest"), vec![Box::new(b)]).unwrap();
     assert_eq!(runner::run(&plan).unwrap(), RunStatus::Done);
     let events = common::events_of(&dir);
     let tests = named(&events, "sandbox.selftest");

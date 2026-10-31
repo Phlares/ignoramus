@@ -259,11 +259,11 @@ fn fake(script: Vec<Exit>) -> (Fake, Rc<RefCell<Vec<u64>>>) {
 }
 
 fn plan_of(lab: &Lab, id: &str) -> RunPlan {
-    prepare_with(&lab.home, id, vec![Box::new(Level0)]).unwrap()
+    prepare_with(&lab.home, id, &common::work_of(&lab.home, id), vec![Box::new(Level0)]).unwrap()
 }
 
 fn err_of(lab: &Lab, id: &str) -> RunError {
-    prepare_with(&lab.home, id, vec![Box::new(Level0)])
+    prepare_with(&lab.home, id, &common::work_of(&lab.home, id), vec![Box::new(Level0)])
         .err()
         .expect("prepare should refuse")
 }
@@ -750,6 +750,38 @@ fn the_first_prepare_freezes_every_input_and_a_resume_on_other_bytes_is_refused(
 }
 
 #[test]
+fn a_late_input_is_read_only_from_the_registered_root() {
+    let lab = lab();
+    // data/confirm.txt is absent at registration, so the study reads it from its root.
+    plain(&lab, "rooted");
+    let other = lab.root.join("elsewhere");
+    std::fs::create_dir_all(other.join("data")).unwrap();
+    std::fs::write(other.join("data/confirm.txt"), "other text").unwrap();
+    let err = prepare_with(&lab.home, "rooted", &other, vec![Box::new(Level0)])
+        .err()
+        .unwrap();
+    assert!(
+        matches!(&err, RunError::OtherRoot(p) if p == "data/confirm.txt"),
+        "{err}"
+    );
+    assert!(
+        err.to_string().starts_with(
+            "input data/confirm.txt was absent at registration and is read from the study root; "
+        ),
+        "{err}"
+    );
+    assert!(!lab.home.study_dir("rooted").join("schedule.json").exists());
+    assert!(kind_of(&lab, "rooted", "inputs").is_empty());
+    // A study whose every input is in the store reads nothing from a root.
+    let both = [
+        ("data/example.txt", "calibration"),
+        ("data/confirm.txt", "held text"),
+    ];
+    register_study(&lab, "held", |t| t, &both, PAYLOAD);
+    prepare_with(&lab.home, "held", &other, vec![Box::new(Level0)]).unwrap();
+}
+
+#[test]
 fn a_refused_first_prepare_freezes_nothing() {
     let lab = lab();
     // Another study used the late file first: the gate refuses, and the study is not yet
@@ -1016,7 +1048,7 @@ fn sigchld_ignored_child() {
         return;
     };
     let home = ignorarium::home::Home::open_at(std::path::Path::new(&root)).unwrap();
-    let plan = prepare_with(&home, &id, vec![Box::new(Level0)]).unwrap();
+    let plan = prepare_with(&home, &id, &common::work_of(&home, &id), vec![Box::new(Level0)]).unwrap();
     assert_eq!(run(&plan).unwrap(), RunStatus::Paused(REAPED.into()));
 }
 
@@ -1150,7 +1182,7 @@ fn a_late_input_with_the_data_of_the_other_role_is_refused() {
         for (p, text) in after {
             std::fs::write(common::work(&lab, id).join(p), text).unwrap();
         }
-        let err = prepare_with(&lab.home, id, vec![Box::new(Level0)])
+        let err = prepare_with(&lab.home, id, &common::work_of(&lab.home, id), vec![Box::new(Level0)])
             .err()
             .unwrap_or_else(|| panic!("{id}: prepare should refuse"));
         assert_eq!(
@@ -1277,7 +1309,7 @@ fn data_present_at_registration_is_not_late() {
 fn prepare_refuses_a_missing_backend_an_unknown_study_and_a_changed_spec() {
     let lab = lab();
     let dir = plain(&lab, "guard");
-    let none = prepare_with(&lab.home, "guard", vec![]).err().unwrap();
+    let none = prepare_with(&lab.home, "guard", &common::work_of(&lab.home, "guard"), vec![]).err().unwrap();
     assert!(
         matches!(none, RunError::NoBackend { need: 0, .. }),
         "{none}"
@@ -1404,7 +1436,7 @@ fn the_highest_backend_that_meets_min_isolation_runs() {
     register_study(&lab, "lvl1", need_isolation, &[], PAYLOAD);
     let pick = |id: &str, levels: &[u8]| {
         let all = levels.iter().map(|&l| fake_at(l)).collect();
-        prepare_with(&lab.home, id, all).unwrap().backend.level()
+        prepare_with(&lab.home, id, &common::work_of(&lab.home, id), all).unwrap().backend.level()
     };
     assert_eq!(pick("lvl0", &[2, 0, 1]), 2);
     assert_eq!(pick("lvl0", &[0, 1]), 1);
@@ -1412,7 +1444,7 @@ fn the_highest_backend_that_meets_min_isolation_runs() {
     assert_eq!(pick("lvl0", &[0]), 0);
     assert_eq!(pick("lvl1", &[2, 0, 1]), 2);
     assert_eq!(pick("lvl1", &[0, 1]), 1);
-    let only0 = prepare_with(&lab.home, "lvl1", vec![fake_at(0)])
+    let only0 = prepare_with(&lab.home, "lvl1", &common::work_of(&lab.home, "lvl1"), vec![fake_at(0)])
         .err()
         .unwrap();
     assert!(
@@ -1434,9 +1466,9 @@ fn backend_max_filters_out_higher_levels() {
     assert_eq!(levels(2), vec![0, 1, 2]);
     let lab = lab();
     plain(&lab, "reg");
-    assert_eq!(prepare(&lab.home, "reg", 0).unwrap().backend.level(), 0);
+    assert_eq!(prepare(&lab.home, "reg", &common::work_of(&lab.home, "reg"), 0).unwrap().backend.level(), 0);
     register_study(&lab, "reg1", need_isolation, &[], PAYLOAD);
-    let err = prepare(&lab.home, "reg1", 0).err().unwrap();
+    let err = prepare(&lab.home, "reg1", &common::work_of(&lab.home, "reg1"), 0).err().unwrap();
     assert!(matches!(err, RunError::NoBackend { need: 1, .. }), "{err}");
 }
 

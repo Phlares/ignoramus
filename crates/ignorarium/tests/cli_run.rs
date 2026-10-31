@@ -15,6 +15,13 @@ fn bin(lab: &Lab) -> Command {
     c
 }
 
+/// `bin` in the root of study `id`, where `run` and `resume` read a late input from.
+fn bin_at(lab: &Lab, id: &str) -> Command {
+    let mut c = bin(lab);
+    c.current_dir(common::work(lab, id));
+    c
+}
+
 fn text(a: &assert_cmd::assert::Assert) -> String {
     String::from_utf8_lossy(&a.get_output().stdout).into_owned()
 }
@@ -118,7 +125,7 @@ fn probe_refuses_a_bad_machine_file() {
 fn run_a_registered_study_to_completion() {
     let lab = lab();
     plain(&lab, "s1");
-    let a = bin(&lab).args(["run", "s1"]).assert().code(0);
+    let a = bin_at(&lab, "s1").args(["run", "s1"]).assert().code(0);
     assert!(text(&a).contains("done"), "{}", text(&a));
     let s = status(&lab, "s1");
     assert_eq!(s["state"], "done");
@@ -154,7 +161,7 @@ fn editing_the_working_payload_after_register_does_not_reach_the_run() {
         &work,
         "#!/bin/sh\necho edited > \"$IGNORARIUM_OUT/result\"\nprintf '{\"ppl\": 1.5}' > \"$IGNORARIUM_OUT/values.json\"\n",
     );
-    bin(&lab).args(["run", "frozen"]).assert().code(0);
+    bin_at(&lab, "frozen").args(["run", "frozen"]).assert().code(0);
     let rows = kind_of(&lab, "frozen", "row");
     assert_eq!(rows.len(), 6);
     for r in &rows {
@@ -193,7 +200,7 @@ fn rows_see_exactly_the_declared_inputs() {
         ("data/other.txt", "not declared"),
     ];
     let dir = register_study(&lab, "view", declared, &before, payload);
-    bin(&lab).args(["run", "view"]).assert().code(0);
+    bin_at(&lab, "view").args(["run", "view"]).assert().code(0);
     let rows = kind_of(&lab, "view", "row");
     assert_eq!(rows.len(), 6);
     for r in &rows {
@@ -218,7 +225,7 @@ fn run_refuses_when_the_machine_is_below_min_isolation() {
         common::PAYLOAD,
     );
     std::fs::write(lab.home.root.join("machine.toml"), "max_level = 0\n").unwrap();
-    let a = bin(&lab).args(["run", "hi"]).assert().code(1);
+    let a = bin_at(&lab, "hi").args(["run", "hi"]).assert().code(1);
     let e = err(&a);
     assert!(e.contains("level 2"), "{e}");
     assert!(e.contains("ignorarium probe"), "{e}");
@@ -229,16 +236,34 @@ fn run_refuses_when_the_machine_is_below_min_isolation() {
 fn max_level_flag_parses_and_a_value_above_3_is_a_usage_error() {
     let lab = lab();
     plain(&lab, "ml");
-    bin(&lab)
+    bin_at(&lab, "ml")
         .args(["run", "ml", "--max-level", "4"])
         .assert()
         .code(2);
     assert!(kind_of(&lab, "ml", "row").is_empty());
-    bin(&lab)
+    bin_at(&lab, "ml")
         .args(["run", "ml", "--max-level", "0"])
         .assert()
         .code(0);
     assert_eq!(status(&lab, "ml")["state"], "done");
+}
+
+#[test]
+fn run_outside_the_study_root_is_refused_when_an_input_was_absent_at_registration() {
+    let lab = lab();
+    plain(&lab, "out");
+    let a = bin(&lab)
+        .current_dir(&lab.root)
+        .args(["run", "out"])
+        .assert()
+        .code(1);
+    assert!(
+        err(&a).contains("input data/confirm.txt was absent at registration"),
+        "{}",
+        err(&a)
+    );
+    assert!(kind_of(&lab, "out", "row").is_empty());
+    bin_at(&lab, "out").args(["run", "out"]).assert().code(0);
 }
 
 #[test]
@@ -265,7 +290,7 @@ fn pause_then_status_shows_paused_and_run_refuses_until_resume() {
     bin(&lab).args(["pause", "p1"]).assert().code(0);
     let s = status(&lab, "p1");
     assert_eq!(s["request"], "pause");
-    let a = bin(&lab).args(["run", "p1"]).assert().code(1);
+    let a = bin_at(&lab, "p1").args(["run", "p1"]).assert().code(1);
     assert!(
         err(&a).contains("a pause is pending; run `ignorarium resume p1`"),
         "{}",
@@ -273,7 +298,7 @@ fn pause_then_status_shows_paused_and_run_refuses_until_resume() {
     );
     assert!(kind_of(&lab, "p1", "row").is_empty());
     // resume clears the pause and runs to the end.
-    bin(&lab).args(["resume", "p1"]).assert().code(0);
+    bin_at(&lab, "p1").args(["resume", "p1"]).assert().code(0);
     let s = status(&lab, "p1");
     assert_eq!(s["state"], "done");
     assert!(s["request"].is_null());
@@ -289,7 +314,7 @@ fn a_run_stopped_by_the_budget_exits_1_with_the_reason() {
         &[],
         common::PAYLOAD,
     );
-    let a = bin(&lab).args(["run", "bud"]).assert().code(1);
+    let a = bin_at(&lab, "bud").args(["run", "bud"]).assert().code(1);
     assert!(
         err(&a).contains("paused: the next row would reach the cpu cap"),
         "{}",
@@ -319,9 +344,9 @@ fn stop_writes_a_record_and_status_shows_stopped() {
     let s = status(&lab, "x1");
     assert_eq!(s["state"], "stopped");
     assert_eq!(s["detail"], "enough");
-    let a = bin(&lab).args(["run", "x1"]).assert().code(1);
+    let a = bin_at(&lab, "x1").args(["run", "x1"]).assert().code(1);
     assert!(err(&a).contains("stopped"), "{}", err(&a));
-    let a = bin(&lab).args(["resume", "x1"]).assert().code(1);
+    let a = bin_at(&lab, "x1").args(["resume", "x1"]).assert().code(1);
     assert!(err(&a).contains("stopped"), "{}", err(&a));
     // A second stop adds nothing.
     bin(&lab)
@@ -356,6 +381,7 @@ fn resume_and_stop_during_a_live_run() {
     with_payload(&lab, "live", "#!/bin/sh\nsleep 20\n");
     let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("ignorarium"))
         .args(["run", "live"])
+        .current_dir(common::work(&lab, "live"))
         .env("IGNORARIUM_HOME", &lab.home.root)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -373,7 +399,7 @@ fn resume_and_stop_during_a_live_run() {
     // A resume while the run is live clears the pause and starts nothing.
     bin(&lab).args(["pause", "live"]).assert().code(0);
     assert_eq!(status(&lab, "live")["request"], "pause");
-    let a = bin(&lab).args(["resume", "live"]).assert().code(0);
+    let a = bin_at(&lab, "live").args(["resume", "live"]).assert().code(0);
     assert_eq!(text(&a), "the live run continues\n");
     assert_eq!(status(&lab, "live")["request"], "resume");
     let start = std::time::Instant::now();
@@ -409,6 +435,7 @@ fn start_run(lab: &Lab, id: &str, env_args: &[&str]) -> std::process::Child {
         .args(env_args)
         .arg(assert_cmd::cargo::cargo_bin("ignorarium"))
         .args(["run", id])
+        .current_dir(common::work(lab, id))
         .env("IGNORARIUM_HOME", &lab.home.root)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -631,7 +658,7 @@ fn run_refuses_a_bad_machine_file_with_exit_2() {
     let lab = lab();
     plain(&lab, "bm");
     std::fs::write(lab.home.root.join("machine.toml"), "cpus = 0\n").unwrap();
-    let a = bin(&lab).args(["run", "bm"]).assert().code(2);
+    let a = bin_at(&lab, "bm").args(["run", "bm"]).assert().code(2);
     assert!(err(&a).contains("machine.toml"), "{}", err(&a));
 }
 
@@ -840,7 +867,7 @@ fn status_order_stop_then_live_then_interrupted_then_state() {
 fn status_json_has_every_field() {
     let lab = lab();
     plain(&lab, "j1");
-    bin(&lab).args(["run", "j1"]).assert().code(0);
+    bin_at(&lab, "j1").args(["run", "j1"]).assert().code(0);
     let s = status(&lab, "j1");
     let obj = s.as_object().unwrap();
     for key in [
@@ -907,7 +934,7 @@ fn status_json_has_every_field() {
 fn status_counts_void_rows_and_retries() {
     let lab = lab();
     with_payload(&lab, "v1", "#!/bin/sh\nexit 3\n");
-    bin(&lab).args(["run", "v1"]).assert().code(0);
+    bin_at(&lab, "v1").args(["run", "v1"]).assert().code(0);
     let s = status(&lab, "v1");
     assert_eq!(s["voided"], s["total"]);
     assert_eq!(s["done"], s["total"]);
@@ -936,7 +963,7 @@ fn status_blinds_condition_ids_when_blind_is_set() {
         &[("data/example.txt", "calibration")],
         common::PAYLOAD,
     );
-    bin(&lab).args(["run", "b1"]).assert().code(0);
+    bin_at(&lab, "b1").args(["run", "b1"]).assert().code(0);
     let a = bin(&lab).args(["status", "b1"]).assert().success();
     let t = text(&a);
     assert!(!t.contains("arm-a") && !t.contains("exact"), "{t}");
@@ -1017,7 +1044,7 @@ fn run_refuses_while_another_run_holds_the_lock() {
     let lab = lab();
     plain(&lab, "bz");
     let _held = RunLock::try_take(&lab.home, "bz").unwrap().unwrap();
-    let a = bin(&lab).args(["run", "bz"]).assert().code(1);
+    let a = bin_at(&lab, "bz").args(["run", "bz"]).assert().code(1);
     assert!(err(&a).contains("in progress"), "{}", err(&a));
 }
 
@@ -1062,7 +1089,7 @@ fn pilot_run(lab: &Lab, id: &str, payload: &str) {
     use ignorarium::backend::level0::Level0;
     use ignorarium::runner::{RunStatus, prepare_with, run};
     register_study(lab, id, two_clusters, &[], payload);
-    let plan = prepare_with(&lab.home, id, vec![Box::new(Level0)]).unwrap();
+    let plan = prepare_with(&lab.home, id, &common::work_of(&lab.home, id), vec![Box::new(Level0)]).unwrap();
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
 }
 

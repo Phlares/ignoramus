@@ -194,16 +194,21 @@ fn defaults_are_recorded_and_the_stored_spec_is_the_authors() {
 }
 
 #[test]
-fn register_records_the_absolute_root() {
+fn register_records_an_identity_of_the_root_and_no_path() {
+    let root_id = |f: &Fixture, root: &Path| {
+        let key = keys::load(&f.home).unwrap().unwrap();
+        ignorarium::derived::Register::root_id(&key, root).unwrap()
+    };
     let (f, spec) = setup("numeric-ablation", same);
     let work = spec.parent().unwrap().to_path_buf();
     go(&f, &spec, &answer(&spec), true).0.unwrap();
     let rp = f.home.study_dir("my-study").join("records.jsonl");
-    // No marker: the root is the spec's folder.
-    assert_eq!(
-        records(&rp)[0]["record"]["body"]["root"],
-        work.to_str().unwrap()
-    );
+    // No marker: the root is the spec's folder. The signed log names no path above it.
+    let body = &records(&rp)[0]["record"]["body"];
+    assert!(body.get("root").is_none(), "{body}");
+    assert_eq!(body["root_id"], root_id(&f, &work).as_str());
+    let tmp = f.tmp.path().to_str().unwrap();
+    assert!(!std::fs::read_to_string(&rp).unwrap().contains(tmp));
     // With a marker above the spec, the root is the marker's folder.
     let (f, spec) = setup("numeric-ablation", same);
     let work = spec.parent().unwrap().to_path_buf();
@@ -214,10 +219,27 @@ fn register_records_the_absolute_root() {
     let (r, out) = go(&f, &spec, &answer(&spec), true);
     assert_eq!(r.unwrap().code, 0, "{out}");
     let rp = f.home.study_dir("my-study").join("records.jsonl");
-    assert_eq!(
-        records(&rp)[0]["record"]["body"]["root"],
-        work.to_str().unwrap()
-    );
+    let body = &records(&rp)[0]["record"]["body"];
+    assert_eq!(body["root_id"], root_id(&f, &work).as_str());
+    assert_ne!(body["root_id"], root_id(&f, &work.join("spec")).as_str());
+}
+
+#[test]
+fn a_root_identity_needs_the_box_key_and_the_same_folder() {
+    let dir = TempDir::new().unwrap();
+    let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+    std::fs::create_dir_all(a.join("sub")).unwrap();
+    std::fs::create_dir(&b).unwrap();
+    let key = |n: u8| ed25519_dalek::SigningKey::from_bytes(&[n; 32]);
+    let id = |k: u8, p: &Path| ignorarium::derived::Register::root_id(&key(k), p).unwrap();
+    // The same folder by another spelling, or through a link, is the same root.
+    assert_eq!(id(1, &a), id(1, &a.join("sub/..")));
+    std::os::unix::fs::symlink(&a, dir.path().join("link")).unwrap();
+    assert_eq!(id(1, &a), id(1, &dir.path().join("link")));
+    assert_ne!(id(1, &a), id(1, &b));
+    assert_ne!(id(1, &a), id(2, &a));
+    assert_eq!(id(1, &a).len(), 64);
+    assert!(ignorarium::derived::Register::root_id(&key(1), &dir.path().join("none")).is_err());
 }
 
 #[test]

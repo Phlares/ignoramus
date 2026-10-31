@@ -648,7 +648,7 @@ fn a_confirmatory_study_finishes_only_once_its_slot_closes() {
     let lab = lab();
     common::pilot(&lab.home, vec![common::arm_a()]);
     common::register_study(&lab, "conf", common::confirmatory, &[], common::PAYLOAD);
-    let plan = prepare_with(&lab.home, "conf", vec![Box::new(Level0)]).unwrap();
+    let plan = prepare_with(&lab.home, "conf", &common::work_of(&lab.home, "conf"), vec![Box::new(Level0)]).unwrap();
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
     let all = common::records_of(&lab, "conf");
     let analysis = all.iter().find_map(Analysis::of).unwrap();

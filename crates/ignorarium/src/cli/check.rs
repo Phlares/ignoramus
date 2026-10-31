@@ -200,6 +200,20 @@ pub fn study_root_in(spec_path: &Path, home: Option<&Path>) -> PathBuf {
     let folder = spec
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    root_at(&folder, home)
+}
+
+/// The study root a `run` or `resume` reads late inputs from: `study_root`'s walk from the
+/// current folder, which is the root itself when no marker is found.
+pub fn current_root() -> std::io::Result<PathBuf> {
+    Ok(root_at(
+        &std::env::current_dir()?,
+        std::env::home_dir().as_deref(),
+    ))
+}
+
+/// The walk of `study_root` from the absolute folder `folder`.
+fn root_at(folder: &Path, home: Option<&Path>) -> PathBuf {
     for dir in folder.ancestors() {
         if dir.parent().is_none() || Some(dir) == home {
             break;
@@ -212,7 +226,7 @@ pub fn study_root_in(spec_path: &Path, home: Option<&Path>) -> PathBuf {
             break;
         }
     }
-    folder
+    folder.to_path_buf()
 }
 
 /// Drop `.` and fold `..` against the segment before it, without touching the disk, so the

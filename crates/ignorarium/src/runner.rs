@@ -104,6 +104,9 @@ pub enum RunError {
     /// An input differs from the `inputs` record of the study's first prepare: other bytes,
     /// gone, or there now while it was absent then. By input path.
     InputFrozen(String),
+    /// An input absent at registration is read from the study root, and the run started in
+    /// another one. By input path.
+    OtherRoot(String),
     /// `pins.environment` names an image that is not in the store.
     EnvironmentMissing(String),
     /// `pins.environment` is not a store digest (64 lowercase hex characters).
@@ -162,6 +165,12 @@ impl fmt::Display for RunError {
                 f,
                 "input {p} differs from what the study's first run read; \
                  put that back, or register the plan again as a new study"
+            ),
+            RunError::OtherRoot(p) => write!(
+                f,
+                "input {p} was absent at registration and is read from the study root; \
+                 run from that root: the spec's folder, or the folder above it that holds \
+                 ignorarium.toml"
             ),
             RunError::EnvironmentMissing(d) => {
                 write!(f, "the pinned environment {d} is not in the store")
@@ -243,8 +252,13 @@ fn io(e: impl fmt::Display) -> RunError {
 }
 
 /// `prepare_with` on the backends this build registers, up to `backend_max`.
-pub fn prepare(home: &Home, study_id: &str, backend_max: u8) -> Result<RunPlan, RunError> {
-    prepare_with(home, study_id, up_to(backend::registered(), backend_max))
+pub fn prepare(
+    home: &Home,
+    study_id: &str,
+    root: &Path,
+    backend_max: u8,
+) -> Result<RunPlan, RunError> {
+    prepare_with(home, study_id, root, up_to(backend::registered(), backend_max))
 }
 
 /// The backends at or below `max`.
@@ -258,10 +272,13 @@ pub fn up_to(backends: Vec<Box<dyn Backend>>, max: u8) -> Vec<Box<dyn Backend>> 
 /// `resume`; before each attempt the run only compares the view's stamps (see `stale`).
 /// The first prepare that gets this far signs an `inputs` record of every input's digest,
 /// or its absence; a later one whose inputs differ is refused before anything changes, so
-/// every row of a study runs on the same bytes.
+/// every row of a study runs on the same bytes. `root` is the study root found where the
+/// run started (`check::current_root`); only an input absent at registration is read from
+/// it, and only when its identity is the register record's.
 pub fn prepare_with(
     home: &Home,
     study_id: &str,
+    root: &Path,
     backends: Vec<Box<dyn Backend>>,
 ) -> Result<RunPlan, RunError> {
     let dir = home.study_dir(study_id);
@@ -313,7 +330,7 @@ pub fn prepare_with(
         .map_err(|_| RunError::Records(format!("register record names log {:?}", register.log)))?
         .as_str();
     let machine = machine::load(&home.root).map_err(io)?;
-    let inputs = held_inputs(&store, &key, &spec, &register)?;
+    let inputs = held_inputs(&store, &key, &spec, &register, root)?;
     let now = Inputs {
         inputs: (inputs.iter())
             .map(|(p, h)| (p.clone(), h.as_ref().map(|h| h.0.clone())))
@@ -491,18 +508,24 @@ fn view_error(e: ViewError) -> RunError {
 }
 
 /// Each input's hashes. A registered input comes from its stored copy, which must still be
-/// in the store with its size. An input absent at registration is read from the study root
-/// the register record names, never from the box's copy of the study, and imported when it
-/// is there now (signed the first time the store sees it); it is then late data for
-/// `gate_late_data`. A pin always resolves at registration (E-HSH-001), so such an input is
-/// unpinned.
+/// in the store with its size. An input absent at registration is read from `root`, never
+/// from the box's copy of the study, and imported when it is there now (signed the first
+/// time the store sees it); it is then late data for `gate_late_data`. Before any such input
+/// is read, `root` must have the register record's `root_id`. A pin always resolves at
+/// registration (E-HSH-001), so such an input is unpinned.
 fn held_inputs(
     store: &Store,
     key: &SigningKey,
     spec: &Spec,
     register: &Register,
+    root: &Path,
 ) -> Result<InputHashes, RunError> {
-    let root = Path::new(&register.root);
+    let registered = |path: &str| register.inputs.iter().any(|(p, _)| p == path);
+    if let Some(i) = spec.inputs.iter().find(|i| !registered(&i.path))
+        && Register::root_id(key, root).map_err(io)? != register.root_id
+    {
+        return Err(RunError::OtherRoot(i.path.clone()));
+    }
     let source = format!("run {}", spec.study.id);
     let mut all = Vec::new();
     for i in &spec.inputs {

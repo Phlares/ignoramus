@@ -68,7 +68,13 @@ pub fn unseal(dir: &Path) {
 
 /// The study root that `register_study` registers `id` from.
 pub fn work(lab: &Lab, id: &str) -> PathBuf {
-    lab.root.join(format!("work-{id}"))
+    work_of(&lab.home, id)
+}
+
+/// `work` for the box at `home`, a lab's `home` folder.
+pub fn work_of(home: &Home, id: &str) -> PathBuf {
+    let lab = home.root.parent().expect("a lab's home has a parent");
+    lab.join(format!("work-{id}"))
 }
 
 /// Register a study with `register::run` from its own root, which holds `payload/run` and
@@ -407,7 +413,7 @@ pub fn finished(estimates: Vec<serde_json::Value>) -> Vec<(&'static str, serde_j
         leaf: 0,
         log: "testlog".into(),
         defaults: serde_json::json!([]),
-        root: "/work/pilot".into(),
+        root_id: "12".repeat(32),
         payload: "cd".repeat(32),
         inputs: vec![],
         resolved: vec![],

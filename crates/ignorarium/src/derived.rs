@@ -2,10 +2,13 @@
 use crate::canon::{sha256_hex, to_canonical};
 use crate::records::Record;
 use crate::spec::model::{Direction, Outcome, SelectionRule};
+use ed25519_dalek::SigningKey;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 
 pub const ANALYSIS: &str = "analysis";
 pub const ESTIMATE: &str = "estimate";
@@ -63,8 +66,9 @@ pub struct Register {
     pub leaf: u64,
     pub log: String,
     pub defaults: Value,
-    /// The absolute study root that the plan's paths were read from.
-    pub root: String,
+    /// The identity of the study root that the plan's paths were read from (`root_id`). The
+    /// record holds no path.
+    pub root_id: String,
     /// The tree hash of the payload folder, as copied into the study folder.
     pub payload: String,
     /// Each input present at registration, by path, with the digest of its stored copy.
@@ -92,6 +96,18 @@ impl Register {
     /// `None` for another kind of record, or a body that does not parse.
     pub fn of(r: &Record) -> Option<Register> {
         body_of(r, REGISTER)
+    }
+
+    /// The identity of the study root `root` in the box of `key`: the hex SHA-256 of a label,
+    /// the key's secret bytes and the root's canonical path. Another root, or the same one
+    /// moved, gives another identity. Without the key, no reader of a signed record can test
+    /// a guessed path against it.
+    pub fn root_id(key: &SigningKey, root: &Path) -> std::io::Result<String> {
+        let path = std::fs::canonicalize(root)?;
+        let mut bytes = b"ignorarium study root\0".to_vec();
+        bytes.extend_from_slice(&key.to_bytes());
+        bytes.extend_from_slice(path.as_os_str().as_bytes());
+        Ok(sha256_hex(&bytes))
     }
 }
 

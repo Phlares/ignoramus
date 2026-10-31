@@ -52,7 +52,7 @@ printf '{{"ppl": 1.5}}' > "$IGNORARIUM_OUT/values.json"
 }
 
 fn plan_of(lab: &Lab, id: &str) -> RunPlan {
-    prepare_with(&lab.home, id, vec![Box::new(Level0)]).unwrap()
+    prepare_with(&lab.home, id, &common::work_of(&lab.home, id), vec![Box::new(Level0)]).unwrap()
 }
 
 fn control_of(lab: &Lab, id: &str) -> ControlFile {
@@ -809,7 +809,7 @@ fn dead_box_child() {
     let Some((home, id)) = boxed_study() else {
         return;
     };
-    let plan = prepare_with(&home, &id, vec![Box::new(Level0)]).unwrap();
+    let plan = prepare_with(&home, &id, &common::work_of(&home, &id), vec![Box::new(Level0)]).unwrap();
     let _ = runner::run(&plan);
 }
 
