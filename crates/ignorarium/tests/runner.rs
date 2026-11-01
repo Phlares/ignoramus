@@ -9,13 +9,15 @@ use ignorarium::budget::{Cost, FakeMeter, MeterError};
 use ignorarium::canon::sha256_hex;
 use ignorarium::control::State;
 use ignorarium::derived::{
-    Analysis, BoundResult, Estimate, Register, StudyState, Verdict, contrast_key,
+    Analysis, BoundResult, Carried, Estimate, Instrument, Recheck, Register, StudyState, Verdict,
+    contrast_key,
 };
 use ignorarium::planlog::store::PlanLog;
 use ignorarium::prior::{PriorUse, file_hashes};
 use ignorarium::runner::{RunError, RunPlan, RunStatus, prepare, prepare_with, run, up_to};
+use ignorarium::spec::model::Role;
 use ignorarium::stream::{Log, LogName};
-use ignorarium::{analysis, estimate, keys, records, schedule, spec};
+use ignorarium::{analysis, estimate, keys, records, schedule, spec, view};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -412,6 +414,10 @@ fn run_writes_one_record_per_row_in_order() {
     let events = events_of(&dir);
     assert!(!events.is_empty());
     assert!(events.iter().all(|e| e["trace_id"] == trace));
+    // A plan that declares no determinism runs no recheck, and its analysis says so.
+    assert!(plan.schedule.rows.iter().all(|r| r.recheck_of.is_none()));
+    let analysis = &kind_of(&lab, "s1", "analysis")[0].body;
+    assert_eq!(analysis.get("recheck"), Some(&serde_json::Value::Null));
     // A second run has nothing left to do.
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
     assert_eq!(rows_of(&lab, "s1").len(), 6);
@@ -559,6 +565,7 @@ fn pauses_after_row_0(lab: &Lab, id: &str, why: &str) {
     // The record names the bytes row 0 started with.
     let row = &rows_of(lab, id)[0];
     assert_eq!(row.body["payload_sha256"], plan.payload_sha256.as_str());
+    assert_eq!(row.body["manifest"], plan.manifest.as_str());
 }
 
 #[test]
@@ -632,6 +639,68 @@ fn a_changed_store_blob_pauses_the_run() {
         matches!(&err, RunError::InputChanged(p) if p == "data/example.txt"),
         "{err}"
     );
+}
+
+#[test]
+fn a_changed_manifest_blob_pauses_the_run() {
+    let lab = lab();
+    // The view's link is the blob itself.
+    let edit = edits_in_row_0(&format!(
+        "m=\"$IGNORARIUM_IN/{}\"; chmod u+w \"$m\"; printf x >> \"$m\"",
+        view::MANIFEST
+    ));
+    common::with_payload(&lab, "list", &edit);
+    pauses_after_row_0(
+        &lab,
+        "list",
+        "ignorarium:inputs.json changed after the run began",
+    );
+    // The next prepare writes the same manifest and finds other bytes under its digest.
+    let err = err_of(&lab, "list").to_string();
+    assert!(err.contains(view::MANIFEST), "{err}");
+    assert!(err.contains("stored blob differs"), "{err}");
+}
+
+#[test]
+fn a_view_without_the_manifest_moves_aside_on_resume() {
+    let lab = lab();
+    // Row 0 takes the manifest out of the view. What is left is the view a box without the
+    // manifest built: the inputs only.
+    let edit = edits_in_row_0(&format!(
+        "chmod u+w \"$IGNORARIUM_IN\"; mv \"$IGNORARIUM_IN/{}\" \"$IGNORARIUM_OUT/../list\"",
+        view::MANIFEST
+    ));
+    common::with_payload(&lab, "old-view", &edit);
+    pauses_after_row_0(
+        &lab,
+        "old-view",
+        "ignorarium:inputs.json changed after the run began",
+    );
+    let dir = lab.home.study_dir("old-view");
+    assert!(!dir.join("in").join(view::MANIFEST).exists());
+    let frozen = kind_of(&lab, "old-view", "inputs");
+    let done = rows_of(&lab, "old-view");
+    let out = dir.join("run/rows/0/out");
+    let hash = ignorarium::backend::output_hash(&out).unwrap();
+    // The resume moves the old view aside whole and builds one that holds the manifest.
+    let plan = plan_of(&lab, "old-view");
+    let old = dir.join("in.old-0");
+    assert!(old.join("data/example.txt").is_file());
+    assert!(!old.join(view::MANIFEST).exists());
+    assert!(!dir.join("in.old-1").exists());
+    let list = std::fs::read(plan.view.join(view::MANIFEST)).unwrap();
+    assert_eq!(sha256_hex(&list), plan.manifest);
+    assert_eq!(done[0].body["manifest"], plan.manifest.as_str());
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    // The frozen inputs and the row recorded before stay as they were.
+    assert_eq!(kind_of(&lab, "old-view", "inputs"), frozen);
+    let rows = rows_of(&lab, "old-view");
+    assert_eq!(rows.len(), 6);
+    assert_eq!(rows[0], done[0]);
+    assert_eq!(ignorarium::backend::output_hash(&out).unwrap(), hash);
+    for r in &rows[1..] {
+        assert_eq!(r.body["manifest"], plan.manifest.as_str());
+    }
 }
 
 #[test]
@@ -1293,7 +1362,7 @@ fn a_late_input_with_the_data_of_the_other_role_is_refused() {
         assert_eq!(
             err.to_string(),
             format!(
-                "E-CNF-004: input {conf} holds the same data as input {sel}, of the other role. See docs/rules/E-CNF-004.md"
+                "E-CNF-004: the confirmation input {conf} holds the same data as the selection input {sel}. See docs/rules/E-CNF-004.md"
             ),
             "{id}"
         );
@@ -1309,6 +1378,64 @@ fn a_late_input_with_the_data_of_the_other_role_is_refused() {
     std::fs::write(work("loose").join(sel), "both").unwrap();
     std::fs::write(work("loose").join(conf), "both").unwrap();
     plan_of(&lab, "loose");
+}
+
+#[test]
+fn the_shared_data_refusal_names_the_role_and_escapes_the_paths() {
+    let e = RunError::DataShared {
+        path: "data/c\u{202e}txt".into(),
+        other: "data/a\nb".into(),
+        role: Role::Calibration,
+    };
+    assert_eq!(
+        e.to_string(),
+        "E-CNF-004: the confirmation input data/c\\u{202e}txt holds the same data as the calibration input data/a\\nb. See docs/rules/E-CNF-004.md"
+    );
+}
+
+#[test]
+fn a_late_calibration_copy_of_a_confirmation_input_is_refused() {
+    let lab = lab();
+    staged_pilot(&lab);
+    let (cal, conf) = ("data/example.txt", "data/confirm.txt");
+    // The calibration input is absent at registration, then written with the confirmation
+    // text: once exactly, once in other case and spacing.
+    // Each study has its own confirmation text: another study's use of it is refused.
+    for (id, held, late) in [
+        ("late-exact", "Held  Text", "Held  Text"),
+        ("late-near", "Kept  Text", "kept text"),
+    ] {
+        let dir = register_study(&lab, id, confirmatory_staged, &[(conf, held)], PAYLOAD);
+        std::fs::write(common::work(&lab, id).join(cal), late).unwrap();
+        let err = prepare_with(
+            &lab.home,
+            id,
+            &common::work_of(&lab.home, id),
+            vec![Box::new(Level0)],
+        )
+        .err()
+        .unwrap_or_else(|| panic!("{id}: prepare should refuse"));
+        match err {
+            RunError::DataShared { path, other, role } => {
+                assert_eq!(
+                    (path, other, role),
+                    (conf.into(), cal.into(), Role::Calibration)
+                )
+            }
+            e => panic!("{id}: {e}"),
+        }
+        assert!(!dir.join("schedule.json").exists(), "{id}");
+    }
+    // Other calibration data passes.
+    register_study(
+        &lab,
+        "apart",
+        confirmatory_staged,
+        &[(conf, "Third  Text")],
+        PAYLOAD,
+    );
+    std::fs::write(common::work(&lab, "apart").join(cal), "other text").unwrap();
+    plan_of(&lab, "apart");
 }
 
 #[test]
@@ -1467,7 +1594,10 @@ fn the_schedule_runs_the_picked_units_of_the_confirmation_input() {
     plain(&lab, "units");
     let plan = plan_of(&lab, "units");
     let rows = &plan.schedule.rows;
-    assert_eq!(rows, &schedule::rows(&plan.spec, &plan.spec_hash).unwrap());
+    assert_eq!(
+        rows,
+        &schedule::rows(&plan.spec, &plan.spec_hash, false).unwrap()
+    );
     let got: Vec<_> = rows
         .iter()
         .map(|r| {
@@ -2087,6 +2217,31 @@ fn priced(lab: &Lab, id: &str) {
         "max_level = 1\nrate_usd_per_hour = 36.0\n",
     )
     .unwrap();
+}
+
+#[test]
+fn the_gate_counts_a_rows_whole_time_against_the_wall_cap() {
+    let lab = lab();
+    // Rows run one at a time: a 60 s row needs 60 s of wall time, whatever the cpu count.
+    // The wall cap is 30 s; the old estimate divided by 4 cpus and charged 15 s a row.
+    let edit = |t: String| {
+        t.replace("cpu_hours = 1.0", "cpu_hours = 0.0").replace(
+            "wall_hours = 1.0",
+            &format!("wall_hours = {}", 30.0 / 3600.0),
+        )
+    };
+    common::edited(&lab, "wall-whole", edit, PAYLOAD);
+    std::fs::write(
+        lab.home.root.join("machine.toml"),
+        "max_level = 1
+cpus = 4
+",
+    )
+    .unwrap();
+    let plan = plan_of(&lab, "wall-whole");
+    let why = "the next row would reach the wall cap";
+    assert_eq!(run(&plan).unwrap(), RunStatus::Paused(why.into()));
+    assert!(rows_of(&lab, "wall-whole").is_empty());
 }
 
 #[test]
@@ -2945,4 +3100,780 @@ fn verdicts_and_the_close_are_written_once() {
     let stream = stream_of(&lab, LogName::Plan);
     assert_eq!(stream.last(), Some(&close_of("once", 250.0, true)));
     assert!(finished(&lab, "once"));
+}
+
+// ---- a payload that declares determinism is rechecked ----
+
+/// The template text with `pins.deterministic = true`.
+fn deterministic(t: String) -> String {
+    t.replace("# deterministic = true", "deterministic = true")
+}
+
+/// Writes its row, its seed and its arguments, and the template's measure.
+const JOB: &str = "#!/bin/sh
+printf '%s %s %s' \"$IGNORARIUM_ROW\" \"$IGNORARIUM_SEED\" \"$*\" > \"$IGNORARIUM_OUT/job\"
+printf '{\"ppl\": 1.5}' > \"$IGNORARIUM_OUT/values.json\"
+";
+
+/// Writes the time in nanoseconds, and the template's measure.
+const CLOCK: &str = "#!/bin/sh
+date +%s%N > \"$IGNORARIUM_OUT/time\"
+printf '{\"ppl\": 1.5}' > \"$IGNORARIUM_OUT/values.json\"
+";
+
+/// (copy index, original index) of each recheck copy, in schedule order.
+fn copies(plan: &RunPlan) -> Vec<(u64, u64)> {
+    (plan.schedule.rows.iter())
+        .filter_map(|r| Some((r.index, r.recheck_of?)))
+        .collect()
+}
+
+/// The record of row `i`.
+fn row_record(lab: &Lab, id: &str, i: u64) -> records::Record {
+    (rows_of(lab, id).into_iter())
+        .find(|r| r.row == Some(i))
+        .unwrap()
+}
+
+/// What `run/rows/<i>/out/job` holds.
+fn job_of(dir: &std::path::Path, i: u64) -> String {
+    std::fs::read_to_string(dir.join(format!("run/rows/{i}/out/job"))).unwrap()
+}
+
+/// The `recheck` of the study's analysis record.
+fn recheck_in(lab: &Lab, id: &str) -> Option<Recheck> {
+    Analysis::of(&kind_of(lab, id, "analysis")[0])
+        .unwrap()
+        .recheck
+}
+
+/// The level and attrs of each `row.recheck` event.
+fn rechecks(dir: &std::path::Path) -> Vec<(String, serde_json::Value)> {
+    let ev = events_of(dir);
+    (named(&ev, "row.recheck").iter())
+        .map(|e| (e["level"].as_str().unwrap().to_string(), e["attrs"].clone()))
+        .collect()
+}
+
+#[test]
+fn a_recheck_gets_the_original_job() {
+    let lab = lab();
+    let dir = common::edited(&lab, "same", deterministic, JOB);
+    let plan = plan_of(&lab, "same");
+    assert_eq!(plan.schedule.rows.len(), 8);
+    let pairs = copies(&plan);
+    let mut numbers: Vec<u64> = pairs.iter().map(|p| p.0).collect();
+    numbers.sort_unstable();
+    assert_eq!(numbers, [6, 7]);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    for &(c, o) in &pairs {
+        let row = (plan.schedule.rows.iter()).find(|r| r.index == o).unwrap();
+        let job = format!(
+            "{o} {} --condition {} --unit {} --repeat {}",
+            row.seed_hex, row.condition, row.unit, row.repeat
+        );
+        assert_eq!(job_of(&dir, o), job);
+        assert_eq!(job_of(&dir, c), job);
+        let (copy, original) = (row_record(&lab, "same", c), row_record(&lab, "same", o));
+        assert_eq!(copy.body["recheck_of"], o);
+        assert_eq!(copy.body["same"], true);
+        assert_eq!(copy.body["output_hash"], original.body["output_hash"]);
+        assert_eq!(copy.body["seed"], original.body["seed"]);
+        assert_eq!(original.body.get("recheck_of"), None);
+        assert_eq!(original.body.get("same"), None);
+    }
+    let want: Vec<_> = (pairs.iter())
+        .map(|&(c, o)| {
+            let attrs = serde_json::json!({ "row": c, "of": o, "same": true });
+            ("info".to_string(), attrs)
+        })
+        .collect();
+    assert_eq!(rechecks(&dir), want);
+    let r = recheck_in(&lab, "same").unwrap();
+    let passed = Recheck {
+        rows: 2,
+        mismatched: vec![],
+        uncompared: vec![],
+        carried_from: None,
+    };
+    assert_eq!(r, passed);
+    assert!(r.passed());
+}
+
+#[test]
+fn a_mismatch_flags_an_exploratory_run() {
+    let lab = lab();
+    let dir = common::edited(&lab, "clock", deterministic, CLOCK);
+    let plan = plan_of(&lab, "clock");
+    let pairs = copies(&plan);
+    assert_eq!(pairs.len(), 2);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(rows_of(&lab, "clock").len(), 8);
+    for &(c, o) in &pairs {
+        let (copy, original) = (row_record(&lab, "clock", c), row_record(&lab, "clock", o));
+        assert_eq!(
+            (&copy.body["exit"], &original.body["exit"]),
+            (&"ok".into(), &"ok".into())
+        );
+        assert_ne!(copy.body["output_hash"], original.body["output_hash"]);
+        assert_eq!(copy.body["same"], false);
+    }
+    let want: Vec<_> = (pairs.iter())
+        .map(|&(c, o)| {
+            let attrs = serde_json::json!({ "row": c, "of": o, "same": false });
+            ("warn".to_string(), attrs)
+        })
+        .collect();
+    assert_eq!(rechecks(&dir), want);
+    let r = recheck_in(&lab, "clock").unwrap();
+    let flagged = Recheck {
+        rows: 2,
+        mismatched: pairs.iter().map(|p| p.0).collect(),
+        uncompared: vec![],
+        carried_from: None,
+    };
+    assert_eq!(r, flagged);
+    assert!(!r.passed());
+    // A later run finds the mismatch in the records and still ends: the study is exploratory.
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+}
+
+#[test]
+fn a_mismatch_stops_a_confirmatory_run() {
+    let lab = lab();
+    // The source holds no recheck, and the plan declares a deviation from it.
+    common::pilot(&lab.home, vec![common::arm_a()]);
+    let edit = |t: String| deterministic(one_unit_each(t));
+    let dir = register_study(&lab, "strict", edit, &[], CLOCK);
+    let plan = plan_of(&lab, "strict");
+    let first = (plan.schedule.rows.iter())
+        .position(|r| r.recheck_of.is_some())
+        .unwrap();
+    let copy = &plan.schedule.rows[first];
+    let (c, o) = (copy.index, copy.recheck_of.unwrap());
+    let status = run(&plan).unwrap();
+    let hash = |i: u64| {
+        let r = row_record(&lab, "strict", i);
+        r.body["output_hash"].as_str().unwrap().to_string()
+    };
+    let (a, b) = (hash(o), hash(c));
+    assert_ne!(a, b);
+    let why = format!(
+        "row {o} gave output {a} and its recheck row {c} gave {b}; the payload is not deterministic"
+    );
+    assert_eq!(status, RunStatus::Stopped(why.clone()));
+    let stop = kind_of(&lab, "strict", "stop");
+    assert_eq!(stop.len(), 1);
+    assert_eq!(stop[0].body["why"], why.as_str());
+    assert_eq!(row_record(&lab, "strict", c).body["same"], false);
+    // The run ends at the copy: no later row runs, and no analysis is written.
+    let ran: Vec<u64> = plan.schedule.rows[..=first]
+        .iter()
+        .map(|r| r.index)
+        .collect();
+    assert_eq!(indices(&lab, "strict"), ran);
+    assert!(kind_of(&lab, "strict", "analysis").is_empty());
+    assert!(rechecks(&dir).is_empty());
+    assert_eq!(run(&plan).unwrap(), RunStatus::Stopped(why));
+    assert_eq!(indices(&lab, "strict"), ran);
+}
+
+/// Marks each row in `marks` on its first call and runs the shell line `first` then, and
+/// `later` on each later call of the same `IGNORARIUM_ROW`.
+fn marking(marks: &std::path::Path, first: &str, later: &str) -> String {
+    format!(
+        "#!/bin/sh
+mark=\"{}/$IGNORARIUM_ROW\"
+if [ -e \"$mark\" ]; then {later}; else : > \"$mark\"; {first}; fi
+",
+        marks.display()
+    )
+}
+
+#[test]
+fn a_void_row_is_not_compared() {
+    // The original is void and its copy ok, then the other way round.
+    let values = common::VALUES;
+    for (id, first, later, exits) in [
+        ("void-first", ":", values, ("void:output", "ok")),
+        ("void-copy", values, ":", ("ok", "void:output")),
+    ] {
+        let lab = lab();
+        let marks = lab.root.join("marks");
+        std::fs::create_dir(&marks).unwrap();
+        let dir = common::edited(&lab, id, deterministic, &marking(&marks, first, later));
+        let plan = plan_of(&lab, id);
+        let pairs = copies(&plan);
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(run(&plan).unwrap(), RunStatus::Done, "{id}");
+        for &(c, o) in &pairs {
+            let (copy, original) = (row_record(&lab, id, c), row_record(&lab, id, o));
+            let got = (&original.body["exit"], &copy.body["exit"]);
+            assert_eq!(got, (&exits.0.into(), &exits.1.into()), "{id}");
+            assert_eq!(copy.body["recheck_of"], o, "{id}");
+            let null = serde_json::Value::Null;
+            assert_eq!(copy.body.get("same"), Some(&null), "{id}");
+        }
+        assert!(rechecks(&dir).is_empty(), "{id}");
+        let r = recheck_in(&lab, id).unwrap();
+        let none = Recheck {
+            rows: 0,
+            mismatched: vec![],
+            uncompared: pairs.iter().map(|p| p.0).collect(),
+            carried_from: None,
+        };
+        assert_eq!(r, none, "{id}");
+        assert!(!r.passed(), "{id}");
+    }
+}
+
+/// Level 0, where the box ends each listed row at its wall timeout once the payload has written
+/// its output. A row is known by its output folder: a copy runs with its original's
+/// `IGNORARIUM_ROW`.
+struct TimedOut(Vec<u64>);
+
+impl Backend for TimedOut {
+    fn cpus(&self) -> u32 {
+        1
+    }
+    fn launcher(&self) -> String {
+        "process".into()
+    }
+    fn level(&self) -> u8 {
+        0
+    }
+    fn probe(&self) -> Probe {
+        Probe::Available
+    }
+    fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> std::io::Result<RowOutcome> {
+        let o = Level0.run_row(job, watch)?;
+        let at = |i: &u64| job.output_dir.ends_with(format!("{i}/out"));
+        Ok(if self.0.iter().any(at) {
+            RowOutcome {
+                exit: Exit::Payload(124),
+                ended: true,
+                ..o
+            }
+        } else {
+            o
+        })
+    }
+}
+
+#[test]
+fn a_row_the_box_ended_is_not_compared() {
+    // A confirmatory study whose payload writes the time, so no two outputs are the same. The
+    // box ends the originals at their wall timeout, then the copies, then both.
+    for (id, originals, copies_too) in [
+        ("ended-first", true, false),
+        ("ended-copy", false, true),
+        ("ended-both", true, true),
+    ] {
+        let lab = lab();
+        common::pilot(&lab.home, vec![common::arm_a()]);
+        let edit = |t: String| deterministic(one_unit_each(t));
+        let dir = register_study(&lab, id, edit, &[], CLOCK);
+        let mut plan = plan_of(&lab, id);
+        let pairs = copies(&plan);
+        assert_eq!(pairs.len(), 2, "{id}");
+        let ended: Vec<u64> = (pairs.iter())
+            .flat_map(|&(c, o)| [(o, originals), (c, copies_too)])
+            .filter_map(|(i, end)| end.then_some(i))
+            .collect();
+        plan.backend = Box::new(TimedOut(ended.clone()));
+        assert_eq!(run(&plan).unwrap(), RunStatus::Done, "{id}");
+        assert!(kind_of(&lab, id, "stop").is_empty(), "{id}");
+        for &(c, o) in &pairs {
+            for i in [o, c] {
+                let r = row_record(&lab, id, i);
+                let (exit, mark) = if ended.contains(&i) {
+                    ("payload:124", Some(serde_json::json!(true)))
+                } else {
+                    ("ok", None)
+                };
+                assert_eq!(r.body["exit"], exit, "{id} row {i}");
+                assert_eq!(r.body.get("ended"), mark.as_ref(), "{id} row {i}");
+            }
+            let same = row_record(&lab, id, c).body.get("same").cloned();
+            assert_eq!(same, Some(serde_json::Value::Null), "{id}");
+        }
+        assert!(rechecks(&dir).is_empty(), "{id}");
+        let r = recheck_in(&lab, id).unwrap();
+        let none = Recheck {
+            rows: 0,
+            mismatched: vec![],
+            uncompared: pairs.iter().map(|p| p.0).collect(),
+            carried_from: None,
+        };
+        assert_eq!(r, none, "{id}");
+        assert!(!r.passed(), "{id}");
+    }
+}
+
+/// Level 0, asking for a pause while a row runs whose `IGNORARIUM_ROW` is `row`.
+struct PauseAt {
+    control: ignorarium::control::ControlFile,
+    row: u64,
+}
+
+impl Backend for PauseAt {
+    fn cpus(&self) -> u32 {
+        1
+    }
+    fn launcher(&self) -> String {
+        "process".into()
+    }
+    fn level(&self) -> u8 {
+        0
+    }
+    fn probe(&self) -> Probe {
+        Probe::Available
+    }
+    fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> std::io::Result<RowOutcome> {
+        let row = job.env.iter().find(|(k, _)| k == "IGNORARIUM_ROW").unwrap();
+        if row.1 == self.row.to_string() {
+            self.control.request_pause().unwrap();
+        }
+        Level0.run_row(job, watch)
+    }
+}
+
+#[test]
+fn a_resumed_run_rechecks_with_the_original_job() {
+    let lab = lab();
+    let dir = common::edited(&lab, "resumed", deterministic, JOB);
+    let mut plan = plan_of(&lab, "resumed");
+    let (c, o) = copies(&plan)[0];
+    let control = || ignorarium::control::ControlFile::of(&lab.home, "resumed");
+    plan.backend = Box::new(PauseAt {
+        control: control(),
+        row: o,
+    });
+    let paused = RunStatus::Paused("a pause was requested".into());
+    assert_eq!(run(&plan).unwrap(), paused);
+    // The pause lands between the original and its copy.
+    let done = indices(&lab, "resumed");
+    assert_eq!(done.last(), Some(&o));
+    assert!(!done.contains(&c));
+    control().request_resume().unwrap();
+    assert_eq!(run(&plan_of(&lab, "resumed")).unwrap(), RunStatus::Done);
+    let copy = row_record(&lab, "resumed", c);
+    assert_eq!(copy.body["recheck_of"], o);
+    assert_eq!(copy.body["same"], true);
+    assert_eq!(job_of(&dir, c), job_of(&dir, o));
+    assert!(job_of(&dir, c).starts_with(&format!("{o} ")));
+    let done = indices(&lab, "resumed");
+    assert_eq!(done.iter().filter(|i| **i == o).count(), 1);
+    assert_eq!(done.len(), 8);
+    assert_eq!(recheck_in(&lab, "resumed").unwrap().rows, 2);
+}
+
+#[test]
+fn an_exit_that_differs_is_a_mismatch() {
+    // The first call of each row writes its values and exits 3; a later call exits 0.
+    let lab = lab();
+    let marks = lab.root.join("marks");
+    std::fs::create_dir(&marks).unwrap();
+    let first = format!("{}; exit 3", common::VALUES);
+    let payload = marking(&marks, &first, common::VALUES);
+    let dir = common::edited(&lab, "exits", deterministic, &payload);
+    let plan = plan_of(&lab, "exits");
+    let pairs = copies(&plan);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    for &(c, o) in &pairs {
+        let (copy, original) = (row_record(&lab, "exits", c), row_record(&lab, "exits", o));
+        let exits = (&original.body["exit"], &copy.body["exit"]);
+        assert_eq!(exits, (&"payload:3".into(), &"ok".into()));
+        assert_eq!(copy.body["output_hash"], original.body["output_hash"]);
+        assert_eq!(copy.body["same"], false);
+    }
+    let want: Vec<_> = (pairs.iter())
+        .map(|&(c, o)| {
+            let attrs = serde_json::json!({ "row": c, "of": o, "same": false });
+            ("warn".to_string(), attrs)
+        })
+        .collect();
+    assert_eq!(rechecks(&dir), want);
+    let r = recheck_in(&lab, "exits").unwrap();
+    assert_eq!(r.mismatched, pairs.iter().map(|p| p.0).collect::<Vec<_>>());
+    assert_eq!((r.rows, r.uncompared), (2, vec![]));
+}
+
+#[test]
+fn an_original_record_without_an_exit_is_a_records_fault() {
+    let lab = lab();
+    common::edited(&lab, "gap", deterministic, JOB);
+    let plan = plan_of(&lab, "gap");
+    let (c, o) = copies(&plan)[0];
+    // A signed record of the original that names no exit: the run takes the original as done.
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let draft = records::RecordDraft {
+        study: "gap".into(),
+        row: Some(o),
+        kind: "row".into(),
+        body: serde_json::json!({ "output_hash": "00".repeat(32) }),
+    };
+    let log = lab.home.study_dir("gap").join("records.jsonl");
+    records::append(&log, &key, draft).unwrap();
+    match run(&plan) {
+        Err(RunError::Records(why)) => assert_eq!(
+            why,
+            format!("the record of row {o}, which recheck row {c} repeats, holds no exit")
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert!(!indices(&lab, "gap").contains(&c));
+}
+
+/// A meter that reads no spend and crashes the box on the `at`-th row it is told of, right
+/// after that row's record.
+struct CrashAt {
+    rows: std::cell::Cell<usize>,
+    at: usize,
+}
+
+impl ignorarium::budget::CostMeter for CrashAt {
+    fn sample(&self) -> Result<Cost, MeterError> {
+        Ok(Cost::default())
+    }
+    fn add_row(&self, _cpu_seconds: f64) {
+        self.rows.set(self.rows.get() + 1);
+        if self.rows.get() == self.at {
+            panic!("crash after the record of row {}", self.at);
+        }
+    }
+}
+
+#[test]
+fn a_crash_after_a_mismatched_copy_still_stops_the_run() {
+    let lab = lab();
+    common::pilot(&lab.home, vec![common::arm_a()]);
+    let edit = |t: String| deterministic(one_unit_each(t));
+    register_study(&lab, "crash", edit, &[], CLOCK);
+    let mut plan = plan_of(&lab, "crash");
+    let first = (plan.schedule.rows.iter())
+        .position(|r| r.recheck_of.is_some())
+        .unwrap();
+    let (c, o) = (plan.schedule.rows[first].index, copies(&plan)[0].1);
+    plan.meter = Box::new(CrashAt {
+        rows: 0.into(),
+        at: first + 1,
+    });
+    assert!(catch_unwind(AssertUnwindSafe(|| run(&plan))).is_err());
+    // The copy's record holds the mismatch, and no stop record follows it.
+    assert_eq!(row_record(&lab, "crash", c).body["same"], false);
+    assert!(kind_of(&lab, "crash", "stop").is_empty());
+    let ran = indices(&lab, "crash");
+    let hash = |i: u64| {
+        let r = row_record(&lab, "crash", i);
+        r.body["output_hash"].as_str().unwrap().to_string()
+    };
+    let why = format!(
+        "row {o} gave output {} and its recheck row {c} gave {}; the payload is not deterministic",
+        hash(o),
+        hash(c)
+    );
+    // The resume stops from the records: no row runs, and no analysis, verdict or close.
+    let again = plan_of(&lab, "crash");
+    assert_eq!(run(&again).unwrap(), RunStatus::Stopped(why.clone()));
+    assert_eq!(kind_of(&lab, "crash", "stop")[0].body["why"], why.as_str());
+    assert_eq!(indices(&lab, "crash"), ran);
+    for kind in ["analysis", "estimate", "verdict"] {
+        assert!(kind_of(&lab, "crash", kind).is_empty(), "{kind}");
+    }
+    let stream = stream_of(&lab, LogName::Plan);
+    assert!(stream.iter().all(|(kind, _)| kind != "stream.close"));
+}
+
+/// Writes what the file `session` holds, and the template's measure.
+fn session_payload(session: &std::path::Path) -> String {
+    format!(
+        "#!/bin/sh\ncat \"{}\" > \"$IGNORARIUM_OUT/session\"\n{}\n",
+        session.display(),
+        common::VALUES
+    )
+}
+
+/// Level 0 that names itself level `.0` in the records.
+struct AtLevel(u8);
+
+impl Backend for AtLevel {
+    fn cpus(&self) -> u32 {
+        1
+    }
+    fn launcher(&self) -> String {
+        "process".into()
+    }
+    fn level(&self) -> u8 {
+        self.0
+    }
+    fn probe(&self) -> Probe {
+        Probe::Available
+    }
+    fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> std::io::Result<RowOutcome> {
+        Level0.run_row(job, watch)
+    }
+}
+
+#[test]
+fn a_copy_in_another_environment_or_level_is_not_compared() {
+    // A confirmatory study pauses between an original and its copy, and its output changes
+    // with the session, as it could with the environment or the level.
+    for (id, part) in [("other-env", "environment"), ("other-level", "isolation")] {
+        let lab = lab();
+        common::pilot(&lab.home, vec![common::arm_a()]);
+        let session = lab.root.join("session");
+        std::fs::write(&session, "1").unwrap();
+        let edit = |t: String| deterministic(one_unit_each(t));
+        let dir = register_study(&lab, id, edit, &[], &session_payload(&session));
+        let control = || ignorarium::control::ControlFile::of(&lab.home, id);
+        let mut plan = plan_of(&lab, id);
+        let (c, o) = copies(&plan)[0];
+        plan.backend = Box::new(PauseAt {
+            control: control(),
+            row: o,
+        });
+        let paused = RunStatus::Paused("a pause was requested".into());
+        assert_eq!(run(&plan).unwrap(), paused, "{id}");
+        let before = indices(&lab, id);
+        std::fs::write(&session, "2").unwrap();
+        control().request_resume().unwrap();
+        let mut again = plan_of(&lab, id);
+        if part == "environment" {
+            again.environment = "ab".repeat(32);
+        } else {
+            again.backend = Box::new(AtLevel(1));
+        }
+        assert_eq!(run(&again).unwrap(), RunStatus::Done, "{id}");
+        assert!(kind_of(&lab, id, "stop").is_empty(), "{id}");
+        // A copy of an original from the first session is not compared; the others match.
+        let (mut want, mut uncompared) = (vec![], vec![]);
+        for (copy, original) in copies(&again) {
+            let r = row_record(&lab, id, copy);
+            if before.contains(&original) {
+                assert_eq!(r.body.get("same"), Some(&serde_json::Value::Null), "{id}");
+                let attrs = serde_json::json!({
+                    "row": copy, "of": original, "same": null, "differs": [part]
+                });
+                want.push(("warn".to_string(), attrs));
+                uncompared.push(copy);
+            } else {
+                assert_eq!(r.body["same"], true, "{id}");
+                let attrs = serde_json::json!({ "row": copy, "of": original, "same": true });
+                want.push(("info".to_string(), attrs));
+            }
+        }
+        assert!(uncompared.contains(&c), "{id}");
+        assert_eq!(rechecks(&dir), want, "{id}");
+        let r = recheck_in(&lab, id).unwrap();
+        assert_eq!(r.rows, 2 - uncompared.len() as u64, "{id}");
+        assert_eq!(r.uncompared, uncompared, "{id}");
+        assert!(r.mismatched.is_empty(), "{id}");
+        assert!(!r.passed(), "{id}");
+    }
+}
+
+// ---- a borrowing study carries a passed check of the same code ----
+
+/// The store digest of an environment image: a docker archive whose one layer holds one file.
+fn image(lab: &Lab) -> String {
+    let tar_of = |members: &[(&str, &[u8])]| {
+        let mut b = tar::Builder::new(Vec::new());
+        for (name, data) in members {
+            let mut h = tar::Header::new_gnu();
+            h.set_path(name).unwrap();
+            h.set_mode(0o644);
+            h.set_size(data.len() as u64);
+            h.set_cksum();
+            b.append(&h, *data).unwrap();
+        }
+        b.into_inner().unwrap()
+    };
+    let layer = tar_of(&[("etc/os-release", b"ID=test\n")]);
+    let manifest = br#"[{"Layers":["l0/layer.tar"]}]"#;
+    let archive = tar_of(&[("manifest.json", manifest), ("l0/layer.tar", &layer)]);
+    let store = ignorarium::store::Store::open(&lab.home.root).unwrap();
+    store.put(&archive).unwrap()
+}
+
+/// A recheck whose two copies matched their originals.
+fn passed_check() -> Recheck {
+    Recheck {
+        rows: 2,
+        mismatched: vec![],
+        uncompared: vec![],
+        carried_from: None,
+    }
+}
+
+/// What the calibration input `data/example.txt` holds.
+const CALIBRATION: &str = "calibration";
+
+/// Register `id`: `one_unit_each` with `pins.deterministic`, at `min_isolation = 1`, pinning
+/// `environment` and its calibration input, then `edit`; its source `my-pilot` ran its `JOB`
+/// payload and that input in `environment`, with `recheck`. Returns the hash of my-pilot's
+/// analysis record.
+fn borrowing(
+    lab: &Lab,
+    id: &str,
+    environment: &str,
+    recheck: Option<Recheck>,
+    edit: impl Fn(String) -> String,
+) -> String {
+    let payload = common::work(lab, id).join("payload");
+    std::fs::create_dir_all(&payload).unwrap();
+    common::write_exec(&payload.join("run"), JOB);
+    let calibration = sha256_hex(CALIBRATION.as_bytes());
+    let instrument = Instrument {
+        payload: ignorarium::payload::tree_hash(&payload).unwrap(),
+        environment: environment.into(),
+        inputs: vec![(
+            "data/example.txt".into(),
+            "calibration".into(),
+            calibration.clone(),
+        )],
+    };
+    let source = common::finished_with(instrument, recheck, vec![common::arm_a()]);
+    let analysis = common::plant(&lab.home, "my-pilot", &source)[1].clone();
+    let spec = |t: String| {
+        let t = need_isolation(deterministic(one_unit_each(t)));
+        edit(
+            t.replace(
+                "environment = \"\"",
+                &format!("environment = \"{environment}\""),
+            )
+            .replacen("sha256 = \"\"", &format!("sha256 = \"{calibration}\""), 1),
+        )
+    };
+    register_study(lab, id, spec, &[("data/example.txt", CALIBRATION)], JOB);
+    analysis
+}
+
+fn carries_of(lab: &Lab, id: &str) -> Option<Carried> {
+    Register::of(&kind_of(lab, id, "register")[0])
+        .unwrap()
+        .carries
+}
+
+#[test]
+fn a_matching_borrower_carries_a_passed_check() {
+    let lab = lab();
+    let env = image(&lab);
+    let analysis = borrowing(&lab, "carry", &env, Some(passed_check()), |t| t);
+    let carried = Carried {
+        study: "my-pilot".into(),
+        record: analysis,
+    };
+    assert_eq!(carries_of(&lab, "carry"), Some(carried));
+    let work = common::work(&lab, "carry");
+    let plan = prepare_with(&lab.home, "carry", &work, vec![fake_at(1)]).unwrap();
+    assert_eq!(
+        (plan.backend.level(), plan.environment.as_str()),
+        (1, &*env)
+    );
+    assert!(copies(&plan).is_empty());
+    assert_eq!(plan.schedule.rows.len(), 30);
+    // A resume at another level keeps the register record's decision: level 2 runs the same
+    // rows in the same image, and level 0 is refused, since the plan needs level 1.
+    let schedule = || std::fs::read(lab.home.study_dir("carry").join("schedule.json")).unwrap();
+    let before = schedule();
+    let again = prepare_with(&lab.home, "carry", &work, vec![fake_at(2)]).unwrap();
+    assert_eq!(
+        (again.backend.level(), again.environment.as_str()),
+        (2, &*env)
+    );
+    assert!(copies(&again).is_empty());
+    let host = prepare_with(&lab.home, "carry", &work, vec![fake_at(0)]);
+    let host = host.err().unwrap();
+    assert!(
+        matches!(&host, RunError::NoBackend { need: 1, have } if *have == [0]),
+        "{host}"
+    );
+    assert_eq!(schedule(), before);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let rows = rows_of(&lab, "carry");
+    assert_eq!(rows.len(), 30);
+    assert!(rows.iter().all(|r| r.body["environment"] == *env));
+    let r = recheck_in(&lab, "carry").unwrap();
+    let carried = Recheck {
+        rows: 0,
+        mismatched: vec![],
+        uncompared: vec![],
+        carried_from: Some("my-pilot".into()),
+    };
+    assert_eq!(r, carried);
+    assert!(r.passed());
+    // `status` counts the rows the study runs.
+    let all = common::records_of(&lab, "carry");
+    let p = ignorarium::runner::progress(&lab.home, "carry", &all).unwrap();
+    assert_eq!((p.done, p.total), (30, 30));
+}
+
+#[test]
+fn a_borrower_that_carries_nothing_runs_its_own_rechecks() {
+    let failed = Recheck {
+        mismatched: vec![7],
+        ..passed_check()
+    };
+    let host = |t: String| t.replace("min_isolation = 1", "min_isolation = 0");
+    // A source whose check failed, and a plan whose rows may run on the host, where its
+    // environment pin is not read.
+    for (id, recheck, level, ran_in) in [
+        ("failed", failed, 1, None),
+        ("host", passed_check(), 0, Some("host")),
+    ] {
+        let lab = lab();
+        let env = image(&lab);
+        let edit = |t: String| if level == 0 { host(t) } else { t };
+        borrowing(&lab, id, &env, Some(recheck), edit);
+        assert_eq!(carries_of(&lab, id), None, "{id}");
+        let work = common::work(&lab, id);
+        let plan = prepare_with(&lab.home, id, &work, vec![fake_at(level)]).unwrap();
+        assert_eq!(plan.environment, ran_in.unwrap_or(&env), "{id}");
+        assert_eq!(copies(&plan).len(), 2, "{id}");
+        assert_eq!(run(&plan).unwrap(), RunStatus::Done, "{id}");
+        assert_eq!(recheck_in(&lab, id), Some(passed_check()), "{id}");
+        let all = common::records_of(&lab, id);
+        let p = ignorarium::runner::progress(&lab.home, id, &all).unwrap();
+        assert_eq!((p.done, p.total), (32, 32), "{id}");
+    }
+}
+
+#[test]
+fn prepare_refuses_when_the_carried_record_is_gone() {
+    let lab = lab();
+    let env = image(&lab);
+    let analysis = borrowing(&lab, "gone", &env, Some(passed_check()), |t| t);
+    let log = lab.home.study_dir("my-pilot").join("records.jsonl");
+    std::fs::rename(&log, lab.root.join("my-pilot-records.jsonl")).unwrap();
+    let work = common::work(&lab, "gone");
+    let err = prepare_with(&lab.home, "gone", &work, vec![fake_at(1)])
+        .err()
+        .unwrap();
+    let why = format!("frozen record {analysis} is gone");
+    assert!(matches!(&err, RunError::Records(m) if *m == why), "{err}");
+    assert!(!lab.home.study_dir("gone").join("schedule.json").exists());
+}
+
+// ---- a declared row memory caps each row ----
+
+#[test]
+fn the_declared_row_memory_caps_every_row_and_its_absence_none() {
+    let lab = lab();
+    let payload = format!("#!/bin/sh\n{}\n{}\n", common::LIMITS, common::VALUES);
+    let memory = |t: String| t.replace("# row_memory_mib = 1024", "row_memory_mib = 1024");
+    let capped = common::edited(&lab, "capped", memory, &payload);
+    let uncapped = common::edited(&lab, "uncapped", |t| t, &payload);
+    for (id, dir, want) in [
+        ("capped", capped, vec!["1073741824".to_string(); 2]),
+        ("uncapped", uncapped, common::own_data_limit()),
+    ] {
+        let plan = plan_of(&lab, id);
+        assert_eq!(run(&plan).unwrap(), RunStatus::Done, "{id}");
+        for row in &plan.schedule.rows {
+            let out = dir.join(format!("run/rows/{}/out/limits", row.index));
+            let limits = common::data_limit(&std::fs::read_to_string(out).unwrap());
+            assert_eq!(limits, want, "{id} row {}", row.index);
+        }
+    }
 }

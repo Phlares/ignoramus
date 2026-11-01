@@ -144,7 +144,7 @@ fn the_estimate_counts_each_stage() {
     inputs.extend(texts("confirmation", 52));
     v["inputs"] = json!(inputs);
     let s = Spec::from_value(&v).unwrap();
-    let rows = schedule::rows(&s, &hash()).unwrap();
+    let rows = schedule::rows(&s, &hash(), false).unwrap();
     let e = ignorarium::estimate::estimate(&s, &Machine::default(), &rows);
     // 5 conditions x 8 texts x 4 units, then 2 x 52 x 4.
     assert_eq!(e.rows, 5 * 8 * 4 + 2 * 52 * 4);
@@ -291,7 +291,7 @@ fn the_schedule_of_a_spec_holds_each_clusters_picked_units() {
         input("data/c.txt", "confirmation", 7),
     ]);
     let s = Spec::from_value(&v).unwrap();
-    let rows = schedule::rows(&s, &hash()).unwrap();
+    let rows = schedule::rows(&s, &hash(), false).unwrap();
     assert_eq!(
         rows,
         expand(&s, &hash(), &units::clusters(&s, &hash())).unwrap()
@@ -392,4 +392,116 @@ fn schedule_spec_hash_matches_the_raw_spec_hash() {
         .try_into()
         .unwrap();
     assert_eq!(Schedule::new(&digest, vec![]).spec_hash, raw.hash);
+}
+
+/// The template with 3 of its confirmation input's units: 3 units x 2 conditions = 6 rows.
+fn three_units() -> Spec {
+    let mut v = template();
+    v["design"]["units_per_cluster"] = json!(3);
+    Spec::from_value(&v).unwrap()
+}
+
+#[test]
+fn rechecks_take_one_row_per_condition_after_its_original() {
+    let s = three_units();
+    let base = schedule::rows(&s, &hash(), false).unwrap();
+    assert_eq!(base.len(), 6);
+    assert!(base.iter().all(|r| r.recheck_of.is_none()));
+    let rows = schedule::rows(&s, &hash(), true).unwrap();
+    assert_eq!(rows.len(), 8);
+    assert_eq!(rows, schedule::with_rechecks(base.clone(), &hash()));
+    // Without its copies the schedule is the one without rechecks, in its order.
+    let originals: Vec<Row> = (rows.iter())
+        .filter(|r| r.recheck_of.is_none())
+        .cloned()
+        .collect();
+    assert_eq!(originals, base);
+    // One copy per condition id, numbered after the last row in order of first appearance.
+    let mut copies: Vec<(usize, &Row)> = (rows.iter().enumerate())
+        .filter(|(_, r)| r.recheck_of.is_some())
+        .collect();
+    copies.sort_by_key(|(_, c)| c.index);
+    let ids: Vec<(u64, &str)> = (copies.iter())
+        .map(|(_, c)| (c.index, &c.condition[..]))
+        .collect();
+    assert_eq!(ids, [(6, "exact"), (7, "arm-a")]);
+    // Each copy sits right after its original and is the original in all but its index.
+    for (at, copy) in copies {
+        let original = &rows[at - 1];
+        assert_eq!(copy.recheck_of, Some(original.index), "{at}");
+        let undone = Row {
+            index: original.index,
+            recheck_of: None,
+            ..copy.clone()
+        };
+        assert_eq!(&undone, original, "{at}");
+    }
+}
+
+#[test]
+fn the_recheck_pick_is_fixed_by_the_spec_hash() {
+    let s = spec(&["a", "ref"], "ref", 1);
+    // For each condition, the place among its own rows of the row its copy repeats.
+    let picks = |h: &[u8; 32]| -> Vec<u32> {
+        let rows = expand(&s, h, &units(10)).unwrap();
+        let checked = schedule::with_rechecks(rows.clone(), h);
+        assert_eq!(checked, schedule::with_rechecks(rows.clone(), h));
+        let place = |c: &str| {
+            let of: Vec<u64> = (rows.iter())
+                .filter(|r| r.condition == c)
+                .map(|r| r.index)
+                .collect();
+            let copy = (checked.iter())
+                .find(|r| r.recheck_of.is_some() && r.condition == c)
+                .unwrap();
+            let at = of.iter().position(|i| Some(*i) == copy.recheck_of).unwrap();
+            let want = units::pick(1, 10, Pick::Seeded, seed(h, &format!("recheck/{c}")));
+            assert_eq!(vec![at as u32], want, "{c}");
+            at as u32
+        };
+        vec![place("ref"), place("a")]
+    };
+    let seen: std::collections::BTreeSet<Vec<u32>> = (0u8..8).map(|b| picks(&[b; 32])).collect();
+    assert!(seen.len() > 1, "another hash, another pick: {seen:?}");
+}
+
+#[test]
+fn a_plan_without_determinism_keeps_its_schedule_bytes() {
+    let s = three_units();
+    let text = |rows: Vec<Row>| {
+        String::from_utf8(Schedule::new(&hash(), rows).to_bytes().unwrap()).unwrap()
+    };
+    let keys = |text: &str| -> Vec<Vec<String>> {
+        let v: Value = serde_json::from_str(text).unwrap();
+        (v["rows"].as_array().unwrap().iter())
+            .map(|r| r.as_object().unwrap().keys().cloned().collect())
+            .collect()
+    };
+    let fields: Vec<String> = [
+        "cluster",
+        "condition",
+        "index",
+        "repeat",
+        "seed_hex",
+        "shard",
+        "stage",
+        "stratum",
+        "unit",
+    ]
+    .map(String::from)
+    .to_vec();
+    let plain = text(schedule::rows(&s, &hash(), false).unwrap());
+    assert!(!plain.contains("recheck_of"), "{plain}");
+    assert_eq!(keys(&plain), vec![fields.clone(); 6]);
+    // A copy alone adds the key, with its original's index.
+    let checked = schedule::rows(&s, &hash(), true).unwrap();
+    let v: Value = serde_json::from_str(&text(checked.clone())).unwrap();
+    for (r, row) in v["rows"].as_array().unwrap().iter().zip(&checked) {
+        let want = match row.recheck_of {
+            Some(of) => json!(of),
+            None => Value::Null,
+        };
+        assert_eq!(r.get("recheck_of").cloned().unwrap_or(Value::Null), want);
+    }
+    assert_eq!(text(checked).matches("\"recheck_of\"").count(), 2);
 }

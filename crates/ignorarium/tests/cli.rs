@@ -1368,13 +1368,13 @@ fn the_gate_gives_the_same_verdict_on_every_check() {
     assert_eq!(
         first,
         json!([{
-            "hypothesis": "H1", "power": 0.35825, "target": 0.8, "clusters": { "": 15 },
+            "hypothesis": "H1", "power": 0.3625, "target": 0.8, "clusters": { "": 15 },
             "needed": 20
         }])
     );
     assert_eq!(power(1), first);
     let sentence =
-        "Simulated power 0.35 with 15 clusters in the pooled group; about 20 clusters reach 0.80.";
+        "Simulated power 0.36 with 15 clusters in the pooled group; about 20 clusters reach 0.80.";
     assert!(check_out(&home, &spec, 1).contains(sentence));
     let page = stdout(&bin(&home).arg("review").arg(&spec).assert().code(1));
     assert!(
@@ -1563,6 +1563,78 @@ fn check_shows_the_slot_and_level_the_stream_would_give() {
     assert_eq!(check_json(&home, &spec, 0)["stream"], Value::Null);
     let page = stdout(&bin(&home).arg("review").arg(&spec).assert().code(0));
     assert!(page.contains("\n## Level\n\n- none\n"), "{page}");
+}
+
+#[test]
+fn check_shows_where_determinism_comes_from() {
+    // A confirmatory plan that declares determinism and pins the payload and environment
+    // my-pilot ran, in a box where my-pilot's check passed, or holds none.
+    let i = common::instrument();
+    let pinned = |t: String| {
+        common::confirmatory(t)
+            .replace("# deterministic = true", "deterministic = true")
+            .replace("payload = \"\"", &format!("payload = \"{}\"", i.payload))
+            .replace(
+                "environment = \"\"",
+                &format!("environment = \"{}\"", i.environment),
+            )
+    };
+    let passed = ignorarium::derived::Recheck {
+        rows: 2,
+        mismatched: vec![],
+        uncompared: vec![],
+        carried_from: None,
+    };
+    let checked = |edit: &dyn Fn(String) -> String, recheck| {
+        let (d, home, spec) = setup(edit);
+        let pilot = common::finished_with(i.clone(), recheck, vec![common::arm_a()]);
+        common::plant(&Home::open_at(&home).unwrap(), "my-pilot", &pilot);
+        (check_out(&home, &spec, 0), check_json(&home, &spec, 0), d)
+    };
+    let (out, v, _d) = checked(&pinned, Some(passed.clone()));
+    assert!(
+        out.contains("\n\ndeterminism: carried from my-pilot\nstream: slot 1, level 0.005\n"),
+        "{out}"
+    );
+    assert_eq!(
+        v["recheck"],
+        json!({ "carried_from": "my-pilot", "rows": 0 })
+    );
+    assert_eq!(v["estimate"]["rows"], 30);
+    // The check reads the plan with its defaults filled: without a min_isolation line the
+    // plan runs at the default level 1, so it carries; without pins.deterministic too, it
+    // declares no determinism.
+    let unset = |key: &'static str| {
+        move |t: String| {
+            let kept: Vec<&str> = (t.lines()).filter(|l| !l.starts_with(key)).collect();
+            format!("{}\n", kept.join("\n"))
+        }
+    };
+    let (no_level, no_flag) = (unset("min_isolation"), unset("deterministic"));
+    let (out, v, _d) = checked(&|t: String| no_level(pinned(t)), Some(passed.clone()));
+    let level = json!({ "path": "scope.min_isolation", "value": 1 });
+    assert!(v["defaults"].as_array().unwrap().contains(&level), "{v}");
+    assert!(
+        out.contains("\ndeterminism: carried from my-pilot\n"),
+        "{out}"
+    );
+    let (out, v, _d) = checked(&|t: String| no_flag(no_level(pinned(t))), Some(passed));
+    assert!(v["defaults"].as_array().unwrap().contains(&level), "{v}");
+    assert!(!out.contains("determinism"), "{out}");
+    assert_eq!(v["recheck"], Value::Null);
+    // A source without a passed check: the plan runs its own, one copy per condition id.
+    let (out, v, _d) = checked(&pinned, None);
+    assert!(
+        out.contains("\n\ndeterminism: 2 recheck rows\nstream: slot 1, level 0.005\n"),
+        "{out}"
+    );
+    assert_eq!(v["recheck"], json!({ "carried_from": null, "rows": 2 }));
+    assert_eq!(v["estimate"]["rows"], 32);
+    // A plan without determinism has no recheck.
+    let (out, v, _d) = checked(&common::confirmatory, None);
+    assert!(!out.contains("determinism"), "{out}");
+    assert_eq!(v["recheck"], Value::Null);
+    assert_eq!(v["estimate"]["rows"], 30);
 }
 
 #[test]

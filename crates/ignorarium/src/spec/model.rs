@@ -233,6 +233,9 @@ pub struct Design {
     pub reference: String,
     pub repeats: u32,
     pub row_seconds: f64,
+    /// The payload's data limit in MiB at every level; `None` when the plan declares none.
+    #[serde(default)]
+    pub row_memory_mib: Option<u32>,
     pub power: f64,
     /// Units each cluster gives the study, at most.
     pub units_per_cluster: u32,
@@ -320,7 +323,7 @@ pub struct Input {
     pub licence: Licence,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Role {
     Calibration,
@@ -354,6 +357,34 @@ pub struct Pins {
     pub environment: String,
     pub payload: String,
     pub rule_base: String,
+    /// One per study the plan takes estimates from without pinning that study's code.
+    #[serde(default)]
+    pub deviations: Vec<PinDeviation>,
+    /// The payload gives the same output for the same job, so the box reruns one row per
+    /// condition and compares.
+    #[serde(default)]
+    pub deterministic: bool,
+}
+
+/// A plan's departure from the code of a study it takes estimates from: why, and when.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PinDeviation {
+    /// The study id.
+    pub from: String,
+    pub reason: String,
+    pub timing: Timing,
+}
+
+/// When a deviation happened, against the confirmation data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Timing {
+    BeforeCollection,
+    DuringCollection,
+    AfterCollectionBeforeAccess,
+    AfterAccessBeforeResults,
+    AfterResults,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

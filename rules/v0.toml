@@ -72,6 +72,9 @@ target = [
   { path = "pins.environment", check = "required" },
   { path = "pins.payload", check = "required" },
   { path = "pins.rule_base", check = "required" },
+  { path = "pins.deviations[*].from", check = "required" },
+  { path = "pins.deviations[*].reason", check = "required" },
+  { path = "pins.deviations[*].timing", check = "required" },
   { path = "mutations", check = "required" },
   { path = "mutations.operators", check = "required" },
   { path = "mutations.operators[*].name", check = "required" },
@@ -161,6 +164,7 @@ target = [
   { path = "design.reference", check = "type", kind = "string" },
   { path = "design.repeats", check = "type", kind = "int" },
   { path = "design.row_seconds", check = "type", kind = "float" },
+  { path = "design.row_memory_mib", check = "type", kind = "int" },
   { path = "design.power", check = "type", kind = "float" },
   { path = "design.units_per_cluster", check = "type", kind = "int" },
   { path = "design.pick", check = "type", kind = "string" },
@@ -195,6 +199,12 @@ target = [
   { path = "pins.environment", check = "type", kind = "string" },
   { path = "pins.payload", check = "type", kind = "string" },
   { path = "pins.rule_base", check = "type", kind = "string" },
+  { path = "pins.deterministic", check = "type", kind = "bool" },
+  { path = "pins.deviations", check = "type", kind = "array" },
+  { path = "pins.deviations[*]", check = "type", kind = "table" },
+  { path = "pins.deviations[*].from", check = "type", kind = "string" },
+  { path = "pins.deviations[*].reason", check = "type", kind = "string" },
+  { path = "pins.deviations[*].timing", check = "type", kind = "string" },
   { path = "mutations", check = "type", kind = "table" },
   { path = "mutations.depth_cap", check = "type", kind = "int" },
   { path = "mutations.operators", check = "type", kind = "array" },
@@ -239,13 +249,14 @@ target = [
   { path = "inputs[*].licence.type", check = "enum", values = ["common", "custom", "request-form", "unspecified"] },
   { path = "mutations.operators[*].type", check = "enum", values = ["int", "float", "enum"] },
   { path = "report.publish", check = "enum", values = ["none", "zenodo-sandbox"] },
+  { path = "pins.deviations[*].timing", check = "enum", values = ["before-collection", "during-collection", "after-collection-before-access", "after-access-before-results", "after-results"] },
 ]
 
 [[rule]]
 code = "E-RNG-001"
 severity = "error"
 problem = "A number is outside its allowed range."
-instruction = "Bring the value into range: min_isolation 0 to 3, power 0.5 to 0.999, repeats at least 1, each budget value 0 or more, row_seconds above 0, units_per_cluster 1 up to 4294967295, each input's units 1 up to 4294967295, repeats up to 4294967295, depth_cap 0 to 255, each trigger threshold_e above 0."
+instruction = "Bring the value into range: min_isolation 0 to 3, power 0.5 to 0.999, repeats at least 1, each budget value 0 or more, row_seconds above 0, row_memory_mib 1 up to 1048576, units_per_cluster 1 up to 4294967295, each input's units 1 up to 4294967295, repeats up to 4294967295, depth_cap 0 to 255, each trigger threshold_e above 0."
 why = "Values outside these ranges are meaningless or make the sample-size maths fail."
 sources = ["https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661"]
 target = [
@@ -256,6 +267,7 @@ target = [
   { path = "scope.budget.wall_hours", check = "range", interval = "[0, inf)" },
   { path = "scope.budget.money_usd", check = "range", interval = "[0, inf)" },
   { path = "design.row_seconds", check = "range", interval = "(0, inf)" },
+  { path = "design.row_memory_mib", check = "range", interval = "[1, 1048576]" },
   { path = "design.units_per_cluster", check = "range", interval = "[1, 4294967295]" },
   { path = "inputs[*].units", check = "range", interval = "[1, 4294967295]" },
   { path = "mutations.depth_cap", check = "range", interval = "[0, 255]" },
@@ -266,7 +278,7 @@ target = [
 code = "E-FMT-001"
 severity = "error"
 problem = "An id, a stratum or a study reference is not ASCII letters and digits joined by single hyphens."
-instruction = "Use ASCII lowercase letters and digits, joined by single hyphens, for example my-study. A hypothesis id may also use capital letters, for example E1 or P1a. A stratum may be empty where the design or an input names none, but not in the strata a hypothesis lists. estimates.from and a param's from name a study id."
+instruction = "Use ASCII lowercase letters and digits, joined by single hyphens, for example my-study. A hypothesis id may also use capital letters, for example E1 or P1a. A stratum may be empty where the design or an input names none, but not in the strata a hypothesis lists. estimates.from, a param's from and a deviation's from name a study id."
 why = "Ids and strata become file names, seed inputs and record keys, and are printed in diagnostics. Accents and look-alike letters would make two ids that look the same differ."
 sources = ["https://toml.io/en/v1.0.0"]
 target = [
@@ -279,6 +291,7 @@ target = [
   { path = "question.hypotheses[*].strata[*]", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
   { path = "question.hypotheses[*].estimates.from", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
   { path = "design.conditions[*].params.*.from", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
+  { path = "pins.deviations[*].from", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
 ]
 
 [[rule]]
@@ -319,7 +332,7 @@ code = "E-UNQ-001"
 severity = "error"
 problem = "A list repeats an id, path or name."
 instruction = "Give every entry its own value. Remove the repeat, or rename it."
-why = "A repeated input would run its units twice and count them twice in the power gate. A stage that lists a condition twice runs it twice. A repeated condition, outcome, measure, hypothesis, operator or trigger id makes later steps pick one entry and ignore the other."
+why = "A repeated input would run its units twice and count them twice in the power gate. A stage that lists a condition twice runs it twice. A repeated condition, outcome, measure, hypothesis, operator or trigger id makes later steps pick one entry and ignore the other. Two deviations from one study would record two reasons for one change."
 sources = []
 target = [
   { path = "design.conditions", check = "unique", key = "id" },
@@ -331,6 +344,7 @@ target = [
   { path = "inputs", check = "unique", key = "path" },
   { path = "mutations.operators", check = "unique", key = "name" },
   { path = "mutations.triggers", check = "unique", key = "id" },
+  { path = "pins.deviations", check = "unique", key = "from" },
 ]
 
 [[rule]]
@@ -415,6 +429,19 @@ target = [
 ]
 
 [[rule]]
+code = "E-REF-003"
+severity = "error"
+problem = "The plan takes estimates from a study that ran other code, and declares no deviation from it."
+instruction = "Pin the source study's payload, environment and model and calibration inputs, or add a `[[pins.deviations]]` entry with `from`, `reason` and `timing`. A deviation names a study that a confirmatory hypothesis with a claim takes estimates from, and gives a reason."
+why = "Estimates describe the code that produced them. A pipeline is frozen before the confirmatory data exist, and a change is reported with its reason and when it happened."
+sources = ["https://journals.plos.org/plosbiology/article?id=10.1371/journal.pbio.3000246", "https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1010571", "https://doi.org/10.1177/25152459231213802"]
+target = [
+  { path = "question.hypotheses[*].estimates", check = "named:estimates-same-code" },
+  { path = "pins.deviations[*].from", check = "named:deviation-borrowed" },
+  { path = "pins.deviations[*].reason", check = "non-empty" },
+]
+
+[[rule]]
 code = "E-LBL-001"
 severity = "error"
 problem = "An exploratory study carries a label above signal."
@@ -477,14 +504,14 @@ target = [
 [[rule]]
 code = "E-CNF-004"
 severity = "error"
-problem = "The plan has no confirmation input, or a confirmation input holds the same data as a selection input."
-instruction = "Add a confirmation input. Give each one data that no selection input holds: not the same bytes, and not the same text in other case or spacing."
-why = "A winner picked on some data looks better on that same data. Only fresh data gives an honest test. The content decides, not the file name."
-sources = ["https://doi.org/10.1038/s41562-016-0021"]
+problem = "The plan has no confirmation input, or a confirmation input holds the same data as a selection or calibration input."
+instruction = "Add a confirmation input. Give each one data that no selection or calibration input holds: not the same bytes, and not the same text in other case or spacing."
+why = "A winner picked on some data looks better on that same data. Only fresh data gives an honest test. The content decides, not the file name. A model calibrated on a text has adapted to it; its error there is not its error on new text."
+sources = ["https://doi.org/10.1038/s41562-016-0021", "https://arxiv.org/html/2311.09755v2"]
 when = { mode = "confirmatory" }
 target = [
-  { path = "inputs", check = "named:selection-confirmation-disjoint" },
-  { path = "inputs[*].sha256", check = "named:selection-confirmation-disjoint" },
+  { path = "inputs", check = "named:confirmation-disjoint" },
+  { path = "inputs[*].sha256", check = "named:confirmation-disjoint" },
 ]
 
 [[rule]]

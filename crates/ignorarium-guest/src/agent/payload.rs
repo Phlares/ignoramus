@@ -13,6 +13,8 @@ pub struct Ran {
     pub end: End,
     pub wall: Duration,
     pub cpu_seconds: f64,
+    /// The data limit the payload ran under, in bytes, as the job gave it.
+    pub data_limit: Option<u64>,
 }
 
 /// Runs `job.argv` as the current user, in `/`. When this returns, no process of the
@@ -50,6 +52,7 @@ fn run_watched(
         // When root changes the uid, std also drops the supplementary groups.
         cmd.uid(uid).gid(gid);
     }
+    sys::limit_data(&mut cmd, job.data_limit);
     let start = Instant::now();
     let mut child = cmd.spawn()?;
     let pid = Pid::from_raw(child.id() as i32).ok_or_else(|| io::Error::other("bad pid"))?;
@@ -79,6 +82,7 @@ fn run_watched(
         end,
         wall,
         cpu_seconds,
+        data_limit: job.data_limit,
     })
 }
 
@@ -146,6 +150,7 @@ mod tests {
                 .to_vec(),
             env: vec![("OUT".into(), d.path().to_str().unwrap().into())],
             timeout_ms: 30_000,
+            data_limit: None,
         };
         let mut leader = None;
         let err = run_watched(&job, None, std::path::Path::new("/"), |pid| {

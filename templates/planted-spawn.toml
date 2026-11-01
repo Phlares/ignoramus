@@ -49,6 +49,7 @@ stratum = "genre"               # optional; "" if none
 reference = "exact"             # condition id of the reference arm
 repeats = 1
 row_seconds = 60.0              # estimate per row, until a record gives one
+# row_memory_mib = 1024         # optional; caps the data (heap and private writable maps) of each payload process in MiB at every level
 power = 0.8
 units_per_cluster = 1           # units each cluster gives the study, at most
 pick = "seeded"                 # seeded | first: which of a cluster's units the study takes
@@ -92,6 +93,11 @@ creators = []
 environment = ""
 payload = ""                    # "", or the hash of payload/ under the study root that register prints
 rule_base = ""
+# deterministic = true          # the payload gives the same output for the same job; the box reruns one row per condition and compares
+# [[pins.deviations]]           # confirmatory: one per study in estimates whose payload, environment, or model and calibration inputs this plan does not pin
+# from = "my-pilot"             # the study id
+# reason = "the payload changed after the pilot"  # why this plan runs other code
+# timing = "before-collection"  # when, against the confirmation data: before-collection | during-collection | after-collection-before-access | after-access-before-results | after-results
 
 [mutations]
 depth_cap = 2

@@ -25,7 +25,10 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::thread::sleep;
 use std::time::Duration;
-use steps::{disable_io_uring, disk_by_serial, disk_bytes, mix_seed, now_nanos, set_clock};
+use steps::{
+    disable_io_uring, disk_by_serial, disk_bytes, mem_available, mix_seed, now_nanos, room,
+    set_clock,
+};
 
 /// The payload's user and group: `nobody` and `nogroup` in Debian-based images.
 pub const PAYLOAD_UID: u32 = 65534;
@@ -117,6 +120,11 @@ fn connect() -> io::Result<OwnedFd> {
 /// packs `/out` onto the output disk.
 fn row(chan: &mut File, out_disk: &mut File, out_bytes: u64) -> io::Result<Report> {
     let job: Job = read_frame(chan)?;
+    room(
+        mem_available(Path::new("/proc/meminfo"))?,
+        job.data_limit,
+        out_bytes,
+    )?;
     let seed = seed_from_hex(&job.seed_hex)?;
     mix_seed(&seed, &OpenOptions::new().write(true).open("/dev/urandom")?)?;
     set_clock(job.unix_nanos)?;
@@ -166,16 +174,17 @@ pub fn gate(
     clock_unix_nanos: u64,
     run: impl FnOnce() -> io::Result<(Ran, Result<String, String>)>,
 ) -> io::Result<Report> {
-    let (end, payload_wall_ns, cpu_seconds, packed) = if selftest.ok() {
+    let (end, payload_wall_ns, cpu_seconds, data_limit, packed) = if selftest.ok() {
         let (ran, packed) = run()?;
         (
             Some(ran.end),
             ran.wall.as_nanos() as u64,
             ran.cpu_seconds,
+            ran.data_limit,
             packed,
         )
     } else {
-        (None, 0, 0.0, Ok(String::new()))
+        (None, 0, 0.0, None, Ok(String::new()))
     };
     let (output_hash, pack_refused) = match packed {
         Ok(hash) => (hash, None),
@@ -189,6 +198,7 @@ pub fn gate(
         cpu_seconds,
         output_hash,
         pack_refused,
+        data_limit,
     })
 }
 

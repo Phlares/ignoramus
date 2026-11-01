@@ -8,6 +8,7 @@ fn job() -> Job {
         argv: vec!["/bin/x".into(), "--y".into()],
         env: vec![("A".into(), "b".into())],
         timeout_ms: 5000,
+        data_limit: Some(64 << 20),
     }
 }
 
@@ -25,6 +26,7 @@ fn report() -> Report {
         cpu_seconds: 0.25,
         output_hash: "00".repeat(32),
         pack_refused: Some("too big".into()),
+        data_limit: Some(32 << 20),
     }
 }
 
@@ -56,6 +58,26 @@ fn frames_round_trip() {
     for e in [End::Code(-1), End::Timeout] {
         assert_eq!(round(&e), e);
     }
+}
+
+#[test]
+fn a_job_without_a_data_limit_has_none() {
+    let mut v = serde_json::to_value(job()).unwrap();
+    assert_eq!(v["data_limit"], 64 << 20);
+    v.as_object_mut().unwrap().remove("data_limit");
+    let parsed: Job = serde_json::from_value(v).unwrap();
+    // The report of an agent that predates the field decodes as a report of no limit.
+    let mut r = serde_json::to_value(report()).unwrap();
+    r.as_object_mut().unwrap().remove("data_limit");
+    let old: Report = serde_json::from_value(r).unwrap();
+    assert_eq!(old.data_limit, None);
+    assert_eq!(
+        parsed,
+        Job {
+            data_limit: None,
+            ..job()
+        }
+    );
 }
 
 #[test]

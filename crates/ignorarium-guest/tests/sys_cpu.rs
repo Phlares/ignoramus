@@ -15,6 +15,7 @@ fn spin(n: u64) -> Job {
         .to_vec(),
         env: vec![],
         timeout_ms: 60_000,
+        data_limit: None,
     }
 }
 

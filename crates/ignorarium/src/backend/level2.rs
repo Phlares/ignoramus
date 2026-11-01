@@ -6,6 +6,8 @@ use super::rootfs;
 use super::selftest::{Call, SelfTest};
 use super::{Backend, Exit, Probe, RowJob, RowOutcome, TIMEOUT_CODE, Watch};
 use crate::files::temp_beside;
+use ignorarium_guest::agent::steps::meminfo_kb;
+pub use ignorarium_guest::host::GUEST_MIB;
 use ignorarium_guest::host::{self, HostJob, Timings, Vm, VmError, VmOutcome};
 use ignorarium_guest::image::{self, KERNEL, Pin, VMM, check_pin, has_interp};
 use ignorarium_guest::proto::{self, End, GUEST_IN, GUEST_OUT, GUEST_PAYLOAD};
@@ -40,13 +42,15 @@ static ROWS: AtomicU64 = AtomicU64::new(0);
 pub struct Level2 {
     /// The KVM device.
     pub kvm: PathBuf,
+    /// Where the host's memory size is read: `MemTotal` of `/proc/meminfo`.
+    pub meminfo: PathBuf,
     /// Cloud Hypervisor.
     pub vmm: PathBuf,
     /// The guest kernel.
     pub kernel: PathBuf,
     /// A static build of the `ignorarium-guest` binary, the guest's `/init`.
     pub agent: PathBuf,
-    /// Each row's machine.
+    /// Each row's machine; `mem_mib` only for a row that declares no memory (`vm_mem_mib`).
     pub cpus: u32,
     pub mem_mib: u32,
     pub out_mib: u64,
@@ -81,6 +85,7 @@ impl Level2 {
     pub fn with(vmm: PathBuf, kernel: PathBuf, agent: PathBuf) -> Level2 {
         Level2 {
             kvm: "/dev/kvm".into(),
+            meminfo: "/proc/meminfo".into(),
             vmm,
             kernel,
             agent,
@@ -92,6 +97,19 @@ impl Level2 {
             report_slack: host::REPORT_SLACK,
             version: OnceLock::new(),
             initramfs: OnceLock::new(),
+        }
+    }
+
+    /// The guest memory of `job`'s machine, in MiB: `mem_mib` when the row declares no
+    /// memory; otherwise the cap, the `/out` and `/tmp` tmpfs and `GUEST_MIB`, which the host
+    /// checks every machine against.
+    pub fn vm_mem_mib(&self, job: &RowJob) -> u32 {
+        match job.data_limit() {
+            None => self.mem_mib,
+            limit => {
+                let need = host::needed_mem_mib(limit, self.out_mib);
+                u32::try_from(need).unwrap_or(u32::MAX)
+            }
         }
     }
 
@@ -205,7 +223,7 @@ impl Level2 {
             initramfs: scratch.0.join("initramfs.cpio"),
             rootfs,
             cpus: self.cpus,
-            mem_mib: self.mem_mib,
+            mem_mib: self.vm_mem_mib(job),
             out_mib: self.out_mib,
             boot_timeout: self.boot_timeout,
             exit_timeout: self.exit_timeout,
@@ -239,6 +257,12 @@ impl Watch for Counted<'_> {
     fn reaped(&self, cpu_seconds: f64) {
         self.cpu.set(self.cpu.get() + cpu_seconds);
     }
+}
+
+/// `MemTotal` of the `/proc/meminfo` text at `path`, in kB.
+fn host_kb(path: &Path) -> Result<u64, String> {
+    let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    meminfo_kb(&text, "MemTotal").ok_or_else(|| format!("{} names no MemTotal", path.display()))
 }
 
 /// Why `path` is not the file `pin` names, if it is not.
@@ -320,6 +344,27 @@ impl Backend for Level2 {
         self.initramfs().ok().map(|(_, sha256)| sha256.clone())
     }
 
+    /// A machine larger than the host's memory cannot run; one the host cannot measure is
+    /// taken as one that cannot.
+    fn unfit(&self, memory_mib: Option<u32>) -> Option<String> {
+        let need = self.vm_mem_mib(&RowJob {
+            memory_mib,
+            ..RowJob::default()
+        });
+        let have_kb = match host_kb(&self.meminfo) {
+            Ok(kb) => kb,
+            Err(why) => return Some(format!("cannot read the host's memory size: {why}")),
+        };
+        let rows = memory_mib.map_or("no declared memory".into(), |m| format!("{m} MiB"));
+        (u64::from(need) << 10 > have_kb).then(|| {
+            format!(
+                "a level 2 machine for rows of {rows} needs {need} MiB, more than the host's \
+                 MemTotal of {} MiB",
+                have_kb >> 10
+            )
+        })
+    }
+
     fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> io::Result<RowOutcome> {
         Ok(self.run_timed(job, watch).0)
     }
@@ -361,6 +406,7 @@ pub fn guest_job(job: &RowJob) -> Result<HostJob, String> {
         output_dir: job.output_dir.clone(),
         seed: job.seed,
         wall_timeout: job.wall_timeout,
+        data_limit: job.data_limit(),
     })
 }
 

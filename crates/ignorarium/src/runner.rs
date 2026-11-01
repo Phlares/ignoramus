@@ -1,9 +1,12 @@
 //! The run engine: writes the schedule, runs each row on a backend, records each row.
 //! A row is done when its signed record exists. A crash before the record reruns the row.
-use crate::backend::{self, Backend, Exit, Probe, RowJob, RowOutcome, Watch, level2, rootfs};
+use crate::backend::{
+    self, Backend, Exit, PINNED_LEVEL, Probe, RowJob, RowOutcome, Watch, level2, rootfs,
+};
 use crate::budget::{Alerts, Cost, CostMeter, Decision, HostMeter, decide, dimension_name};
 use crate::control::{self, ControlError, ControlFile, RunLock, Signal, State};
 use crate::derived::{INPUTS, Inputs, REGISTER, Register, SELECTION, Selection};
+use crate::diag::printable;
 use crate::environ::{Builder, Built, Recipe};
 use crate::estimate::{apply_defaults, estimate};
 use crate::events::{self, Event};
@@ -63,8 +66,13 @@ pub struct RunPlan {
     /// Each condition's params as rows get them, by condition id: the spec's values, and for a
     /// reference the condition `register` froze.
     pub params: BTreeMap<String, Value>,
-    /// The input view rows see: `<study>/in`, one link per input present.
+    /// The input view rows see: `<study>/in`, one link per input present and one to the
+    /// manifest.
     pub view: PathBuf,
+    /// The view's entries by path and store digest: each input present, then the manifest.
+    pub entries: Vec<(String, String)>,
+    /// The store digest of the view's manifest.
+    pub manifest: String,
     /// The scan of the view that `prepare` took before every file in it hashed to its digest.
     /// A later scan that differs only in ctimes over the same bytes replaces it, so a chmod
     /// or another study's link to a blob costs one full hash, not one per attempt.
@@ -122,6 +130,9 @@ pub enum RunError {
     EnvironmentPin(String),
     /// The environment cannot be built or extracted.
     Environment(String),
+    /// Level 2's machine for the study's rows is larger than the host's memory, and no lower
+    /// level may run the study.
+    Machine(String),
     /// A folder of the study cannot become a level 2 disk as it is: what, and why.
     Disk(String),
     NoKey,
@@ -138,11 +149,13 @@ pub enum RunError {
         path: String,
         label: String,
     },
-    /// In a confirmatory plan, a selection input and a confirmation input hold the same data;
-    /// one of them was absent when `check` compared them.
+    /// In a confirmatory plan, a confirmation input holds the same data as a selection or
+    /// calibration input; one of them was absent when `check` compared them.
     DataShared {
         path: String,
         other: String,
+        /// The role of `other`.
+        role: Role,
     },
     Spec(String),
     Schedule(ScheduleError),
@@ -190,6 +203,7 @@ impl fmt::Display for RunError {
                 write!(f, "pins.environment {p:?} is not a store digest")
             }
             RunError::Environment(e) => write!(f, "environment: {e}"),
+            RunError::Machine(e) => write!(f, "{e}"),
             RunError::Disk(e) => write!(f, "level 2 cannot make a disk of {e}; rename it"),
             RunError::NoKey => write!(f, "the box key does not exist"),
             RunError::Busy => write!(f, "another run of this study is in progress"),
@@ -204,9 +218,12 @@ impl fmt::Display for RunError {
                 f,
                 "E-CNF-005: input {path} was used by an earlier study ({label}). See docs/rules/E-CNF-005.md"
             ),
-            RunError::DataShared { path, other } => write!(
+            RunError::DataShared { path, other, role } => write!(
                 f,
-                "E-CNF-004: input {path} holds the same data as input {other}, of the other role. See docs/rules/E-CNF-004.md"
+                "E-CNF-004: the confirmation input {} holds the same data as the {} input {}. See docs/rules/E-CNF-004.md",
+                printable(path),
+                json!(role).as_str().unwrap_or_default(),
+                printable(other)
             ),
             RunError::Spec(e) => write!(f, "cannot load the spec: {e}"),
             RunError::Schedule(e) => e.fmt(f),
@@ -284,12 +301,14 @@ pub fn up_to(backends: Vec<Box<dyn Backend>>, max: u8) -> Vec<Box<dyn Backend>> 
 }
 
 /// Load a registered study, check its payload copy and its stored inputs, build its input
-/// view, gate its late data, write its schedule, and pick the highest backend whose probe
-/// finds it available, that meets `scope.min_isolation` and can run the study: level 2 and up
-/// run rows only in the study's environment image, so a study without one runs at the
-/// highest level below, and one `run.isolation` event names the levels it skipped. Every
-/// input in the view is hashed in full here, once per `run` or `resume`; before each attempt
-/// the run only compares the view's stamps (see `stale`).
+/// view (the inputs present and the manifest that lists them with their roles), gate its late
+/// data, write its schedule, and pick the highest backend whose probe finds it available, that
+/// meets `scope.min_isolation` and can run the study: level 2 and up run rows only in the
+/// study's environment image, in a machine the host's memory must hold, so a study without
+/// one, or with rows too large, runs at the highest level below, and one `run.isolation`
+/// event names the levels it skipped. Every file in the view is hashed in full
+/// here, once per `run` or `resume`; before each attempt the run only compares the view's
+/// stamps (see `stale`).
 /// The first prepare that gets this far signs an `inputs` record of every input's digest,
 /// or its absence; a later one whose inputs differ is refused before anything changes, so
 /// every row of a study runs on the same bytes. `root` is the study root found where the
@@ -333,7 +352,7 @@ pub fn prepare_with(
         return Err(RunError::PayloadChanged);
     }
     let store = Store::open(&home.root).map_err(io)?;
-    let (rootfs, environment) = if top >= 1 {
+    let (rootfs, environment) = if top >= PINNED_LEVEL {
         let pin = spec.pins.environment.trim();
         let found = environment(&store, &dir, pin, Builder::detect().as_ref())?;
         if let Some(b) = &found.built {
@@ -350,17 +369,26 @@ pub fn prepare_with(
     } else {
         (None, HOST.into())
     };
-    let unfit = if fit.iter().any(|b| b.level() >= IMAGE_LEVEL) {
+    let image = if fit.iter().any(|b| b.level() >= IMAGE_LEVEL) {
         image_unfit(rootfs.as_deref())?
     } else {
         None
     };
-    let (skipped, fit): (Vec<_>, Vec<_>) =
-        (fit.into_iter()).partition(|b| unfit.is_some() && b.level() >= IMAGE_LEVEL);
-    let skipped: Vec<u8> = skipped.iter().map(|b| b.level()).collect();
-    // Only the image rule can empty the list.
-    let Some(backend) = fit.into_iter().max_by_key(|b| b.level()) else {
-        return Err(RunError::Environment(unfit.unwrap_or_default().1));
+    // Levels 2 and up: the image first, then the machine the rows' memory needs. Each reason
+    // comes with the refusal it becomes when no lower level is left.
+    let memory = spec.design.row_memory_mib;
+    let why = |b: &dyn Backend| match &image {
+        _ if b.level() < IMAGE_LEVEL => None,
+        Some((reason, refusal)) => Some((reason.clone(), RunError::Environment(refusal.clone()))),
+        None => b.unfit(memory).map(|w| (w.clone(), RunError::Machine(w))),
+    };
+    let (out, fit): (Vec<_>, Vec<_>) =
+        (fit.into_iter().map(|b| (why(b.as_ref()), b))).partition(|(w, _)| w.is_some());
+    let skipped: Vec<u8> = out.iter().map(|(_, b)| b.level()).collect();
+    let unfit = out.into_iter().find_map(|(w, _)| w);
+    // Only these rules can empty the list.
+    let Some((_, backend)) = fit.into_iter().max_by_key(|(_, b)| b.level()) else {
+        return Err(unfit.map_or(RunError::Environment(String::new()), |(_, e)| e));
     };
 
     let leaf = register.leaf;
@@ -381,9 +409,13 @@ pub fn prepare_with(
         return Err(RunError::InputFrozen(path.clone()));
     }
     let params = resolved_params(home, &key, &spec, &register)?;
-    let present = present(&inputs);
-    let view = view::build(&store, &dir, &present).map_err(view_error)?;
-    let view_seen = view::verify(&view, &present).map_err(view_error)?;
+    let mut entries = present(&inputs);
+    let manifest = store
+        .put(&view::manifest(&spec, &entries))
+        .map_err(|e| io(format!("{}: {e}", view::MANIFEST)))?;
+    entries.push((view::MANIFEST.into(), manifest.clone()));
+    let view = view::build(&store, &dir, &entries).map_err(view_error)?;
+    let view_seen = view::verify(&view, &entries).map_err(view_error)?;
     if backend.level() >= IMAGE_LEVEL {
         let folders = [
             (&view, "the input view"),
@@ -394,7 +426,7 @@ pub fn prepare_with(
         }
     }
     gate_late_data(home, &spec, log, leaf, &key, &inputs)?;
-    let rows = expand_rows(&spec, &spec_hash)?;
+    let rows = expand_rows(&spec, &spec_hash, Some(&register))?;
     let schedule = Schedule::new(&spec_hash, rows);
     schedule::write_once(&dir, &schedule)?;
     if frozen.is_none() {
@@ -419,6 +451,8 @@ pub fn prepare_with(
         inputs,
         params,
         view,
+        entries,
+        manifest,
         view_seen: RefCell::new(view_seen),
         payload,
         payload_sha256,
@@ -430,10 +464,10 @@ pub fn prepare_with(
     })
 }
 
-/// Why levels 2 and up cannot run the study, when they cannot: the `run.isolation` reason, and
-/// the refusal when no lower level is left. They run rows only in an environment image, from
-/// its disk, which this builds once. A disk that cannot be built for a fault of the host
-/// refuses the run: the box never falls back to a lower level by itself.
+/// Why levels 2 and up cannot run the study's image, when they cannot: the `run.isolation`
+/// reason, and the refusal when no lower level is left. They run rows only in an environment
+/// image, from its disk, which this builds once. A disk that cannot be built for a fault of
+/// the host refuses the run: the box never falls back to a lower level by itself.
 fn image_unfit(rootfs: Option<&Path>) -> Result<Option<(String, String)>, RunError> {
     let Some(root) = rootfs else {
         let why = format!("{NO_IMAGE}; the study has no env/ and no pins.environment");
@@ -453,16 +487,17 @@ fn image_unfit(rootfs: Option<&Path>) -> Result<Option<(String, String)>, RunErr
     }
 }
 
-/// Each condition's params by condition id. A reference takes the value `register` froze for it,
-/// and every record a frozen value comes from must still be in the box.
+/// Each condition's params by condition id. A reference takes the value `register` froze for it.
+/// The record of the determinism check the study carries, and every record a frozen value
+/// comes from, must still be in the box.
 fn resolved_params(
     home: &Home,
     key: &SigningKey,
     spec: &Spec,
     register: &Register,
 ) -> Result<BTreeMap<String, Value>, RunError> {
-    let frozen: Vec<&str> = (register.resolved.iter())
-        .flat_map(|r| &r.records)
+    let carried = register.carries.iter().map(|c| &c.record);
+    let frozen: Vec<&str> = (carried.chain(register.resolved.iter().flat_map(|r| &r.records)))
         .map(String::as_str)
         .collect();
     let found = records::find(home, &key.verifying_key(), &frozen)
@@ -642,7 +677,7 @@ fn stale(plan: &RunPlan, dir: &Path) -> Option<String> {
         changed.push("payload".to_string());
     }
     let mut seen = plan.view_seen.borrow_mut();
-    match view::changes(&plan.view, &present(&plan.inputs), &seen) {
+    match view::changes(&plan.view, &plan.entries, &seen) {
         Err(e) => faults.push(format!("the input view cannot be read: {e}")),
         Ok(c) if c.inputs.is_empty() && !c.other => *seen = c.now,
         Ok(c) => {
@@ -674,8 +709,16 @@ pub(crate) fn stored_spec(dir: &Path) -> Result<(Spec, Value, [u8; 32], String),
     Ok((spec, value, hash, raw.hash))
 }
 
-fn expand_rows(spec: &Spec, hash: &[u8; 32]) -> Result<Vec<Row>, RunError> {
-    schedule::rows(spec, hash).map_err(|e| RunError::Spec(e.to_string()))
+/// The schedule's rows, with a recheck copy per condition when the plan declares determinism
+/// and its register record carries no check.
+fn expand_rows(
+    spec: &Spec,
+    hash: &[u8; 32],
+    register: Option<&Register>,
+) -> Result<Vec<Row>, RunError> {
+    let carries = register.is_some_and(|r| r.carries.is_some());
+    schedule::rows(spec, hash, spec.pins.deterministic && !carries)
+        .map_err(|e| RunError::Spec(e.to_string()))
 }
 
 /// How far a study has run, from its signed records and its stored spec.
@@ -703,7 +746,8 @@ pub fn progress(
 ) -> Result<Progress, RunError> {
     let (spec, _, spec_hash, _) = stored_spec(&home.study_dir(study_id))?;
     let machine = machine::load(&home.root).map_err(io)?;
-    let rows = expand_rows(&spec, &spec_hash)?;
+    let register = all.iter().find_map(Register::of);
+    let rows = expand_rows(&spec, &spec_hash, register.as_ref())?;
     let tally = Tally::of(all);
     let mut conditions: BTreeMap<String, (u64, u64)> = BTreeMap::new();
     for r in &rows {
@@ -730,12 +774,13 @@ pub fn progress(
     })
 }
 
-/// In a confirmatory plan, refuse a selection input and a confirmation input that hold the
-/// same data (E-CNF-004): `check` cannot compare a file that was absent at registration, and a
-/// late copy of a registered file has a registered hash. Then a selection or confirmation
-/// input that the registered plan leaf did not hold is late: refuse it if another study used
-/// it, else record it under this study's id once. The study's own leaves, its plan leaf and
-/// its late-data leaves, are no earlier use. `all` are the inputs' hashes in spec order.
+/// In a confirmatory plan, refuse a confirmation input that holds the same data as a selection
+/// or calibration input (E-CNF-004): `check` cannot compare a file that was absent at
+/// registration, and a late copy of a registered file has a registered hash. Then a selection
+/// or confirmation input that the registered plan leaf did not hold is late: refuse it if
+/// another study used it, else record it under this study's id once. The study's own leaves,
+/// its plan leaf and its late-data leaves, are no earlier use. `all` are the inputs' hashes in
+/// spec order.
 /// Every lookup finishes before the append takes its lock.
 fn gate_late_data(
     home: &Home,
@@ -751,23 +796,25 @@ fn gate_late_data(
         .leaf(leaf_index)?
         .ok_or_else(|| RunError::NotRegistered(id.into()))?
         .data_hashes;
-    // (path, role, hashes) of each selection or confirmation input present now.
-    let clusters: Vec<(&str, Role, &(String, String))> = (spec.inputs.iter().zip(all))
-        .filter(|(i, _)| matches!(i.role, Role::Selection | Role::Confirmation))
+    // (path, role, hashes) of each input present now, and those of the given roles.
+    let present: Vec<(&str, Role, &(String, String))> = (spec.inputs.iter().zip(all))
         .filter_map(|(i, (_, h))| Some((i.path.as_str(), i.role, h.as_ref()?)))
         .collect();
+    let of = |roles: &'static [Role]| present.iter().filter(move |(_, r, _)| roles.contains(r));
     if spec.study.mode == Mode::Confirmatory {
-        for (path, role, hashes) in &clusters {
-            let other = (clusters.iter()).find(|(_, r, h)| r != role && same_data(h, hashes));
-            if let Some((other, _, _)) = other {
+        for (path, _, hashes) in of(&[Role::Confirmation]) {
+            let mut held = of(&[Role::Selection, Role::Calibration]);
+            if let Some((other, role, _)) = held.find(|(_, _, h)| same_data(h, hashes)) {
                 return Err(RunError::DataShared {
                     path: (*path).into(),
                     other: (*other).into(),
+                    role: *role,
                 });
             }
         }
     }
-    let late = (clusters.iter()).filter(|(_, _, h)| !registered.contains(h));
+    let late =
+        of(&[Role::Selection, Role::Confirmation]).filter(|(_, _, h)| !registered.contains(h));
     let own = own_label(id);
     let mut new = Vec::new();
     for (path, _, hashes) in late {
@@ -825,7 +872,9 @@ fn no_links(base: &Path, parts: &[&str]) -> Result<(), RunError> {
     Ok(())
 }
 
-/// Run every row that has no record, holding the run lock; a second run gets `Busy`.
+/// Run every row that has no record, holding the run lock; a second run gets `Busy`. A
+/// study whose records hold a stop, or a confirmatory study whose records hold a recheck
+/// mismatch (`recheck_stop`), ends with the stop trace before any row.
 /// A row a dead box left running is killed first. At each row boundary the control file is
 /// read: a stop ends the run with the stop trace, a pause ends it at that boundary. Then the
 /// gate runs before each attempt, retries included: the run pauses instead of starting it
@@ -856,8 +905,9 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
     let log = dir.join("records.jsonl");
     let machine = machine::load(&plan.home.root).map_err(io)?;
     let all = records::read_all(&log, &plan.key.verifying_key())?;
-    if let Some(r) = all.iter().find(|r| r.kind == "stop") {
-        let why = why_of(r);
+    let stopped = (all.iter().find(|r| r.kind == "stop").map(why_of))
+        .or_else(|| recheck_stop(&plan.spec, &all));
+    if let Some(why) = stopped {
         return halt(
             plan,
             &dir,
@@ -1334,7 +1384,9 @@ fn run_row(
 
 /// A row's attempts, retries included, then its record. Returns the recorded exit, or
 /// `stopped` or `paused` for a row that ends the run with only spend records. The row
-/// record holds the last attempt's spend; each earlier attempt has its own spend record.
+/// record holds the last attempt's spend; each earlier attempt has its own spend record. A
+/// recheck copy's record also holds `recheck_of` and `same`, its comparison with the row it
+/// repeats, and `rechecked` acts on it.
 fn attempt_row(
     plan: &RunPlan,
     row: &Row,
@@ -1463,6 +1515,7 @@ fn attempt_row(
         "environment": plan.environment,
         "payload_sha256": plan.payload_sha256,
         "data_hashes": plan.inputs.iter().filter_map(|(_, h)| h.as_ref()).collect::<Vec<_>>(),
+        "manifest": plan.manifest,
         "cpu_seconds": outcome.cpu_seconds,
         "wall_seconds": outcome.wall_seconds,
         "output_hash": outcome.output_hash,
@@ -1470,6 +1523,16 @@ fn attempt_row(
         "attempts": attempts,
     });
     agent(&mut body, plan);
+    if outcome.ended {
+        body["ended"] = json!(true);
+    }
+    let compared = (row.recheck_of)
+        .map(|of| compare(plan, log, of, row.index, &body))
+        .transpose()?;
+    if let Some(c) = &compared {
+        body["recheck_of"] = json!(c.of);
+        body["same"] = json!(c.same);
+    }
     if let Some(why) = reason {
         body["reason"] = json!(why);
     }
@@ -1504,9 +1567,143 @@ fn attempt_row(
             "row {} voided by infrastructure faults: {why}",
             row.index
         ))),
-        _ => unknown.then(|| unknown_cpu(row)),
+        _ => (compared.and_then(|c| rechecked(watch, &span, row, c, &outcome.output_hash)))
+            .or_else(|| unknown.then(|| unknown_cpu(row))),
     };
     Ok((exit, halt))
+}
+
+/// The keys of a row record that say where the row ran. A copy is compared only with an
+/// original that ran in the same environment at the same level: a difference between two
+/// environments or levels is no behaviour of the payload.
+const RAN_IN: [&str; 2] = ["environment", "isolation"];
+
+/// A recheck copy's comparison with the row it repeats.
+struct Compared {
+    of: u64,
+    /// Whether the copy gave the original's exit and output hash. `None` when either row is
+    /// not data (`is_data`), or when `differs`.
+    same: Option<bool>,
+    /// The keys of `RAN_IN` on which the two records differ.
+    differs: Vec<&'static str>,
+    /// The original's output hash.
+    theirs: String,
+}
+
+/// Compare the body of copy `row`'s record with the record of row `of`, the row it repeats.
+/// A missing record, or one without an exit or output hash, is a records fault.
+fn compare(
+    plan: &RunPlan,
+    log: &Path,
+    of: u64,
+    row: u64,
+    copy: &Value,
+) -> Result<Compared, RunError> {
+    let all = records::read_all(log, &plan.key.verifying_key())?;
+    let original = (all.iter())
+        .find(|r| r.kind == "row" && r.row == Some(of))
+        .ok_or_else(|| {
+            RunError::Records(format!(
+                "recheck row {row} repeats row {of}, which has no record"
+            ))
+        })?;
+    let text = |k: &str| {
+        original.body[k].as_str().ok_or_else(|| {
+            RunError::Records(format!(
+                "the record of row {of}, which recheck row {row} repeats, holds no {k}"
+            ))
+        })
+    };
+    let (exit, theirs) = (text("exit")?, text("output_hash")?);
+    let differs: Vec<&'static str> = (RAN_IN.into_iter())
+        .filter(|k| original.body[*k] != copy[*k])
+        .collect();
+    let same = (differs.is_empty() && is_data(&original.body) && is_data(copy))
+        .then(|| copy["exit"] == exit && copy["output_hash"] == theirs);
+    Ok(Compared {
+        of,
+        same,
+        differs,
+        theirs: theirs.into(),
+    })
+}
+
+/// Whether the row record `body` holds the payload's own exit and output for its job. A void
+/// row's need not be the payload's, and a row the box ended at its wall timeout holds what the
+/// payload had written when the kill fell.
+fn is_data(body: &Value) -> bool {
+    let void = body["exit"]
+        .as_str()
+        .is_some_and(|e| e.starts_with("void:"));
+    !void && body["ended"] != true
+}
+
+/// The stop of a confirmatory run whose recheck copy `row` gave output `ours` and the row
+/// `of` it repeats gave `theirs`.
+fn not_deterministic(of: u64, theirs: &str, row: u64, ours: &str) -> String {
+    format!(
+        "row {of} gave output {theirs} and its recheck row {row} gave {ours}; \
+         the payload is not deterministic"
+    )
+}
+
+/// The stop that the records of a confirmatory study hold before any stop record: the first
+/// recheck copy recorded with `same: false`. The run that wrote it stops at once, so only a
+/// run that ended before its stop record leaves one. A piece the records lack is left empty:
+/// the study stops either way.
+fn recheck_stop(spec: &Spec, all: &[records::Record]) -> Option<String> {
+    let confirmatory = spec.study.mode == Mode::Confirmatory;
+    let copy = (all.iter()).find(|r| confirmatory && r.kind == "row" && r.body["same"] == false)?;
+    let of = copy.body["recheck_of"].as_u64().unwrap_or_default();
+    let hash = |r: &records::Record| {
+        r.body["output_hash"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let theirs = (all.iter()).find(|r| r.kind == "row" && r.row == Some(of));
+    let row = copy.row.unwrap_or_default();
+    Some(not_deterministic(
+        of,
+        &theirs.map(hash).unwrap_or_default(),
+        row,
+        &hash(copy),
+    ))
+}
+
+/// After a copy's record: a mismatch stops a confirmatory run. Otherwise a compared copy gets
+/// one `row.recheck` event, `warn` for a mismatch and `info` for a match, and so does a copy
+/// that ran in another environment or level than its original, at `warn`, naming the keys
+/// that differ. A copy or original that is not data gets none.
+fn rechecked(watch: &RunWatch, span: &str, row: &Row, c: Compared, ours: &str) -> Option<Halt> {
+    let confirmatory = watch.plan.spec.study.mode == Mode::Confirmatory;
+    let (level, attrs) = match c.same {
+        None if c.differs.is_empty() => return None,
+        None => {
+            let attrs = json!({ "row": row.index, "of": c.of, "same": null, "differs": c.differs });
+            ("warn", attrs)
+        }
+        Some(false) if confirmatory => {
+            let why = not_deterministic(c.of, &c.theirs, row.index, ours);
+            return Some(Halt::Stop {
+                why,
+                in_flight: None,
+            });
+        }
+        Some(same) => {
+            let level = if same { "info" } else { "warn" };
+            (level, json!({ "row": row.index, "of": c.of, "same": same }))
+        }
+    };
+    watch.keep(log_event(
+        watch.plan,
+        watch.dir,
+        Some(span),
+        "row.recheck",
+        level,
+        attrs,
+    ));
+    None
 }
 
 /// `o` with the host paths in its texts replaced.
@@ -1628,7 +1825,8 @@ fn params_json(plan: &RunPlan, condition: &str) -> Result<String, RunError> {
 }
 
 /// The job for one attempt of `row`, running `condition`, with a fresh output dir. An old one
-/// is renamed, never deleted.
+/// is renamed, never deleted. A recheck copy gets its original's job: the copy holds the
+/// original's seed, unit and repeat, and here its row index.
 fn job_for(plan: &RunPlan, row: &Row, condition: &str, dir: &Path) -> Result<RowJob, RunError> {
     let index = row.index.to_string();
     no_links(dir, &["run", "rows", &index])?;
@@ -1659,7 +1857,10 @@ fn job_for(plan: &RunPlan, row: &Row, condition: &str, dir: &Path) -> Result<Row
         env: vec![
             ("PATH".into(), PATH_ENV.into()),
             ("IGNORARIUM_SEED".into(), row.seed_hex.clone()),
-            ("IGNORARIUM_ROW".into(), row.index.to_string()),
+            (
+                "IGNORARIUM_ROW".into(),
+                row.recheck_of.unwrap_or(row.index).to_string(),
+            ),
             ("IGNORARIUM_PARAMS".into(), params_json(plan, condition)?),
         ],
         input_dir: plan.view.clone(),
@@ -1667,6 +1868,7 @@ fn job_for(plan: &RunPlan, row: &Row, condition: &str, dir: &Path) -> Result<Row
         seed,
         wall_timeout: wall_timeout(plan.spec.design.row_seconds),
         rootfs: plan.rootfs.clone(),
+        memory_mib: plan.spec.design.row_memory_mib,
     })
 }
 

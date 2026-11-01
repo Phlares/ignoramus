@@ -18,6 +18,9 @@ use std::time::{Duration, Instant};
 
 /// Exit code reported for a row killed at its wall timeout.
 pub const TIMEOUT_CODE: i32 = 124;
+/// The lowest level that runs rows in the environment `pins.environment` names; level 0 runs
+/// them on the host root.
+pub const PINNED_LEVEL: u8 = 1;
 const POLL: Duration = Duration::from_millis(5);
 
 /// What to run: a read-only input dir and one write-only output dir.
@@ -32,6 +35,15 @@ pub struct RowJob {
     pub wall_timeout: Duration,
     /// Root file system to run in. Level 0 ignores it.
     pub rootfs: Option<PathBuf>,
+    /// The payload's data limit in MiB; `None` leaves the box's own.
+    pub memory_mib: Option<u32>,
+}
+
+impl RowJob {
+    /// `memory_mib` in bytes, as every level applies it.
+    pub fn data_limit(&self) -> Option<u64> {
+        self.memory_mib.map(|m| u64::from(m) << 20)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +128,11 @@ pub trait Backend {
     }
     /// How many CPUs a row may use at once.
     fn cpus(&self) -> u32;
+    /// Why this backend cannot run the rows of a study that declares `memory_mib` per row, if
+    /// it cannot: level 2's machine for such a row must fit in the host's memory.
+    fn unfit(&self, _memory_mib: Option<u32>) -> Option<String> {
+        None
+    }
     fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> io::Result<RowOutcome>;
 }
 

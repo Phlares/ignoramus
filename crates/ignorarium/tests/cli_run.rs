@@ -5,9 +5,13 @@ use assert_cmd::Command;
 use common::{Lab, kind_of, lab, no_level1, plain, register_study, with_payload};
 use ignorarium::backend::level2::Level2;
 use ignorarium::backend::{Backend, Probe};
+use ignorarium::canon::sha256_hex;
 use ignorarium::cli::status::blind_order;
 use ignorarium::control::{ControlFile, RunLock, Signal, State};
-use ignorarium::keys;
+use ignorarium::derived::Register;
+use ignorarium::estimate::apply_defaults;
+use ignorarium::spec::model::Spec;
+use ignorarium::{keys, view};
 use serde_json::Value;
 use std::path::Path;
 use std::time::Duration;
@@ -231,8 +235,45 @@ fn rows_see_exactly_the_declared_inputs() {
         let seen = dir.join(format!("run/rows/{}/out/seen", r.row.unwrap()));
         assert_eq!(
             std::fs::read_to_string(seen).unwrap(),
-            ".\n./data\n./data/example.txt\n./models\n./models/m.bin\n"
+            ".\n./data\n./data/example.txt\n./ignorarium:inputs.json\n./models\n./models/m.bin\n"
         );
+    }
+}
+
+#[test]
+fn rows_read_the_manifest() {
+    let lab = lab();
+    let payload = format!(
+        "#!/bin/sh\ncp \"$IGNORARIUM_IN/{}\" \"$IGNORARIUM_OUT/m\"\n{}\n",
+        view::MANIFEST,
+        common::VALUES
+    );
+    let dir = with_payload(&lab, "list", &payload);
+    bin_at(&lab, "list").args(["run", "list"]).assert().code(0);
+    let mut spec = ignorarium::spec::load(&dir.join("spec.toml"))
+        .unwrap()
+        .value;
+    apply_defaults(&mut spec);
+    let spec = Spec::from_value(&spec).unwrap();
+    let register = Register::of(&kind_of(&lab, "list", "register")[0]).unwrap();
+    let want = view::manifest(&spec, &register.inputs);
+    // The template's confirmation input is absent, so only the calibration input is listed.
+    let listed: Value = serde_json::from_slice(&want).unwrap();
+    assert_eq!(
+        listed,
+        serde_json::json!([{
+            "path": "data/example.txt",
+            "role": "calibration",
+            "sha256": sha256_hex(b"calibration"),
+        }])
+    );
+    let rows = kind_of(&lab, "list", "row");
+    assert_eq!(rows.len(), 6);
+    for r in &rows {
+        assert_eq!(r.body["exit"], "ok", "{:?}", r.body);
+        let got = std::fs::read(dir.join(format!("run/rows/{}/out/m", r.row.unwrap()))).unwrap();
+        assert_eq!(got, want);
+        assert_eq!(r.body["manifest"], sha256_hex(&want));
     }
 }
 
@@ -1057,6 +1098,11 @@ fn guide_lists_run_and_status_with_real_commands() {
             .unwrap_or_else(|| panic!("{id}"))
             .clone()
     };
+    let payload = find("payload");
+    assert!(
+        payload["does"].as_str().unwrap().contains(view::MANIFEST),
+        "{payload}"
+    );
     let run = find("run");
     assert_eq!(run["command"], "ignorarium run <id>");
     assert!(!run.to_string().contains("not available yet"));

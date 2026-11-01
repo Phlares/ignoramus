@@ -238,6 +238,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output_dir: dir.path().join("out"),
             seed: [7; 32],
             wall_timeout: Duration::from_secs(120),
+            data_limit: None,
         };
         let o = run_row(&vm, &job, &dir.path().join("work"), &|| true).map_err(|e| {
             let console = std::fs::read_to_string(&serial).unwrap_or_default();

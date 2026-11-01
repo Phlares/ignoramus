@@ -198,6 +198,8 @@ impl Level1 {
             .stdout(pipes.stdout_w.take().map_or_else(Stdio::null, Stdio::from))
             .stderr(Stdio::from(pipes.stderr_w));
         sys::inherit_only(&mut cmd, inherited);
+        // bubblewrap runs under the cap too; it starts within 256 KiB, below the 1 MiB floor.
+        sys::limit_data(&mut cmd, job.data_limit());
         let started = Started {
             held: Cell::new(Some((pipes.filter, pipes.status_w))),
             inner: watch,

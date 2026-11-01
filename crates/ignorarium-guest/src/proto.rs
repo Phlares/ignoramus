@@ -23,6 +23,9 @@ pub struct Job {
     pub argv: Vec<String>,
     pub env: Vec<(String, String)>,
     pub timeout_ms: u64,
+    /// The payload's data limit in bytes; `None` leaves the agent's own.
+    #[serde(default)]
+    pub data_limit: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -82,6 +85,11 @@ pub struct Report {
     /// Why the pack refused what the payload left in `/out`: the payload's own result, so
     /// no outputs come back and `output_hash` is empty.
     pub pack_refused: Option<String>,
+    /// The data limit, in bytes, the payload ran under; `None` when it ran without one or did
+    /// not run. An agent that predates the field sends none, which the host refuses for a
+    /// job that has one.
+    #[serde(default)]
+    pub data_limit: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

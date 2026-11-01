@@ -1,10 +1,14 @@
-//! The input view: `<study>/in` holds one hard link per input to its blob in the store, so a
-//! row sees the declared inputs and nothing else. A link shares the blob's bytes and its
-//! read-only mode; the view's folders are read-only too.
+//! The input view: `<study>/in` holds one hard link per input to its blob in the store, and
+//! one to the manifest that lists them with their roles, so a row sees the declared inputs and
+//! nothing else. A link shares the blob's bytes and its read-only mode; the view's folders are
+//! read-only too.
 use crate::backend::output::file_digest;
+use crate::canon::to_canonical;
 use crate::files;
 use crate::inputs::input_path;
+use crate::spec::model::Spec;
 use crate::store::Store;
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
@@ -14,6 +18,23 @@ use std::path::{Path, PathBuf};
 
 /// The view folder's name inside the study folder.
 pub const IN: &str = "in";
+
+/// The manifest's name at the top of the view. No input path may hold a `:` (`input_path`),
+/// so no input can take it.
+pub const MANIFEST: &str = "ignorarium:inputs.json";
+
+/// The manifest of the view that holds `present`: canonical JSON, one `{path, role, sha256}`
+/// object per input of `spec` whose path is in `present`, in spec order. Each path is spelled
+/// as the view holds it (`key`), so `data//x.txt/` lists as `data/x.txt`.
+pub fn manifest(spec: &Spec, present: &[(String, String)]) -> Vec<u8> {
+    let listed: Vec<Value> = (spec.inputs.iter())
+        .filter_map(|i| {
+            let (_, digest) = present.iter().find(|(p, _)| *p == i.path)?;
+            Some(json!({ "path": key(&i.path), "role": i.role, "sha256": digest }))
+        })
+        .collect();
+    to_canonical(&Value::Array(listed)).expect("an array of string fields always serializes")
+}
 
 #[derive(Debug)]
 pub enum ViewError {
@@ -87,9 +108,10 @@ fn key(path: &str) -> String {
 }
 
 /// Make `study_dir/in` hold exactly one hard link per `(path, digest)` to its blob and
-/// return its absolute path. A view whose entries are already exactly those links (same
-/// device and inode) is kept; any other is renamed to the first free `in.old-<k>` and built
-/// again. Nothing is deleted.
+/// return its absolute path. `MANIFEST` goes at the top of the view; every other path is an
+/// input's, which `input_path` guards. A view whose entries are already exactly those links
+/// (same device and inode) is kept; any other is renamed to the first free `in.old-<k>` and
+/// built again. Nothing is deleted.
 pub fn build(
     store: &Store,
     study_dir: &Path,
@@ -112,7 +134,12 @@ pub fn build(
         }
         fs::create_dir(&dir)?;
         for (path, digest) in inputs {
-            let link = input_path(&dir, path).ok_or_else(|| ViewError::Unsafe(path.clone()))?;
+            let link = if path == MANIFEST {
+                Some(dir.join(MANIFEST))
+            } else {
+                input_path(&dir, path)
+            };
+            let link = link.ok_or_else(|| ViewError::Unsafe(path.clone()))?;
             if let Some(parent) = link.parent() {
                 fs::create_dir_all(parent)?;
             }

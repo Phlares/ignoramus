@@ -2,12 +2,12 @@
 //! condition's value for the same unit and repeat.
 use crate::canon::{sha256_hex, to_canonical};
 use crate::derived::{
-    ANALYSIS, Analysis, BoundResult, Candidate, ESTIMATE, Estimate, Register, Selection, VERDICT,
-    Verdict, contrast_key,
+    ANALYSIS, Analysis, BoundResult, Candidate, ESTIMATE, Estimate, Instrument, Recheck, Register,
+    Selection, VERDICT, Verdict, contrast_key,
 };
 use crate::prior::same_data;
 use crate::records::{self, Record, RecordDraft};
-use crate::runner::{RunError, RunPlan, stored_spec};
+use crate::runner::{InputHashes, RunError, RunPlan, stored_spec};
 use crate::schedule::SELECTION_STAGE;
 use crate::seed::seed;
 use crate::spec::model::{
@@ -52,14 +52,25 @@ impl Paired {
     }
 }
 
+/// The row records of the schedule's own rows: a recheck copy repeats a row to compare its
+/// output, and adds no value.
+fn own_rows(records: &[Record]) -> impl Iterator<Item = &Record> {
+    (records.iter()).filter(|r| r.kind == "row" && !is_recheck(r))
+}
+
+fn is_recheck(r: &Record) -> bool {
+    r.body.get("recheck_of").is_some()
+}
+
 /// Pair every `ok` row record's values with the reference condition's row for the same
-/// unit and repeat. `Difference` is condition minus reference; `Percent` is
-/// 100 x (condition / reference - 1), and no pair when the reference is not above zero;
-/// `LogRatio` is ln(condition / reference), and no pair when either side is not above zero.
+/// unit and repeat; recheck copies add none. `Difference` is condition minus reference;
+/// `Percent` is 100 x (condition / reference - 1), and no pair when the reference is not above
+/// zero; `LogRatio` is ln(condition / reference), and no pair when either side is not above
+/// zero.
 pub fn paired(spec: &Spec, rows: &[Record]) -> Paired {
     // (unit, repeat, condition) -> the row's values
     let mut cells: BTreeMap<(&str, u64, &str), &serde_json::Value> = BTreeMap::new();
-    for r in rows.iter().filter(|r| r.kind == "row") {
+    for r in own_rows(rows) {
         let b = &r.body;
         if b["exit"] != "ok" {
             continue;
@@ -110,18 +121,17 @@ pub fn paired(spec: &Spec, rows: &[Record]) -> Paired {
     }
 }
 
-/// The selection stage's pick. A selection unit (a unit of a `selection` row record) is
-/// complete when it has a paired metric value for every candidate. Each candidate's mean is
-/// over the complete units; the best mean in the metric outcome's direction wins, and a tie
-/// goes to the first listed. `Err` when the plan has no stage or candidate, its metric is not
-/// an outcome, no unit is complete, or a mean is not finite.
+/// The selection stage's pick. A selection unit (a unit of a `selection` row record, recheck
+/// copies aside) is complete when it has a paired metric value for every candidate. Each
+/// candidate's mean is over the complete units; the best mean in the metric outcome's
+/// direction wins, and a tie goes to the first listed. `Err` when the plan has no stage or
+/// candidate, its metric is not an outcome, no unit is complete, or a mean is not finite.
 pub fn select(spec: &Spec, rows: &[Record]) -> Result<Selection, String> {
     let stage = (spec.design.selection.as_ref()).ok_or("the plan has no selection stage")?;
     let outcome = (spec.outcomes.iter().find(|o| o.id == stage.metric))
         .ok_or("the selection metric is not an outcome of the plan")?;
-    let units: BTreeSet<&str> = rows
-        .iter()
-        .filter(|r| r.kind == "row" && r.body["stage"] == SELECTION_STAGE)
+    let units: BTreeSet<&str> = own_rows(rows)
+        .filter(|r| r.body["stage"] == SELECTION_STAGE)
         .filter_map(|r| r.body["unit"].as_str())
         .collect();
     let pairs = paired(spec, rows);
@@ -530,13 +540,65 @@ pub fn commit(spec: &Value, box_version: &str) -> Result<String, RunError> {
     Ok(sha256_hex(&bytes))
 }
 
+/// The `Instrument` of a run whose register record names `payload`: the environment its
+/// `rows` name, and each model and calibration input of `spec` with a digest in `inputs`.
+pub fn instrument(spec: &Spec, payload: &str, inputs: &InputHashes, rows: &[Record]) -> Instrument {
+    let mut named = (rows.iter())
+        .filter(|r| r.kind == "row")
+        .map(|r| r.body["environment"].as_str());
+    let environment = match named.next().flatten() {
+        Some(first) if named.all(|e| e == Some(first)) => first,
+        _ => "",
+    };
+    let mut built: Vec<(String, String, String)> = (spec.inputs.iter())
+        .filter(|i| matches!(i.role, Role::Model | Role::Calibration))
+        .filter_map(|i| {
+            let (_, hashes) = inputs.iter().find(|(p, _)| *p == i.path)?;
+            let role = json!(i.role).as_str()?.to_string();
+            Some((i.path.clone(), role, hashes.as_ref()?.0.clone()))
+        })
+        .collect();
+    built.sort();
+    Instrument {
+        payload: payload.into(),
+        environment: environment.into(),
+        inputs: built,
+    }
+}
+
+/// The `Recheck` of a run of `spec` from its records, which carries the check of the study
+/// `carried_from` names; `None` unless the plan declares `pins.deterministic`. A copy counts as
+/// compared when its record's `same` is not `null`.
+fn recheck(spec: &Spec, records: &[Record], carried_from: Option<String>) -> Option<Recheck> {
+    let copies: Vec<&Record> = (records.iter())
+        .filter(|r| r.kind == "row" && is_recheck(r))
+        .collect();
+    // The copies whose record says `same` is `same`, in the order they ran.
+    let with = |same: Value| -> Vec<u64> {
+        (copies.iter())
+            .filter(|r| r.body["same"] == same)
+            .filter_map(|r| r.row)
+            .collect()
+    };
+    spec.pins.deterministic.then(|| {
+        let uncompared = with(Value::Null);
+        Recheck {
+            rows: (copies.len() - uncompared.len()) as u64,
+            mismatched: with(json!(false)),
+            uncompared,
+            carried_from,
+        }
+    })
+}
+
 /// When every scheduled row has a record, add what the study's results still lack: the
-/// `analysis` record first, which states how many records follow it, then each estimate and
-/// each verdict it promises, and last, for a study that holds a stream slot, the close of that
-/// slot with the e-value its verdict records give (`study_e_value`). A call after a crash adds
-/// only what is missing; a complete study gets nothing. A log whose analysis record another
-/// box version wrote is refused when it lacks an estimate or a verdict. The close takes its
-/// e-value from the signed records alone, so it is added whatever box wrote them.
+/// `analysis` record first, which names the `instrument` and the `recheck` and states how many
+/// records follow it, then each estimate and each verdict it promises, and last, for a study
+/// that holds a stream slot, the close of that slot with the e-value its verdict records give
+/// (`study_e_value`). A call after a crash adds only what is missing; a complete study gets
+/// nothing. A log whose analysis record another box version wrote is refused when it lacks an
+/// estimate or a verdict. The close takes its e-value from the signed records alone, so it is
+/// added whatever box wrote them.
 pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
     let dir = plan.home.study_dir(&plan.study_id);
     let log = dir.join("records.jsonl");
@@ -558,7 +620,8 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
         &clusters,
         selection.as_ref(),
     );
-    let alpha = all.iter().find_map(Register::of).and_then(|r| r.alpha);
+    let register = all.iter().find_map(Register::of);
+    let alpha = register.as_ref().and_then(|r| r.alpha.clone());
     let level = alpha.as_ref().map(|a| a.level);
     let judged = verdicts(&plan.spec, &pairs, &clusters, &plan.spec_hash, level);
     let (_, value, hash, _) = stored_spec(&dir)?;
@@ -586,12 +649,16 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
             }
         }
         None => {
+            let carried = register.as_ref().and_then(|r| r.carries.as_ref());
+            let carried_from = carried.map(|c| c.study.clone());
             let body = Analysis {
                 commit: commit(&value, version)?,
                 box_version: version.into(),
                 estimates: wanted.len() as u64,
                 verdicts: judged.len() as u64,
                 slot: alpha.as_ref().map(|a| a.slot),
+                instrument: instrument(&plan.spec, &plan.payload_sha256, &plan.inputs, &all),
+                recheck: recheck(&plan.spec, &all, carried_from),
             };
             append(plan, &log, ANALYSIS, &body)?;
         }

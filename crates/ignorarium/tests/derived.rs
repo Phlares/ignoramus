@@ -1,6 +1,7 @@
 use ignorarium::canon::{sha256_hex, to_canonical};
 use ignorarium::derived::{
-    Alpha, Analysis, Estimate, Register, Selection, StudyState, contrast_key,
+    Alpha, Analysis, Carried, Estimate, Instrument, PinDeviated, Recheck, Register, Selection,
+    StudyState, contrast_key,
 };
 use ignorarium::records::Record;
 use ignorarium::spec::model::{Direction, Outcome, Paired};
@@ -82,10 +83,37 @@ fn a_register_record_parses_with_its_root_identity() {
     );
     assert_eq!(frozen.records, ["e".repeat(64)]);
     assert_eq!(frozen.value, json!({ "": { "sd": 2.0, "icc": 0.1 } }));
-    assert_eq!(serde_json::to_value(&r).unwrap(), register_body());
+    // A record written before deviations were recorded reads as one that declares none.
+    assert!(r.deviations.is_empty());
+    let mut now = register_body();
+    now["deviations"] = json!([]);
+    now["carries"] = Value::Null;
+    assert_eq!(serde_json::to_value(&r).unwrap(), now);
     assert_eq!(r.timestamp, None);
     assert_eq!(r.alpha, None);
-    let mut b = register_body();
+    let mut b = now.clone();
+    b["deviations"] = json!([{
+        "from": "pilot", "reason": "r", "timing": "after-results", "differs": ["payload"]
+    }]);
+    let r = Register::of(&rec("register", b.clone())).unwrap();
+    assert_eq!(
+        r.deviations,
+        [PinDeviated {
+            from: "pilot".into(),
+            reason: "r".into(),
+            timing: "after-results".into(),
+            differs: vec!["payload".into()],
+        }]
+    );
+    assert_eq!(serde_json::to_value(&r).unwrap(), b);
+    for field in ["from", "reason", "timing", "differs"] {
+        let mut c = b.clone();
+        c["deviations"][0].as_object_mut().unwrap().remove(field);
+        assert_eq!(Register::of(&rec("register", c)), None, "{field}");
+    }
+    let mut c = b.clone();
+    c["deviations"][0]["extra"] = json!(1);
+    assert_eq!(Register::of(&rec("register", c)), None);
     b["timestamp"] = json!("pending");
     b["alpha"] = json!({ "log": "planlog", "slot": 4, "level": 0.01 });
     let r = Register::of(&rec("register", b.clone())).unwrap();
@@ -98,6 +126,30 @@ fn a_register_record_parses_with_its_root_identity() {
     assert_eq!(r.alpha, Some(alpha));
     assert_eq!(serde_json::to_value(&r).unwrap(), b);
     b["alpha"]["extra"] = json!(1);
+    assert_eq!(Register::of(&rec("register", b)), None);
+}
+
+#[test]
+fn a_register_record_names_the_check_it_carries() {
+    // A record written before the field existed carries none.
+    let r = Register::of(&rec("register", register_body())).unwrap();
+    assert_eq!(r.carries, None);
+    let mut b = register_body();
+    b["deviations"] = json!([]);
+    b["carries"] = json!({ "study": "pilot", "record": "a".repeat(64) });
+    let r = Register::of(&rec("register", b.clone())).unwrap();
+    let carried = Carried {
+        study: "pilot".into(),
+        record: "a".repeat(64),
+    };
+    assert_eq!(r.carries, Some(carried));
+    assert_eq!(serde_json::to_value(&r).unwrap(), b);
+    for field in ["study", "record"] {
+        let mut c = b.clone();
+        c["carries"].as_object_mut().unwrap().remove(field);
+        assert_eq!(Register::of(&rec("register", c)), None, "{field}");
+    }
+    b["carries"]["extra"] = json!(1);
     assert_eq!(Register::of(&rec("register", b)), None);
 }
 
@@ -226,7 +278,12 @@ fn a_contrast_key_orders_two_weights_of_one_condition() {
 fn analysis_body() -> Value {
     json!({
         "commit": "c".repeat(64), "box_version": "0.1.0", "estimates": 2, "verdicts": 1,
-        "slot": 3
+        "slot": 3,
+        "instrument": {
+            "payload": "p".repeat(64), "environment": "host",
+            "inputs": [["data/m.bin", "model", "d".repeat(64)]]
+        },
+        "recheck": { "rows": 2, "mismatched": [7], "uncompared": [6], "carried_from": null }
     })
 }
 
@@ -241,6 +298,17 @@ fn an_analysis_record_states_what_follows_it() {
             estimates: 2,
             verdicts: 1,
             slot: Some(3),
+            instrument: Instrument {
+                payload: "p".repeat(64),
+                environment: "host".into(),
+                inputs: vec![("data/m.bin".into(), "model".into(), "d".repeat(64))],
+            },
+            recheck: Some(Recheck {
+                rows: 2,
+                mismatched: vec![7],
+                uncompared: vec![6],
+                carried_from: None,
+            }),
         }
     );
     assert_eq!(serde_json::to_value(&a).unwrap(), analysis_body());
@@ -257,6 +325,67 @@ fn an_analysis_record_states_what_follows_it() {
         b.as_object_mut().unwrap().remove(field);
         assert_eq!(Analysis::of(&rec("analysis", b)), None, "{field}");
     }
+}
+
+#[test]
+fn a_recheck_passes_when_every_copy_matched_or_it_was_carried() {
+    let recheck = |rows, mismatched: &[u64], uncompared: &[u64], carried: Option<&str>| Recheck {
+        rows,
+        mismatched: mismatched.to_vec(),
+        uncompared: uncompared.to_vec(),
+        carried_from: carried.map(String::from),
+    };
+    assert!(recheck(1, &[], &[], None).passed());
+    assert!(recheck(0, &[], &[], Some("pilot")).passed());
+    assert!(!recheck(0, &[], &[], None).passed(), "nothing compared");
+    assert!(!recheck(2, &[7], &[], None).passed());
+    assert!(!recheck(1, &[], &[6], None).passed(), "a copy not compared");
+    assert!(!recheck(0, &[7], &[], Some("pilot")).passed());
+    // A study without determinism writes `null`; a recheck that is there must be whole.
+    let mut b = analysis_body();
+    b["recheck"] = Value::Null;
+    assert_eq!(Analysis::of(&rec("analysis", b)).unwrap().recheck, None);
+    for field in ["rows", "mismatched", "uncompared", "carried_from"] {
+        let mut b = analysis_body();
+        b["recheck"].as_object_mut().unwrap().remove(field);
+        assert_eq!(Analysis::of(&rec("analysis", b)), None, "{field}");
+    }
+    let mut b = analysis_body();
+    b["recheck"]["extra"] = json!(1);
+    assert_eq!(Analysis::of(&rec("analysis", b)), None);
+}
+
+#[test]
+fn an_analysis_record_from_before_the_instrument_names_an_empty_one() {
+    // A box that wrote no instrument still leaves a finished study.
+    let mut b = analysis_body();
+    b.as_object_mut().unwrap().remove("instrument");
+    b.as_object_mut().unwrap().remove("recheck");
+    b["estimates"] = json!(0);
+    b["verdicts"] = json!(0);
+    b["slot"] = Value::Null;
+    let a = Analysis::of(&rec("analysis", b.clone())).unwrap();
+    let empty = Instrument {
+        payload: String::new(),
+        environment: String::new(),
+        inputs: vec![],
+    };
+    assert_eq!(a.instrument, empty);
+    assert_eq!(a.recheck, None);
+    let all = vec![at(0, "register", register_body()), at(1, "analysis", b)];
+    assert_eq!(
+        StudyState::of(Some(all), |_, _| panic!("no slot to ask for")),
+        Ok(StudyState::Finished(vec![]))
+    );
+    // An instrument that is there must be whole.
+    for field in ["payload", "environment", "inputs"] {
+        let mut b = analysis_body();
+        b["instrument"].as_object_mut().unwrap().remove(field);
+        assert_eq!(Analysis::of(&rec("analysis", b)), None, "{field}");
+    }
+    let mut b = analysis_body();
+    b["instrument"]["extra"] = json!(1);
+    assert_eq!(Analysis::of(&rec("analysis", b)), None);
 }
 
 /// A record whose hash is its own: `seq` tells two records with one body apart.

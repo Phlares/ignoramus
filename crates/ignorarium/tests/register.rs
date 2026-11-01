@@ -174,6 +174,8 @@ fn success_writes_four_files_a_plan_leaf_and_a_record() {
     assert_eq!(rec["body"]["leaf"], 0);
     assert_eq!(rec["body"]["log"], "planlog");
     assert!(rec["body"].get("timestamp").is_none());
+    assert_eq!(rec["body"]["deviations"], json!([]));
+    assert!(!out.contains("deviates"), "{out}");
 }
 
 #[test]
@@ -1144,6 +1146,141 @@ fn register_refuses_a_param_that_waits_or_has_no_selection() {
     let (r, out) = go(&f, &spec, &answer(&spec), true);
     assert_eq!(r.unwrap().code, 1, "{out}");
     assert!(out.contains("error[E-REF-002]"), "{out}");
+    assert!(!out.contains(PROMPT), "{out}");
+    assert!(!f.home.study_dir("my-study").exists());
+}
+
+/// The reason the template's example deviation gives.
+const REASON: &str = "the payload changed after the pilot";
+
+#[test]
+fn register_records_each_deviation_with_what_differs() {
+    let image = "ef".repeat(32);
+    let calibration = sha256_hex(b"Hello  World");
+    // `edit` on the confirmatory plan, which pins `image` and declares the template's
+    // deviation from my-pilot. my-pilot ran this plan's payload in `image`, with the
+    // calibration input the study root holds.
+    let registered = |edit: &dyn Fn(String) -> String| {
+        let (f, spec) = setup("numeric-ablation", |t| {
+            let pinned = format!("environment = \"{image}\"");
+            edit(common::confirmatory(t).replace("environment = \"\"", &pinned))
+        });
+        let instrument = ignorarium::derived::Instrument {
+            payload: ignorarium::payload::tree_hash(&spec.parent().unwrap().join("payload"))
+                .unwrap(),
+            environment: image.clone(),
+            inputs: vec![(
+                "data/example.txt".into(),
+                "calibration".into(),
+                calibration.clone(),
+            )],
+        };
+        let source = common::finished_with(instrument, None, vec![common::arm_a()]);
+        common::plant(&f.home, "my-pilot", &source);
+        let (r, out) = go(&f, &spec, &answer(&spec), true);
+        assert_eq!(r.unwrap().code, 0, "{out}");
+        (body_of(&f), out)
+    };
+    // The plan leaves the calibration input unpinned, and an empty pin pins nothing.
+    let (body, out) = registered(&|t| t);
+    assert_eq!(
+        body["deviations"],
+        json!([{ "from": "my-pilot", "reason": REASON, "timing": "before-collection",
+                 "differs": ["inputs"] }])
+    );
+    let line = format!("deviates from my-pilot in inputs (before-collection): {REASON}\n");
+    let at = out.find(&line).unwrap_or_else(|| panic!("{out}"));
+    assert!(at < out.find(PROMPT).unwrap(), "{out}");
+    assert_eq!(out.matches("deviates").count(), 1, "{out}");
+    // A deviation from a study whose code the plan pins records that nothing differs. The
+    // reason prints on one line, whatever it holds.
+    let pin = format!("sha256 = \"{calibration}\"");
+    let (body, out) = registered(&|t| {
+        t.replacen("sha256 = \"\"", &pin, 1)
+            .replace(&format!("\"{REASON}\""), "\"one\\nline\"")
+    });
+    assert_eq!(
+        body["deviations"],
+        json!([{ "from": "my-pilot", "reason": "one\nline", "timing": "before-collection",
+                 "differs": [] }])
+    );
+    assert!(
+        out.contains("\ndeviates from my-pilot in nothing (before-collection): one\\nline\n"),
+        "{out}"
+    );
+    // A plan that pins the study's code needs no deviation, and records and prints none.
+    let undeclared = |t: String| -> String {
+        let deviation = ["[[pins.deviations]]", "from = ", "reason = ", "timing = "];
+        let kept: Vec<&str> = (t.lines())
+            .filter(|l| !deviation.iter().any(|k| l.starts_with(k)))
+            .collect();
+        format!("{}\n", kept.join("\n"))
+    };
+    let (body, out) = registered(&|t| undeclared(t.replacen("sha256 = \"\"", &pin, 1)));
+    assert_eq!(body["deviations"], json!([]));
+    assert!(!out.contains("deviates"), "{out}");
+}
+
+#[test]
+fn register_freezes_the_check_it_carries() {
+    let image = "ef".repeat(32);
+    // The confirmatory plan, which declares determinism and pins `image`, after my-pilot ran
+    // its payload in `image` with `recheck`. Returns the record body, the output and the hash
+    // of my-pilot's analysis record.
+    let registered = |recheck| {
+        let (f, spec) = setup("numeric-ablation", |t| {
+            common::confirmatory(t)
+                .replace("environment = \"\"", &format!("environment = \"{image}\""))
+                .replace("# deterministic = true", "deterministic = true")
+        });
+        let instrument = ignorarium::derived::Instrument {
+            payload: ignorarium::payload::tree_hash(&spec.parent().unwrap().join("payload"))
+                .unwrap(),
+            environment: image.clone(),
+            inputs: vec![],
+        };
+        let source = common::finished_with(instrument, recheck, vec![common::arm_a()]);
+        let analysis = common::plant(&f.home, "my-pilot", &source)[1].clone();
+        let (r, out) = go(&f, &spec, &answer(&spec), true);
+        assert_eq!(r.unwrap().code, 0, "{out}");
+        (body_of(&f), out, analysis)
+    };
+    let passed = ignorarium::derived::Recheck {
+        rows: 2,
+        mismatched: vec![],
+        uncompared: vec![],
+        carried_from: None,
+    };
+    let (body, out, analysis) = registered(Some(passed));
+    assert_eq!(
+        body["carries"],
+        json!({ "study": "my-pilot", "record": analysis })
+    );
+    let lines = format!("{REASON}\ncarries the determinism check of my-pilot\nstream: slot 1");
+    let at = out.find(&lines).unwrap_or_else(|| panic!("{out}"));
+    assert!(at < out.find(PROMPT).unwrap(), "{out}");
+    // A source with no passed check leaves nothing to carry.
+    let (body, out, _) = registered(None);
+    assert_eq!(body["carries"], Value::Null);
+    assert!(!out.contains("determinism check"), "{out}");
+}
+
+#[test]
+fn an_exploratory_plan_with_a_deviation_is_refused() {
+    let (f, spec) = setup("numeric-ablation", |t| {
+        ["[[pins.deviations]]", "from = ", "reason = ", "timing = "]
+            .iter()
+            .fold(t, |t, k| t.replace(&format!("# {k}"), k))
+    });
+    common::pilot(&f.home, vec![common::arm_a()]);
+    let (r, out) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap().code, 1, "{out}");
+    assert!(
+        out.contains(
+            "error[E-REF-003] pins.deviations[0].from: The plan takes estimates from a study that ran other code, and declares no deviation from it. Only a confirmatory hypothesis with a claim takes estimates, and none takes them from study my-pilot.\n"
+        ),
+        "{out}"
+    );
     assert!(!out.contains(PROMPT), "{out}");
     assert!(!f.home.study_dir("my-study").exists());
 }

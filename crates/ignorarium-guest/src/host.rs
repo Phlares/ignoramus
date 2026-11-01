@@ -4,6 +4,7 @@
 //! unreaped, so a caller must keep SIGCHLD at its default action: an ignored SIGCHLD lets the
 //! kernel reap the VMM first.
 use crate::agent::payload::exited;
+use crate::agent::sandbox::tmpfs_bytes;
 use crate::agent::steps::now_nanos;
 use crate::image::{ext4, size_mib};
 use crate::pack::{self, Link, Unpacked};
@@ -28,6 +29,23 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 pub const REPORT_SLACK: Duration = Duration::from_secs(30);
+
+/// Guest memory, in MiB, for the guest's kernel, the agent and the page cache, with room
+/// for the agent's boot floor (`agent::steps::FLOOR`).
+pub const GUEST_MIB: u32 = 320;
+
+/// The guest memory, in MiB, that a row needs: the payload's data limit in bytes (none
+/// counts 0), the `/out` and `/tmp` tmpfs of an output disk of `out_mib` (their pages live in
+/// guest memory, outside the data limit) and `GUEST_MIB`, over 31/32 of the machine: the
+/// kernel's page data, zone reserves and page tables grow with it, about 1/32 as measured. A
+/// part of a MiB counts as a whole. The agent checks the guest it boots against the same
+/// parts.
+pub fn needed_mem_mib(data_limit: Option<u64>, out_mib: u64) -> u64 {
+    let held = (data_limit.unwrap_or(0))
+        .saturating_add(tmpfs_bytes(out_mib.saturating_mul(1 << 20)))
+        .saturating_add(u64::from(GUEST_MIB) << 20);
+    held.saturating_mul(32).div_ceil(31 << 20)
+}
 
 /// What the caller hears while a row runs.
 pub trait Watch {
@@ -70,6 +88,8 @@ pub struct HostJob {
     pub output_dir: PathBuf,
     pub seed: [u8; 32],
     pub wall_timeout: Duration,
+    /// The payload's data limit in bytes; `None` leaves the agent's own.
+    pub data_limit: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -177,9 +197,11 @@ fn disk(path: &Path, readonly: bool, serial: &str) -> OsString {
 
 /// Cloud Hypervisor arguments for one row. No network device, no API socket.
 pub fn vmm_args(vm: &Vm, work: &Path) -> Vec<OsString> {
+    // Virtio devices without an IOMMU need no bounce buffer, which would take 64 MiB of a
+    // guest past 4 GiB.
     let (cmdline, serial) = match &vm.serial_log {
-        Some(log) => ("console=ttyS0 quiet", kv("file=", log)),
-        None => ("quiet", OsString::from("off")),
+        Some(log) => ("console=ttyS0 quiet swiotlb=noforce", kv("file=", log)),
+        None => ("quiet swiotlb=noforce", OsString::from("off")),
     };
     let mut vsock = OsString::from(format!("cid={GUEST_CID},"));
     vsock.push(kv("socket=", &work.join(VSOCK_SOCKET)));
@@ -481,12 +503,19 @@ fn check_inputs(vm: &Vm, job: &HostJob, work: &Path) -> io::Result<()> {
             return Err(invalid(format!("{what} {} is not empty", dir.display())));
         }
     }
-    // A tmpfs of size 0 has no limit. /out and /tmp live in guest memory, each up to the
-    // disk size, and together they may take at most half of it.
-    if vm.out_mib == 0 || vm.out_mib.saturating_mul(4) > u64::from(vm.mem_mib) {
+    // A tmpfs of size 0 has no limit.
+    if vm.out_mib == 0 {
+        return Err(invalid(
+            "an output disk of 0 MiB leaves /out and /tmp unlimited".into(),
+        ));
+    }
+    let need = needed_mem_mib(job.data_limit, vm.out_mib);
+    if u64::from(vm.mem_mib) < need {
         return Err(invalid(format!(
-            "output disk of {} MiB: it needs at least 1 MiB and at most a quarter of the {} MiB guest memory",
-            vm.out_mib, vm.mem_mib
+            "a guest memory of {} MiB cannot hold the row: its data limit, /out and /tmp of \
+             the {} MiB output disk, {GUEST_MIB} MiB for the guest and the kernel's reserve \
+             need {need} MiB",
+            vm.mem_mib, vm.out_mib
         )));
     }
     // The clock field is widest at its maximum, so the job sent later is no longer.
@@ -508,6 +537,7 @@ fn wire_job(job: &HostJob, unix_nanos: u64) -> Job {
         argv: job.argv.clone(),
         env: job.env.clone(),
         timeout_ms: job.wall_timeout.as_millis() as u64,
+        data_limit: job.data_limit,
     }
 }
 
@@ -627,6 +657,17 @@ pub fn run_row(
         }
     };
     let guest = sent.elapsed();
+    // An agent built before the data limit drops it from the job and runs the payload
+    // uncapped; its report has no echo.
+    if report.end.is_some() && report.data_limit != job.data_limit {
+        let text = |l: Option<u64>| l.map_or("none".into(), |b| format!("{b} bytes"));
+        let msg = format!(
+            "the agent reported the data limit {}, not the job's {}: rebuild the agent",
+            text(report.data_limit),
+            text(job.data_limit)
+        );
+        return Err(guest_err(msg, work));
+    }
     // The guest wrote it, and it reaches the caller's records.
     report.pack_refused = report.pack_refused.as_deref().map(shown);
 

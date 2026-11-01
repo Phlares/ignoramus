@@ -4,7 +4,8 @@ use common::write_exec;
 use ignorarium_guest::agent::payload::{self, Ran};
 use ignorarium_guest::agent::selftest::{self, route_blocked};
 use ignorarium_guest::agent::steps::{
-    disable_io_uring, disk_by_serial, disk_bytes, mix_seed, now_nanos, set_clock,
+    FLOOR, disable_io_uring, disk_by_serial, disk_bytes, mem_available, mix_seed, now_nanos, room,
+    set_clock,
 };
 use ignorarium_guest::agent::{gate, sandbox};
 use ignorarium_guest::pack;
@@ -30,6 +31,7 @@ fn job(argv: &[&str], env: &[(&str, &str)], timeout_ms: u64) -> Job {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
         timeout_ms,
+        data_limit: None,
     }
 }
 
@@ -94,6 +96,40 @@ fn disk_bytes_counts_512_byte_sectors() {
     assert!(disk_bytes(d.path(), Path::new("/dev/vdd")).is_err());
 }
 
+#[test]
+fn mem_available_reads_meminfo_in_bytes() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("meminfo");
+    fs::write(&path, "MemTotal:  2000 kB\nMemAvailable:    1500 kB\n").unwrap();
+    assert_eq!(mem_available(&path).unwrap(), 1500 << 10);
+    fs::write(&path, "MemTotal:  2000 kB\n").unwrap();
+    let e = mem_available(&path).unwrap_err();
+    assert_eq!(
+        e.to_string(),
+        format!("{} names no MemAvailable", path.display())
+    );
+    assert!(mem_available(Path::new("/proc/meminfo")).unwrap() > 0);
+}
+
+#[test]
+fn the_guest_refuses_a_row_it_has_no_room_for() {
+    let mib = |m: u64| m << 20;
+    assert_eq!(FLOOR, mib(128));
+    // A 256 MiB cap, /out and /tmp of a 256 MiB disk (128 + 256 MiB) and the floor.
+    let need = mib(256 + 384 + 128);
+    assert!(room(need, Some(mib(256)), mib(256)).is_ok());
+    let e = room(need - 1, Some(mib(256)), mib(256)).unwrap_err();
+    assert_eq!(
+        e.to_string(),
+        "the guest has 767 MiB available at boot, under the 768 MiB the row needs: a data \
+         limit of 256 MiB, 384 MiB for /out and /tmp, and a 128 MiB floor"
+    );
+    // Without a limit: the tmpfs and the floor.
+    assert!(room(mib(384 + 128), None, mib(256)).is_ok());
+    let e = room(mib(384 + 128) - 1, None, mib(256)).unwrap_err();
+    assert!(e.to_string().contains("a data limit of 0 MiB"), "{e}");
+}
+
 fn net_with(names: &[&str]) -> tempfile::TempDir {
     let d = tempfile::tempdir().unwrap();
     for n in names {
@@ -138,6 +174,32 @@ fn payload_exit_code_and_signal() {
         payload::run(&sh("kill -TERM $$", d.path())).unwrap().end,
         End::Signal(15)
     );
+}
+
+/// The soft and hard limit in the `Max data size` line of `/proc/self/limits` text.
+fn data_limit(limits: &str) -> Vec<String> {
+    let line = limits.lines().find(|l| l.starts_with("Max data size"));
+    let words = line.unwrap_or_default().split_whitespace();
+    words.skip(3).take(2).map(String::from).collect()
+}
+
+#[test]
+fn the_data_limit_reaches_the_payload() {
+    let d = tempfile::tempdir().unwrap();
+    let seen = |limit: Option<u64>| {
+        let job = Job {
+            data_limit: limit,
+            ..sh("cat /proc/self/limits > \"$OUT/limits\"", d.path())
+        };
+        let ran = payload::run(&job).unwrap();
+        assert_eq!((ran.end, ran.data_limit), (End::Code(0), limit));
+        data_limit(&fs::read_to_string(d.path().join("limits")).unwrap())
+    };
+    assert_eq!(seen(Some(256 << 20)), ["268435456", "268435456"]);
+    // No limit leaves the agent's own.
+    let own = data_limit(&fs::read_to_string("/proc/self/limits").unwrap());
+    assert_eq!(own.len(), 2);
+    assert_eq!(seen(None), own);
 }
 
 #[test]
@@ -364,6 +426,7 @@ fn ran_with(packed: Result<&str, &str>) -> io::Result<(Ran, Result<String, Strin
         end: End::Code(0),
         wall: Duration::from_millis(5),
         cpu_seconds: 0.25,
+        data_limit: Some(7 << 20),
     };
     Ok((ran, packed.map(str::to_string).map_err(str::to_string)))
 }
@@ -380,6 +443,8 @@ fn gate_runs_the_payload_only_after_a_passing_selftest() {
     assert_eq!((failed.end, failed.output_hash.as_str()), (None, ""));
     assert_eq!(failed.clock_unix_nanos, 42);
     assert_eq!(failed.pack_refused, None);
+    // No payload ran, so no limit was applied.
+    assert_eq!(failed.data_limit, None);
 
     let passed = gate(selftest_with(true), 42, ran).unwrap();
     assert!(called.get());
@@ -388,6 +453,7 @@ fn gate_runs_the_payload_only_after_a_passing_selftest() {
     assert_eq!(passed.payload_wall_ns, 5_000_000);
     assert_eq!(passed.cpu_seconds, 0.25);
     assert_eq!(passed.pack_refused, None);
+    assert_eq!(passed.data_limit, Some(7 << 20));
 }
 
 #[test]

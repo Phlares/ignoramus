@@ -353,6 +353,12 @@ fn fat_templates() -> Vec<Value> {
             second["id"] = json!("second");
             second["measure"] = json!("second-measure");
             s["inputs"][0]["licence"]["creators"] = json!(["x", "y"]);
+            s["pins"]["deterministic"] = json!(true);
+            s["design"]["row_memory_mib"] = json!(1024);
+            s["pins"]["deviations"] = json!([
+                { "from": "pilot", "reason": "r", "timing": "before-collection" },
+                { "from": "early", "reason": "r", "timing": "after-results" },
+            ]);
             s["mutations"]["operators"] = json!([
                 { "name": "o1", "type": "int", "range": [1, 2], "acts_on": "a" },
                 { "name": "o2", "type": "int", "range": [1, 2], "acts_on": "a" },
@@ -729,6 +735,8 @@ fn type_rules_accept_and_reject_the_right_values() {
     assert!(!bad(&["design", "repeats"], json!(-1))); // negative and
     assert!(!bad(&["design", "repeats"], json!(u64::MAX))); // > i64::MAX are still ints
     assert!(bad(&["study", "test_log"], json!("no")));
+    assert!(bad(&["pins", "deterministic"], json!("yes")));
+    assert!(!bad(&["pins", "deterministic"], json!(true)));
     assert!(bad(&["study", "id"], json!(3)));
     assert!(bad(&["design", "pick"], json!([])));
     assert!(bad(&["design", "conditions"], json!({})));
@@ -1184,6 +1192,32 @@ fn cost_inputs_are_range_checked_at_their_edges() {
     for (path, v, want) in cases {
         assert_eq!(rng_codes(&with(&path, v.clone())), want, "{path:?} = {v}");
     }
+}
+
+#[test]
+fn a_row_memory_is_a_whole_number_of_mib_from_1_to_1048576() {
+    let at = |v: Value| with(&["design", "row_memory_mib"], v);
+    let errors = |s: &Value| -> Vec<(String, String)> {
+        (rules::check_generic(s, &v0()).into_iter())
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| (d.code, d.path))
+            .collect()
+    };
+    let here = |code: &str| vec![(code.to_string(), "design.row_memory_mib".to_string())];
+    for (v, want) in [
+        (json!(0), here("E-RNG-001")),
+        (json!(-1), here("E-RNG-001")),
+        (json!(1), vec![]),
+        (json!(1048576), vec![]),
+        (json!(1048577), here("E-RNG-001")),
+        (json!("lots"), here("E-TYP-001")),
+        (json!(1.5), here("E-TYP-001")),
+    ] {
+        assert_eq!(errors(&at(v.clone())), want, "{v}");
+    }
+    // Absent, no cap: nothing to report.
+    assert!(template()["design"].get("row_memory_mib").is_none());
+    assert_eq!(errors(&template()), vec![]);
 }
 
 #[test]

@@ -1,8 +1,10 @@
 //! The input view: one hard link per declared input, reused only when it matches.
 mod common;
 
+use ignorarium::spec::model::Spec;
 use ignorarium::store::Store;
 use ignorarium::view::{self, ViewError};
+use serde_json::json;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -252,6 +254,97 @@ fn changes_name_what_moved_and_hash_a_file_whose_ctime_alone_moved() {
     assert_eq!((c.inputs.as_slice(), c.other), (none, true));
     // A missing view is an error.
     assert!(view::changes(&fresh.study.join("none"), &inputs, &seen).is_err());
+}
+
+/// The template with these `(path, role)` inputs.
+fn spec_with(inputs: &[(&str, &str)]) -> Spec {
+    let mut v = ignorarium::spec::load(Path::new("../../templates/numeric-ablation.toml"))
+        .unwrap()
+        .value;
+    let licence = json!({ "spdx": "", "type": "unspecified", "source": "", "creators": [] });
+    let inputs: Vec<_> = (inputs.iter())
+        .map(|(path, role)| json!({ "path": path, "sha256": "", "role": role, "licence": licence }))
+        .collect();
+    v["inputs"] = json!(inputs);
+    Spec::from_value(&v).unwrap()
+}
+
+fn pairs(p: &[(&str, &str)]) -> Vec<(String, String)> {
+    p.iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect()
+}
+
+#[test]
+fn the_manifest_lists_only_inputs_in_the_view() {
+    let spec = spec_with(&[
+        ("a.txt", "calibration"),
+        ("b.txt", "confirmation"),
+        ("c.bin", "model"),
+        ("d.txt", "selection"),
+    ]);
+    let present = pairs(&[("a.txt", "da"), ("b.txt", "db")]);
+    assert_eq!(
+        view::manifest(&spec, &present),
+        br#"[{"path":"a.txt","role":"calibration","sha256":"da"},{"path":"b.txt","role":"confirmation","sha256":"db"}]"#
+    );
+    // Spec order, whatever the order present lists them in.
+    let present = pairs(&[("d.txt", "dd"), ("c.bin", "dc")]);
+    assert_eq!(
+        view::manifest(&spec, &present),
+        br#"[{"path":"c.bin","role":"model","sha256":"dc"},{"path":"d.txt","role":"selection","sha256":"dd"}]"#
+    );
+    // A path no input declares is left out.
+    let present = pairs(&[("e.txt", "de")]);
+    assert_eq!(view::manifest(&spec, &present), b"[]");
+}
+
+#[test]
+fn the_manifest_spells_each_path_as_the_view_holds_it() {
+    let b = bench();
+    let (x, y) = (stored(&b, "x.bin", "ex"), stored(&b, "y.txt", "why"));
+    let spec = spec_with(&[("x.bin/", "model"), ("data//y.txt", "calibration")]);
+    let present = pairs(&[("x.bin/", &x), ("data//y.txt", &y)]);
+    let listed = format!(
+        r#"[{{"path":"x.bin","role":"model","sha256":"{x}"}},{{"path":"data/y.txt","role":"calibration","sha256":"{y}"}}]"#
+    );
+    let text = String::from_utf8(view::manifest(&spec, &present)).unwrap();
+    assert_eq!(text, listed);
+    let dir = view::build(&b.store, &b.study, &present).unwrap();
+    assert_eq!(listing(&dir), ["data", "data/y.txt", "x.bin"]);
+}
+
+#[test]
+fn the_manifest_name_is_no_input_path() {
+    let b = bench();
+    assert!(ignorarium::inputs::input_path(&b.study, view::MANIFEST).is_none());
+}
+
+#[test]
+fn a_view_holds_the_manifest_at_its_top() {
+    let b = bench();
+    let a = stored(&b, "a.txt", "alpha");
+    let m = b.store.put(b"[]").unwrap();
+    let entries = pairs(&[("data/a.txt", &a), (view::MANIFEST, &m)]);
+    let dir = view::build(&b.store, &b.study, &entries).unwrap();
+    assert_eq!(listing(&dir), ["data", "data/a.txt", view::MANIFEST]);
+    assert_eq!(
+        inode(&dir.join(view::MANIFEST)),
+        inode(&b.store.path(&m).unwrap())
+    );
+    assert_eq!(
+        view::verify(&dir, &entries).unwrap(),
+        view::scan(&dir).unwrap()
+    );
+    let first = inode(&dir);
+    view::build(&b.store, &b.study, &entries).unwrap();
+    assert_eq!(inode(&dir), first);
+    // Only that name at the top of the view: an input path with a `:` is still refused.
+    let below = format!("data/{}", view::MANIFEST);
+    match view::build(&b.store, &b.study, &pairs(&[(&below, &m)])) {
+        Err(ViewError::Unsafe(p)) => assert_eq!(p, below),
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]

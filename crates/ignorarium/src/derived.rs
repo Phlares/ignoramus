@@ -75,6 +75,15 @@ pub struct Register {
     pub inputs: Vec<(String, String)>,
     /// The values the plan takes from other studies, as registration found them.
     pub resolved: Vec<Resolved>,
+    /// Each deviation the plan declares. A record written before the field existed reads as
+    /// none.
+    #[serde(default)]
+    pub deviations: Vec<PinDeviated>,
+    /// The passed determinism check the plan takes instead of running its own; `None` for a
+    /// plan that runs its own or declares no determinism, and in a record written before the
+    /// field existed. Written as `null`.
+    #[serde(default)]
+    pub carries: Option<Carried>,
     /// The stream slot a confirmatory plan holds; `None` for an exploratory one. Written as
     /// `null`, never left out.
     #[serde(deserialize_with = "Option::deserialize")]
@@ -170,6 +179,27 @@ pub struct Resolved {
     pub value: Value,
 }
 
+/// A deviation the plan declares, as `register` records it: the study, the reason, the
+/// timing, and the parts of that study's code the plan does not pin (a subset of `payload`,
+/// `environment`, `inputs`, in that order; empty when it pins them all).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PinDeviated {
+    pub from: String,
+    pub reason: String,
+    pub timing: String,
+    pub differs: Vec<String>,
+}
+
+/// A passed determinism check that a plan takes from a study that ran the same payload in the
+/// same environment: the study, and the hash of its `analysis` record, which holds the check.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Carried {
+    pub study: String,
+    pub record: String,
+}
+
 /// The first record of a finished run. It states how many records follow it, so a reader can
 /// tell a finished study from one whose run stopped after this record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -185,6 +215,49 @@ pub struct Analysis {
     /// `null`, never left out.
     #[serde(deserialize_with = "Option::deserialize")]
     pub slot: Option<u64>,
+    /// The code the estimates describe. A record written before the field existed reads as
+    /// an empty one, so its study stays finished.
+    #[serde(default)]
+    pub instrument: Instrument,
+    /// The determinism check of a plan that declares `pins.deterministic`; `None` for one
+    /// that does not, and in a record written before the field existed. Written as `null`.
+    #[serde(default)]
+    pub recheck: Option<Recheck>,
+}
+
+/// What the recheck copies of a run found, one copy per condition: `rows` counts the copies
+/// compared with their originals; `mismatched` lists the compared copies whose exit or output
+/// differed, and `uncompared` the copies not compared (a void row, or another environment or
+/// level), each in the order they ran; `carried_from` names the study whose passed check this
+/// one takes instead.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Recheck {
+    pub rows: u64,
+    pub mismatched: Vec<u64>,
+    pub uncompared: Vec<u64>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub carried_from: Option<String>,
+}
+
+impl Recheck {
+    /// Every condition's copy was compared and matched, or the check was carried.
+    pub fn passed(&self) -> bool {
+        let compared = self.rows > 0 && self.uncompared.is_empty();
+        self.mismatched.is_empty() && (compared || self.carried_from.is_some())
+    }
+}
+
+/// The code a finished run measured with: the payload folder's tree hash, the environment
+/// every row ran in (`"host"` or the image's store digest; `""` when the rows name more than
+/// one or none), and each model and calibration input present as (path, role, store digest),
+/// sorted by path.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Instrument {
+    pub payload: String,
+    pub environment: String,
+    pub inputs: Vec<(String, String, String)>,
 }
 
 impl Analysis {

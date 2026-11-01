@@ -108,6 +108,24 @@ pub fn wait4(pid: u32) -> io::Result<Reaped> {
     })
 }
 
+/// Caps the data of the process `cmd` starts, and of each process that one starts, at `bytes`:
+/// `RLIMIT_DATA`, which counts the heap and private writable maps, as its soft and hard limit,
+/// so the payload cannot raise it. An allocation past it fails with `ENOMEM`. `None` leaves
+/// the limit the child inherits.
+pub fn limit_data(cmd: &mut std::process::Command, bytes: Option<u64>) {
+    use rustix::process::{Resource, Rlimit, setrlimit};
+    use std::os::unix::process::CommandExt;
+    let Some(bytes) = bytes else { return };
+    let cap = Rlimit {
+        current: Some(bytes),
+        maximum: Some(bytes),
+    };
+    let hook = move || setrlimit(Resource::Data, cap).map_err(io::Error::from);
+    // SAFETY: `hook` runs in the child between fork and exec. setrlimit is async-signal-safe,
+    // touches no shared state, and the hook allocates nothing.
+    unsafe { cmd.pre_exec(hook) };
+}
+
 /// The errno of `io_uring_setup`, or `None` when it succeeds (its descriptor is closed
 /// again).
 pub fn io_uring_setup_errno() -> Option<i32> {
