@@ -649,7 +649,6 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
             }
         }
         None => {
-            let payload = register.as_ref().map_or("", |r| r.payload.as_str());
             let carried = register.as_ref().and_then(|r| r.carries.as_ref());
             let carried_from = carried.map(|c| c.study.clone());
             let body = Analysis {
@@ -658,7 +657,7 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
                 estimates: wanted.len() as u64,
                 verdicts: judged.len() as u64,
                 slot: alpha.as_ref().map(|a| a.slot),
-                instrument: instrument(&plan.spec, payload, &plan.inputs, &all),
+                instrument: instrument(&plan.spec, &plan.payload_sha256, &plan.inputs, &all),
                 recheck: recheck(&plan.spec, &all, carried_from),
             };
             append(plan, &log, ANALYSIS, &body)?;
