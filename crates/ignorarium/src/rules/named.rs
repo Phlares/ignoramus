@@ -10,7 +10,7 @@ use crate::derived::{
 };
 use crate::diag::{Diagnostic, printable};
 use crate::inputs::{self, Found, input_path};
-use crate::payload;
+use crate::payload::{self, PayloadError};
 use crate::power::{required_clusters, z};
 use crate::prior::{PriorUse, same_data};
 use crate::records;
@@ -24,7 +24,7 @@ use evidence::power::{Plan, Stratum, WORK, clusters_needed, mean_sd, simulate};
 use evidence::rng::Rng;
 use evidence::{Error, Tail};
 use serde_json::{Value, json};
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -44,6 +44,8 @@ pub struct CheckCtx {
     pub spec_hash: [u8; 32],
     /// What the power gate found, so the power report shows the simulation the rules ran.
     pub gates: Gates,
+    /// The payload folder's tree hash, once read: see `payload_hash`.
+    pub payload: OnceCell<Result<String, PayloadError>>,
 }
 
 impl CheckCtx {
@@ -60,7 +62,15 @@ impl CheckCtx {
             },
             spec_hash: [0; 32],
             gates: Gates::default(),
+            payload: OnceCell::new(),
         }
+    }
+
+    /// The tree hash of the payload folder under `root`, read the first time a check asks for
+    /// it. Every rule of one check, and the `register` that freezes the hash, then compare
+    /// one hash, whatever writes the folder sees meanwhile.
+    pub fn payload_hash(&self) -> &Result<String, PayloadError> {
+        (self.payload).get_or_init(|| payload::tree_hash(&self.root.join(payload::DIR)))
     }
 }
 
@@ -1248,7 +1258,7 @@ pub fn borrowed(spec: &Value, ctx: &CheckCtx) -> Vec<Borrowed> {
     if finished.is_empty() {
         return vec![];
     }
-    let pinned = Pinned::of(spec, &ctx.root);
+    let pinned = Pinned::of(spec, ctx);
     (finished.into_iter())
         .map(|(study, hash, a)| Borrowed {
             study: study.into(),
@@ -1269,16 +1279,16 @@ struct Pinned {
 }
 
 impl Pinned {
-    /// An empty `pins.payload` stands for the hash of the payload folder under `root`, which
-    /// `register` freezes; a folder that cannot be hashed pins nothing.
-    fn of(spec: &Value, root: &Path) -> Pinned {
+    /// An empty `pins.payload` stands for the hash of the payload folder that `ctx` read,
+    /// which `register` freezes; a folder that cannot be hashed pins nothing.
+    fn of(spec: &Value, ctx: &CheckCtx) -> Pinned {
         let pin = |path: &str| {
             let p = text(spec, path).unwrap_or_default().trim();
             p.strip_prefix("sha256:").unwrap_or(p).to_string()
         };
         let mut payload = pin("pins.payload");
         if payload.is_empty() {
-            payload = payload::tree_hash(&root.join(payload::DIR)).unwrap_or_default();
+            payload = ctx.payload_hash().as_ref().cloned().unwrap_or_default();
         }
         let field = |i: &Value, k: &str| {
             let v = i.get(k).and_then(Value::as_str);

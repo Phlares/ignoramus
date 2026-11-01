@@ -4075,6 +4075,36 @@ fn an_empty_payload_pin_stands_for_the_payload_folder() {
 }
 
 #[test]
+fn one_check_hashes_the_payload_folder_once() {
+    let dir = study_dir();
+    write(dir.path(), "payload/run", b"#!/bin/sh\n");
+    let folder = ignorarium::payload::tree_hash(&dir.path().join("payload")).unwrap();
+    let source = Instrument {
+        payload: folder.clone(),
+        ..common::instrument()
+    };
+    let (pilot, analysis) = checked("pilot", source, Some(passed_check()));
+    let check = || with_box(dir.path(), common::Studies(vec![pilot.clone()]));
+    let spec = edited(&steady(vec![("/pins/payload", j(json!("")))]));
+    let named = |c: &CheckCtx| rules::check_named(&spec, v0(), c);
+    let c = check();
+    assert_eq!(rules::carried(&spec, &c), carry("pilot", &analysis));
+    // The folder changes after the carry hashed it. The rest of this check, and the register
+    // that freezes its hash, compare the code the carry compared.
+    write(dir.path(), "payload/run", b"#!/bin/sh\nexit 1\n");
+    let none: [(&str, &str); 0] = [];
+    assert_eq!(codes_paths(&named(&c)), none);
+    assert_eq!(rules::borrowed(&spec, &c)[0].differs, Vec::<&str>::new());
+    assert_eq!(rules::carried(&spec, &c), carry("pilot", &analysis));
+    assert_eq!(c.payload_hash().as_ref().unwrap(), &folder);
+    // A new check reads the folder as it is now.
+    let fresh = check();
+    assert_eq!(codes_paths(&named(&fresh)), [SAME]);
+    assert_eq!(rules::borrowed(&spec, &fresh)[0].differs, ["payload"]);
+    assert_eq!(rules::carried(&spec, &fresh), None);
+}
+
+#[test]
 fn a_pending_source_is_left_to_w_ref_001() {
     let dir = study_dir();
     let begun = common::records_for("pilot", &common::finished(pilot_estimates())[..1]);

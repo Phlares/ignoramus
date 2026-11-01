@@ -15,7 +15,7 @@ use crate::planlog::store::{Leaf, PlanLog};
 use crate::planlog::{commitment, family};
 use crate::records::{self, RecordDraft};
 use crate::rules::{self, Lookup, Taken};
-use crate::spec::model::{Condition, Param, Spec, param_path};
+use crate::spec::model::{Condition, Param, PinDeviation, Spec, param_path};
 use crate::spec::{self};
 use crate::store::Store;
 use crate::stream::{self, Log, LogName, StreamError};
@@ -127,11 +127,12 @@ pub fn run_stdio(ctx: &Ctx, spec_path: &Path) -> Result<Done, CliError> {
 }
 
 /// Nothing named `studies/<id>` exists until every local write has succeeded. Every check
-/// that can refuse comes first: the rules, the values taken from other studies, the stream
-/// level, the payload hash and its pin, the approval, the input imports, the spec re-read and
-/// the log tails. Then the study is staged under a temporary name and published by one
-/// rename. A confirmatory plan's stream slot opens next; a refusal there moves the folder
-/// back to staging. Only the plan leaf and the `register` record are appended after it.
+/// that can refuse comes first: the rules, the values taken from other studies, the deviations
+/// from their code, the stream level, the payload hash and its pin, the approval, the input
+/// imports, the spec re-read and the log tails. Then the study is staged under a temporary
+/// name and published by one rename. A confirmatory plan's stream slot opens next; a refusal
+/// there moves the folder back to staging. Only the plan leaf and the `register` record are
+/// appended after it.
 pub fn run(
     spec_path: &Path,
     home: &Home,
@@ -161,13 +162,13 @@ pub fn run(
     }
     let spec = Spec::from_value(&a.value).map_err(|e| io("spec does not fit the schema", e))?;
     let resolved = resolve(&a, &spec.design.conditions)?;
-    let deviations = deviated(&a, &spec);
+    let deviations = deviated(&a, &spec.pins.deviations)?;
     let checked = level_to_spend(&a)?;
     let id = spec.study.id.as_str();
     if home.study_dir(id).symlink_metadata().is_ok() {
         return Err(refusal("E-REG-002", ""));
     }
-    let payload = payload_hash(&a.root, &spec)?;
+    let payload = payload_hash(&a, &spec.pins.payload)?;
     writeln!(
         output,
         "plan {id}: {}, earnable label {}, spec {}, payload sha256:{payload}",
@@ -262,11 +263,6 @@ fn resolve(a: &Assessed, conditions: &[Condition]) -> Result<Vec<Resolved>, CliE
             waits.join("; ")
         )));
     }
-    let drifted = |path: &str, why: &str| {
-        CliError::refuse(format!(
-            "{path} no longer reads as the check read it: {why} The study was not registered."
-        ))
-    };
     let mut out = Vec::new();
     for (i, path, study) in claimed().filter(|_| mode_of(a) == "confirmatory") {
         let groups = match rules::estimate_inputs(&a.value, i, &a.ctx) {
@@ -308,6 +304,13 @@ fn resolve(a: &Assessed, conditions: &[Condition]) -> Result<Vec<Resolved>, CliE
     Ok(out)
 }
 
+/// The refusal for a value at `path` that the box no longer finds as the check found it.
+fn drifted(path: &str, why: &str) -> CliError {
+    CliError::refuse(format!(
+        "{path} no longer reads as the check read it: {why} The study was not registered."
+    ))
+}
+
 /// `takes <path> from <study>: stratum <name> sd <sd>, icc <icc>; …`, the values a person
 /// approves with the plan.
 fn taken(r: &Resolved) -> String {
@@ -338,17 +341,25 @@ fn taken(r: &Resolved) -> String {
 }
 
 /// Each deviation the plan declares, with the parts of its study's code the plan does not
-/// pin. The check passed, so each names a finished study the plan takes estimates from.
-fn deviated(a: &Assessed, spec: &Spec) -> Vec<PinDeviated> {
+/// pin. The check passed, so each names a finished study the plan takes estimates from. A
+/// study the box no longer finds cannot be compared, so it refuses.
+fn deviated(a: &Assessed, declared: &[PinDeviation]) -> Result<Vec<PinDeviated>, CliError> {
     let found = rules::borrowed(&a.value, &a.ctx);
-    (spec.pins.deviations.iter())
-        .map(|d| PinDeviated {
-            from: d.from.clone(),
-            reason: d.reason.clone(),
-            timing: json!(d.timing).as_str().unwrap_or_default().into(),
-            differs: (found.iter().find(|b| b.study == d.from)).map_or(vec![], |b| {
-                b.differs.iter().map(|p| p.to_string()).collect()
-            }),
+    (declared.iter().enumerate())
+        .map(|(i, d)| {
+            let b = (found.iter().find(|b| b.study == d.from)).ok_or_else(|| {
+                let why = format!(
+                    "Study {} is not a finished study this plan takes estimates from.",
+                    d.from
+                );
+                drifted(&format!("pins.deviations[{i}].from"), &why)
+            })?;
+            Ok(PinDeviated {
+                from: d.from.clone(),
+                reason: d.reason.clone(),
+                timing: json!(d.timing).as_str().unwrap_or_default().into(),
+                differs: b.differs.iter().map(|p| p.to_string()).collect(),
+            })
         })
         .collect()
 }
@@ -394,11 +405,12 @@ fn label_of(a: &Assessed) -> &str {
         .map_or("", |e| e.label_earnable.as_str())
 }
 
-/// The tree hash of the payload folder under the study root. E-REG-003 when there is no
+/// The tree hash of the payload folder under the study root, as the check read it, so the
+/// hash `register` freezes is the one the rules compared. E-REG-003 when there is no
 /// folder, `payload` is a file, there is no executable `payload/run`, the folder holds a
-/// link or another non-regular file, or `pins.payload` is set to another hash.
-fn payload_hash(root: &Path, spec: &Spec) -> Result<String, CliError> {
-    let dir = root.join(payload::DIR);
+/// link or another non-regular file, or `pin` is set to another hash.
+fn payload_hash(a: &Assessed, pin: &str) -> Result<String, CliError> {
+    let dir = a.root.join(payload::DIR);
     let found = |what: &str| refusal("E-REG-003", what);
     match dir.symlink_metadata() {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -407,7 +419,7 @@ fn payload_hash(root: &Path, spec: &Spec) -> Result<String, CliError> {
         Ok(m) if m.is_file() => return Err(found("payload is a file, not a folder")),
         _ => {}
     }
-    let hash = payload::tree_hash(&dir).map_err(|e| match e {
+    let hash = (a.ctx.payload_hash().as_ref().cloned()).map_err(|e| match e {
         PayloadError::Io(e) => io("payload", e),
         e => found(&e.to_string()),
     })?;
@@ -415,7 +427,7 @@ fn payload_hash(root: &Path, spec: &Spec) -> Result<String, CliError> {
     if run.permissions().mode() & 0o111 == 0 {
         return Err(found("payload/run is not executable"));
     }
-    let pin = spec.pins.payload.trim();
+    let pin = pin.trim();
     let pin = pin.strip_prefix("sha256:").unwrap_or(pin);
     if !pin.is_empty() && pin != hash {
         return Err(found(&format!(
@@ -710,22 +722,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_value_the_box_no_longer_holds_refuses() {
-        // A plan the check passed, read again against a box without the study it names.
-        let value = json!({
-            "study": { "id": "s", "mode": "confirmatory" },
-            "question": { "hypotheses": [{
-                "outcome": "o", "contrast": { "arm-a": 1.0 }, "claim": { "below": 0.0 },
-                "estimates": { "from": "pilot" }
-            }] },
-            "outcomes": [{ "id": "o", "unit": "u", "direction": "lower", "measure": "m",
-                           "paired": "difference", "registered": true }],
-            "design": { "reference": "exact", "conditions": [{ "id": "exact" }, { "id": "arm-a" }],
-                        "confirmation": { "conditions": ["arm-a"] } }
-        });
-        let root = Path::new("/work/study");
-        let a = Assessed {
+    /// A plan the check passed with `value`, at the study root `root`.
+    fn assessed(root: &Path, value: Value) -> Assessed {
+        Assessed {
             root: root.into(),
             hash: "sha256:ab".into(),
             value,
@@ -737,7 +736,28 @@ mod tests {
             stream: None,
             carried: None,
             rechecks: None,
-        };
+        }
+    }
+
+    /// A confirmatory plan whose one hypothesis takes estimates from study `pilot`.
+    fn borrowing() -> Value {
+        json!({
+            "study": { "id": "s", "mode": "confirmatory" },
+            "question": { "hypotheses": [{
+                "outcome": "o", "contrast": { "arm-a": 1.0 }, "claim": { "below": 0.0 },
+                "estimates": { "from": "pilot" }
+            }] },
+            "outcomes": [{ "id": "o", "unit": "u", "direction": "lower", "measure": "m",
+                           "paired": "difference", "registered": true }],
+            "design": { "reference": "exact", "conditions": [{ "id": "exact" }, { "id": "arm-a" }],
+                        "confirmation": { "conditions": ["arm-a"] } }
+        })
+    }
+
+    #[test]
+    fn a_value_the_box_no_longer_holds_refuses() {
+        // A plan the check passed, read again against a box without the study it names.
+        let a = assessed(Path::new("/work/study"), borrowing());
         let e = resolve(&a, &[]).unwrap_err();
         assert_eq!(e.code, 1);
         assert_eq!(
@@ -747,20 +767,54 @@ mod tests {
     }
 
     #[test]
+    fn a_deviation_from_a_study_the_box_no_longer_holds_refuses() {
+        let a = assessed(Path::new("/work/study"), borrowing());
+        let d = PinDeviation {
+            from: "pilot".into(),
+            reason: "r".into(),
+            timing: crate::spec::model::Timing::AfterResults,
+        };
+        let e = deviated(&a, &[d]).unwrap_err();
+        assert_eq!(e.code, 1);
+        assert_eq!(
+            e.msg,
+            "pins.deviations[0].from no longer reads as the check read it: Study pilot is not a finished study this plan takes estimates from. The study was not registered."
+        );
+        assert_eq!(deviated(&a, &[]).unwrap(), []);
+    }
+
+    #[test]
+    fn register_freezes_the_payload_hash_the_check_compared() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run = tmp.path().join("payload/run");
+        std::fs::create_dir(run.parent().unwrap()).unwrap();
+        std::fs::write(&run, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let a = assessed(tmp.path(), borrowing());
+        // The hash that E-REF-003 and the carry compared with the source's code.
+        let checked = a.ctx.payload_hash().as_ref().unwrap().clone();
+        std::fs::write(tmp.path().join("payload/late.txt"), "later").unwrap();
+        assert_eq!(payload_hash(&a, "").unwrap(), checked);
+        assert_eq!(
+            payload_hash(&a, &format!("sha256:{checked}")).unwrap(),
+            checked
+        );
+        // A pin is checked against that hash too, not against the folder as it is now.
+        let now = payload::tree_hash(run.parent().unwrap()).unwrap();
+        assert_ne!(now, checked);
+        let e = payload_hash(&a, &now).unwrap_err();
+        let found = format!("pins.payload is {now}, and the folder hashes to {checked}");
+        assert!(e.msg.contains(&found), "{}", e.msg);
+    }
+
+    #[test]
     fn a_confirmatory_plan_with_no_level_is_refused_before_staging() {
-        let root = Path::new("/work/study");
         let assessed = |mode: &str, stream: Option<Alpha>| Assessed {
-            root: root.into(),
-            hash: "sha256:ab".into(),
-            value: json!({ "study": { "id": "s", "mode": mode } }),
-            filled: vec![],
-            diags: vec![],
-            estimate: None,
-            input_hashes: vec![],
-            ctx: rules::CheckCtx::empty(root),
             stream,
-            carried: None,
-            rechecks: None,
+            ..assessed(
+                Path::new("/work/study"),
+                json!({ "study": { "id": "s", "mode": mode } }),
+            )
         };
         let at = |level: f64| Alpha {
             log: "planlog".into(),

@@ -286,6 +286,7 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         spec_hash: spec::hash_bytes(&raw.hash)
             .ok_or_else(|| CliError::usage(format!("{shown}: the spec hash is malformed")))?,
         gates: Default::default(),
+        payload: Default::default(),
     };
     let (value, filled, diags) = rules::check_all(&raw.value, rules::builtin(), &cc);
     let mut a = Assessed {
