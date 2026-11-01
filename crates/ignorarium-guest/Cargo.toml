@@ -9,7 +9,7 @@ description = "Runs one experiment row inside a virtual machine."
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 libc = "0.2"
 rustix = { version = "1", features = ["fs", "mount", "process", "system", "thread", "time"] }

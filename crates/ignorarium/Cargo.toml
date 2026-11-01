@@ -10,12 +10,12 @@ description = "Checks experiment plans before they run."
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
-toml = "0.9"
-sha2 = "0.10"
+toml = "1.1"
+sha2 = "0.11"
 hex = "0.4"
 regex = "1"
-getrandom = "0.3"
-ed25519-dalek = "2"
+getrandom = "0.4"
+ed25519-dalek = "3"
 rustix = { version = "1", features = ["process", "pipe", "net"] }
 libc = "0.2"
 seccompiler = "0.5"
