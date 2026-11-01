@@ -790,18 +790,15 @@ fn gate_late_data(
         .leaf(leaf_index)?
         .ok_or_else(|| RunError::NotRegistered(id.into()))?
         .data_hashes;
-    // (path, role, hashes) of each selection or confirmation input present now.
-    let clusters: Vec<(&str, Role, &(String, String))> = (spec.inputs.iter().zip(all))
-        .filter(|(i, _)| matches!(i.role, Role::Selection | Role::Confirmation))
+    // (path, role, hashes) of each input present now, and those of the given roles.
+    let present: Vec<(&str, Role, &(String, String))> = (spec.inputs.iter().zip(all))
         .filter_map(|(i, (_, h))| Some((i.path.as_str(), i.role, h.as_ref()?)))
         .collect();
+    let of = |roles: &'static [Role]| present.iter().filter(move |(_, r, _)| roles.contains(r));
     if spec.study.mode == Mode::Confirmatory {
-        let held: Vec<(&str, &(String, String))> = (spec.inputs.iter().zip(all))
-            .filter(|(i, _)| matches!(i.role, Role::Selection | Role::Calibration))
-            .filter_map(|(i, (_, h))| Some((i.path.as_str(), h.as_ref()?)))
-            .collect();
-        for (path, _, hashes) in clusters.iter().filter(|(_, r, _)| *r == Role::Confirmation) {
-            if let Some((other, _)) = held.iter().find(|(_, h)| same_data(h, hashes)) {
+        for (path, _, hashes) in of(&[Role::Confirmation]) {
+            let mut held = of(&[Role::Selection, Role::Calibration]);
+            if let Some((other, _, _)) = held.find(|(_, _, h)| same_data(h, hashes)) {
                 return Err(RunError::DataShared {
                     path: (*path).into(),
                     other: (*other).into(),
@@ -809,7 +806,8 @@ fn gate_late_data(
             }
         }
     }
-    let late = (clusters.iter()).filter(|(_, _, h)| !registered.contains(h));
+    let late =
+        of(&[Role::Selection, Role::Confirmation]).filter(|(_, _, h)| !registered.contains(h));
     let own = own_label(id);
     let mut new = Vec::new();
     for (path, _, hashes) in late {
