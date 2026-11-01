@@ -3310,6 +3310,89 @@ fn a_void_row_is_not_compared() {
     }
 }
 
+/// Level 0, where the box ends each listed row at its wall timeout once the payload has written
+/// its output. A row is known by its output folder: a copy runs with its original's
+/// `IGNORARIUM_ROW`.
+struct TimedOut(Vec<u64>);
+
+impl Backend for TimedOut {
+    fn cpus(&self) -> u32 {
+        1
+    }
+    fn launcher(&self) -> String {
+        "process".into()
+    }
+    fn level(&self) -> u8 {
+        0
+    }
+    fn probe(&self) -> Probe {
+        Probe::Available
+    }
+    fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> std::io::Result<RowOutcome> {
+        let o = Level0.run_row(job, watch)?;
+        let at = |i: &u64| job.output_dir.ends_with(format!("{i}/out"));
+        Ok(if self.0.iter().any(at) {
+            RowOutcome {
+                exit: Exit::Payload(124),
+                ended: true,
+                ..o
+            }
+        } else {
+            o
+        })
+    }
+}
+
+#[test]
+fn a_row_the_box_ended_is_not_compared() {
+    // A confirmatory study whose payload writes the time, so no two outputs are the same. The
+    // box ends the originals at their wall timeout, then the copies, then both.
+    for (id, originals, copies_too) in [
+        ("ended-first", true, false),
+        ("ended-copy", false, true),
+        ("ended-both", true, true),
+    ] {
+        let lab = lab();
+        common::pilot(&lab.home, vec![common::arm_a()]);
+        let edit = |t: String| deterministic(one_unit_each(t));
+        let dir = register_study(&lab, id, edit, &[], CLOCK);
+        let mut plan = plan_of(&lab, id);
+        let pairs = copies(&plan);
+        assert_eq!(pairs.len(), 2, "{id}");
+        let ended: Vec<u64> = (pairs.iter())
+            .flat_map(|&(c, o)| [(o, originals), (c, copies_too)])
+            .filter_map(|(i, end)| end.then_some(i))
+            .collect();
+        plan.backend = Box::new(TimedOut(ended.clone()));
+        assert_eq!(run(&plan).unwrap(), RunStatus::Done, "{id}");
+        assert!(kind_of(&lab, id, "stop").is_empty(), "{id}");
+        for &(c, o) in &pairs {
+            for i in [o, c] {
+                let r = row_record(&lab, id, i);
+                let (exit, mark) = if ended.contains(&i) {
+                    ("payload:124", Some(serde_json::json!(true)))
+                } else {
+                    ("ok", None)
+                };
+                assert_eq!(r.body["exit"], exit, "{id} row {i}");
+                assert_eq!(r.body.get("ended"), mark.as_ref(), "{id} row {i}");
+            }
+            let same = row_record(&lab, id, c).body.get("same").cloned();
+            assert_eq!(same, Some(serde_json::Value::Null), "{id}");
+        }
+        assert!(rechecks(&dir).is_empty(), "{id}");
+        let r = recheck_in(&lab, id).unwrap();
+        let none = Recheck {
+            rows: 0,
+            mismatched: vec![],
+            uncompared: pairs.iter().map(|p| p.0).collect(),
+            carried_from: None,
+        };
+        assert_eq!(r, none, "{id}");
+        assert!(!r.passed(), "{id}");
+    }
+}
+
 /// Level 0, asking for a pause while a row runs whose `IGNORARIUM_ROW` is `row`.
 struct PauseAt {
     control: ignorarium::control::ControlFile,

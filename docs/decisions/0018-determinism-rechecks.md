@@ -10,6 +10,7 @@ Decision:
 - **The comparison.** After a copy's last attempt, the box reads its original's signed row record. The copy's record holds `recheck_of` and `same`:
   - `true` when the exit and the output hash are both equal, `false` when either differs; an exit that alone differs is a mismatch.
   - `null` when either exit is `void:*`: a void row's exit and output need not be the payload's.
+  - `null` when the box ended either row at its wall timeout. That row's record holds `ended: true` and the exit `payload:124`, and its output hash covers what the payload had written when the kill fell. Where the kill falls is no behaviour of the payload, so a timeout never stops a study.
   - `null` when the two records name another environment or another isolation level. The box then writes a `row.recheck` warning event that names the keys that differ. A pause between the rows can change either, and a difference between two environments or levels is no behaviour of the payload either.
 
   An original without a row record, or one without an exit or an output hash, is a records fault.

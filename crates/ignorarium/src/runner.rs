@@ -1516,6 +1516,9 @@ fn attempt_row(
         "attempts": attempts,
     });
     agent(&mut body, plan);
+    if outcome.ended {
+        body["ended"] = json!(true);
+    }
     let compared = (row.recheck_of)
         .map(|of| compare(plan, log, of, row.index, &body))
         .transpose()?;
@@ -1572,7 +1575,7 @@ const RAN_IN: [&str; 2] = ["environment", "isolation"];
 struct Compared {
     of: u64,
     /// Whether the copy gave the original's exit and output hash. `None` when either row is
-    /// void, so neither its exit nor its output need be the payload's, or when `differs`.
+    /// not data (`is_data`), or when `differs`.
     same: Option<bool>,
     /// The keys of `RAN_IN` on which the two records differ.
     differs: Vec<&'static str>,
@@ -1608,8 +1611,7 @@ fn compare(
     let differs: Vec<&'static str> = (RAN_IN.into_iter())
         .filter(|k| original.body[*k] != copy[*k])
         .collect();
-    let void = |e: &Value| e.as_str().is_some_and(|e| e.starts_with("void:"));
-    let same = (differs.is_empty() && !void(&original.body["exit"]) && !void(&copy["exit"]))
+    let same = (differs.is_empty() && is_data(&original.body) && is_data(copy))
         .then(|| copy["exit"] == exit && copy["output_hash"] == theirs);
     Ok(Compared {
         of,
@@ -1617,6 +1619,16 @@ fn compare(
         differs,
         theirs: theirs.into(),
     })
+}
+
+/// Whether the row record `body` holds the payload's own exit and output for its job. A void
+/// row's need not be the payload's, and a row the box ended at its wall timeout holds what the
+/// payload had written when the kill fell.
+fn is_data(body: &Value) -> bool {
+    let void = body["exit"]
+        .as_str()
+        .is_some_and(|e| e.starts_with("void:"));
+    !void && body["ended"] != true
 }
 
 /// The stop of a confirmatory run whose recheck copy `row` gave output `ours` and the row
@@ -1655,7 +1667,7 @@ fn recheck_stop(spec: &Spec, all: &[records::Record]) -> Option<String> {
 /// After a copy's record: a mismatch stops a confirmatory run. Otherwise a compared copy gets
 /// one `row.recheck` event, `warn` for a mismatch and `info` for a match, and so does a copy
 /// that ran in another environment or level than its original, at `warn`, naming the keys
-/// that differ. A void copy or original gets none.
+/// that differ. A copy or original that is not data gets none.
 fn rechecked(watch: &RunWatch, span: &str, row: &Row, c: Compared, ours: &str) -> Option<Halt> {
     let confirmatory = watch.plan.spec.study.mode == Mode::Confirmatory;
     let (level, attrs) = match c.same {
