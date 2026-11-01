@@ -9,7 +9,7 @@ use ignorarium_guest::agent::steps::now_nanos;
 use ignorarium_guest::host::{
     HostJob, REPORT_SLACK, Vm, VmError, VmOutcome, needed_mem_mib, run_row,
 };
-use ignorarium_guest::image::{has_interp, initramfs};
+use ignorarium_guest::image::{has_interp, initramfs, newc_entry};
 use ignorarium_guest::proto::End;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -110,17 +110,8 @@ impl Row {
 /// size check does not count.
 fn padding(bytes: usize) -> Vec<u8> {
     let mut out = Vec::new();
-    for (ino, name, mode, size) in [(9, "pad", 0o100644, bytes), (0, "TRAILER!!!", 0, 0)] {
-        let fields = [ino, mode, 0, 0, 1, 0, size, 0, 0, 0, 0, name.len() + 1, 0];
-        out.extend(b"070701");
-        for f in fields {
-            out.extend(format!("{f:08x}").bytes());
-        }
-        out.extend(name.bytes().chain([0]));
-        out.resize(out.len().next_multiple_of(4), 0);
-        out.resize(out.len() + size, 0);
-        out.resize(out.len().next_multiple_of(4), 0);
-    }
+    newc_entry(&mut out, 9, "pad", 0o100644, (0, 0), &vec![0; bytes]);
+    newc_entry(&mut out, 0, "TRAILER!!!", 0, (0, 0), &[]);
     out
 }
 

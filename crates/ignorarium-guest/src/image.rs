@@ -82,7 +82,14 @@ pub fn has_interp(elf: &[u8]) -> io::Result<bool> {
 
 /// Appends one entry of the "newc" cpio format:
 /// <https://docs.kernel.org/driver-api/early-userspace/buffer-format.html>
-fn newc_entry(out: &mut Vec<u8>, ino: u32, name: &str, mode: u32, rdev: (u32, u32), data: &[u8]) {
+pub fn newc_entry(
+    out: &mut Vec<u8>,
+    ino: u32,
+    name: &str,
+    mode: u32,
+    rdev: (u32, u32),
+    data: &[u8],
+) {
     let nlink = if mode & 0o170000 == 0o040000 { 2 } else { 1 };
     let name_size = name.len() as u32 + 1;
     let fields = [
