@@ -82,11 +82,15 @@ pub fn disk_by_serial(sys_block: &Path, serial: &str) -> io::Result<PathBuf> {
 /// the payload's page tables and processes and the page cache.
 pub const FLOOR: u64 = 128 << 20;
 
+/// The value of `field` in `/proc/meminfo` text, in kB.
+pub fn meminfo_kb(text: &str, field: &str) -> Option<u64> {
+    let value = (text.lines()).find_map(|l| l.strip_prefix(field)?.strip_prefix(':'))?;
+    value.trim().strip_suffix("kB")?.trim().parse().ok()
+}
+
 /// `MemAvailable` of the `/proc/meminfo` text at `meminfo`, in bytes.
 pub fn mem_available(meminfo: &Path) -> io::Result<u64> {
-    let text = fs::read_to_string(meminfo)?;
-    let value = text.lines().find_map(|l| l.strip_prefix("MemAvailable:"));
-    let kb = value.and_then(|v| v.trim().strip_suffix("kB")?.trim().parse::<u64>().ok());
+    let kb = meminfo_kb(&fs::read_to_string(meminfo)?, "MemAvailable");
     kb.map(|kb| kb << 10).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,

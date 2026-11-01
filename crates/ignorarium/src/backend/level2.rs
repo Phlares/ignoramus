@@ -6,6 +6,7 @@ use super::rootfs;
 use super::selftest::{Call, SelfTest};
 use super::{Backend, Exit, Probe, RowJob, RowOutcome, TIMEOUT_CODE, Watch};
 use crate::files::temp_beside;
+use ignorarium_guest::agent::steps::meminfo_kb;
 pub use ignorarium_guest::host::GUEST_MIB;
 use ignorarium_guest::host::{self, HostJob, Timings, Vm, VmError, VmOutcome};
 use ignorarium_guest::image::{self, KERNEL, Pin, VMM, check_pin, has_interp};
@@ -261,9 +262,7 @@ impl Watch for Counted<'_> {
 /// `MemTotal` of the `/proc/meminfo` text at `path`, in kB.
 fn host_kb(path: &Path) -> Result<u64, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let total = text.lines().find_map(|l| l.strip_prefix("MemTotal:"));
-    let kb = total.and_then(|v| v.trim().strip_suffix("kB")?.trim().parse().ok());
-    kb.ok_or_else(|| format!("{} names no MemTotal", path.display()))
+    meminfo_kb(&text, "MemTotal").ok_or_else(|| format!("{} names no MemTotal", path.display()))
 }
 
 /// Why `path` is not the file `pin` names, if it is not.

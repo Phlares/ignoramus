@@ -1,5 +1,6 @@
 //! The machine profile: what this box can spend. Read from `<home>/machine.toml`.
 use crate::backend::{Backend, Probe};
+use ignorarium_guest::agent::steps::meminfo_kb;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -115,13 +116,7 @@ pub fn measure(home: &Path, probes: &[(u8, Probe)]) -> Result<Machine, MachineEr
 
 /// Whole GiB (at least 1) from the `MemTotal` line of `/proc/meminfo` text.
 pub fn mem_gib_of(meminfo: &str) -> Option<u32> {
-    let kib: u64 = meminfo
-        .lines()
-        .find_map(|l| l.strip_prefix("MemTotal:"))?
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()?;
+    let kib = meminfo_kb(meminfo, "MemTotal")?;
     Some(u32::try_from((kib / (1024 * 1024)).max(1)).unwrap_or(u32::MAX))
 }
 

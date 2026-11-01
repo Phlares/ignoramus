@@ -14,6 +14,7 @@ use ignorarium::backend::{
 };
 use ignorarium::runner::{self, RunError, RunStatus};
 use ignorarium::store::Store;
+use ignorarium_guest::agent::steps;
 use ignorarium_guest::host::{Timings, VmError, VmOutcome};
 use ignorarium_guest::image::{KERNEL, VMM, sha256_file};
 use ignorarium_guest::pack::Link;
@@ -1404,11 +1405,7 @@ fn a_row_well_under_its_memory_runs_at_every_level() {
 
 /// The value of `key` in `/proc/meminfo` text, in kB.
 fn meminfo_kb(text: &str, key: &str) -> u64 {
-    let line = text
-        .lines()
-        .find_map(|l| l.strip_prefix(key)?.strip_prefix(':'));
-    let value = line.unwrap_or_else(|| panic!("no {key} in {text}"));
-    value.trim().trim_end_matches("kB").trim().parse().unwrap()
+    steps::meminfo_kb(text, key).unwrap_or_else(|| panic!("no {key} in {text}"))
 }
 
 #[test]
