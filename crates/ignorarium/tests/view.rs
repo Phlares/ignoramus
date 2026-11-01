@@ -300,6 +300,21 @@ fn the_manifest_lists_only_inputs_in_the_view() {
 }
 
 #[test]
+fn the_manifest_spells_each_path_as_the_view_holds_it() {
+    let b = bench();
+    let (x, y) = (stored(&b, "x.bin", "ex"), stored(&b, "y.txt", "why"));
+    let spec = spec_with(&[("x.bin/", "model"), ("data//y.txt", "calibration")]);
+    let present = pairs(&[("x.bin/", &x), ("data//y.txt", &y)]);
+    let listed = format!(
+        r#"[{{"path":"x.bin","role":"model","sha256":"{x}"}},{{"path":"data/y.txt","role":"calibration","sha256":"{y}"}}]"#
+    );
+    let text = String::from_utf8(view::manifest(&spec, &present)).unwrap();
+    assert_eq!(text, listed);
+    let dir = view::build(&b.store, &b.study, &present).unwrap();
+    assert_eq!(listing(&dir), ["data", "data/y.txt", "x.bin"]);
+}
+
+#[test]
 fn the_manifest_name_is_no_input_path() {
     let b = bench();
     assert!(ignorarium::inputs::input_path(&b.study, view::MANIFEST).is_none());

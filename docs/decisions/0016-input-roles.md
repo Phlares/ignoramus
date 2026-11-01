@@ -4,7 +4,7 @@ Every input declares a role from a closed set: `selection`, `confirmation`, `cal
 
 Decision:
 
-- **The manifest.** The input view holds one more file at its top: `ignorarium:inputs.json`. It is canonical JSON (0002) with no final newline: an array with one `{"path", "role", "sha256"}` object per input in the view, in spec order. `sha256` is the input's store digest. An input absent from the view is not listed. The role stays required and closed: the box gives each role a meaning, so a payload cannot name one of its own.
+- **The manifest.** The input view holds one more file at its top: `ignorarium:inputs.json`. It is canonical JSON (0002) with no final newline: an array with one `{"path", "role", "sha256"}` object per input in the view, in spec order. `path` is spelled as the view holds it: its segments joined by `/`, empty ones dropped, so `data//x.txt/` lists as `data/x.txt`. `sha256` is the input's store digest. An input absent from the view is not listed. The role stays required and closed: the box gives each role a meaning, so a payload cannot name one of its own.
 - **Where it lives.** `prepare` puts the manifest's bytes into the content store, and the view links it to its blob as it links each input. The view writes the manifest itself, straight into its top folder. Every other entry is an input path, and every input path passes the path check, which refuses a `:`. So no input can take the manifest's name: the refusal is the guarantee, and the manifest never passes through it.
 - **Records.** Each row record names the manifest's store digest under `manifest`. The store holds its bytes, so a reader can see which roles a row saw.
 - **Checks.** The manifest is a view entry like any input. `prepare` hashes it with the rest, and a change to its blob before an attempt pauses the run (0006). The view is the same at levels 0, 1 and 2, so the manifest reaches every level unchanged.
@@ -16,6 +16,10 @@ Why:
 - An environment variable does have one. `execve` takes one environment string of at most 32 pages, 128 KiB on 4 KiB pages. At about 140 bytes an entry, that holds under 1,000 inputs.
 - A model calibrated on a text has adapted to it. Williams and Aletras quantized models with 4-bit GPTQ and changed only the calibration source. The WikiText perplexity moved by up to 0.18, as much as the quantization itself. Wikipedia calibration gave the lowest WikiText perplexity in 5 of 9 models. A model's error on its calibration text is not its error on new text.
 - Eggensperger, Lindauer and Hutter keep the instances that score a configuration disjoint from the instances that tune it, because a score on tuning data is biased. Calibration fits a model to its text, as tuning does.
+
+Limits:
+
+- A study that a box without the manifest started, and this box resumes, gives its later rows one more file in the view. The rows that ran before saw only the inputs. A payload that reads every file in `IGNORARIUM_IN` can then give the two groups other values, or fail on the JSON, within one study. The records show where the change came: a row record from before names no `manifest`.
 
 Cost: a payload must know one reserved name. The manifest's blob has no `import` record, so a published bundle that shows the roles a row saw must carry the blob.
 

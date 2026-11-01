@@ -24,12 +24,13 @@ pub const IN: &str = "in";
 pub const MANIFEST: &str = "ignorarium:inputs.json";
 
 /// The manifest of the view that holds `present`: canonical JSON, one `{path, role, sha256}`
-/// object per input of `spec` whose path is in `present`, in spec order.
+/// object per input of `spec` whose path is in `present`, in spec order. Each path is spelled
+/// as the view holds it (`key`), so `data//x.txt/` lists as `data/x.txt`.
 pub fn manifest(spec: &Spec, present: &[(String, String)]) -> Vec<u8> {
     let listed: Vec<Value> = (spec.inputs.iter())
         .filter_map(|i| {
             let (_, digest) = present.iter().find(|(p, _)| *p == i.path)?;
-            Some(json!({ "path": i.path, "role": i.role, "sha256": digest }))
+            Some(json!({ "path": key(&i.path), "role": i.role, "sha256": digest }))
         })
         .collect();
     to_canonical(&Value::Array(listed)).expect("an array of string fields always serializes")

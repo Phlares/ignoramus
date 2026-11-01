@@ -1069,8 +1069,10 @@ fn faults() -> Vec<Fault> {
             ],
             vec![("E-BUD-001", "scope.budget")],
         ),
-        // Path forms: a lone `..`, a colon, and a segment Windows would trim.
+        // Path forms: a lone `..` or `.`, a colon, and a segment Windows would trim. So no
+        // input reaches the view or its manifest in a second spelling with a `.` segment.
         pth(".."),
+        pth("./x"),
         pth("a/b:c"),
         pth("a. /x"),
         pth("a./x"),
