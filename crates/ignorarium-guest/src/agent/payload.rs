@@ -52,9 +52,7 @@ fn run_watched(
         // When root changes the uid, std also drops the supplementary groups.
         cmd.uid(uid).gid(gid);
     }
-    if let Some(bytes) = job.data_limit {
-        sys::limit_data(&mut cmd, bytes);
-    }
+    sys::limit_data(&mut cmd, job.data_limit);
     let start = Instant::now();
     let mut child = cmd.spawn()?;
     let pid = Pid::from_raw(child.id() as i32).ok_or_else(|| io::Error::other("bad pid"))?;

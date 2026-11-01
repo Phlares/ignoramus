@@ -50,8 +50,6 @@ fn run_child(job: &RowJob, start: Instant, watch: &dyn Watch) -> Supervised {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    if let Some(bytes) = job.data_limit() {
-        sys::limit_data(&mut cmd, bytes);
-    }
+    sys::limit_data(&mut cmd, job.data_limit());
     supervise(cmd, job, start, watch)
 }
