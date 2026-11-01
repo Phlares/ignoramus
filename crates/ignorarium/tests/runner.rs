@@ -15,6 +15,7 @@ use ignorarium::derived::{
 use ignorarium::planlog::store::PlanLog;
 use ignorarium::prior::{PriorUse, file_hashes};
 use ignorarium::runner::{RunError, RunPlan, RunStatus, prepare, prepare_with, run, up_to};
+use ignorarium::spec::model::Role;
 use ignorarium::stream::{Log, LogName};
 use ignorarium::{analysis, estimate, keys, records, schedule, spec, view};
 use std::cell::RefCell;
@@ -1361,7 +1362,7 @@ fn a_late_input_with_the_data_of_the_other_role_is_refused() {
         assert_eq!(
             err.to_string(),
             format!(
-                "E-CNF-004: input {conf} holds the same data as input {sel}, of the other role. See docs/rules/E-CNF-004.md"
+                "E-CNF-004: the confirmation input {conf} holds the same data as the selection input {sel}. See docs/rules/E-CNF-004.md"
             ),
             "{id}"
         );
@@ -1377,6 +1378,19 @@ fn a_late_input_with_the_data_of_the_other_role_is_refused() {
     std::fs::write(work("loose").join(sel), "both").unwrap();
     std::fs::write(work("loose").join(conf), "both").unwrap();
     plan_of(&lab, "loose");
+}
+
+#[test]
+fn the_shared_data_refusal_names_the_role_and_escapes_the_paths() {
+    let e = RunError::DataShared {
+        path: "data/c\u{202e}txt".into(),
+        other: "data/a\nb".into(),
+        role: Role::Calibration,
+    };
+    assert_eq!(
+        e.to_string(),
+        "E-CNF-004: the confirmation input data/c\\u{202e}txt holds the same data as the calibration input data/a\\nb. See docs/rules/E-CNF-004.md"
+    );
 }
 
 #[test]
@@ -1402,8 +1416,11 @@ fn a_late_calibration_copy_of_a_confirmation_input_is_refused() {
         .err()
         .unwrap_or_else(|| panic!("{id}: prepare should refuse"));
         match err {
-            RunError::DataShared { path, other } => {
-                assert_eq!((path, other), (conf.into(), cal.into()))
+            RunError::DataShared { path, other, role } => {
+                assert_eq!(
+                    (path, other, role),
+                    (conf.into(), cal.into(), Role::Calibration)
+                )
             }
             e => panic!("{id}: {e}"),
         }

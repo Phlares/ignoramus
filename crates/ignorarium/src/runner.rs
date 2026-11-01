@@ -6,6 +6,7 @@ use crate::backend::{
 use crate::budget::{Alerts, Cost, CostMeter, Decision, HostMeter, decide, dimension_name};
 use crate::control::{self, ControlError, ControlFile, RunLock, Signal, State};
 use crate::derived::{INPUTS, Inputs, REGISTER, Register, SELECTION, Selection};
+use crate::diag::printable;
 use crate::environ::{Builder, Built, Recipe};
 use crate::estimate::{apply_defaults, estimate};
 use crate::events::{self, Event};
@@ -153,6 +154,8 @@ pub enum RunError {
     DataShared {
         path: String,
         other: String,
+        /// The role of `other`.
+        role: Role,
     },
     Spec(String),
     Schedule(ScheduleError),
@@ -215,9 +218,12 @@ impl fmt::Display for RunError {
                 f,
                 "E-CNF-005: input {path} was used by an earlier study ({label}). See docs/rules/E-CNF-005.md"
             ),
-            RunError::DataShared { path, other } => write!(
+            RunError::DataShared { path, other, role } => write!(
                 f,
-                "E-CNF-004: input {path} holds the same data as input {other}, of the other role. See docs/rules/E-CNF-004.md"
+                "E-CNF-004: the confirmation input {} holds the same data as the {} input {}. See docs/rules/E-CNF-004.md",
+                printable(path),
+                json!(role).as_str().unwrap_or_default(),
+                printable(other)
             ),
             RunError::Spec(e) => write!(f, "cannot load the spec: {e}"),
             RunError::Schedule(e) => e.fmt(f),
@@ -798,10 +804,11 @@ fn gate_late_data(
     if spec.study.mode == Mode::Confirmatory {
         for (path, _, hashes) in of(&[Role::Confirmation]) {
             let mut held = of(&[Role::Selection, Role::Calibration]);
-            if let Some((other, _, _)) = held.find(|(_, _, h)| same_data(h, hashes)) {
+            if let Some((other, role, _)) = held.find(|(_, _, h)| same_data(h, hashes)) {
                 return Err(RunError::DataShared {
                     path: (*path).into(),
                     other: (*other).into(),
+                    role: *role,
                 });
             }
         }
