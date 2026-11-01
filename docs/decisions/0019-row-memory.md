@@ -1,6 +1,6 @@
 # 0019 Row memory
 
-A plan can declare the most memory one payload process may use. The box enforces that one size at every level, so a row's result does not depend on the level it ran at.
+A plan can declare the most memory one payload process may use. The box enforces that one size at every level, so a row that keeps its data in private memory gets the same result at every level. Shared memory is outside the cap (Limits).
 
 Decision:
 
@@ -12,15 +12,15 @@ Decision:
   - level 2 sends it in the job, and the guest agent sets it on the payload after it drops to the payload's user.
 
   Each process the payload starts inherits the limit, and the payload cannot raise a hard limit.
-- **The echo.** The agent reports the limit the payload ran under. The host refuses a report whose limit differs from the job's, as an infrastructure fault: `the agent reported the data limit none, not the job's <n> bytes: rebuild the agent`. So an agent built before the field can never run a capped payload uncapped.
-- **Past the cap.** An allocation past the cap fails with `ENOMEM`, and the row fails as the payload's own result, never a retried infrastructure fault. Shapes measured with numpy 2.5.4 and its OpenBLAS 0.3.34:
+- **The echo.** The agent reports the limit the payload ran under. The host refuses a report whose limit differs from the job's, as an infrastructure fault: `the agent reported the data limit none, not the job's <n> bytes: rebuild the agent`. An agent built before the field runs the payload uncapped, so the host never takes the result of a capped row that ran uncapped.
+- **Past the cap.** A private allocation past the cap fails with `ENOMEM`, and the row fails as the payload's own result, never a retried infrastructure fault. Shapes measured with numpy 2.5.4 and its OpenBLAS 0.3.34:
   - an array past the cap raises `MemoryError`, which the payload can catch; uncaught, it exits 1;
   - a BLAS call whose work buffer cannot be had prints `OpenBLAS error: Memory allocation still failed after 10 retries, giving up.` and exits 1, with no exception to catch;
   - an OpenBLAS thread that cannot start makes OpenBLAS raise SIGINT itself: exit 130;
   - a shell (dash) dies by SIGSEGV: exit 139.
 - **The level 2 machine.** For a row with a cap, the machine's memory is ceil((cap + `/out` tmpfs + `/tmp` tmpfs + 320 MiB) × 32 / 31), summed in bytes and rounded up to a whole MiB. `/out` takes half the output disk and `/tmp` all of it (0015); tmpfs pages live in guest memory, outside the payload's limit. The 320 MiB holds the guest kernel, the agent, the page cache and the agent's 128 MiB floor (below). The 32/31 holds what grows with the machine: the kernel's page data (64 bytes per 4 KiB page, 1/64), zone reserves and page tables, about 1/32 as measured. With the 256 MiB output disk, a 2048 MiB cap gives 2841 MiB. The host checks every machine against this sum, with a cap of 0 for a row without one, so a hand-set machine smaller than it is refused before boot.
 - **No bounce buffer.** The guest kernel boots with `swiotlb=noforce`. Virtio devices without an IOMMU need no bounce buffer, which took 64 MiB of a guest past 4 GiB.
-- **The boot check.** Before the payload, the agent reads `MemAvailable` and refuses the row when it is under the cap plus both tmpfs plus 128 MiB. The refusal is an infrastructure fault that names the numbers. So a size model that falls short shows as a named fault, never as an out-of-memory kill.
+- **The boot check.** Before the payload, the agent reads `MemAvailable` and refuses the row when it is under the cap plus both tmpfs plus 128 MiB. The refusal is an infrastructure fault that names the numbers. So a size model that falls short shows as a named fault, never as an out-of-memory kill. The sum holds no room for shared memory, which the cap does not count (Limits).
 - **The host bound.** A machine larger than the host's `MemTotal`, or a host whose memory size cannot be read, makes level 2 unavailable for the study, as an image that cannot become a disk does (0015). `prepare` runs a lower level with a `run.isolation` event, or refuses at `min_isolation = 2`: `a level 2 machine for rows of <cap> MiB needs <n> MiB, more than the host's MemTotal of <m> MiB`.
 
 Measured (one cloud host with nested virtualization; the pinned kernel; the debug agent the tests boot; a 256 MiB output disk; the payload at its cap less 8 MiB with both tmpfs full for "at full load"):
@@ -37,7 +37,8 @@ Every size clears the 128 MiB floor, by 25 to 60 MiB. The least room is just pas
 
 What counts:
 
-- Since Linux 4.7, `RLIMIT_DATA` counts every private writable mapping that is not a stack: the heap, anonymous `mmap` (where numpy arrays live), thread stacks, which glibc maps private and writable, and copy-on-write file maps. It leaves out read-only and shared file maps, the main thread's stack and `PROT_NONE` reservations. The counter is `VmData` in `/proc/<pid>/status`.
+- Since Linux 4.7, `RLIMIT_DATA` counts every private writable mapping that is not a stack: the heap, anonymous `mmap` (where numpy arrays live), thread stacks, which glibc maps private and writable, and copy-on-write file maps. It leaves out read-only maps, every shared map, the main thread's stack and `PROT_NONE` reservations. The counter is `VmData` in `/proc/<pid>/status`.
+- Shared maps are shared file maps, shared anonymous maps (Python's `mmap.mmap(-1, n)` makes one), `memfd` maps, and System V or POSIX shared memory. Measured on Linux 6.6 under a 64 MiB limit: a shared anonymous map and a `memfd` map of 256 MiB each map and fill, while a private map of that size fails with `ENOMEM` and a `bytearray` of that size raises `MemoryError`.
 - So a model file that a payload maps read-only, as safetensors does, does not count; the tensors it copies out do. The cap counts mapped size, not resident memory: size it from the peak `VmData`, not from RSS.
 - OpenBLAS starts one thread per visible CPU, about 40 MiB of data each (its buffer and the thread's stack), unless `OPENBLAS_NUM_THREADS=1`. At levels 0 and 1 a payload sees the host's CPUs, and a 1-vCPU level 2 machine shows one. Measured on a 6-CPU host: `import numpy` needs about 48 MiB with one thread and about 248 MiB with six. A payload that uses OpenBLAS sets the thread count, or one cap passes at level 2 and fails at level 1.
 - glibc sizes each new thread's stack from the inherited `RLIMIT_STACK`. At levels 0 and 1 that is the limit the box was started with, from its shell. At level 2 it is the kernel's default for the agent, 8 MiB. A box started under another stack limit gives a threaded payload another need at levels 0 and 1.
@@ -47,6 +48,7 @@ Why `RLIMIT_DATA`, not `RLIMIT_AS`: `RLIMIT_AS` counts all address space, a read
 Limits:
 
 - The cap is per process, and a level 2 machine holds one cap. A payload that starts several large processes can run out of memory there and not at levels 0 and 1.
+- Shared writable memory escapes the cap. At levels 0 and 1 only the host bounds it. At level 2 the machine's memory bounds it, and the machine's size holds no room for it, so the guest kernel's out-of-memory killer can end such a payload there (`payload:137`) while levels 0 and 1 run it. A data loader whose worker processes hand batches over in shared memory takes this path. A memory cgroup would count shared memory; the box does not use one.
 - The constants come from one host and the pinned kernel. A guest kernel or agent that grows by more than 25 MiB turns rows near 3 GiB into a named boot refusal.
 - Only a test run by hand checks the large sizes. It needs a host that can back a machine past 4 GiB.
 - `MemTotal` is a static bound, checked once at prepare. Memory that other processes hold when a row starts is not checked: a machine that cannot start is an infrastructure fault, retried.
@@ -57,4 +59,5 @@ Sources:
 
 - https://man7.org/linux/man-pages/man2/setrlimit.2.html (`RLIMIT_DATA`, `RLIMIT_AS`, `RLIMIT_STACK`)
 - https://man7.org/linux/man-pages/man5/proc_pid_status.5.html (`VmData`)
+- https://github.com/torvalds/linux/blob/master/mm/internal.h (`is_data_mapping`: private, writable, not stack)
 - https://docs.kernel.org/filesystems/tmpfs.html (tmpfs pages live in memory, `size`)
