@@ -67,10 +67,11 @@ impl CheckCtx {
     }
 
     /// The tree hash of the payload folder under `root`, read the first time a check asks for
-    /// it. Every rule of one check, and the `register` that freezes the hash, then compare
-    /// one hash, whatever writes the folder sees meanwhile.
+    /// it. Every rule of one check, and the `register` that freezes the hash, compare that one
+    /// hash, even when the folder changes meanwhile.
     pub fn payload_hash(&self) -> &Result<String, PayloadError> {
-        (self.payload).get_or_init(|| payload::tree_hash(&self.root.join(payload::DIR)))
+        self.payload
+            .get_or_init(|| payload::tree_hash(&self.root.join(payload::DIR)))
     }
 }
 
