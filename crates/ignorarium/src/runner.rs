@@ -371,23 +371,17 @@ pub fn prepare_with(
     // Levels 2 and up: the image first, then the machine the rows' memory needs. Each reason
     // comes with the refusal it becomes when no lower level is left.
     let memory = spec.design.row_memory_mib;
-    let mut unfit = None;
-    let (skipped, fit): (Vec<_>, Vec<_>) = (fit.into_iter()).partition(|b| {
-        let why = (b.level() >= IMAGE_LEVEL)
-            .then(|| match &image {
-                Some((reason, refusal)) => {
-                    Some((reason.clone(), RunError::Environment(refusal.clone())))
-                }
-                None => b.unfit(memory).map(|w| (w.clone(), RunError::Machine(w))),
-            })
-            .flatten();
-        let skip = why.is_some();
-        unfit = unfit.take().or(why);
-        skip
-    });
-    let skipped: Vec<u8> = skipped.iter().map(|b| b.level()).collect();
+    let why = |b: &dyn Backend| match &image {
+        _ if b.level() < IMAGE_LEVEL => None,
+        Some((reason, refusal)) => Some((reason.clone(), RunError::Environment(refusal.clone()))),
+        None => b.unfit(memory).map(|w| (w.clone(), RunError::Machine(w))),
+    };
+    let (out, fit): (Vec<_>, Vec<_>) =
+        (fit.into_iter().map(|b| (why(b.as_ref()), b))).partition(|(w, _)| w.is_some());
+    let skipped: Vec<u8> = out.iter().map(|(_, b)| b.level()).collect();
+    let unfit = out.into_iter().find_map(|(w, _)| w);
     // Only these rules can empty the list.
-    let Some(backend) = fit.into_iter().max_by_key(|b| b.level()) else {
+    let Some((_, backend)) = fit.into_iter().max_by_key(|(_, b)| b.level()) else {
         return Err(unfit.map_or(RunError::Environment(String::new()), |(_, e)| e));
     };
 
