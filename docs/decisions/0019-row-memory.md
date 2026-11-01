@@ -11,7 +11,7 @@ Decision:
   - level 1 sets it on bubblewrap, which passes it to the payload; bubblewrap starts within 256 KiB, below the 1 MiB floor;
   - level 2 sends it in the job, and the guest agent sets it on the payload after it drops to the payload's user.
 
-  Each process the payload starts inherits the limit, and the payload cannot raise a hard limit. The cap is per process, not per row.
+  Each process the payload starts inherits the limit, and the payload cannot raise a hard limit.
 - **The echo.** The agent reports the limit the payload ran under. The host refuses a report whose limit differs from the job's, as an infrastructure fault: `the agent reported the data limit none, not the job's <n> bytes: rebuild the agent`. So an agent built before the field can never run a capped payload uncapped.
 - **Past the cap.** An allocation past the cap fails with `ENOMEM`, and the row fails as the payload's own result, never a retried infrastructure fault. Shapes measured with numpy 2.5.4 and its OpenBLAS 0.3.34:
   - an array past the cap raises `MemoryError`, which the payload can catch; uncaught, it exits 1;
