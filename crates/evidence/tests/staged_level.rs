@@ -3,13 +3,13 @@
 //!
 //! Every scenario simulates one stratum of a two-stratum design, so its re-size asks that
 //! stratum's share of power 0.8, 0.8^(1/2): a first batch of 21 clusters of 4 units and a
-//! reserve, a mean claim below ln 1.04 on [-ln 2, ln 2] at level 0.005, sized at ln 1.02. The
-//! level test asserts a bound on the pass share; the power test asserts nothing and prints its
-//! shares.
+//! reserve, a mean claim below ln 1.04 on [-ln 2, ln 2] at level 0.005 (or 0.05, where the
+//! test rejects often enough to show a raised error rate), sized at ln 1.02. The level tests
+//! assert a bound on the pass share; the power test asserts nothing and prints its shares.
 //!
-//! Seeds: batch b of scenario `name` in test `level` or `power` runs on
-//! `seed("<test>/<name>/<b>")`, four splitmix64 outputs from the FNV-1a hash of that text, so
-//! each scenario and batch has its own seed.
+//! Seeds: batch b of scenario `name` in the level tests (`level`) or the power test (`power`)
+//! runs on `seed("level/<name>/<b>")` or `seed("power/<name>/<b>")`, four splitmix64 outputs
+//! from the FNV-1a hash of that text, so each scenario and batch has its own seed.
 //! A scenario runs in batches of 4,000 replicates, the count the registration gate uses: one
 //! call of 100,000 would size its re-size table with 100,000 replicates per search, past
 //! `WORK`.
@@ -25,6 +25,8 @@ const MARGIN: f64 = 0.039221;
 /// ln 1.02.
 const POWER_AT: f64 = 0.019803;
 const LEVEL: f64 = 0.005;
+/// A level at which the test rejects in about 1 replicate in 20 under the null.
+const LOOSE_LEVEL: f64 = 0.05;
 /// One stratum's share of a two-stratum claim at power 0.8: 0.8^(1/2).
 const TARGET_EACH: f64 = 0.894427;
 const BATCH: u32 = 4_000;
@@ -53,6 +55,7 @@ struct Scenario {
     sd: f64,
     icc: f64,
     unit_mean: f64,
+    level: f64,
 }
 
 fn design(s: &Scenario) -> Staged {
@@ -73,7 +76,7 @@ fn design(s: &Scenario) -> Staged {
             unit_mean: s.unit_mean,
             size_at: POWER_AT,
         }],
-        level: LEVEL,
+        level: s.level,
         target_each: TARGET_EACH,
     }
 }
@@ -117,6 +120,18 @@ fn run(test: &str, scenarios: &[Scenario]) -> Vec<(u32, u32)> {
     results.into_iter().map(|(p, q, _)| (p, q)).collect()
 }
 
+/// Runs the null scenarios and asserts each pass share stays within three standard errors of
+/// its level.
+fn assert_level(scenarios: &[Scenario]) {
+    let results = run("level", scenarios);
+    for (s, (pass, _)) in scenarios.iter().zip(results) {
+        let bound = s.level + 3.0 * (s.level * (1.0 - s.level) / f64::from(REPS)).sqrt();
+        let share = f64::from(pass) / f64::from(REPS);
+        println!("{}: share {share:.5}, bound {bound:.7}", s.name);
+        assert!(share <= bound, "{}: {share} > {bound}", s.name);
+    }
+}
+
 #[test]
 #[ignore = "long: about 100,000 replicates per scenario; run in release mode"]
 fn staged_design_keeps_its_level() {
@@ -130,17 +145,29 @@ fn staged_design_keeps_its_level() {
                     sd,
                     icc,
                     unit_mean: MARGIN,
+                    level: LEVEL,
                 });
             }
         }
     }
-    let bound = LEVEL + 3.0 * (LEVEL * (1.0 - LEVEL) / f64::from(REPS)).sqrt();
-    println!("level bound {bound:.7}");
-    let results = run("level", &scenarios);
-    for (s, (pass, _)) in scenarios.iter().zip(results) {
-        let share = f64::from(pass) / f64::from(REPS);
-        assert!(share <= bound, "{}: {share} > {bound}", s.name);
-    }
+    assert_level(&scenarios);
+}
+
+#[test]
+#[ignore = "long: about 100,000 replicates per scenario; run in release mode"]
+fn staged_design_keeps_a_level_it_can_reach() {
+    let scenarios: Vec<_> = [0.03, 0.15]
+        .into_iter()
+        .map(|sd| Scenario {
+            name: format!("level {LOOSE_LEVEL}, reserve 2500, sd {sd}, icc 0.1"),
+            reserve: 2_500,
+            sd,
+            icc: 0.1,
+            unit_mean: MARGIN,
+            level: LOOSE_LEVEL,
+        })
+        .collect();
+    assert_level(&scenarios);
 }
 
 #[test]
@@ -154,6 +181,7 @@ fn staged_design_power_at_the_pilot_and_a_third() {
             sd,
             icc: 0.82,
             unit_mean: POWER_AT,
+            level: LEVEL,
         })
         .collect();
     run("power", &scenarios);
