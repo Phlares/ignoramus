@@ -4,11 +4,13 @@ use crate::canon::{canonical_of, to_canonical};
 use crate::files::{locked_append, open_log};
 use crate::home::{HomeError, make_private_dir};
 use crate::keys::{sign_hex, verify_hex};
-use crate::prior::{PriorError, PriorUse, same_data};
+use crate::prior::{PriorError, PriorUse};
 use crate::time::now_rfc3339;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::cell::OnceCell;
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -244,20 +246,10 @@ impl PlanLog {
             .collect()
     }
 
-    /// Every leaf that used this data, oldest first, with its index. A `release` leaf that
-    /// lists the data is no use, and it frees the data from each earlier leaf it names: the
-    /// plan leaf with its commitment, and the late-data leaves with its label.
+    /// Every leaf that used this data, oldest first, with its index: `Uses::of` over the leaves
+    /// read now.
     pub fn uses(&self, exact: &str, normalized: &str) -> Result<Vec<(usize, Leaf)>, LogError> {
-        let data = (exact.to_string(), normalized.to_string());
-        let holds = |l: &Leaf| l.data_hashes.iter().any(|h| same_data(&data, h));
-        let (releases, held): (Vec<_>, Vec<_>) = (self.leaves()?.into_iter().enumerate())
-            .filter(|(_, l)| holds(l))
-            .partition(|(_, l)| l.kind == RELEASE);
-        let names = |r: &Leaf, l: &Leaf| {
-            r.label == l.label || (r.commitment.is_some() && r.commitment == l.commitment)
-        };
-        let freed = |i: usize, l: &Leaf| releases.iter().any(|(j, r)| *j > i && names(r, l));
-        Ok(held.into_iter().filter(|(i, l)| !freed(*i, l)).collect())
+        Ok(Uses::of(self.leaves()?).find(exact, normalized))
     }
 
     /// The leaf at `index`, or `None` past the end.
@@ -321,13 +313,106 @@ impl PlanLog {
 /// The kind of leaf that frees data a study held back and never measured.
 pub const RELEASE: &str = "release";
 
+/// The leaves of a plan log, indexed by the exact and the normalized hash of each data file
+/// they list.
+struct Uses {
+    leaves: Vec<Leaf>,
+    exact: HashMap<String, Vec<usize>>,
+    normalized: HashMap<String, Vec<usize>>,
+}
+
+impl Uses {
+    fn of(leaves: Vec<Leaf>) -> Uses {
+        let mut exact: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut normalized: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, l) in leaves.iter().enumerate() {
+            for (e, n) in &l.data_hashes {
+                exact.entry(e.clone()).or_default().push(i);
+                if !n.is_empty() {
+                    normalized.entry(n.clone()).or_default().push(i);
+                }
+            }
+        }
+        Uses {
+            leaves,
+            exact,
+            normalized,
+        }
+    }
+
+    /// Every leaf that used this data (`same_data`), oldest first, with its index. A
+    /// `release` leaf that lists the data is no use, and it frees the data from each earlier
+    /// leaf it names: the plan leaf with its commitment, and the late-data leaves with its
+    /// label.
+    fn find(&self, exact: &str, normalized: &str) -> Vec<(usize, Leaf)> {
+        let none = Vec::new();
+        let by_normalized = match normalized {
+            "" => &none,
+            n => self.normalized.get(n).unwrap_or(&none),
+        };
+        let mut hits: Vec<usize> = (self.exact.get(exact).unwrap_or(&none).iter())
+            .chain(by_normalized)
+            .copied()
+            .collect();
+        hits.sort_unstable();
+        hits.dedup();
+        let (releases, held): (Vec<_>, Vec<_>) = (hits.into_iter())
+            .map(|i| (i, &self.leaves[i]))
+            .partition(|(_, l)| l.kind == RELEASE);
+        let names = |r: &Leaf, l: &Leaf| {
+            r.label == l.label || (r.commitment.is_some() && r.commitment == l.commitment)
+        };
+        let freed = |i: usize, l: &Leaf| releases.iter().any(|(j, r)| *j > i && names(r, l));
+        (held.into_iter())
+            .filter(|(i, l)| !freed(*i, l))
+            .map(|(i, l)| (i, l.clone()))
+            .collect()
+    }
+}
+
+/// A plan log read on its first lookup and kept, for a caller that looks up many data files
+/// while the log stays as it is: a check reads `leaves.jsonl` once, not once per input. A log
+/// that cannot be read then fails every lookup with the same error.
+pub struct PlanLogOnce {
+    log: PlanLog,
+    uses: OnceCell<Result<Uses, PriorError>>,
+}
+
+impl PlanLogOnce {
+    pub fn new(log: PlanLog) -> PlanLogOnce {
+        PlanLogOnce {
+            log,
+            uses: OnceCell::new(),
+        }
+    }
+
+    /// `PlanLog::uses` over the leaves read on the first lookup.
+    pub fn uses(&self, exact: &str, normalized: &str) -> Result<Vec<(usize, Leaf)>, PriorError> {
+        let read = || self.log.leaves().map(Uses::of).map_err(prior_error);
+        let uses = self.uses.get_or_init(read).as_ref().map_err(Clone::clone)?;
+        Ok(uses.find(exact, normalized))
+    }
+}
+
+fn prior_error(e: LogError) -> PriorError {
+    PriorError(e.to_string())
+}
+
+/// The first leaf that used the data, as `leaf <index> (<kind>)`.
+fn first_use(hits: Vec<(usize, Leaf)>) -> Option<String> {
+    (hits.first()).map(|(i, leaf)| format!("leaf {i} ({})", leaf.kind))
+}
+
 impl PriorUse for PlanLog {
     fn used(&self, exact: &str, normalized: &str) -> Result<Option<String>, PriorError> {
         self.uses(exact, normalized)
-            .map(|hits| {
-                hits.first()
-                    .map(|(i, leaf)| format!("leaf {i} ({})", leaf.kind))
-            })
-            .map_err(|e| PriorError(e.to_string()))
+            .map(first_use)
+            .map_err(prior_error)
+    }
+}
+
+impl PriorUse for PlanLogOnce {
+    fn used(&self, exact: &str, normalized: &str) -> Result<Option<String>, PriorError> {
+        self.uses(exact, normalized).map(first_use)
     }
 }

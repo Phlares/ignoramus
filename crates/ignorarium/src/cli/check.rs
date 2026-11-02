@@ -6,7 +6,7 @@ use crate::estimate::{Estimate, defaults_json, estimate};
 use crate::home::Home;
 use crate::inputs;
 use crate::keys;
-use crate::planlog::store::PlanLog;
+use crate::planlog::store::{PlanLog, PlanLogOnce};
 use crate::prior::{PriorError, PriorUse};
 use crate::records;
 use crate::rules::{self, BoxRecords, CheckCtx, ReadOnce};
@@ -263,7 +263,7 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
     })?;
     let machine = crate::machine::load(&home.root).map_err(|e| CliError::usage(e.to_string()))?;
     let prior: Box<dyn PriorUse> = match PlanLog::open(&home.root.join("planlog")) {
-        Ok(log) => Box::new(log),
+        Ok(log) => Box::new(PlanLogOnce::new(log)),
         Err(e) => Box::new(Unreadable(e.to_string())),
     };
     let key = keys::load(home)
