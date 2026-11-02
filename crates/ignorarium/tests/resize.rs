@@ -257,6 +257,34 @@ fn continue_appends_needed_minus_first_in_pin_order() {
 }
 
 #[test]
+fn each_stratum_counts_its_own_clusters() {
+    // News keeps 20 first and 10 reserve clusters; fiction keeps 30 and 16.
+    let mut v = study(30, 16);
+    let dropped = |p: &str| {
+        (20..30).any(|i| p == format!("data/news-confirmation-{i}.txt"))
+            || (10..16).any(|i| p == format!("data/news-reserve-{i}.txt"))
+    };
+    let kept: Vec<Value> = (v["inputs"].as_array().unwrap().iter())
+        .filter(|i| !dropped(i["path"].as_str().unwrap()))
+        .cloned()
+        .collect();
+    v["inputs"] = json!(kept);
+    let spec = spec_of(&v);
+    let all = records(&spec, Role::Confirmation, by_stratum(-1.0, 0.5));
+    let r = decide(&spec, &HASH, &all, &clusters_of(&spec)).unwrap();
+    let fiction = count(1.0, "resize/H1/fiction", 46, each(), -1.0, 1.0);
+    let news = count(0.5, "resize/H1/news", 30, each(), -1.0, 1.0);
+    assert_eq!((fiction, news), (Some(39), Some(29)));
+    assert_eq!(
+        r.strata,
+        [
+            group("fiction", 30, 16, fiction),
+            group("news", 20, 10, news)
+        ]
+    );
+}
+
+#[test]
 fn stop_when_the_reserve_is_short() {
     let spec = spec_of(&study(30, 16));
     // News' spread of 2 needs more clusters than its 46: the study stops, and appends nothing.
