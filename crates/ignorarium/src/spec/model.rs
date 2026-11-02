@@ -258,8 +258,9 @@ pub struct Resize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ResizeRule {
-    /// One count, after the confirmation clusters: from their spread about 0, with no estimate
-    /// of the effect, the reserve clusters each claimed stratum adds.
+    /// One count, after the confirmation clusters: from their spread about 0, the reserve
+    /// clusters each claimed stratum adds. The count computes no mean (its root mean square
+    /// carries the squared effect), and the test keeps its level whatever count the re-size picks.
     BlindedOnce,
 }
 

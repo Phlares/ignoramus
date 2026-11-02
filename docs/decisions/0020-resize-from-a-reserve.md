@@ -32,7 +32,7 @@ Measured. A null simulation of the design, in release mode on one 6-CPU cloud ho
 | 2,500 | 0.15 | 0.1 | 0.00002 (0.00001) | 0.00002 (0.00001) |
 | 2,500 | 0.15 | 0.8 | 0.00012 (0.00003) | 0.10277 (0.00096) |
 
-At level 0.005 the test almost never rejects, so these shares cannot show a fault that raises rejections. Two more scenarios run the same design at level 0.05, with a reserve of 2,500 and an icc of 0.1, against the bound 0.05 + 3 × √(0.05 × 0.95 / 100,000) = 0.0520676. Both ran at once on the same host in 763 s:
+At level 0.005 the test almost never rejects, so these shares cannot show a fault that raises rejections. Two more scenarios run the same design at level 0.05, with a reserve of 2,500 and an icc of 0.1, against the bound 0.05 + 3 × √(0.05 × 0.95 / 100,000) = 0.0520676. At level 0.05 the sd 0.03 scenario still rejects 0 times in 100,000, so only the sd 0.15 scenario can show a raised error rate; it measured 0.00089 against a bound of 0.0520676. Both ran at once on the same host in 763 s:
 
 | Level | Reserve | sd | icc | Rejection share (se) | Stop share (se) |
 |---|---|---|---|---|---|

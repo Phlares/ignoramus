@@ -3,8 +3,8 @@
 //!
 //! Every scenario simulates one stratum of a two-stratum design, so its re-size asks that
 //! stratum's share of power 0.8, 0.8^(1/2): a first batch of 21 clusters of 4 units and a
-//! reserve, a mean claim below ln 1.04 on [-ln 2, ln 2] at level 0.005 (or 0.05, where the
-//! test rejects often enough to show a raised error rate), sized at ln 1.02. The level tests
+//! reserve, a mean claim below ln 1.04 on [-ln 2, ln 2] at level 0.005 (or 0.05, a level ten
+//! times looser, where the sd 0.15 scenario rejects at all), sized at ln 1.02. The level tests
 //! assert a bound on the pass share; the power test asserts nothing and prints its shares.
 //!
 //! Seeds: batch b of scenario `name` in the level tests (`level`) or the power test (`power`)
@@ -25,7 +25,7 @@ const MARGIN: f64 = 0.039221;
 /// ln 1.02.
 const POWER_AT: f64 = 0.019803;
 const LEVEL: f64 = 0.005;
-/// A level at which the test rejects in about 1 replicate in 20 under the null.
+/// A level ten times looser than LEVEL; at LEVEL the sd 0.15 scenario almost never rejects.
 const LOOSE_LEVEL: f64 = 0.05;
 /// One stratum's share of a two-stratum claim at power 0.8: 0.8^(1/2).
 const TARGET_EACH: f64 = 0.894427;
