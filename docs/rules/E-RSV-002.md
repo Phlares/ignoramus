@@ -12,7 +12,7 @@ List the clusters the re-size may add as inputs with role = "reserve", in the st
 
 ## Why
 
-The re-size runs once, after the confirmation clusters, and counts how many reserve clusters each claimed stratum adds. With no reserve it can add nothing. The count reads only the spread of the first clusters' observations about 0, never the effect or a condition's name, so it does not inflate the test's error rate.
+The re-size runs once, after the confirmation clusters, and counts how many reserve clusters each claimed stratum adds. With no reserve it can add nothing. The count reads the root mean square of the first clusters' observations about 0 and no condition's name. It computes no mean, but the square carries the squared effect, so the count shows a little of the effect. The e-value test keeps its level whatever count the re-size picks, because each bet uses only the observations before it.
 
 ## Sources
 
