@@ -2,13 +2,15 @@
 //! condition's value for the same unit and repeat.
 use crate::canon::{sha256_hex, to_canonical};
 use crate::derived::{
-    ANALYSIS, Analysis, BoundResult, Candidate, ESTIMATE, Estimate, Instrument, Recheck, Register,
-    Selection, VERDICT, Verdict, contrast_key,
+    ANALYSIS, Analysis, BoundResult, CONTINUE, Candidate, ESTIMATE, Estimate, Instrument, Recheck,
+    Register, Selection, VERDICT, Verdict, contrast_key,
 };
+use crate::planlog::store::{PlanLog, RELEASE};
 use crate::prior::same_data;
 use crate::records::{self, Record, RecordDraft};
-use crate::runner::{InputHashes, RunError, RunPlan, stored_spec};
-use crate::schedule::SELECTION_STAGE;
+use crate::resize;
+use crate::runner::{InputHashes, RunError, RunPlan, own_label, stored_spec};
+use crate::schedule::{self, Row, SELECTION_STAGE};
 use crate::seed::seed;
 use crate::spec::model::{
     Claim, Direction, Hypothesis, Mode, Paired as Rule, Role, SELECTED, Spec,
@@ -188,11 +190,12 @@ pub fn select(spec: &Spec, rows: &[Record]) -> Result<Selection, String> {
 
 /// One estimate per hypothesis, per group: each stratum the hypothesis lists, then the pooled
 /// group `""` (alone when it lists none). A group holds the confirmation clusters of its
-/// stratum. A unit's value is the contrast over its paired values, and counts only when
-/// every term has one. A `selected` row is recorded under `selected`, so its value is read
-/// there, while the key names the pick. `params` holds each condition's params, by id. A
-/// hypothesis whose outcome is unknown, or whose contrast needs a pick that `selection` does
-/// not give, has none, and neither has a group with fewer than 2 values.
+/// stratum, then its reserve clusters in `clusters`. A unit's value is the contrast over its
+/// paired values, and counts only when every term has one. A `selected` row is recorded under
+/// `selected`, so its value is read there, while the key names the pick. `params` holds each
+/// condition's params, by id. A hypothesis whose outcome is unknown, or whose contrast needs a
+/// pick that `selection` does not give, has none, and neither has a group with fewer than 2
+/// values.
 pub fn estimates(
     spec: &Spec,
     params: &BTreeMap<String, Value>,
@@ -229,7 +232,8 @@ pub fn estimates(
         }
         for stratum in groups {
             // An estimate takes a unit that pairs in any repeat.
-            let (samples, _) = group(clusters, stratum, &outcome.id, &h.contrast, paired, 1);
+            let of = |role| group(clusters, role, stratum, &outcome.id, &h.contrast, paired, 1).0;
+            let samples = [of(Role::Confirmation), of(Role::Reserve)].concat();
             if let Some(f) = fit(&samples) {
                 out.push(Estimate {
                     hypothesis: h.id.clone(),
@@ -249,12 +253,14 @@ pub fn estimates(
     out
 }
 
-/// The confirmation clusters of `stratum` (every one for the pooled group `""`), each as the
-/// contrast's value for each picked unit that counts, and the count of picked units that do
-/// not. A unit counts when every term pairs in at least `repeats` repeats; its value is the
-/// weighted sum of the terms' means. A cluster with no unit that counts is left out.
+/// The clusters of `role` in `stratum` (every stratum for the pooled group `""`), in the order
+/// of `clusters`, each as the contrast's value for each picked unit that counts, and the count
+/// of picked units that do not. A unit counts when every term pairs in at least `repeats`
+/// repeats; its value is the weighted sum of the terms' means. A cluster with no unit that
+/// counts is left out.
 pub(crate) fn group(
     clusters: &[Cluster],
+    role: Role,
     stratum: &str,
     outcome: &str,
     contrast: &BTreeMap<String, f64>,
@@ -263,7 +269,7 @@ pub(crate) fn group(
 ) -> (Vec<Vec<f64>>, u64) {
     let mut incomplete = 0;
     let samples = (clusters.iter())
-        .filter(|c| c.role == Role::Confirmation)
+        .filter(|c| c.role == role)
         .filter(|c| stratum.is_empty() || c.stratum == stratum)
         .map(|c| {
             let mut xs = Vec::new();
@@ -331,15 +337,19 @@ fn fit(samples: &[Vec<f64>]) -> Option<Fit> {
 
 /// One verdict per hypothesis, in spec order. A hypothesis with no claim gets `none`. A claim
 /// is held in each stratum it lists, or in the pooled group `""` when it lists none. There
-/// each confirmation cluster with a complete unit gives one observation per bound
-/// (`claim::observation`), from its complete units only. A unit is complete when every term of
-/// the contrast pairs in all `design.repeats` repeats.
-/// - Confirmatory: per stratum, the observations in the order `claim::order` draws from
-///   `seed(spec_hash, "test/<id>/<stratum>")`, then each bound's `claim::e_value`. The
+/// each confirmation cluster, then each reserve cluster in `clusters`, with a complete unit
+/// gives one observation per bound (`claim::observation`), from its complete units only. A
+/// unit is complete when every term of the contrast pairs in all `design.repeats` repeats.
+/// - Confirmatory: per stratum, the confirmation clusters' observations in the order
+///   `claim::order` draws from `seed(spec_hash, "test/<id>/<stratum>")`, then the reserve
+///   clusters' in the order of `clusters`, then each bound's `claim::e_value`. The
 ///   hypothesis takes the least of them, an e-value under the union of the bounds' nulls, or 0
 ///   when a unit in scope is incomplete. `tree::decide` splits `level` by `alpha_share` and
 ///   passes each hypothesis it rejects.
 /// - Exploratory: the claim passes when `claim::holds` for every bound in every stratum.
+///
+/// A study that `stopped` (why) before its reserve fails every claim, with that reason after
+/// `stopped: ` and, in a test, e-value 0.
 ///
 /// An e-value past the largest float is kept as that float: records and the stream hold
 /// finite numbers, and a smaller e-value is still one.
@@ -349,10 +359,18 @@ pub fn verdicts(
     clusters: &[Cluster],
     spec_hash: &[u8; 32],
     level: Option<f64>,
+    stopped: Option<&str>,
 ) -> Vec<Verdict> {
     let mut out: Vec<Verdict> = (spec.question.hypotheses.iter())
         .map(|h| judge(spec, h, paired, clusters, spec_hash))
         .collect();
+    if let Some(why) = stopped {
+        for v in out.iter_mut().filter(|v| v.basis != NONE) {
+            v.verdict = "fail".into();
+            v.e_value = v.e_value.map(|_| 0.0);
+            v.reason = Some(format!("stopped: {why}"));
+        }
+    }
     if spec.study.mode != Mode::Confirmatory {
         return out;
     }
@@ -419,13 +437,28 @@ fn judge(
     let tested = spec.study.mode == Mode::Confirmatory;
     let repeats = spec.design.repeats;
     let scopes: Vec<Scope> = (claim_strata(h).into_iter())
-        .map(|s| {
-            let (samples, incomplete) =
-                group(clusters, s, &h.outcome, &h.contrast, paired, repeats);
-            (s, samples, incomplete)
+        .map(|stratum| {
+            let of = |role| {
+                group(
+                    clusters,
+                    role,
+                    stratum,
+                    &h.outcome,
+                    &h.contrast,
+                    paired,
+                    repeats,
+                )
+            };
+            let ((first, a), (appended, b)) = (of(Role::Confirmation), of(Role::Reserve));
+            Scope {
+                stratum,
+                first,
+                appended,
+                incomplete: a + b,
+            }
         })
         .collect();
-    let incomplete = scopes.iter().map(|(_, _, n)| n).sum();
+    let incomplete = scopes.iter().map(|s| s.incomplete).sum();
     let mut v = Verdict {
         hypothesis: h.id.clone(),
         verdict: NONE.into(),
@@ -463,12 +496,18 @@ fn judge(
     v
 }
 
-/// One stratum of a claim's scope: its name, the values of each cluster's complete units, and
-/// the count of incomplete units.
-type Scope<'a> = (&'a str, Vec<Vec<f64>>, u64);
+/// One stratum of a claim's scope: its name, the values of the complete units of each
+/// first-batch cluster and of each appended reserve cluster, and the count of incomplete units.
+struct Scope<'a> {
+    stratum: &'a str,
+    first: Vec<Vec<f64>>,
+    appended: Vec<Vec<f64>>,
+    incomplete: u64,
+}
 
 /// Each bound of `claim` in each of `scopes`, with whether it holds by the point estimate. In
-/// a test the bound's value is its e-value, else the mean of its observations.
+/// a test the bound's value is its e-value, else the mean of its observations. The
+/// observations run over the first batch in its seeded order, then the appended clusters.
 fn held(
     h: &Hypothesis,
     claim: &Claim,
@@ -480,12 +519,19 @@ fn held(
         .ok_or(evidence::Error::Parameter("statistic"))?
         .to_evidence();
     let mut out = Vec::new();
-    for (stratum, samples, _) in scopes {
+    for Scope {
+        stratum,
+        first,
+        appended,
+        ..
+    } in scopes
+    {
         let path = format!("test/{}/{stratum}", h.id);
-        let order = claim::order(samples.len(), &mut Rng::from_seed(seed(spec_hash, &path)));
+        let order = claim::order(first.len(), &mut Rng::from_seed(seed(spec_hash, &path)));
+        let samples: Vec<&Vec<f64>> = (order.iter().map(|&i| &first[i])).chain(appended).collect();
         for b in claim.bounds() {
-            let obs = (order.iter())
-                .map(|&i| claim::observation(&stat, &b, &samples[i]))
+            let obs = (samples.iter())
+                .map(|xs| claim::observation(&stat, &b, xs))
                 .collect::<Result<Vec<f64>, _>>()?;
             let value = if tested {
                 Some(finite(claim::e_value(&stat, &b, &obs)?))
@@ -591,39 +637,61 @@ fn recheck(spec: &Spec, records: &[Record], carried_from: Option<String>) -> Opt
     })
 }
 
-/// When every scheduled row has a record, add what the study's results still lack: the
-/// `analysis` record first, which names the `instrument` and the `recheck` and states how many
-/// records follow it, then each estimate and each verdict it promises, and last, for a study
-/// that holds a stream slot, the close of that slot with the e-value its verdict records give
-/// (`study_e_value`). A call after a crash adds only what is missing; a complete study gets
-/// nothing. A log whose analysis record another box version wrote is refused when it lacks an
-/// estimate or a verdict. The close takes its e-value from the signed records alone, so it is
-/// added whatever box wrote them.
+/// When every scheduled row that runs has a record, add what the study's results still lack:
+/// the `analysis` record first, which names the `instrument` and the `recheck`, and for a study
+/// that re-sized, its spread (`resize::spreads`), and states how many records follow it, then
+/// each estimate and each verdict it promises, and, for a study that holds a stream slot, the
+/// close of that slot with the e-value its verdict records give (`study_e_value`). Last, a
+/// study that re-sized releases the reserve data it never measured (`release`). A reserve
+/// row runs when the `resize` record admits its cluster, and every one runs in a study with no
+/// such record; the analysis reads the reserve clusters that ran, in the order they are
+/// appended. A study the record stops fails its claims (`verdicts`). A call after a crash adds
+/// only what is missing; a complete study gets nothing. A log whose analysis record another
+/// box version wrote is refused when it lacks an estimate or a verdict. The close takes its
+/// e-value from the signed records alone, so it is added whatever box wrote them.
 pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
     let dir = plan.home.study_dir(&plan.study_id);
     let log = dir.join("records.jsonl");
     let all = records::read_all(&log, &plan.key.verifying_key())?;
+    let clusters = distinct_clusters(units::clusters(&plan.spec, &plan.spec_hash), &plan.inputs);
+    let resize = resize::recorded(&all)?;
+    let ran = resize::ran(&plan.spec, &clusters, resize.as_ref());
     let rowed: BTreeSet<u64> = (all.iter())
         .filter(|r| r.kind == "row")
         .filter_map(|r| r.row)
         .collect();
-    if plan.schedule.rows.iter().any(|r| !rowed.contains(&r.index)) {
+    let runs = |r: &&Row| resize::runs(r, &ran);
+    if (plan.schedule.rows.iter().filter(runs)).any(|r| !rowed.contains(&r.index)) {
         return Ok(());
     }
+    let order = schedule::reserve_order(&plan.spec, &clusters);
+    let measured: Vec<Cluster> = (clusters.iter().filter(|c| c.role != Role::Reserve))
+        .chain(order.into_iter().filter(|c| ran.contains(c.path.as_str())))
+        .cloned()
+        .collect();
     let selection = all.iter().find_map(Selection::of);
-    let clusters = distinct_clusters(units::clusters(&plan.spec, &plan.spec_hash), &plan.inputs);
     let pairs = paired(&plan.spec, &all);
     let wanted = estimates(
         &plan.spec,
         &plan.params,
         &pairs,
-        &clusters,
+        &measured,
         selection.as_ref(),
     );
     let register = all.iter().find_map(Register::of);
     let alpha = register.as_ref().and_then(|r| r.alpha.clone());
     let level = alpha.as_ref().map(|a| a.level);
-    let judged = verdicts(&plan.spec, &pairs, &clusters, &plan.spec_hash, level);
+    let stopped = (resize.as_ref())
+        .filter(|r| r.decision != CONTINUE)
+        .map(|r| r.reason.as_deref().unwrap_or(resize::SHORT));
+    let judged = verdicts(
+        &plan.spec,
+        &pairs,
+        &measured,
+        &plan.spec_hash,
+        level,
+        stopped,
+    );
     let (_, value, hash, _) = stored_spec(&dir)?;
     if hash != plan.spec_hash {
         return Err(RunError::SpecChanged);
@@ -651,6 +719,9 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
         None => {
             let carried = register.as_ref().and_then(|r| r.carries.as_ref());
             let carried_from = carried.map(|c| c.study.clone());
+            let (resize_sd, appended_sd) = (resize.as_ref())
+                .map(|_| resize::spreads(&plan.spec, &pairs, &measured))
+                .unzip();
             let body = Analysis {
                 commit: commit(&value, version)?,
                 box_version: version.into(),
@@ -659,6 +730,8 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
                 slot: alpha.as_ref().map(|a| a.slot),
                 instrument: instrument(&plan.spec, &plan.payload_sha256, &plan.inputs, &all),
                 recheck: recheck(&plan.spec, &all, carried_from),
+                resize_sd,
+                appended_sd,
             };
             append(plan, &log, ANALYSIS, &body)?;
         }
@@ -682,6 +755,35 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
             let e = study_e_value(&plan.spec, &logged, level).unwrap_or(0.0);
             stream.close(&plan.key, &plan.study_id, a.slot, e)?;
         }
+    }
+    if resize.is_some() {
+        let register = register.ok_or_else(|| RunError::NotRegistered(plan.study_id.clone()))?;
+        release(plan, &register, &ran)?;
+    }
+    Ok(())
+}
+
+/// Free in the plan log the reserve data a study that re-sized never measured: each reserve
+/// input whose cluster did not run (`ran`). No two reserve inputs hold the same data: a pinned
+/// input is read at registration (E-HSH-001), and E-CNF-004 refuses the pair. One `release`
+/// leaf, labelled as the study's late-data leaves are and naming its plan leaf's commitment;
+/// none when there is no such data, and none again when the log holds it.
+fn release(plan: &RunPlan, register: &Register, ran: &BTreeSet<&str>) -> Result<(), RunError> {
+    let data: Vec<(String, String)> = (plan.spec.inputs.iter().zip(&plan.inputs))
+        .filter(|(i, _)| i.role == Role::Reserve && !ran.contains(i.path.as_str()))
+        .filter_map(|(_, (_, h))| h.clone())
+        .collect();
+    if data.is_empty() {
+        return Ok(());
+    }
+    let log = PlanLog::open(&plan.home.root.join(&register.log))?;
+    let commitment = (log.leaf(register.leaf)?)
+        .and_then(|l| l.commitment)
+        .ok_or_else(|| RunError::NotRegistered(plan.study_id.clone()))?;
+    let done = (log.leaves()?.iter())
+        .any(|l| l.kind == RELEASE && l.commitment.as_ref() == Some(&commitment));
+    if !done {
+        log.append_release(&own_label(&plan.study_id), &commitment, data, &plan.key)?;
     }
     Ok(())
 }

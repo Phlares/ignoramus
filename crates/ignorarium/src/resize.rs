@@ -1,16 +1,18 @@
 //! The blinded re-size of a study that declares one: once its first batch has run, how many
 //! reserve clusters each group a claim is tested in appends, from the first batch's row
 //! records and the spec hash alone.
-use crate::analysis::{claim_strata, group, paired};
-use crate::derived::{CONTINUE, Register, Resize, ResizeStratum, STOP};
+use crate::analysis::{Paired, claim_strata, group, paired};
+use crate::derived::{CONTINUE, GroupSd, RESIZE, Register, Resize, ResizeStratum, STOP};
 use crate::records::Record;
 use crate::rules::REPS;
+use crate::runner::RunError;
+use crate::schedule::{RESERVE_STAGE, Row, reserve_order};
 use crate::seed::seed;
 use crate::spec::model::{Role, Spec};
 use crate::units::Cluster;
-use evidence::claim::observation;
+use evidence::claim::{Bound, Statistic, observation};
 use evidence::power::{Plan, blinded_sd, resize_count};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Why a study whose reserve falls short stops.
 pub const SHORT: &str = "the reserve cannot reach the power the claim needs";
@@ -58,16 +60,21 @@ pub fn decide(
         };
         for g in strata {
             let repeats = spec.design.repeats;
-            let (samples, incomplete) =
-                group(clusters, g, &h.outcome, &h.contrast, &pairs, repeats);
+            let (samples, incomplete) = group(
+                clusters,
+                Role::Confirmation,
+                g,
+                &h.outcome,
+                &h.contrast,
+                &pairs,
+                repeats,
+            );
             if incomplete > 0 {
                 return Err(format!("incomplete units in the first batch: {incomplete}"));
             }
-            let obs = (samples.iter())
-                .map(|xs| observation(&stat, &first, xs))
-                .collect::<Result<Vec<f64>, _>>()
-                .map_err(|e| e.to_string())?;
-            let s = blinded_sd(&obs).ok_or_else(|| format!("group {g:?} has no observation"))?;
+            let s = spread(&stat, &first, &samples)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("group {g:?} has no observation"))?;
             let sizes: Vec<u32> = (clusters.iter())
                 .filter(|c| holds(g, c, Role::Confirmation))
                 .chain(clusters.iter().filter(|c| holds(g, c, Role::Reserve)))
@@ -111,6 +118,79 @@ pub fn or_stop(
         decision: STOP.into(),
         reason: Some(why),
     })
+}
+
+/// The study's `resize` record; `None` when its records hold none. `Err` when it does not
+/// parse.
+pub fn recorded(records: &[Record]) -> Result<Option<Resize>, RunError> {
+    (records.iter().find(|r| r.kind == RESIZE))
+        .map(|r| {
+            Resize::of(r)
+                .ok_or_else(|| RunError::Records("the resize record does not parse".into()))
+        })
+        .transpose()
+}
+
+/// The paths of the reserve clusters of `clusters` whose rows run: those `resize`, the study's
+/// record, admits; every one while it has none, so a study waits for its record.
+pub fn ran<'a>(
+    spec: &'a Spec,
+    clusters: &'a [Cluster],
+    resize: Option<&Resize>,
+) -> BTreeSet<&'a str> {
+    let order = reserve_order(spec, clusters);
+    match resize {
+        Some(r) => r.admitted(&order),
+        None => order.iter().map(|c| c.path.as_str()).collect(),
+    }
+}
+
+/// `row` runs: it is no reserve row, or its cluster is one that `ran` holds.
+pub fn runs(row: &Row, ran: &BTreeSet<&str>) -> bool {
+    row.stage != RESERVE_STAGE || ran.contains(row.cluster.as_str())
+}
+
+/// What a study that re-sized shows of its spread once it is over: for each hypothesis with
+/// a claim and each group it is tested in, the blinded sd of the observations of the claim's
+/// first bound, as the re-size reads them, over the first batch's complete units, and over
+/// the appended reserve clusters' (`clusters` holds those that ran; `None` for none).
+pub fn spreads(spec: &Spec, pairs: &Paired, clusters: &[Cluster]) -> (Vec<GroupSd>, Vec<GroupSd>) {
+    let repeats = spec.design.repeats;
+    let mut out = (vec![], vec![]);
+    for h in &spec.question.hypotheses {
+        let (Some(claim), Some(stat)) = (h.claim, h.statistic.as_ref()) else {
+            continue;
+        };
+        let stat = stat.to_evidence();
+        let first = claim.bounds()[0];
+        for g in claim_strata(h) {
+            let sd = |role| {
+                let (samples, _) =
+                    group(clusters, role, g, &h.outcome, &h.contrast, pairs, repeats);
+                GroupSd {
+                    hypothesis: h.id.clone(),
+                    stratum: g.into(),
+                    sd: spread(&stat, &first, &samples).ok().flatten(),
+                }
+            };
+            out.0.push(sd(Role::Confirmation));
+            out.1.push(sd(Role::Reserve));
+        }
+    }
+    out
+}
+
+/// The blinded sd of the observations (`claim::observation`) of `bound` over `samples`, one
+/// per cluster.
+fn spread(
+    stat: &Statistic,
+    bound: &Bound,
+    samples: &[Vec<f64>],
+) -> Result<Option<f64>, evidence::Error> {
+    let obs = (samples.iter())
+        .map(|xs| observation(stat, bound, xs))
+        .collect::<Result<Vec<f64>, _>>()?;
+    Ok(blinded_sd(&obs))
 }
 
 /// Each group a claim is tested in, by name, with its first-batch and reserve clusters

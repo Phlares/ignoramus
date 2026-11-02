@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 /// older binaries must still read the log.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Leaf {
-    /// `plan` or `legacy`.
+    /// `plan`, `legacy` or `release`.
     pub kind: String,
     pub commitment: Option<String>,
     pub family: Option<String>,
@@ -236,18 +236,28 @@ impl PlanLog {
         })
     }
 
-    /// Every leaf that holds this data, oldest first, with its index.
-    pub fn uses(&self, exact: &str, normalized: &str) -> Result<Vec<(usize, Leaf)>, LogError> {
+    /// Every leaf, oldest first.
+    pub fn leaves(&self) -> Result<Vec<Leaf>, LogError> {
         let _lock = self.read_lock()?;
+        (read_lines(&self.leaves_path())?.iter().enumerate())
+            .map(|(index, l)| serde_json::from_slice(l).map_err(|_| LogError::Leaf { index }))
+            .collect()
+    }
+
+    /// Every leaf that used this data, oldest first, with its index. A `release` leaf that
+    /// lists the data is no use, and it frees the data from each earlier leaf it names: the
+    /// plan leaf with its commitment, and the late-data leaves with its label.
+    pub fn uses(&self, exact: &str, normalized: &str) -> Result<Vec<(usize, Leaf)>, LogError> {
         let data = (exact.to_string(), normalized.to_string());
-        let mut hits = Vec::new();
-        for (index, l) in read_lines(&self.leaves_path())?.iter().enumerate() {
-            let leaf: Leaf = serde_json::from_slice(l).map_err(|_| LogError::Leaf { index })?;
-            if leaf.data_hashes.iter().any(|h| same_data(&data, h)) {
-                hits.push((index, leaf));
-            }
-        }
-        Ok(hits)
+        let holds = |l: &Leaf| l.data_hashes.iter().any(|h| same_data(&data, h));
+        let (releases, held): (Vec<_>, Vec<_>) = (self.leaves()?.into_iter().enumerate())
+            .filter(|(_, l)| holds(l))
+            .partition(|(_, l)| l.kind == RELEASE);
+        let names = |r: &Leaf, l: &Leaf| {
+            r.label == l.label || (r.commitment.is_some() && r.commitment == l.commitment)
+        };
+        let freed = |i: usize, l: &Leaf| releases.iter().any(|(j, r)| *j > i && names(r, l));
+        Ok(held.into_iter().filter(|(i, l)| !freed(*i, l)).collect())
     }
 
     /// The leaf at `index`, or `None` past the end.
@@ -283,7 +293,33 @@ impl PlanLog {
             key,
         )
     }
+
+    /// Add a `release` leaf: the study whose late-data leaves carry `label`, and whose plan
+    /// leaf has `commitment`, never measured `data_hashes`.
+    pub fn append_release(
+        &self,
+        label: &str,
+        commitment: &str,
+        data_hashes: Vec<(String, String)>,
+        key: &SigningKey,
+    ) -> Result<(u64, TreeHead), LogError> {
+        self.append(
+            Leaf {
+                kind: RELEASE.into(),
+                commitment: Some(commitment.into()),
+                family: None,
+                mode: None,
+                data_hashes,
+                label: label.into(),
+                ts: now_rfc3339(),
+            },
+            key,
+        )
+    }
 }
+
+/// The kind of leaf that frees data a study held back and never measured.
+pub const RELEASE: &str = "release";
 
 impl PriorUse for PlanLog {
     fn used(&self, exact: &str, normalized: &str) -> Result<Option<String>, PriorError> {

@@ -974,6 +974,7 @@ fn status_json_has_every_field() {
         "triggers",
         "blind",
         "conditions",
+        "resize",
     ] {
         assert!(obj.contains_key(key), "missing {key}: {s}");
     }
@@ -1463,4 +1464,448 @@ fn a_resumed_run_writes_one_resize_record() {
     let again = common::records_of(&lab, "again");
     assert_eq!(again.iter().filter(|r| r.kind == RESIZE).count(), 1);
     assert_eq!(reserve_ran(&plan, &again), (by_pin(&plan)[..1].to_vec(), 2));
+}
+
+// ---- the end of a re-sized study ----
+
+/// A payload that writes 100 for the reference and, for `arm-a`, 98.6 to 101.4 in steps of
+/// 0.7 by the checksum of the unit: observations about 0 % with a spread near 1, so the
+/// e-process never reaches its largest bet and every observation's place changes its value.
+const VARIED: &str = "#!/bin/sh\ncase \"$2\" in exact) v=100;; *) h=$(printf '%s' \"$4\" | cksum | cut -d' ' -f1); case $((h % 5)) in 0) v=98.6;; 1) v=99.3;; 2) v=100;; 3) v=100.7;; *) v=101.4;; esac;; esac\nprintf '{\"ppl\": %s}' \"$v\" > \"$IGNORARIUM_OUT/values.json\"\n";
+
+/// `flat("99")`, but the `arm-a` row of the first batch's cluster `data/fiction-03.txt` fails.
+const ONE_FAILS: &str = "#!/bin/sh\ncase \"$2\" in exact) v=100;; *) case \"$4\" in data/fiction-03.txt*) exit 3;; esac; v=99;; esac\nprintf '{\"ppl\": %s}' \"$v\" > \"$IGNORARIUM_OUT/values.json\"\n";
+
+/// Each cluster's observation in the `ok` row records of `records`: arm-a's percent change
+/// over the reference on its one unit, by path.
+fn observed(
+    plan: &ignorarium::runner::RunPlan,
+    records: &[ignorarium::records::Record],
+) -> std::collections::BTreeMap<String, f64> {
+    let mut values = std::collections::BTreeMap::new();
+    for r in records
+        .iter()
+        .filter(|r| r.kind == "row" && r.body["exit"] == "ok")
+    {
+        let row = &plan.schedule.rows[r.row.unwrap() as usize];
+        let v = r.body["values"]["ppl"].as_f64().unwrap();
+        values.insert((row.cluster.clone(), row.condition.clone()), v);
+    }
+    (values.iter())
+        .filter(|((_, c), _)| c == "arm-a")
+        .map(|((p, _), a)| {
+            let reference = values[&(p.clone(), "exact".to_string())];
+            (p.clone(), 100.0 * (a / reference - 1.0))
+        })
+        .collect()
+}
+
+/// The paths of the first batch's clusters, in the order the analysis reads them.
+fn first_batch(plan: &ignorarium::runner::RunPlan) -> Vec<String> {
+    use ignorarium::spec::model::Role;
+    let all = ignorarium::units::clusters(&plan.spec, &plan.spec_hash);
+    (ignorarium::analysis::distinct_clusters(all, &plan.inputs).into_iter())
+        .filter(|c| c.role == Role::Confirmation)
+        .map(|c| c.path)
+        .collect()
+}
+
+/// The e-value of the study's claim, below 0 by a mean in [-2, 2], over `obs` in order.
+fn e_of(obs: &[f64]) -> f64 {
+    use evidence::claim::{Bound, Statistic, e_value};
+    let below = Bound {
+        tail: evidence::Tail::Lower,
+        margin: 0.0,
+    };
+    e_value(&Statistic::Mean { lo: -2.0, hi: 2.0 }, &below, obs).unwrap()
+}
+
+/// The study's one `resize` record.
+fn resize_of(lab: &Lab, id: &str) -> ignorarium::derived::Resize {
+    let rs = kind_of(lab, id, "resize");
+    assert_eq!(rs.len(), 1);
+    ignorarium::derived::Resize::of(&rs[0]).unwrap()
+}
+
+/// The study's one `verdict` record.
+fn verdict_of(lab: &Lab, id: &str) -> ignorarium::derived::Verdict {
+    let vs = kind_of(lab, id, "verdict");
+    assert_eq!(vs.len(), 1);
+    ignorarium::derived::Verdict::of(&vs[0]).unwrap()
+}
+
+/// The study's register record.
+fn register_of(lab: &Lab, id: &str) -> Register {
+    Register::of(&kind_of(lab, id, "register")[0]).unwrap()
+}
+
+/// The plan log the study registered in.
+fn plan_log_of(lab: &Lab, id: &str) -> ignorarium::planlog::store::PlanLog {
+    let log = register_of(lab, id).log;
+    ignorarium::planlog::store::PlanLog::open(&lab.home.root.join(log)).unwrap()
+}
+
+/// The `release` leaves of the plan log the study registered in.
+fn releases(lab: &Lab, id: &str) -> Vec<ignorarium::planlog::store::Leaf> {
+    let leaves = plan_log_of(lab, id).leaves().unwrap();
+    leaves.into_iter().filter(|l| l.kind == "release").collect()
+}
+
+/// The `(exact, normalized)` hashes of the reserve inputs at `paths`, sorted.
+fn reserve_data(paths: &[String]) -> Vec<(String, String)> {
+    let mut data: Vec<(String, String)> = (paths.iter())
+        .map(|p| ignorarium::prior::file_hashes(format!("{p}\n").as_bytes()))
+        .collect();
+    data.sort();
+    data
+}
+
+/// The `stream.close` body of the study's slot.
+fn close_of_slot(lab: &Lab, id: &str) -> Value {
+    use ignorarium::stream::{Log, LogName};
+    let alpha = register_of(lab, id).alpha.unwrap();
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let log = Log::of(&lab.home, LogName::parse(&alpha.log).unwrap());
+    let all = ignorarium::records::read_all(log.path(), &key.verifying_key()).unwrap();
+    let closes: Vec<Value> = (all.into_iter())
+        .filter(|r| r.kind == "stream.close" && r.body["study"] == id)
+        .map(|r| r.body)
+        .collect();
+    assert_eq!(closes.len(), 1, "{closes:?}");
+    closes[0].clone()
+}
+
+#[test]
+fn finish_waits_for_admitted_rows_only() {
+    use ignorarium::analysis::finish;
+    use ignorarium::runner::{RunStatus, run};
+    let lab = lab();
+    common::resize_pilot(&lab.home);
+    let plan = resize_study(&lab, "waits", &flat("99"));
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let all = common::records_of(&lab, "waits");
+    let (ran, rows) = reserve_ran(&plan, &all);
+    // The analysis follows the rows the record admits; the other reserve rows never ran.
+    assert!(!ran.is_empty() && ran.len() < RESERVE, "{ran:?}");
+    assert_eq!(kind_of(&lab, "waits", "row").len(), 2 * FIRST + rows);
+    assert_eq!(kind_of(&lab, "waits", "analysis").len(), 1);
+    assert_eq!(kind_of(&lab, "waits", "verdict").len(), 1);
+    let log = lab.home.study_dir("waits").join("records.jsonl");
+    let whole = std::fs::read_to_string(&log).unwrap();
+    let resized = all.iter().position(|r| r.kind == "resize").unwrap();
+    let last_row = all.iter().rposition(|r| r.kind == "row").unwrap();
+    // Without the record, or without its last admitted row, finish waits.
+    for kept in [resized, last_row] {
+        let text: String = whole.split_inclusive('\n').take(kept).collect();
+        std::fs::write(&log, text).unwrap();
+        finish(&plan).unwrap();
+        assert_eq!(common::records_of(&lab, "waits").len(), kept, "{kept}");
+    }
+    // With every admitted row, it adds the analysis and its verdict.
+    let text: String = whole.split_inclusive('\n').take(last_row + 1).collect();
+    std::fs::write(&log, text).unwrap();
+    finish(&plan).unwrap();
+    assert_eq!(kind_of(&lab, "waits", "analysis").len(), 1);
+    assert_eq!(kind_of(&lab, "waits", "verdict").len(), 1);
+}
+
+#[test]
+fn the_e_process_sees_the_first_batch_then_the_reserve_in_pin_order() {
+    use evidence::rng::Rng;
+    use ignorarium::derived::Estimate;
+    use ignorarium::runner::{RunStatus, run};
+    let lab = lab();
+    common::resize_pilot(&lab.home);
+    let plan = resize_study(&lab, "order", VARIED);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let all = common::records_of(&lab, "order");
+    let x = observed(&plan, &all);
+    let appended = resize_of(&lab, "order").strata[0].appended as usize;
+    assert!(appended > 0 && appended < RESERVE, "{appended}");
+    // The first batch in the order the test seed draws, then the reserve by pin.
+    let first: Vec<f64> = first_batch(&plan).iter().map(|p| x[p]).collect();
+    assert_eq!(first.len(), FIRST);
+    let path = ignorarium::seed::seed(&plan.spec_hash, "test/H1/");
+    let order = evidence::claim::order(FIRST, &mut Rng::from_seed(path));
+    let drawn: Vec<f64> = order.iter().map(|&i| first[i]).collect();
+    let reserve: Vec<f64> = by_pin(&plan)[..appended].iter().map(|p| x[p]).collect();
+    let e = e_of(&[&drawn[..], &reserve[..]].concat());
+    let v = verdict_of(&lab, "order");
+    assert_eq!(v.e_value, Some(e));
+    assert_eq!(v.bounds.len(), 1);
+    assert_eq!(v.bounds[0].clusters, (FIRST + appended) as u64);
+    assert_eq!(v.bounds[0].value, Some(e));
+    // Another order gives another e-value, so the one the verdict holds is this order's.
+    let reversed: Vec<f64> = reserve.iter().rev().copied().collect();
+    assert_ne!(e, e_of(&[&drawn[..], &reversed[..]].concat()));
+    assert_ne!(e, e_of(&[&first[..], &reserve[..]].concat()));
+    assert_ne!(e, e_of(&[&reserve[..], &drawn[..]].concat()));
+    // The estimate holds the appended clusters too.
+    let est = kind_of(&lab, "order", "estimate");
+    assert_eq!(est.len(), 1);
+    let est = Estimate::of(&est[0]).unwrap();
+    assert_eq!(
+        (est.clusters, est.units),
+        ((FIRST + appended) as u64, (FIRST + appended) as u64)
+    );
+}
+
+#[test]
+fn a_stopped_study_fails_its_claims_with_e_value_zero_and_closes_its_slot_with_zero() {
+    use ignorarium::runner::{RunStatus, run};
+    let lab = lab();
+    common::resize_pilot(&lab.home);
+    // The reason is the resize record's, after `stopped: `: a reserve too short for a spread
+    // of 2, or a first-batch unit with no value.
+    let short = "the reserve cannot reach the power the claim needs";
+    let broken = "incomplete units in the first batch: 1";
+    for (id, payload, why) in [
+        ("short", flat("98"), short),
+        ("broken", ONE_FAILS.into(), broken),
+    ] {
+        let plan = resize_study(&lab, id, &payload);
+        assert_eq!(run(&plan).unwrap(), RunStatus::Done, "{id}");
+        let resize = resize_of(&lab, id);
+        assert_eq!(
+            (resize.decision.as_str(), resize.reason.as_deref()),
+            ("stop", Some(why))
+        );
+        let all = common::records_of(&lab, id);
+        assert_eq!(reserve_ran(&plan, &all), (vec![], 0), "{id}");
+        assert_eq!(kind_of(&lab, id, "row").len(), 2 * FIRST, "{id}");
+        let v = verdict_of(&lab, id);
+        let level = register_of(&lab, id).alpha.unwrap().level;
+        assert_eq!(
+            (v.verdict.as_str(), v.basis.as_str(), v.level, v.e_value),
+            ("fail", "test", Some(level), Some(0.0)),
+            "{id}"
+        );
+        assert_eq!(v.reason, Some(format!("stopped: {why}")), "{id}");
+        // The first batch alone was analysed.
+        let complete = FIRST as u64 - u64::from(id == "broken");
+        assert_eq!(v.bounds[0].clusters, complete, "{id}");
+        let close = close_of_slot(&lab, id);
+        assert_eq!(
+            (&close["e_value"], &close["discovery"]),
+            (&serde_json::json!(0.0), &serde_json::json!(false)),
+            "{id}"
+        );
+    }
+}
+
+/// The study's analysis record, which comes after its last row and its resize record; that
+/// record names no sd.
+fn analysis_after_the_end(lab: &Lab, id: &str) -> ignorarium::derived::Analysis {
+    let all = common::records_of(lab, id);
+    let at = all.iter().position(|r| r.kind == "analysis").unwrap();
+    let last_row = all.iter().rposition(|r| r.kind == "row").unwrap();
+    let resized = all.iter().position(|r| r.kind == "resize").unwrap();
+    assert!(at > last_row && at > resized, "{at}");
+    assert!(!all[resized].body.to_string().contains("sd"));
+    ignorarium::derived::Analysis::of(&all[at]).unwrap()
+}
+
+#[test]
+fn the_analysis_record_holds_the_resize_sd_and_the_appended_sd_after_the_end() {
+    use evidence::power::blinded_sd;
+    use ignorarium::derived::GroupSd;
+    use ignorarium::runner::{RunStatus, run};
+    let sd = |s: Option<f64>| {
+        vec![GroupSd {
+            hypothesis: "H1".into(),
+            stratum: String::new(),
+            sd: s,
+        }]
+    };
+    let lab = lab();
+    common::resize_pilot(&lab.home);
+    let plan = resize_study(&lab, "spread", VARIED);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let x = observed(&plan, &common::records_of(&lab, "spread"));
+    let appended = resize_of(&lab, "spread").strata[0].appended as usize;
+    let first: Vec<f64> = first_batch(&plan).iter().map(|p| x[p]).collect();
+    let reserve: Vec<f64> = by_pin(&plan)[..appended].iter().map(|p| x[p]).collect();
+    let a = analysis_after_the_end(&lab, "spread");
+    assert_eq!(a.resize_sd, Some(sd(blinded_sd(&first))));
+    assert_eq!(a.appended_sd, Some(sd(blinded_sd(&reserve))));
+    assert_ne!(blinded_sd(&first), blinded_sd(&reserve));
+    // A stopped study appended none: its sd is null. It runs in a box of its own, since the
+    // first study used part of the reserve.
+    let lab = common::lab();
+    common::resize_pilot(&lab.home);
+    let plan = resize_study(&lab, "flat", &flat("98"));
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let a = analysis_after_the_end(&lab, "flat");
+    assert_eq!(a.resize_sd, Some(sd(Some(2.0))));
+    assert_eq!(a.appended_sd, Some(sd(None)));
+    let body = &kind_of(&lab, "flat", "analysis")[0].body;
+    assert_eq!(body["appended_sd"][0]["sd"], Value::Null);
+}
+
+#[test]
+fn unused_reserve_data_is_released_and_fresh_again() {
+    use ignorarium::runner::{RunStatus, run};
+    let lab = lab();
+    common::resize_pilot(&lab.home);
+    let plan = resize_study(&lab, "grows", &flat("99"));
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let appended = resize_of(&lab, "grows").strata[0].appended as usize;
+    let pins = by_pin(&plan);
+    // One release names the plan leaf by its commitment and every reserve input not appended.
+    let register = register_of(&lab, "grows");
+    let leaf = plan_log_of(&lab, "grows")
+        .leaf(register.leaf)
+        .unwrap()
+        .unwrap();
+    let released = releases(&lab, "grows");
+    assert_eq!(released.len(), 1);
+    let r = &released[0];
+    assert_eq!(
+        (r.label.as_str(), &r.commitment, &r.family, &r.mode),
+        ("study:grows", &leaf.commitment, &None, &None)
+    );
+    assert!(leaf.commitment.is_some());
+    let mut data = r.data_hashes.clone();
+    data.sort();
+    assert_eq!(data, reserve_data(&pins[appended..]));
+    // A later confirmatory plan that names a released text passes E-CNF-005; one that names
+    // an appended text fails it.
+    let later = |n: usize, path: &str| {
+        let root = lab.root.join(format!("later-{n}"));
+        std::fs::create_dir_all(root.join("data")).unwrap();
+        std::fs::write(root.join("data/confirm.txt"), format!("{path}\n")).unwrap();
+        let t = std::fs::read_to_string("../../templates/numeric-ablation.toml").unwrap();
+        let spec = root.join("spec.toml");
+        std::fs::write(&spec, common::confirmatory(t)).unwrap();
+        let (_, v) = check_json(&lab, &spec);
+        codes(&v).contains(&"E-CNF-005")
+    };
+    assert!(!later(0, &pins[appended]), "a released text is fresh");
+    assert!(!later(1, &pins[RESERVE - 1]), "a released text is fresh");
+    assert!(later(2, &pins[0]), "an appended text is used");
+    assert!(later(3, &pins[appended - 1]), "an appended text is used");
+}
+
+#[test]
+fn finish_twice_appends_one_release() {
+    use ignorarium::analysis::finish;
+    use ignorarium::runner::{RunStatus, run};
+    let lab = lab();
+    common::resize_pilot(&lab.home);
+    // A stopped study releases its whole reserve.
+    let plan = resize_study(&lab, "twice", &flat("98"));
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let once = releases(&lab, "twice");
+    assert_eq!(once.len(), 1);
+    let mut data = once[0].data_hashes.clone();
+    data.sort();
+    assert_eq!(data, reserve_data(&by_pin(&plan)));
+    let leaves = plan_log_of(&lab, "twice").leaves().unwrap().len();
+    finish(&plan).unwrap();
+    assert_eq!(releases(&lab, "twice"), once);
+    assert_eq!(plan_log_of(&lab, "twice").leaves().unwrap().len(), leaves);
+    // A finish that adds the verdict again still adds no release.
+    let log = lab.home.study_dir("twice").join("records.jsonl");
+    let whole = std::fs::read_to_string(&log).unwrap();
+    let kept = whole.lines().count() - 1;
+    let text: String = whole.split_inclusive('\n').take(kept).collect();
+    std::fs::write(&log, text).unwrap();
+    finish(&plan).unwrap();
+    assert_eq!(kind_of(&lab, "twice", "verdict").len(), 1);
+    assert_eq!(releases(&lab, "twice"), once);
+}
+
+/// Every key of `v`, at any depth.
+fn keys_of(v: &Value) -> Vec<String> {
+    match v {
+        Value::Object(m) => (m.iter())
+            .flat_map(|(k, v)| std::iter::once(k.clone()).chain(keys_of(v)))
+            .collect(),
+        Value::Array(a) => a.iter().flat_map(keys_of).collect(),
+        _ => vec![],
+    }
+}
+
+#[test]
+fn status_shows_counts_and_decision_only() {
+    use ignorarium::runner::{RunStatus, run};
+    // What status may not show: a spread, a mean, an e-value, the reserve size or a reason.
+    let hidden = [
+        "sd",
+        "resize_sd",
+        "appended_sd",
+        "mean",
+        "e_value",
+        "value",
+        "reserve",
+        "reason",
+    ];
+    let words = |t: &str| -> Vec<String> {
+        (t.split(|c: char| !c.is_ascii_alphanumeric() && c != '_'))
+            .map(String::from)
+            .collect()
+    };
+    let lab = lab();
+    common::resize_pilot(&lab.home);
+    let plan = resize_study(&lab, "counts", VARIED);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let r = resize_of(&lab, "counts");
+    let g = &r.strata[0];
+    let needed = g.needed.unwrap();
+    let s = status(&lab, "counts");
+    assert_eq!(
+        s["resize"],
+        serde_json::json!({
+            "decision": "continue",
+            "strata": [{ "stratum": "", "first": FIRST, "needed": needed, "appended": g.appended }],
+        })
+    );
+    for k in keys_of(&s) {
+        assert!(!hidden.contains(&k.as_str()), "{k}");
+    }
+    // The rows that run are all the rows: the reserve rows the record leaves out count not.
+    let rows = 2 * (FIRST as u64 + g.appended);
+    let done = |s: &Value| {
+        (
+            s["done"].clone(),
+            s["total"].clone(),
+            s["eta_seconds"].clone(),
+        )
+    };
+    let ended = |n: u64| {
+        (
+            serde_json::json!(n),
+            serde_json::json!(n),
+            serde_json::json!(0.0),
+        )
+    };
+    assert_eq!(done(&s), ended(rows));
+    let a = bin(&lab).args(["status", "counts"]).assert().success();
+    let t = text(&a);
+    let want = format!(
+        "resize: continue\nresize pooled: first {FIRST}, needed {needed}, appended {}\n",
+        g.appended
+    );
+    assert!(t.contains(&want), "{t}");
+    for w in words(&t) {
+        assert!(!hidden.contains(&w.as_str()), "{w} in {t}");
+    }
+    // A study with no re-size shows none.
+    plain(&lab, "none");
+    assert_eq!(status(&lab, "none")["resize"], Value::Null);
+    let a = bin(&lab).args(["status", "none"]).assert().success();
+    assert!(!text(&a).contains("resize"));
+    // A stopped study's group needs no count. It runs in a box of its own, since the first
+    // study used part of the reserve.
+    let lab = common::lab();
+    common::resize_pilot(&lab.home);
+    let plan = resize_study(&lab, "halted", &flat("98"));
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let s = status(&lab, "halted");
+    assert_eq!(s["resize"]["decision"], "stop");
+    assert_eq!(s["resize"]["strata"][0]["needed"], Value::Null);
+    assert_eq!(done(&s), ended(2 * FIRST as u64));
+    let a = bin(&lab).args(["status", "halted"]).assert().success();
+    let want = format!("resize: stop\nresize pooled: first {FIRST}, needed n/a, appended 0\n");
+    assert!(text(&a).contains(&want), "{}", text(&a));
 }

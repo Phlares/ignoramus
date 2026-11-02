@@ -483,6 +483,8 @@ pub fn finished_with(
         slot: None,
         instrument,
         recheck,
+        resize_sd: None,
+        appended_sd: None,
     };
     let head = [
         ("register", serde_json::to_value(register).unwrap()),

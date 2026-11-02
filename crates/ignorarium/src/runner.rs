@@ -5,7 +5,7 @@ use crate::backend::{
 };
 use crate::budget::{Alerts, Cost, CostMeter, Decision, HostMeter, decide, dimension_name};
 use crate::control::{self, ControlError, ControlFile, RunLock, Signal, State};
-use crate::derived::{INPUTS, Inputs, REGISTER, RESIZE, Register, Resize, SELECTION, Selection};
+use crate::derived::{CONTINUE, INPUTS, Inputs, REGISTER, RESIZE, Register, SELECTION, Selection};
 use crate::diag::printable;
 use crate::environ::{Builder, Built, Recipe};
 use crate::estimate::{apply_defaults, estimate};
@@ -758,7 +758,13 @@ pub fn progress(
     let (spec, _, spec_hash, _) = stored_spec(&home.study_dir(study_id))?;
     let machine = machine::load(&home.root).map_err(io)?;
     let register = all.iter().find_map(Register::of);
-    let rows = expand_rows(&spec, &spec_hash, register.as_ref())?;
+    // The rows that run: a re-size study's record leaves out the reserve rows it never admits.
+    // Its reserve inputs hold no data twice (E-CNF-004), so every one is a cluster.
+    let clusters = units::clusters(&spec, &spec_hash);
+    let ran = resize::ran(&spec, &clusters, resize::recorded(all)?.as_ref());
+    let rows: Vec<Row> = (expand_rows(&spec, &spec_hash, register.as_ref())?.into_iter())
+        .filter(|r| resize::runs(r, &ran))
+        .collect();
     let tally = Tally::of(all);
     let mut conditions: BTreeMap<String, (u64, u64)> = BTreeMap::new();
     for r in &rows {
@@ -858,7 +864,7 @@ fn gate_late_data(
 /// `import-history` refuses a phase name with this prefix, so no other leaf has it.
 pub const OWN_PREFIX: &str = "study:";
 
-fn own_label(id: &str) -> String {
+pub(crate) fn own_label(id: &str) -> String {
     format!("{OWN_PREFIX}{id}")
 }
 
@@ -981,10 +987,11 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
         .filter(|r| !done.contains(&r.index))
     {
         // In a re-size study no reserve row runs before the `resize` record, and only the
-        // rows of the clusters it admits run: none when it stops.
+        // rows of the clusters it admits run. A stop runs none: the run leaves the loop.
         if row.stage == RESERVE_STAGE && plan.spec.design.resize.is_some() {
             if admitted.is_none() {
-                admitted = Some(resized(plan, &log)?);
+                let Some(a) = resized(plan, &log)? else { break };
+                admitted = Some(a);
             }
             if !admitted.as_ref().is_some_and(|a| a.contains(&row.cluster)) {
                 continue;
@@ -1388,14 +1395,13 @@ fn selection(plan: &RunPlan, log: &Path) -> Result<Result<Pick, String>, RunErro
 
 /// The paths of the reserve clusters that run in a re-size study, from its `resize` record:
 /// the one its records hold, or else one made now from the first batch (`resize::or_stop`) and
-/// signed. A resume reads the record and never makes it again.
-fn resized(plan: &RunPlan, log: &Path) -> Result<BTreeSet<String>, RunError> {
+/// signed; `None` when it stops. A resume reads the record and never makes it again.
+fn resized(plan: &RunPlan, log: &Path) -> Result<Option<BTreeSet<String>>, RunError> {
     let all = records::read_all(log, &plan.key.verifying_key())?;
     let clusters =
         analysis::distinct_clusters(units::clusters(&plan.spec, &plan.spec_hash), &plan.inputs);
-    let decided = match all.iter().find(|r| r.kind == RESIZE) {
-        Some(r) => Resize::of(r)
-            .ok_or_else(|| RunError::Records("the resize record does not parse".into()))?,
+    let decided = match resize::recorded(&all)? {
+        Some(r) => r,
         None => {
             let r = resize::or_stop(&plan.spec, &plan.spec_hash, &all, &clusters);
             analysis::append(plan, log, RESIZE, &r)?;
@@ -1403,11 +1409,8 @@ fn resized(plan: &RunPlan, log: &Path) -> Result<BTreeSet<String>, RunError> {
         }
     };
     let order = schedule::reserve_order(&plan.spec, &clusters);
-    Ok(decided
-        .admitted(&order)
-        .into_iter()
-        .map(String::from)
-        .collect())
+    let admitted = decided.admitted(&order).into_iter().map(String::from);
+    Ok((decided.decision == CONTINUE).then(|| admitted.collect()))
 }
 
 /// One row in its own span: `row.start`, the attempts, `row.end`. `Some` ends the run.

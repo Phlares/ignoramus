@@ -309,6 +309,8 @@ fn an_analysis_record_states_what_follows_it() {
                 uncompared: vec![6],
                 carried_from: None,
             }),
+            resize_sd: None,
+            appended_sd: None,
         }
     );
     assert_eq!(serde_json::to_value(&a).unwrap(), analysis_body());

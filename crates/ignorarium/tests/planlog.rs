@@ -605,6 +605,99 @@ fn prior_use_ignores_an_empty_normalized_hash() {
     );
 }
 
+fn pair(n: &str) -> (String, String) {
+    (format!("ex-{n}"), format!("no-{n}"))
+}
+
+/// The indices of the leaves `uses` finds for data `n`.
+fn uses_of(log: &PlanLog, n: &str) -> Vec<usize> {
+    let (e, no) = pair(n);
+    log.uses(&e, &no).unwrap().iter().map(|(i, _)| *i).collect()
+}
+
+#[test]
+fn a_release_leaf_alone_is_no_use() {
+    let t = tempfile::tempdir().unwrap();
+    let log = PlanLog::open(t.path()).unwrap();
+    let (i, head) = log
+        .append_release("study:s", "c0", vec![pair("a"), pair("b")], &key(1))
+        .unwrap();
+    assert_eq!((i, head.size), (0, 1));
+    let leaves = log.leaves().unwrap();
+    assert_eq!(leaves.len(), 1);
+    let want = Leaf {
+        kind: "release".into(),
+        commitment: Some("c0".into()),
+        family: None,
+        mode: None,
+        data_hashes: vec![pair("a"), pair("b")],
+        label: "study:s".into(),
+        ts: leaves[0].ts.clone(),
+    };
+    assert_eq!(leaves[0], want);
+    assert_eq!(uses_of(&log, "a"), Vec::<usize>::new());
+    assert_eq!(log.used("ex-b", "no-b").unwrap(), None);
+    assert_eq!(log.verify(&vk(1)).unwrap(), ok(1));
+}
+
+#[test]
+fn a_later_release_frees_only_the_data_of_the_leaves_it_names() {
+    let t = tempfile::tempdir().unwrap();
+    let log = PlanLog::open(t.path()).unwrap();
+    // A release before the plan it names frees nothing.
+    log.append_release("study:s", "c1", vec![pair("a")], &key(1))
+        .unwrap();
+    let mut plan = leaf("plan", 1);
+    plan.data_hashes = vec![pair("a"), pair("b"), pair("c")];
+    log.append(plan, &key(1)).unwrap();
+    let mut other = leaf("plan", 2);
+    other.data_hashes = vec![pair("c")];
+    log.append(other, &key(1)).unwrap();
+    let mut late = leaf("legacy", 3);
+    late.label = "study:s".into();
+    late.data_hashes = vec![pair("d")];
+    log.append(late, &key(1)).unwrap();
+    let mut phase = leaf("legacy", 4);
+    phase.label = "study:t".into();
+    phase.data_hashes = vec![pair("d")];
+    log.append(phase, &key(1)).unwrap();
+    assert_eq!(uses_of(&log, "a"), vec![1]);
+    // Plan leaf 1 by its commitment, late-data leaf 3 by its label; leaf 2 is another plan
+    // and leaf 4 another study's, so their hits stay.
+    log.append_release(
+        "study:s",
+        "c1",
+        vec![pair("a"), pair("c"), pair("d")],
+        &key(1),
+    )
+    .unwrap();
+    assert_eq!(uses_of(&log, "a"), Vec::<usize>::new());
+    assert_eq!(uses_of(&log, "b"), vec![1], "b is not released");
+    assert_eq!(uses_of(&log, "c"), vec![2]);
+    assert_eq!(uses_of(&log, "d"), vec![4]);
+    // By the normalized hash alone, as `uses` matches.
+    assert_eq!(log.uses("zzz", "no-a").unwrap(), vec![]);
+    assert_eq!(
+        log.used("ex-c", "zzz").unwrap(),
+        Some("leaf 2 (plan)".into())
+    );
+    // A plan that names the data after the release uses it again.
+    let mut again = leaf("plan", 6);
+    again.data_hashes = vec![pair("a")];
+    log.append(again, &key(1)).unwrap();
+    assert_eq!(uses_of(&log, "a"), vec![6]);
+    // A release with no commitment names no leaf that has none either.
+    let mut bare = leaf("legacy", 7);
+    bare.commitment = None;
+    bare.data_hashes = vec![pair("e")];
+    log.append(bare, &key(1)).unwrap();
+    let mut unnamed = leaf("release", 8);
+    unnamed.commitment = None;
+    unnamed.data_hashes = vec![pair("e")];
+    log.append(unnamed, &key(1)).unwrap();
+    assert_eq!(uses_of(&log, "e"), vec![7]);
+}
+
 #[test]
 fn prior_use_on_an_empty_log_is_none() {
     let t = tempfile::tempdir().unwrap();

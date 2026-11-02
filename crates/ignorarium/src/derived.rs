@@ -280,6 +280,26 @@ pub struct Analysis {
     /// that does not, and in a record written before the field existed. Written as `null`.
     #[serde(default)]
     pub recheck: Option<Recheck>,
+    /// In a study that re-sized, the blinded sd of each claim's first-batch observations in
+    /// each group it is tested in; the `resize` record holds counts alone, so the spread is
+    /// shown only once the study is over. Left out for a study that did not re-size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resize_sd: Option<Vec<GroupSd>>,
+    /// The same over the appended reserve clusters, `sd` `null` for a group that appended
+    /// none: with `resize_sd`, the spread of the two stages side by side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appended_sd: Option<Vec<GroupSd>>,
+}
+
+/// The blinded sd (`evidence::power::blinded_sd`) of a claim's cluster observations in one
+/// group (`""` pools every cluster); `None` when there is no observation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupSd {
+    pub hypothesis: String,
+    pub stratum: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub sd: Option<f64>,
 }
 
 /// What the recheck copies of a run found, one copy per condition: `rows` counts the copies

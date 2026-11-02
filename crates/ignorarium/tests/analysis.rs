@@ -796,7 +796,7 @@ fn decided(
     clusters: &[Cluster],
     level: Option<f64>,
 ) -> (Vec<Verdict>, Option<f64>) {
-    let vs = verdicts(spec, p, clusters, &HASH, level);
+    let vs = verdicts(spec, p, clusters, &HASH, level, None);
     let e = study_e_value(spec, &vs, level);
     (vs, e)
 }
@@ -881,34 +881,101 @@ fn a_confirmatory_claim_tests_each_bound_on_one_observation_per_cluster_in_a_see
 }
 
 #[test]
-fn reserve_clusters_change_no_estimate_or_verdict() {
+fn reserve_clusters_follow_the_first_batch_in_the_order_given() {
     let spec = below_zero("confirmatory", &["code"]);
-    let first = same("c", "code", 15, -1.0);
-    // Reserve clusters whose units lie above the margin, in the claimed stratum and pooled.
-    let reserve = [same("r", "code", 15, 1.0), same("q", "", 3, 1.0)].concat();
-    let (p, clusters) = data(&spec, &first);
-    let (all_p, mut all) = data(&spec, &[first, reserve].concat());
-    for c in &mut all[15..] {
+    // Values near 0: the e-process bets below its largest bet, so each place counts.
+    let xs = [-0.5, 0.25, -0.25, 0.5, -0.75];
+    let ys = [-1.0, 0.75, -0.5];
+    let first: Vec<Group> = (xs.iter().enumerate())
+        .map(|(i, x)| group(&format!("c{i}"), "code", &[*x]))
+        .collect();
+    // Reserve clusters in the claimed stratum, then one in no stratum, which only the pooled
+    // estimate reads.
+    let mut reserve: Vec<Group> = (ys.iter().enumerate())
+        .map(|(i, y)| group(&format!("r{i}"), "code", &[*y]))
+        .collect();
+    reserve.push(group("q", "", &[-1.0]));
+    let (p, mut all) = data(&spec, &[first, reserve].concat());
+    for c in &mut all[5..] {
         c.role = Role::Reserve;
     }
-    // A reserve unit with no paired value.
-    all[15].picked.push(1);
-    let judged = |p: &Paired, c: &[Cluster]| {
-        let e = estimates(&spec, &no_params(), p, c, None);
-        (e, decided(&spec, p, c, Some(LEVEL)))
-    };
-    let (e, (vs, study)) = judged(&all_p, &all);
-    assert_eq!((e.clone(), (vs.clone(), study)), judged(&p, &clusters));
-    assert_eq!(e[0].clusters, 15);
+    // The first batch in its seeded order, then the reserve in the order given.
+    let drawn: Vec<f64> = (seeded_order("H1", "code", 5).into_iter())
+        .map(|i| xs[i])
+        .collect();
+    let e = |ys: &[f64]| e_value(&MEAN, &BELOW_ZERO, &[&drawn[..], ys].concat()).unwrap();
+    let (vs, study) = decided(&spec, &p, &all, Some(LEVEL));
+    assert_eq!(vs[0].e_value, Some(e(&ys)));
+    assert_eq!(vs[0].bounds, [bound("code", "below", 0.0, 8, e(&ys))]);
+    assert_eq!(study, Some(e(&ys)));
+    // Another reserve order gives another e-value, the one the test then reads.
+    let swapped = [ys[1], ys[0], ys[2]];
+    assert_ne!(e(&ys), e(&swapped));
+    let mut other = all.clone();
+    other.swap(5, 6);
     assert_eq!(
-        (vs[0].verdict.as_str(), vs[0].incomplete_units),
-        ("pass", 0)
+        decided(&spec, &p, &other, Some(LEVEL)).0[0].e_value,
+        Some(e(&swapped))
     );
-    // As confirmation clusters they would count.
-    for c in &mut all[15..] {
+    // As confirmation clusters they would join the seeded shuffle.
+    let mut confirmed = all.clone();
+    for c in &mut confirmed[5..] {
         c.role = Role::Confirmation;
     }
-    assert_ne!(judged(&all_p, &all).0, e);
+    assert_ne!(
+        decided(&spec, &p, &confirmed, Some(LEVEL)).0[0].e_value,
+        Some(e(&ys))
+    );
+    // The estimates hold them too: 8 clusters in the stratum, 9 pooled.
+    let held: Vec<(String, u64)> = (estimates(&spec, &no_params(), &p, &all, None).into_iter())
+        .map(|e| (e.stratum, e.clusters))
+        .collect();
+    assert_eq!(held, [("code".to_string(), 8), (String::new(), 9)]);
+    // A reserve unit with no paired value leaves its unit incomplete: e-value 0.
+    all[5].picked.push(1);
+    let (vs, study) = decided(&spec, &p, &all, Some(LEVEL));
+    assert_eq!(
+        (vs[0].e_value, vs[0].incomplete_units, study),
+        (Some(0.0), 1, Some(0.0))
+    );
+}
+
+#[test]
+fn a_stop_fails_every_claim_and_leaves_a_hypothesis_without_one() {
+    for mode in ["confirmatory", "exploratory"] {
+        let mut v = below_zero_value(mode, &[]);
+        // A second hypothesis with no claim.
+        let mut second = v["question"]["hypotheses"][0].clone();
+        second["id"] = json!("H2");
+        for k in ["claim", "statistic", "alpha_share"] {
+            second.as_object_mut().unwrap().remove(k);
+        }
+        v["question"]["hypotheses"]
+            .as_array_mut()
+            .unwrap()
+            .push(second);
+        let spec = Spec::from_value(&v).unwrap();
+        let (p, clusters) = data(&spec, &same("c", "", 15, -1.0));
+        let level = (mode == "confirmatory").then_some(LEVEL);
+        let go = verdicts(&spec, &p, &clusters, &HASH, level, None);
+        assert_eq!(go[0].verdict, "pass", "{mode}");
+        let vs = verdicts(&spec, &p, &clusters, &HASH, level, Some("why"));
+        let tested = (mode == "confirmatory").then_some(0.0);
+        assert_eq!(
+            (
+                vs[0].verdict.as_str(),
+                vs[0].e_value,
+                vs[0].reason.as_deref()
+            ),
+            ("fail", tested, Some("stopped: why")),
+            "{mode}"
+        );
+        // The first batch was still read.
+        assert_eq!(vs[0].bounds, go[0].bounds, "{mode}");
+        assert_eq!(vs[1], go[1], "{mode}");
+        assert_eq!(vs[1].verdict, "none", "{mode}");
+        assert_eq!(study_e_value(&spec, &vs, level), tested, "{mode}");
+    }
 }
 
 #[test]
