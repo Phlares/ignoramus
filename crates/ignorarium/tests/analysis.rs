@@ -706,8 +706,11 @@ fn clusters_that_hold_the_same_data_count_once() {
         // An empty normalized hash matches nothing.
         ("g".to_string(), h("x4", "")),
         ("i".to_string(), h("x5", "")),
+        // The exact hash of `c` and the normalized hash of `b`, neither a cluster: an input
+        // is compared with the kept data alone.
+        ("j".to_string(), h("x2", "n9")),
     ];
-    let all: Vec<Cluster> = ["a", "b", "c", "d", "e", "f", "g", "i"]
+    let all: Vec<Cluster> = ["a", "b", "c", "d", "e", "f", "g", "i", "j"]
         .iter()
         .map(|p| cluster(p, "", 1))
         .collect();
@@ -715,7 +718,7 @@ fn clusters_that_hold_the_same_data_count_once() {
         .into_iter()
         .map(|c| c.path)
         .collect();
-    assert_eq!(kept, ["a", "d", "e", "f", "g", "i"]);
+    assert_eq!(kept, ["a", "d", "e", "f", "g", "i", "j"]);
     // Only a cluster of the same role is the same cluster.
     let mut mixed = all[..2].to_vec();
     mixed[1].role = Role::Selection;

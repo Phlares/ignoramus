@@ -98,9 +98,9 @@ fn stage(spec: &Spec, role: Role) -> Option<(&'static str, &[String])> {
 }
 
 /// Rows in the order stage (selection, confirmation, reserve), stratum, cluster path (a
-/// reserve cluster's input pin instead), then each picked unit,
-/// then the reference condition, then the stage's conditions in the order it lists them, then
-/// repeat 0..repeats. The order of `clusters` does not matter.
+/// reserve cluster's input pin instead), then each picked unit, then the reference condition,
+/// then the stage's conditions in the order it lists them, then repeat 0..repeats. The order
+/// of `clusters` does not matter.
 pub fn expand(
     spec: &Spec,
     spec_hash: &[u8; 32],
@@ -186,10 +186,9 @@ pub fn rows(spec: &Spec, spec_hash: &[u8; 32], rechecks: bool) -> Result<Vec<Row
 
 /// `rows` with one copy of a row of each condition id, which repeats that row's job so the
 /// two outputs can be compared. A reserve row has no copy. The j-th condition id, in order of
-/// first appearance, has its
-/// row drawn from `seed(spec_hash, "recheck/<condition>")`; the copy takes index
-/// `rows.len() + j` and `recheck_of` the original's index, keeps every other field, and runs
-/// right after the original.
+/// first appearance, has its row drawn from `seed(spec_hash, "recheck/<condition>")`; the copy
+/// takes index `rows.len() + j` and `recheck_of` the original's index, keeps every other
+/// field, and runs right after the original.
 pub fn with_rechecks(rows: Vec<Row>, spec_hash: &[u8; 32]) -> Vec<Row> {
     // Each condition id with the positions of its rows, in order of first appearance.
     let mut conditions: Vec<(&str, Vec<usize>)> = Vec::new();

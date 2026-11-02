@@ -1,11 +1,15 @@
 //! Long simulations of a design with a blinded re-size from a reserve, ignored by default:
 //! `cargo test -p evidence --release --test staged_level -- --ignored --nocapture`.
 //!
-//! Every scenario has one stratum: a first batch of 21 clusters of 4 units and a reserve, a
-//! mean claim below ln 1.04 on [-ln 2, ln 2] at level 0.005, sized at ln 1.02.
+//! Every scenario simulates one stratum of a two-stratum design, so its re-size asks that
+//! stratum's share of power 0.8, 0.8^(1/2): a first batch of 21 clusters of 4 units and a
+//! reserve, a mean claim below ln 1.04 on [-ln 2, ln 2] at level 0.005, sized at ln 1.02. The
+//! level test asserts a bound on the pass share; the power test asserts nothing and prints its
+//! shares.
 //!
-//! Seeds: batch b of scenario `name` runs on `seed("<test>/<name>/<b>")`, four splitmix64
-//! outputs from the FNV-1a hash of that text, so each scenario and batch has its own seed.
+//! Seeds: batch b of scenario `name` in test `level` or `power` runs on
+//! `seed("<test>/<name>/<b>")`, four splitmix64 outputs from the FNV-1a hash of that text, so
+//! each scenario and batch has its own seed.
 //! A scenario runs in batches of 4,000 replicates, the count the registration gate uses: one
 //! call of 100,000 would size its re-size table with 100,000 replicates per search, past
 //! `WORK`.

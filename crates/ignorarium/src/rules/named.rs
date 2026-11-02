@@ -12,7 +12,7 @@ use crate::diag::{Diagnostic, printable};
 use crate::inputs::{self, Found, input_path};
 use crate::payload::{self, PayloadError};
 use crate::power::{required_clusters, z};
-use crate::prior::{PriorUse, same_data};
+use crate::prior::{PriorUse, Seen, same_data};
 use crate::records;
 use crate::schedule::ROW_CAP;
 use crate::seed::seed;
@@ -650,14 +650,10 @@ fn gate(spec: &Value, ctx: &CheckCtx, h: &Value, design: (f64, f64, u64)) -> Opt
         return None;
     };
     let level = stream_level * sized.share;
-    let sizes = |of: &str, g: &StratumInput| -> Vec<u32> {
-        (cluster_sizes(spec, ctx, of, &g.stratum, per).into_iter())
-            .map(|u| u32::try_from(u).unwrap_or(u32::MAX))
-            .collect()
-    };
+    let confirmation = clusters_of(spec, ctx, "confirmation", per);
     let groups: Vec<(StratumInput, Vec<u32>)> = (groups.into_iter())
         .map(|g| {
-            let first = sizes("confirmation", &g);
+            let first = units_in(&confirmation, &g.stratum);
             (g, first)
         })
         .collect();
@@ -684,10 +680,11 @@ fn gate(spec: &Value, ctx: &CheckCtx, h: &Value, design: (f64, f64, u64)) -> Opt
     let id = h.get("id").and_then(Value::as_str).unwrap_or_default();
     let seed = seed(&ctx.spec_hash, &format!("power/{id}"));
     let found = if resized {
+        let reserve = clusters_of(spec, ctx, "reserve", per);
         let strata: Vec<StagedStratum> = (groups.iter())
             .map(|(g, first)| StagedStratum {
                 first: first.clone(),
-                reserve: sizes("reserve", g),
+                reserve: units_in(&reserve, &g.stratum),
                 sd: g.sd,
                 icc: g.icc,
                 unit_mean: sized.at,
@@ -805,15 +802,15 @@ fn inside_range(h: &Value, margins: &[f64]) -> bool {
     }
 }
 
-/// The units each cluster of input role `of` in `stratum` gives (every such input for the
-/// pooled group `""`): its declared units, at most `per`. As in `analysis::distinct_clusters`,
-/// an input that holds the same data as an earlier input of the role, in any stratum, is no
-/// cluster; an input whose data cannot be read counts on its own. An input with no units is
-/// not counted: E-UNT-001 reports it. Confirmation clusters come in spec order; reserve
-/// clusters in the order the schedule runs them: by stratum, then pin, then path.
-fn cluster_sizes(spec: &Value, ctx: &CheckCtx, of: &str, stratum: &str, per: u64) -> Vec<u64> {
-    let mut seen: Vec<(String, String)> = vec![];
-    let mut sizes = vec![];
+/// Each cluster of input role `of`, as its stratum and the units it gives: its declared units,
+/// at most `per`. As in `analysis::distinct_clusters`, an input that holds the same data as an
+/// earlier input of the role, in any stratum, is no cluster; an input whose data cannot be
+/// read counts on its own. An input with no units is not counted: E-UNT-001 reports it.
+/// Confirmation clusters come in spec order; reserve clusters in the order the schedule runs
+/// them: by stratum, then pin, then path.
+fn clusters_of<'a>(spec: &'a Value, ctx: &CheckCtx, of: &str, per: u64) -> Vec<(&'a str, u32)> {
+    let mut seen = Seen::default();
+    let mut clusters = vec![];
     for (_, input) in nodes(spec, "inputs[*]") {
         if role(input) != Some(of) {
             continue;
@@ -825,21 +822,27 @@ fn cluster_sizes(spec: &Value, ctx: &CheckCtx, of: &str, stratum: &str, per: u64
         else {
             continue;
         };
-        if let Some(h) = input_hashes(ctx, input) {
-            if seen.iter().any(|s| same_data(s, &h)) {
-                continue;
-            }
-            seen.push(h);
+        if input_hashes(ctx, input).is_some_and(|h| !seen.insert(&h)) {
+            continue;
         }
         let field = |k: &str| input.get(k).and_then(Value::as_str).unwrap_or_default();
-        if stratum.is_empty() || field("stratum") == stratum {
-            let order =
-                (of == "reserve").then(|| (field("stratum"), field("sha256"), field("path")));
-            sizes.push((order, units.min(per)));
-        }
+        let order = (of == "reserve").then(|| (field("sha256"), field("path")));
+        let units = u32::try_from(units.min(per)).unwrap_or(u32::MAX);
+        clusters.push((field("stratum"), order, units));
     }
-    sizes.sort_by_key(|(order, _)| *order);
-    sizes.into_iter().map(|(_, units)| units).collect()
+    clusters.sort_by_key(|&(stratum, order, _)| order.map(|o| (stratum, o)));
+    (clusters.into_iter())
+        .map(|(stratum, _, units)| (stratum, units))
+        .collect()
+}
+
+/// The units of each of `clusters` (`clusters_of`) in `stratum`; every one for the pooled
+/// group `""`.
+fn units_in(clusters: &[(&str, u32)], stratum: &str) -> Vec<u32> {
+    (clusters.iter())
+        .filter(|(s, _)| stratum.is_empty() || *s == stratum)
+        .map(|&(_, units)| units)
+        .collect()
 }
 
 /// The claim of a hypothesis, when it is well formed.
@@ -1492,9 +1495,8 @@ fn reference_not_self(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
 /// At `inputs`: no confirmation input. At `inputs[*].<field>`: a confirmation or reserve input
 /// holds the data of a selection or calibration input, or a reserve input that of a
 /// confirmation input or of an earlier reserve input: the same exact hash, or the same
-/// normalized hash (text that differs only
-/// in case and spacing). An empty normalized hash (not UTF-8 text) matches nothing. The detail
-/// names the first such input in spec order.
+/// normalized hash (text that differs only in case and spacing). An empty normalized hash (not
+/// UTF-8 text) matches nothing. The detail names the first such input in spec order.
 fn confirmation_disjoint(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     if !pat.contains('.') {
         return flag(spec, pat, |v| {
@@ -1515,18 +1517,20 @@ fn confirmation_disjoint(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
         .into_iter()
         .filter(|(_, input, _)| matches!(role(input), Some("confirmation" | "reserve")))
         .filter_map(|(path, input, _)| {
-            let h = input_hashes(ctx, input)?;
+            // `held` and `with_parent` borrow the same spec nodes, so the address finds the
+            // input's own entry and its hashes; an input whose data was not read has none.
+            let own = (held.iter()).position(|(_, _, _, i)| std::ptr::eq(*i, input))?;
+            let h = &held[own].2;
             // Two confirmation inputs may hold one text. A reserve input holds the data of no
             // selection, calibration or confirmation input, nor of an earlier reserve input.
-            let own = (held.iter()).position(|(_, _, _, i)| std::ptr::eq(*i, input));
             let barred = |at: usize, r: &str| match (is_reserve(input), r) {
-                (true, "reserve") => own.is_some_and(|o| at < o),
+                (true, "reserve") => at < own,
                 (true, _) => true,
                 (false, "confirmation" | "reserve") => false,
                 (false, _) => true,
             };
             let (other, r, _, _) = (held.iter().enumerate())
-                .find(|(at, (_, r, s, _))| barred(*at, r) && same_data(s, &h))?
+                .find(|(at, (_, r, s, _))| barred(*at, r) && same_data(s, h))?
                 .1;
             Some(Hit {
                 path,

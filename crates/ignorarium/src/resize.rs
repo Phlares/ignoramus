@@ -39,6 +39,7 @@ pub fn decide(
         .map(|a| a.level)
         .ok_or("the study holds no level")?;
     let pairs = paired(spec, records);
+    let repeats = spec.design.repeats;
     let mut groups = groups(spec, clusters);
     for h in &spec.question.hypotheses {
         let Some(claim) = h.claim else { continue };
@@ -59,7 +60,6 @@ pub fn decide(
             level: level * share,
         };
         for g in strata {
-            let repeats = spec.design.repeats;
             let (samples, incomplete) = group(
                 clusters,
                 Role::Confirmation,

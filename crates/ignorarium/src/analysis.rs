@@ -6,7 +6,7 @@ use crate::derived::{
     Register, Selection, VERDICT, Verdict, contrast_key,
 };
 use crate::planlog::store::{PlanLog, RELEASE};
-use crate::prior::same_data;
+use crate::prior::Seen;
 use crate::records::{self, Record, RecordDraft};
 use crate::resize;
 use crate::runner::{InputHashes, RunError, RunPlan, own_label, stored_spec};
@@ -21,7 +21,7 @@ use evidence::rng::Rng;
 use evidence::{Tail, claim, tree};
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
 /// Paired values by (unit, condition, outcome id), each with the number of repeats it is the
@@ -807,21 +807,15 @@ pub fn distinct_clusters(
     clusters: Vec<Cluster>,
     hashes: &[(String, Option<(String, String)>)],
 ) -> Vec<Cluster> {
-    let data = |c: &Cluster| {
-        (hashes.iter())
-            .find(|(path, _)| *path == c.path)
-            .and_then(|(_, h)| h.as_ref())
-    };
-    let mut kept: Vec<Cluster> = Vec::new();
-    for c in clusters {
-        let twin = data(&c).is_some_and(|h| {
-            (kept.iter())
-                .filter(|k| k.role == c.role)
-                .any(|k| data(k).is_some_and(|kh| same_data(kh, h)))
-        });
-        if !twin {
-            kept.push(c);
-        }
+    let mut data: HashMap<&str, Option<&(String, String)>> = HashMap::new();
+    for (path, h) in hashes {
+        data.entry(path).or_insert(h.as_ref());
     }
-    kept
+    let mut seen: HashMap<Role, Seen> = HashMap::new();
+    (clusters.into_iter())
+        .filter(|c| match data.get(c.path.as_str()).copied().flatten() {
+            Some(h) => seen.entry(c.role).or_default().insert(h),
+            None => true,
+        })
+        .collect()
 }

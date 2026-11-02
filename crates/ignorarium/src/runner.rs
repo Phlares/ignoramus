@@ -1003,7 +1003,8 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
         if let Some(h) = gate(plan, &dir, &mut books)? {
             return halt(plan, &dir, lock, h, None);
         }
-        // The pick comes at the stage boundary: no confirmation row runs before its record.
+        // The pick comes at the stage boundary: no confirmation or reserve row runs before its
+        // record.
         if [CONFIRMATION_STAGE, RESERVE_STAGE].contains(&row.stage.as_str())
             && plan.spec.design.confirmation.runs_pick()
             && pick.is_none()
@@ -1408,9 +1409,8 @@ fn resized(plan: &RunPlan, log: &Path) -> Result<Option<BTreeSet<String>>, RunEr
             r
         }
     };
-    let order = schedule::reserve_order(&plan.spec, &clusters);
-    let admitted = decided.admitted(&order).into_iter().map(String::from);
-    Ok((decided.decision == CONTINUE).then(|| admitted.collect()))
+    let admitted = resize::ran(&plan.spec, &clusters, Some(&decided));
+    Ok((decided.decision == CONTINUE).then(|| admitted.into_iter().map(String::from).collect()))
 }
 
 /// One row in its own span: `row.start`, the attempts, `row.end`. `Some` ends the run.
