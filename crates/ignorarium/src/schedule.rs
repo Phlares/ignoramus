@@ -115,21 +115,22 @@ pub fn expand(
         .filter_map(|c| stage(spec, c.role).map(|(name, conds)| (name, conds, c)))
         .collect();
     // A reserve cluster goes by its input's pin, so a re-size admits the same clusters
-    // whatever the file names.
-    fn key<'a>(spec: &'a Spec, c: &'a Cluster) -> &'a str {
-        match c.role {
-            Role::Reserve => (spec.inputs.iter())
-                .find(|i| i.path == c.path)
-                .map_or("", |i| &i.sha256[..]),
-            _ => &c.path[..],
-        }
-    }
+    // whatever the file names. The first input with a path names its pin.
+    let pins: BTreeMap<&str, &str> = (spec.inputs.iter().rev())
+        .map(|i| (&i.path[..], &i.sha256[..]))
+        .collect();
     let rank = |r: Role| match r {
         Role::Selection => 0,
         Role::Reserve => 2,
         _ => 1,
     };
-    staged.sort_by_key(|(_, _, c)| (rank(c.role), &c.stratum, key(spec, c), &c.path));
+    staged.sort_by_key(|&(_, _, c)| {
+        let key = match c.role {
+            Role::Reserve => pins.get(&c.path[..]).copied().unwrap_or(""),
+            _ => &c.path[..],
+        };
+        (rank(c.role), &c.stratum, key, &c.path)
+    });
     let mut rows = Vec::new();
     let mut index: u64 = 0;
     for (name, conditions, c) in staged {
