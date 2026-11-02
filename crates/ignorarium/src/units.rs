@@ -1,5 +1,5 @@
-//! Clusters and their units. Each selection or confirmation input is one cluster, named by
-//! its path. The study takes up to `design.units_per_cluster` of the units the input
+//! Clusters and their units. Each selection, confirmation or reserve input is one cluster,
+//! named by its path. The study takes up to `design.units_per_cluster` of the units the input
 //! declares, by the design's pick rule, from a seed that the spec hash fixes.
 use crate::seed::seed;
 use crate::spec::model::{Pick, Role, Spec};
@@ -14,13 +14,13 @@ pub struct Cluster {
     pub picked: Vec<u32>,
 }
 
-/// One cluster per selection or confirmation input, in spec order. Its units come from the
-/// seed `units/<path>`. An input without `units` gives none; the rules refuse it.
+/// One cluster per selection, confirmation or reserve input, in spec order. Its units come
+/// from the seed `units/<path>`. An input without `units` gives none; the rules refuse it.
 pub fn clusters(spec: &Spec, spec_hash: &[u8; 32]) -> Vec<Cluster> {
     let d = &spec.design;
     spec.inputs
         .iter()
-        .filter(|i| matches!(i.role, Role::Selection | Role::Confirmation))
+        .filter(|i| matches!(i.role, Role::Selection | Role::Confirmation | Role::Reserve))
         .map(|i| Cluster {
             path: i.path.clone(),
             stratum: i.stratum.clone(),

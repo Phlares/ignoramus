@@ -881,6 +881,37 @@ fn a_confirmatory_claim_tests_each_bound_on_one_observation_per_cluster_in_a_see
 }
 
 #[test]
+fn reserve_clusters_change_no_estimate_or_verdict() {
+    let spec = below_zero("confirmatory", &["code"]);
+    let first = same("c", "code", 15, -1.0);
+    // Reserve clusters whose units lie above the margin, in the claimed stratum and pooled.
+    let reserve = [same("r", "code", 15, 1.0), same("q", "", 3, 1.0)].concat();
+    let (p, clusters) = data(&spec, &first);
+    let (all_p, mut all) = data(&spec, &[first, reserve].concat());
+    for c in &mut all[15..] {
+        c.role = Role::Reserve;
+    }
+    // A reserve unit with no paired value.
+    all[15].picked.push(1);
+    let judged = |p: &Paired, c: &[Cluster]| {
+        let e = estimates(&spec, &no_params(), p, c, None);
+        (e, decided(&spec, p, c, Some(LEVEL)))
+    };
+    let (e, (vs, study)) = judged(&all_p, &all);
+    assert_eq!((e.clone(), (vs.clone(), study)), judged(&p, &clusters));
+    assert_eq!(e[0].clusters, 15);
+    assert_eq!(
+        (vs[0].verdict.as_str(), vs[0].incomplete_units),
+        ("pass", 0)
+    );
+    // As confirmation clusters they would count.
+    for c in &mut all[15..] {
+        c.role = Role::Confirmation;
+    }
+    assert_ne!(judged(&all_p, &all).0, e);
+}
+
+#[test]
 fn every_stratum_must_hold() {
     let spec = below_zero("confirmatory", &["code", "article"]);
     let mut groups = same("c", "code", 15, -1.0);

@@ -4,15 +4,15 @@ Severity: error
 
 ## Problem
 
-The plan has no confirmation input, or a confirmation input holds the same data as a selection or calibration input.
+The plan has no confirmation input, or a confirmation or reserve input holds the same data as a selection or calibration input, or a reserve input holds the data of a confirmation input.
 
 ## Fix
 
-Add a confirmation input. Give each one data that no selection or calibration input holds: not the same bytes, and not the same text in other case or spacing.
+Add a confirmation input. Give each confirmation and reserve input data that no selection or calibration input holds, and each reserve input data that no confirmation input holds: not the same bytes, and not the same text in other case or spacing.
 
 ## Why
 
-A winner picked on some data looks better on that same data. Only fresh data gives an honest test. The content decides, not the file name. A model calibrated on a text has adapted to it; its error there is not its error on new text.
+A winner picked on some data looks better on that same data. Only fresh data gives an honest test. The content decides, not the file name. A model calibrated on a text has adapted to it; its error there is not its error on new text. A reserve cluster the re-size adds must be new to the test too, or the test counts one text twice.
 
 ## Sources
 

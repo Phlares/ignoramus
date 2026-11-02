@@ -107,6 +107,10 @@ const NAMED: &[(&str, NamedFn)] = &[
     ("units-declared", units_declared),
     ("row-cap", row_cap),
     ("selection-stage", selection_stage),
+    ("reserve-declared", reserve_declared),
+    ("reserve-pinned", reserve_pinned),
+    ("reserve-strata", reserve_strata),
+    ("resize-tested", resize_tested),
     ("condition-declared", condition_declared),
     ("param-shape", param_shape),
     ("claim-required", claim_required),
@@ -239,9 +243,14 @@ fn role(input: &Value) -> Option<&str> {
     input.get("role")?.as_str()
 }
 
-/// A selection or confirmation input: one cluster of the schedule.
+/// A selection, confirmation or reserve input: one cluster, with units, a stratum and fresh
+/// data.
 fn is_cluster(input: &Value) -> bool {
-    matches!(role(input), Some("selection" | "confirmation"))
+    matches!(role(input), Some("selection" | "confirmation" | "reserve"))
+}
+
+fn is_reserve(input: &Value) -> bool {
+    role(input) == Some("reserve")
 }
 
 /// The input's `(exact, normalized)` hashes, from the store first; `None` when there is no
@@ -381,11 +390,9 @@ fn power_met(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
         match ctx.gates.of(spec, &path, || gate(spec, ctx, h, design)) {
             None => {}
             Some(Gate::Floor(short)) => out.extend(short.into_iter().map(|(group, have, need)| {
-                let group = group_name(&group);
                 at(format!(
-                    "{}{} has {have} of the {need} clusters the power gate needs.",
-                    group[..1].to_ascii_uppercase(),
-                    &group[1..]
+                    "{} has {have} of the {need} clusters the power gate needs.",
+                    group_subject(&group)
                 ))
             })),
             Some(Gate::Simulated(p)) if p.power >= p.target => {}
@@ -1006,6 +1013,12 @@ fn group_name(stratum: &str) -> String {
     }
 }
 
+/// `group_name` at the start of a sentence: `Stratum <name>`, or `The pooled group`.
+fn group_subject(stratum: &str) -> String {
+    let group = group_name(stratum);
+    format!("{}{}", group[..1].to_ascii_uppercase(), &group[1..])
+}
+
 /// A name read from the spec, as a diagnostic may print it.
 fn shown(name: &str) -> &str {
     if safe_key(name) { name } else { "<name>" }
@@ -1414,10 +1427,11 @@ fn reference_not_self(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     hits
 }
 
-/// At `inputs`: no confirmation input. At `inputs[*].<field>`: a confirmation input holds the
-/// data of a selection or calibration input: the same exact hash, or the same normalized hash
-/// (text that differs only in case and spacing). An empty normalized hash (not UTF-8 text)
-/// matches nothing. The detail names the first such input in spec order.
+/// At `inputs`: no confirmation input. At `inputs[*].<field>`: a confirmation or reserve input
+/// holds the data of a selection or calibration input, or a reserve input that of a
+/// confirmation input: the same exact hash, or the same normalized hash (text that differs only
+/// in case and spacing). An empty normalized hash (not UTF-8 text) matches nothing. The detail
+/// names the first such input in spec order.
 fn confirmation_disjoint(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     if !pat.contains('.') {
         return flag(spec, pat, |v| {
@@ -1428,16 +1442,20 @@ fn confirmation_disjoint(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     let held: Vec<(String, &str, (String, String))> = nodes(spec, "inputs[*]")
         .into_iter()
         .filter_map(|(p, i)| match role(i)? {
-            r @ ("selection" | "calibration") => Some((p, r, input_hashes(ctx, i)?)),
+            r @ ("selection" | "calibration" | "confirmation") => {
+                Some((p, r, input_hashes(ctx, i)?))
+            }
             _ => None,
         })
         .collect();
     with_parent(spec, pat)
         .into_iter()
-        .filter(|(_, input, _)| role(input) == Some("confirmation"))
+        .filter(|(_, input, _)| matches!(role(input), Some("confirmation" | "reserve")))
         .filter_map(|(path, input, _)| {
             let h = input_hashes(ctx, input)?;
-            let (other, r, _) = held.iter().find(|(_, _, s)| same_data(s, &h))?;
+            // Two confirmation inputs may hold one text; a reserve input holds no other's.
+            let barred = |r: &str| r != "confirmation" || is_reserve(input);
+            let (other, r, _) = (held.iter()).find(|(_, r, s)| barred(r) && same_data(s, &h))?;
             Some(Hit {
                 path,
                 detail: Some(format!("It holds the data of {other}, a {r} input.")),
@@ -1447,12 +1465,13 @@ fn confirmation_disjoint(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
 }
 
 /// At `inputs`: no selection or confirmation input, so the schedule has no rows. At
-/// `inputs[*].units`: such an input does not declare its units. At `inputs[*].stratum`: such an
-/// input has no stratum, or `""`, while `design.stratum` names strata.
+/// `inputs[*].units`: a cluster input does not declare its units. At `inputs[*].stratum`: a
+/// cluster input has no stratum, or `""`, while `design.stratum` names strata.
 fn units_declared(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
     let Some((_, field)) = pat.rsplit_once('.') else {
+        let staged = |i: &Value| matches!(role(i), Some("selection" | "confirmation"));
         return flag(spec, pat, |v| {
-            v.as_array().is_some_and(|a| !a.iter().any(is_cluster))
+            v.as_array().is_some_and(|a| !a.iter().any(staged))
         });
     };
     let strata = text(spec, "design.stratum").is_some_and(|s| !s.is_empty());
@@ -1541,6 +1560,98 @@ fn selection_stage(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
         "design.conditions[*].id" => flag(spec, pat, |v| v.as_str() == Some(SELECTED)),
         _ => vec![],
     }
+}
+
+// ---- reserve inputs and the re-size ----
+
+/// E-RSV-001 at `inputs[*].role`: a reserve input, and no `design.resize`. E-RSV-002 at
+/// `design.resize`: a re-size, and no reserve input. A mistyped re-size counts as present.
+fn reserve_declared(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    if pat == "design.resize" {
+        return match list(spec, "inputs") {
+            Some(inputs) if !inputs.iter().any(is_reserve) => flag(spec, pat, Value::is_object),
+            _ => vec![],
+        };
+    }
+    let resized = val(spec, "design.resize").is_some();
+    flag(spec, pat, |v| !resized && v.as_str() == Some("reserve"))
+}
+
+/// E-RSV-003 at `inputs[*].sha256`: a reserve input with an empty pin. The reserve clusters
+/// are taken in the order of their pins. A malformed pin is E-FMT-003's.
+fn reserve_pinned(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    (with_parent(spec, pat).into_iter())
+        .filter(|(_, input, sha)| is_reserve(input) && sha.as_str() == Some(""))
+        .map(|(path, _, _)| hit(path))
+        .collect()
+}
+
+/// E-RSV-004 at a re-size table, when some input is a reserve: a group a claim is tested in that
+/// no reserve input holds, then a reserve stratum that no claim's group holds, each once, in
+/// order of first mention. The pooled group `""` holds every reserve input. A mistyped stratum
+/// is skipped.
+fn reserve_strata(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let Some(inputs) = list(spec, "inputs") else {
+        return vec![];
+    };
+    let reserves: Vec<&str> = (inputs.iter().filter(|i| is_reserve(i)))
+        .filter_map(|i| i.get("stratum").map_or(Some(""), Value::as_str))
+        .collect();
+    if reserves.is_empty() {
+        return vec![];
+    }
+    let mut claimed: Vec<&str> = vec![];
+    for (_, h) in nodes(spec, "question.hypotheses[*]") {
+        for g in groups_of(h).filter(|_| has_claim(h)).unwrap_or_default() {
+            if !claimed.contains(&g) {
+                claimed.push(g);
+            }
+        }
+    }
+    let mut details: Vec<String> = (claimed.iter())
+        .filter(|g| !g.is_empty() && !reserves.contains(g))
+        .map(|g| format!("{} has a claim and no reserve.", group_subject(g)))
+        .collect();
+    if !claimed.contains(&"") {
+        let mut unclaimed: Vec<&str> = vec![];
+        for s in reserves {
+            if !claimed.contains(&s) && !unclaimed.contains(&s) {
+                unclaimed.push(s);
+                details.push(format!("{} has a reserve and no claim.", group_subject(s)));
+            }
+        }
+    }
+    (nodes(spec, pat).into_iter())
+        .filter(|(_, v)| v.is_object())
+        .flat_map(|(path, _)| {
+            (details.iter()).map(move |d| Hit {
+                path: path.clone(),
+                detail: Some(d.clone()),
+            })
+        })
+        .collect()
+}
+
+/// E-RSV-005 at a re-size table: the study is exploratory, so it tests no claim, or a
+/// hypothesis's claim reads a quantile, whose bounds read other observations than the one per
+/// cluster the re-size reads.
+fn resize_tested(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let quantile =
+        |h: &Value| has_claim(h) && matches!(statistic_of(h), Some(Statistic::Quantile(_)));
+    let detail = if text(spec, "study.mode") == Some("exploratory") {
+        "An exploratory study tests no claim."
+    } else if (nodes(spec, "question.hypotheses[*]").iter()).any(|(_, h)| quantile(h)) {
+        "A re-size reads one observation per cluster; a quantile claim's bounds read different ones."
+    } else {
+        return vec![];
+    };
+    (nodes(spec, pat).into_iter())
+        .filter(|(_, v)| v.is_object())
+        .map(|(path, _)| Hit {
+            path,
+            detail: Some(detail.into()),
+        })
+        .collect()
 }
 
 const CONTRAST_KEYS: &str = "question.hypotheses[*].contrast.*";

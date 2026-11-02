@@ -100,6 +100,8 @@ A wrong type changes what the value means, and later checks cannot read it.
 - `design.confirmation` (type)
 - `design.confirmation.conditions` (type)
 - `design.confirmation.conditions[*]` (type)
+- `design.resize` (type)
+- `design.resize.rule` (type)
 - `inputs` (type)
 - `inputs[*]` (type)
 - `inputs[*].path` (type)

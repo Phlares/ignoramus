@@ -1,7 +1,8 @@
 use evidence::Tail;
 use evidence::claim::{Bound, Statistic};
 use ignorarium::spec::model::{
-    Claim, Label, Mode, PinDeviation, Reference, Spec, StatisticSpec, Timing,
+    Claim, Label, Mode, PinDeviation, Reference, Resize, ResizeRule, Role, Spec, StatisticSpec,
+    Timing,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -351,4 +352,40 @@ fn a_row_declares_no_memory_unless_set() {
     );
     v["design"]["row_memory_mib"] = json!("lots");
     assert!(Spec::from_value(&v).is_err());
+}
+
+#[test]
+fn role_reserve_parses() {
+    let mut v = template_value();
+    v["inputs"][1]["role"] = json!("reserve");
+    assert_eq!(Spec::from_value(&v).unwrap().inputs[1].role, Role::Reserve);
+    assert_eq!(json!(Role::Reserve), json!("reserve"));
+}
+
+#[test]
+fn resize_blinded_once_parses() {
+    let mut v = template_value();
+    assert_eq!(Spec::from_value(&v).unwrap().design.resize, None);
+    v["design"]["resize"] = json!({ "rule": "blinded-once" });
+    assert_eq!(
+        Spec::from_value(&v).unwrap().design.resize,
+        Some(Resize {
+            rule: ResizeRule::BlindedOnce
+        })
+    );
+}
+
+#[test]
+fn an_unknown_resize_rule_is_refused() {
+    let mut v = template_value();
+    for bad in [
+        json!({ "rule": "blinded-twice" }),
+        json!({ "rule": "blinded_once" }),
+        json!({}),
+        json!({ "rule": "blinded-once", "at": 0.5 }),
+        json!("blinded-once"),
+    ] {
+        v["design"]["resize"] = bad.clone();
+        assert!(Spec::from_value(&v).is_err(), "{bad}");
+    }
 }

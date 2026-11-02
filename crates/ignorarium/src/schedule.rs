@@ -81,7 +81,8 @@ impl std::error::Error for ExpandError {}
 pub const ROW_CAP: u64 = 100_000;
 
 /// The stage a cluster of `role` runs in, and the conditions that stage runs besides the
-/// reference. A selection cluster has a stage only when the spec declares one.
+/// reference. A selection cluster has a stage only when the spec declares one; a reserve
+/// cluster has none in this schedule.
 fn stage(spec: &Spec, role: Role) -> Option<(&'static str, &[String])> {
     match role {
         Role::Selection => spec
@@ -90,7 +91,7 @@ fn stage(spec: &Spec, role: Role) -> Option<(&'static str, &[String])> {
             .as_ref()
             .map(|s| (SELECTION_STAGE, &s.conditions[..])),
         Role::Confirmation => Some((CONFIRMATION_STAGE, &spec.design.confirmation.conditions[..])),
-        Role::Calibration | Role::Model => None,
+        Role::Calibration | Role::Model | Role::Reserve => None,
     }
 }
 
