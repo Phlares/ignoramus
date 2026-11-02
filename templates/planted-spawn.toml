@@ -66,11 +66,13 @@ id = "arm-a"
 # rule = "best-mean"           # best mean in the outcome's direction, over units with a value for every candidate
 [design.confirmation]
 conditions = ["arm-a"]          # run after the reference on the confirmation inputs; "selected" runs the pick
+# [design.resize]              # confirmatory, optional: once, after the confirmation clusters, add reserve clusters to each claimed stratum
+# rule = "blinded-once"        # the count reads the first clusters' root mean square about 0 (no mean, but it carries the squared effect); the test keeps its level whatever the count; each claim needs a mean statistic
 
 [[inputs]]
 path = "data/example.txt"       # from the study root (the folder with ignorarium.toml; without one, the spec's folder)
 sha256 = ""
-role = "calibration"            # calibration | selection | confirmation | model
+role = "calibration"            # calibration | selection | confirmation | model | reserve (pinned; held back for design.resize)
 [inputs.licence]
 spdx = ""                       # SPDX id, or "" when none was given
 type = "unspecified"            # common | custom | request-form | unspecified
@@ -78,7 +80,7 @@ source = ""
 creators = []
 
 [[inputs]]
-path = "data/confirm.txt"       # each selection or confirmation input is one cluster
+path = "data/confirm.txt"       # each selection, confirmation or reserve input is one cluster
 sha256 = ""
 role = "confirmation"
 stratum = "fiction"             # its stratum; required when design.stratum is set

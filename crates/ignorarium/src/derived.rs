@@ -2,6 +2,7 @@
 use crate::canon::{sha256_hex, to_canonical};
 use crate::records::Record;
 use crate::spec::model::{Direction, Outcome, SelectionRule};
+use crate::units::Cluster;
 use ed25519_dalek::SigningKey;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,7 @@ pub const ANALYSIS: &str = "analysis";
 pub const ESTIMATE: &str = "estimate";
 pub const INPUTS: &str = "inputs";
 pub const REGISTER: &str = "register";
+pub const RESIZE: &str = "resize";
 pub const SELECTION: &str = "selection";
 pub const VERDICT: &str = "verdict";
 
@@ -168,6 +170,61 @@ impl Selection {
     }
 }
 
+/// The decision of a re-size study, made once from its first batch: `continue` appends reserve
+/// clusters, `stop` runs no reserve row. It holds counts only, never the spread they came from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Resize {
+    /// One per group a claim is tested in, by stratum; `""` is the pooled group.
+    pub strata: Vec<ResizeStratum>,
+    /// `CONTINUE` or `STOP`.
+    pub decision: String,
+    /// Why the study stops; `None` when it continues. Written as `null`.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub reason: Option<String>,
+}
+
+/// One group's counts: its first-batch and reserve clusters, the clusters its claims need
+/// (`None` when its reserve cannot reach that count, or the count could not be made), and the
+/// reserve clusters it appends.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResizeStratum {
+    pub stratum: String,
+    pub first: u64,
+    pub reserve: u64,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub needed: Option<u64>,
+    pub appended: u64,
+}
+
+pub const CONTINUE: &str = "continue";
+pub const STOP: &str = "stop";
+
+impl Resize {
+    /// `None` for another kind of record, or a body that does not parse.
+    pub fn of(r: &Record) -> Option<Resize> {
+        body_of(r, RESIZE)
+    }
+
+    /// The paths of the reserve clusters that run: for each group, the first `appended` of
+    /// `reserve` it holds (the pooled group holds every one). `reserve` is in the order the
+    /// re-size appends (`schedule::reserve_order`). None when the study stops.
+    pub fn admitted<'a>(&self, reserve: &[&'a Cluster]) -> BTreeSet<&'a str> {
+        if self.decision != CONTINUE {
+            return BTreeSet::new();
+        }
+        (self.strata.iter())
+            .flat_map(|g| {
+                (reserve.iter())
+                    .filter(|c| g.stratum.is_empty() || c.stratum == g.stratum)
+                    .take(usize::try_from(g.appended).unwrap_or(usize::MAX))
+                    .map(|c| c.path.as_str())
+            })
+            .collect()
+    }
+}
+
 /// A value taken from another study: where the plan names it, the study, the hashes of the
 /// records it comes from, and the value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -223,6 +280,26 @@ pub struct Analysis {
     /// that does not, and in a record written before the field existed. Written as `null`.
     #[serde(default)]
     pub recheck: Option<Recheck>,
+    /// In a study that re-sized, the blinded sd of each claim's first-batch observations in
+    /// each group it is tested in; the `resize` record holds counts alone, so the spread is
+    /// shown only once the study is over. Left out for a study that did not re-size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resize_sd: Option<Vec<GroupSd>>,
+    /// The same over the appended reserve clusters, `sd` `null` for a group that appended
+    /// none: with `resize_sd`, the spread of the two stages side by side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appended_sd: Option<Vec<GroupSd>>,
+}
+
+/// The blinded sd (`evidence::power::blinded_sd`) of a claim's cluster observations in one
+/// group (`""` pools every cluster); `None` when there is no observation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupSd {
+    pub hypothesis: String,
+    pub stratum: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub sd: Option<f64>,
 }
 
 /// What the recheck copies of a run found, one copy per condition: `rows` counts the copies

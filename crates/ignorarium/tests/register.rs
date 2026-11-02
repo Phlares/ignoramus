@@ -179,6 +179,22 @@ fn success_writes_four_files_a_plan_leaf_and_a_record() {
 }
 
 #[test]
+fn a_reserve_input_is_data_the_plan_leaf_records() {
+    let (f, spec) = setup("numeric-ablation", |t| {
+        t.replace(
+            "role = \"calibration\"",
+            "role = \"reserve\"\nstratum = \"fiction\"\nunits = 3",
+        )
+    });
+    go(&f, &spec, &answer(&spec), true).0.unwrap();
+    let data = (sha256_hex(b"Hello  World"), sha256_hex(b"hello world"));
+    let log = f.home.root.join("planlog");
+    assert_eq!(leaves(&log)[0].data_hashes, std::slice::from_ref(&data));
+    let uses = PlanLog::open(&log).unwrap().uses(&data.0, &data.1).unwrap();
+    assert_eq!(uses.iter().map(|(i, _)| *i).collect::<Vec<_>>(), [0]);
+}
+
+#[test]
 fn defaults_are_recorded_and_the_stored_spec_is_the_authors() {
     let (f, spec) = setup("numeric-ablation", |t| t.replace("power = 0.8\n", ""));
     go(&f, &spec, &answer(&spec), true).0.unwrap();

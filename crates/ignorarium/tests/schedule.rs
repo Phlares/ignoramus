@@ -505,3 +505,191 @@ fn a_plan_without_determinism_keeps_its_schedule_bytes() {
     }
     assert_eq!(text(checked).matches("\"recheck_of\"").count(), 2);
 }
+
+// ---- reserve rows ----
+
+/// A reserve input pinned to `pin`.
+fn reserve_input(path: &str, stratum: &str, pin: &str) -> Value {
+    let mut r = input(path, "reserve", 4);
+    r["stratum"] = json!(stratum);
+    r["sha256"] = json!(pin);
+    r
+}
+
+/// The template with 2 units per cluster, a re-size, one confirmation input `data/c.txt` in
+/// `fiction` and the inputs `more`.
+fn reserved(more: &[Value]) -> Spec {
+    let mut v = template();
+    v["design"]["units_per_cluster"] = json!(2);
+    let mut inputs = vec![input("data/c.txt", "confirmation", 4)];
+    inputs.extend_from_slice(more);
+    v["inputs"] = json!(inputs);
+    v["design"]["resize"] = json!({ "rule": "blinded-once" });
+    Spec::from_value(&v).unwrap()
+}
+
+fn rows_of(s: &Spec) -> Vec<Row> {
+    schedule::rows(s, &hash(), false).unwrap()
+}
+
+#[test]
+fn reserve_rows_follow_every_confirmation_row() {
+    let mut v = template();
+    v["design"]["units_per_cluster"] = json!(1);
+    v["design"]["conditions"] = json!([{ "id": "exact" }, { "id": "a" }, { "id": "b" }]);
+    v["design"]["selection"] =
+        json!({ "metric": "ppl-ratio", "conditions": ["a", "b"], "rule": "best-mean" });
+    v["design"]["confirmation"] = json!({ "conditions": ["a"] });
+    v["design"]["resize"] = json!({ "rule": "blinded-once" });
+    // The reserve input sorts first by stratum and path; its rows still come last.
+    let mut r = reserve_input("data/a.txt", "a-stratum", "11");
+    r["units"] = json!(1);
+    let mut c = input("data/z.txt", "confirmation", 1);
+    c["stratum"] = json!("z-stratum");
+    let mut s = input("data/s.txt", "selection", 1);
+    s["stratum"] = json!("z-stratum");
+    v["inputs"] = json!([r, c, s]);
+    let rows = rows_of(&Spec::from_value(&v).unwrap());
+    let got: Vec<(&str, &str, &str)> = rows
+        .iter()
+        .map(|r| (&r.stage[..], &r.cluster[..], &r.condition[..]))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("selection", "data/s.txt", "exact"),
+            ("selection", "data/s.txt", "a"),
+            ("selection", "data/s.txt", "b"),
+            ("confirmation", "data/z.txt", "exact"),
+            ("confirmation", "data/z.txt", "a"),
+            ("reserve", "data/a.txt", "exact"),
+            ("reserve", "data/a.txt", "a"),
+        ]
+    );
+    assert_eq!(schedule::RESERVE_STAGE, "reserve");
+    let indices: Vec<u64> = rows.iter().map(|r| r.index).collect();
+    assert_eq!(indices, (0..7).collect::<Vec<_>>());
+}
+
+#[test]
+fn reserve_rows_go_by_stratum_then_pin_not_path() {
+    // Paths ascend a, b, c, d; the order is stratum x before y, then the lower pin first.
+    let inputs = [
+        reserve_input("data/a.txt", "y", "02"),
+        reserve_input("data/b.txt", "x", "09"),
+        reserve_input("data/c.txt", "y", "01"),
+        reserve_input("data/d.txt", "x", "03"),
+    ];
+    let rows = rows_of(&reserved(&inputs));
+    let mut order: Vec<(&str, &str)> = rows
+        .iter()
+        .filter(|r| r.stage == "reserve")
+        .map(|r| (&r.stratum[..], &r.cluster[..]))
+        .collect();
+    order.dedup();
+    assert_eq!(
+        order,
+        [
+            ("x", "data/d.txt"),
+            ("x", "data/b.txt"),
+            ("y", "data/c.txt"),
+            ("y", "data/a.txt")
+        ]
+    );
+    // The inputs listed the other way give the same rows.
+    let mut flipped = inputs.to_vec();
+    flipped.reverse();
+    assert_eq!(rows_of(&reserved(&flipped)), rows);
+}
+
+#[test]
+fn reserve_rows_run_the_confirmation_conditions() {
+    let mut v = template();
+    v["design"]["conditions"] = json!([{ "id": "exact" }, { "id": "a" }, { "id": "b" }]);
+    v["design"]["confirmation"] = json!({ "conditions": ["b"] });
+    v["design"]["repeats"] = json!(2);
+    v["design"]["units_per_cluster"] = json!(2);
+    v["design"]["resize"] = json!({ "rule": "blinded-once" });
+    v["inputs"] = json!([
+        input("data/c.txt", "confirmation", 4),
+        reserve_input("data/r.txt", "fiction", "05")
+    ]);
+    let rows = rows_of(&Spec::from_value(&v).unwrap());
+    let per = |stage: &str| -> Vec<(String, u32)> {
+        (rows.iter())
+            .filter(|r| r.stage == stage)
+            .map(|r| (r.condition.clone(), r.repeat))
+            .collect()
+    };
+    // Two units x (the reference, then b) x two repeats, for both stages.
+    assert_eq!(per("reserve").len(), 8);
+    assert_eq!(per("reserve"), per("confirmation"));
+    assert!(rows.iter().all(|r| r.condition != "a"));
+}
+
+#[test]
+fn rechecks_never_copy_a_reserve_row() {
+    let s = reserved(&[reserve_input("data/r.txt", "fiction", "05")]);
+    let base = rows_of(&s);
+    assert_eq!(base.iter().filter(|r| r.stage == "reserve").count(), 4);
+    for b in 0u8..16 {
+        let h = [b; 32];
+        let rows = schedule::rows(&s, &h, true).unwrap();
+        let copies: Vec<&Row> = rows.iter().filter(|r| r.recheck_of.is_some()).collect();
+        assert_eq!(copies.len(), 2, "hash byte {b}");
+        for copy in copies {
+            let of = (rows.iter())
+                .find(|r| Some(r.index) == copy.recheck_of && r.recheck_of.is_none())
+                .unwrap();
+            assert_eq!(
+                (&of.stage[..], &copy.stage[..]),
+                ("confirmation", "confirmation")
+            );
+        }
+    }
+    // The draw is over the condition's non-reserve rows: the place among them.
+    let checked = schedule::with_rechecks(base.clone(), &hash());
+    let copy = (checked.iter())
+        .find(|r| r.recheck_of.is_some() && r.condition == "arm-a")
+        .unwrap();
+    let own: Vec<u64> = (base.iter())
+        .filter(|r| r.condition == "arm-a" && r.stage != "reserve")
+        .map(|r| r.index)
+        .collect();
+    assert_eq!(own.len(), 2);
+    let at = units::pick(1, 2, Pick::Seeded, seed(&hash(), "recheck/arm-a"));
+    assert_eq!(copy.recheck_of, Some(own[at[0] as usize]));
+    // The copies are numbered after every row, reserve rows included.
+    let mut idx: Vec<u64> = checked
+        .iter()
+        .filter(|r| r.recheck_of.is_some())
+        .map(|r| r.index)
+        .collect();
+    idx.sort();
+    assert_eq!(idx, [8, 9]);
+}
+
+#[test]
+fn a_schedule_without_reserve_keeps_its_bytes() {
+    let rows = rows_of(&three_units());
+    let bytes = Schedule::new(&hash(), rows).to_bytes().unwrap();
+    assert_eq!(
+        ignorarium::canon::sha256_hex(&bytes),
+        "f9ddb14692d56ddc21aed6c98f95690313b3dd8805a93c710ac4bee780b461d4"
+    );
+}
+
+#[test]
+fn the_estimate_charges_every_reserve_row() {
+    let cost = |s: &Spec| ignorarium::estimate::estimate(s, &Machine::default(), &rows_of(s));
+    let without = cost(&reserved(&[]));
+    // 2 units x (the reference and arm-a), once for the confirmation cluster.
+    assert_eq!(without.rows, 4);
+    let with = cost(&reserved(&[reserve_input("data/r.txt", "fiction", "05")]));
+    assert_eq!(with.rows, 8);
+    assert_eq!(with.cpu_hours, 2.0 * without.cpu_hours);
+    assert_eq!(
+        with.rows_per_condition,
+        [("exact".to_string(), 4), ("arm-a".to_string(), 4)]
+    );
+}

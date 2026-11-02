@@ -282,6 +282,52 @@ fn and(mut a: Vec<Edit>, b: Vec<Edit>) -> Vec<Edit> {
     a
 }
 
+/// The bytes of the reserve files `texts/r<i>.txt` in `study_dir()`.
+const RESERVES: [&[u8]; 2] = [b"reserve text zero", b"reserve text one"];
+
+/// Reserve input `texts/r<i>.txt` of 5 units in `stratum`, pinned to its file.
+fn reserve(i: usize, stratum: &str) -> Value {
+    let mut r = input(&format!("texts/r{i:02}.txt"), "reserve", 5);
+    r["sha256"] = json!(sha256_hex(RESERVES[i]));
+    r["stratum"] = json!(stratum);
+    r
+}
+
+/// `ok()`'s inputs, then `extra` from index 37.
+fn plus(extra: &[Value]) -> Edit {
+    let mut all = inputs(35, 5).as_array().unwrap().clone();
+    all.extend_from_slice(extra);
+    ("/inputs", j(Value::Array(all)))
+}
+
+/// The declared re-size.
+fn resize() -> Edit {
+    ("/design/resize", j(json!({ "rule": "blinded-once" })))
+}
+
+/// The declared re-size at a design power of 0.6. The power gate simulates the whole design,
+/// whose re-size reads `h1()`'s effect of -30 as spread: with `ok()`'s 35 clusters, one reserve
+/// cluster reaches 0.6, not 0.8.
+fn resize_design() -> Vec<Edit> {
+    vec![resize(), ("/design/power", j(json!(0.6)))]
+}
+
+/// `s` with `resize_design()`.
+fn with_resize_design(s: &mut Value) {
+    for (p, v) in resize_design() {
+        set(s, p, v);
+    }
+}
+
+/// `ok()` with `resize_design()` and one reserve input in `fiction`, which `h1()` claims, and
+/// `extra`.
+fn resized(extra: Vec<Edit>) -> Vec<Edit> {
+    and(
+        and(resize_design(), vec![plus(&[reserve(0, "fiction")])]),
+        extra,
+    )
+}
+
 /// An exploratory plan with `h1()` and the descriptive `P1`, no deviation, and `extra`.
 fn exploring(extra: Vec<Edit>) -> Vec<Edit> {
     and(
@@ -1081,15 +1127,45 @@ fn faults() -> Vec<Fault> {
             route(one("H1.pass", "..")),
             vec![("E-PTH-001", "scope.end_of_run.follow_on[0].spec")],
         ),
+        // A re-size needs a reserve, a reserve a re-size; each reserve is pinned, and the
+        // claimed strata and the reserve strata are the same.
+        f(resized(vec![]), vec![]),
+        f(
+            vec![plus(&[reserve(0, "fiction")])],
+            vec![("E-RSV-001", "inputs[37].role")],
+        ),
+        f(vec![resize()], vec![("E-RSV-002", "design.resize")]),
+        f(
+            resized(vec![("/inputs/37/sha256", j(json!("")))]),
+            vec![("E-RSV-003", "inputs[37].sha256")],
+        ),
+        f(
+            resized(vec![("/inputs/37/stratum", j(json!("news")))]),
+            vec![
+                ("E-RSV-004", "design.resize"),
+                ("E-RSV-004", "design.resize"),
+            ],
+        ),
+        f(
+            exploring(resized(vec![])),
+            vec![("E-RSV-005", "design.resize")],
+        ),
+        f(
+            resized(vec![hyp("statistic", j(json!({ "quantile": 0.5 })))]),
+            vec![("E-RSV-005", "design.resize")],
+        ),
     ]
 }
 
-/// The study folder every table row runs in: `f.toml` and `pilot`'s model file
-/// `model/m.bin` exist, `data/example.txt` does not.
+/// The study folder every table row runs in: `f.toml`, `pilot`'s model file `model/m.bin`
+/// and the reserve files `texts/r<i>.txt` exist, `data/example.txt` does not.
 fn study_dir() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("f.toml"), "x = 1\n").unwrap();
     write(dir.path(), "model/m.bin", common::MODEL);
+    for (i, text) in RESERVES.iter().enumerate() {
+        write(dir.path(), &format!("texts/r{i:02}.txt"), text);
+    }
     dir
 }
 
@@ -1865,6 +1941,11 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
         "E-HYP-003",
         "E-HYP-004",
         "E-STR-001",
+        "E-RSV-001",
+        "E-RSV-002",
+        "E-RSV-003",
+        "E-RSV-004",
+        "E-RSV-005",
     ]
     .into_iter()
     .map(String::from)
@@ -2897,6 +2978,7 @@ fn the_gate_refuses_what_the_z_formula_passes() {
             target: 0.8,
             clusters: vec![("code".into(), 26), ("article".into(), 26)],
             needed: Some(96),
+            resized: false,
         }]
     );
 }
@@ -2939,7 +3021,7 @@ fn a_quantile_claim_is_simulated_without_a_floor() {
             "{SIM}0.00 with 14 clusters in fiction; about 15 per stratum reach 0.80."
         )]
     );
-    // Just below the margin about half the units lie on each side, and 1,024 clusters per
+    // Just below the margin about half the units lie on each side, and 16,384 clusters per
     // stratum do not reach the target.
     assert_eq!(
         median(and(
@@ -2947,7 +3029,7 @@ fn a_quantile_claim_is_simulated_without_a_floor() {
             vec![hyp("power_at", j(json!(-0.01)))]
         )),
         [format!(
-            "{SIM}0.00 with 2 clusters in fiction; 1024 per stratum do not reach 0.80."
+            "{SIM}0.00 with 2 clusters in fiction; 16384 per stratum do not reach 0.80."
         )]
     );
     // Pooled, the count is of clusters.
@@ -3020,7 +3102,7 @@ fn a_quantile_claim_too_large_to_simulate_fails_closed() {
     );
     assert_eq!(
         d[0].problem,
-        "The confirmation sample is too small. Cannot simulate power: it would draw more than 100 million values."
+        "The confirmation sample is too small. Cannot simulate power: it would draw more than 2000 million values."
     );
 }
 
@@ -3323,7 +3405,7 @@ fn two_paths_with_the_same_bytes_are_not_disjoint() {
     assert_eq!(codes_paths(&d), [("E-CNF-004", "inputs[2].sha256")]);
     assert_eq!(
         d[0].problem,
-        "The plan has no confirmation input, or a confirmation input holds the same data as a selection or calibration input. It holds the data of inputs[1], a selection input."
+        "The plan has no confirmation input, or a confirmation or reserve input holds the same data as a selection or calibration input, or a reserve input holds the data of a confirmation input or of an earlier reserve input. It holds the data of inputs[1], a selection input."
     );
     assert!(named(&pair("data/s.txt", "data/d.txt"), dir.path()).is_empty());
     // A selection input that is not there shares nothing.
@@ -3457,7 +3539,7 @@ fn a_confirmation_input_without_units_is_refused() {
     assert_eq!(codes_paths(&d), [("E-UNT-001", "inputs[5].units")]);
     assert_eq!(
         d[0].problem,
-        "The plan has no selection or confirmation input, or one does not declare its units, or its stratum while the design names strata."
+        "The plan has no selection or confirmation input, or a selection, confirmation or reserve input does not declare its units, or its stratum while the design names strata."
     );
     // The same in exploratory mode.
     set(&mut s, "/study/mode", j(json!("exploratory")));
@@ -4500,4 +4582,704 @@ fn a_study_that_carried_passes_it_on() {
     let spec = edited(&steady(vec![]));
     assert!(rules::borrowed(&spec, &c)[0].recheck_passed);
     assert_eq!(rules::carried(&spec, &c), carry("pilot", &analysis));
+}
+
+// ---- reserve inputs and the re-size ----
+
+/// The diagnostics of the re-size rules, as (code, path, problem).
+fn rsv(d: &[Diagnostic]) -> Vec<(&str, &str, &str)> {
+    (d.iter())
+        .filter(|x| x.code.starts_with("E-RSV-"))
+        .map(|x| (x.code.as_str(), x.path.as_str(), x.problem.as_str()))
+        .collect()
+}
+
+#[test]
+fn a_reserve_without_resize_is_refused() {
+    let dir = study_dir();
+    let d = named(&edited(&[plus(&[reserve(0, "fiction")])]), dir.path());
+    assert_eq!(
+        rsv(&d),
+        [(
+            "E-RSV-001",
+            "inputs[37].role",
+            "A reserve input is listed, and design.resize declares no re-size."
+        )]
+    );
+    assert_eq!(d.len(), 1);
+    assert!(named(&edited(&resized(vec![])), dir.path()).is_empty());
+    // Only a reserve input needs the re-size.
+    let mut extra = input("texts/r00.txt", "confirmation", 5);
+    extra["sha256"] = json!(sha256_hex(RESERVES[0]));
+    assert!(named(&edited(&[plus(&[extra])]), dir.path()).is_empty());
+}
+
+#[test]
+fn a_resize_without_reserve_is_refused() {
+    let dir = study_dir();
+    let d = named(&edited(&[resize()]), dir.path());
+    assert_eq!(
+        rsv(&d),
+        [(
+            "E-RSV-002",
+            "design.resize",
+            "design.resize declares a re-size, and no input is a reserve."
+        )]
+    );
+    assert_eq!(d.len(), 1);
+    // A mistyped re-size is the type rule's.
+    let d = named(
+        &edited(&[("/design/resize", j(json!("blinded-once")))]),
+        dir.path(),
+    );
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn an_unpinned_reserve_input_is_refused() {
+    let dir = study_dir();
+    let d = named(
+        &edited(&resized(vec![("/inputs/37/sha256", j(json!("")))])),
+        dir.path(),
+    );
+    assert_eq!(
+        rsv(&d),
+        [(
+            "E-RSV-003",
+            "inputs[37].sha256",
+            "A reserve input has no SHA-256 pin."
+        )]
+    );
+    assert_eq!(d.len(), 1);
+    // A malformed pin is the format rule's, and its file does not match it.
+    let d = named(
+        &edited(&resized(vec![("/inputs/37/sha256", j(json!("abc")))])),
+        dir.path(),
+    );
+    assert_eq!(codes_paths(&d), [("E-HSH-001", "inputs[37].sha256")]);
+    // Only a reserve input needs a pin: the base plan's confirmation inputs have none.
+    assert_eq!(ok()["inputs"][2]["sha256"], "");
+}
+
+#[test]
+fn a_claim_stratum_without_reserve_is_refused() {
+    let dir = study_dir();
+    let strata = |list: Value| resized(vec![hyp("strata", j(list))]);
+    let d = named(&edited(&strata(json!(["fiction", "code"]))), dir.path());
+    assert_eq!(
+        rsv(&d),
+        [(
+            "E-RSV-004",
+            "design.resize",
+            "A stratum a claim lists has no reserve input, a reserve input's stratum is one no claim lists, or a claim with no strata has reserve inputs in more than one stratum. Stratum code has a claim and no reserve."
+        )]
+    );
+    // A pooled claim holds every reserve input.
+    let d = named(&edited(&strata(json!([]))), dir.path());
+    assert!(rsv(&d).is_empty(), "{d:?}");
+    // A hypothesis with no claim asks for no reserve; E-CNF-006 refuses it.
+    let mut other = descriptive("P1");
+    other["strata"] = json!(["code"]);
+    let more = resized(vec![("/question/hypotheses", j(json!([h1(), other])))]);
+    let d = named(&edited(&more), dir.path());
+    assert_eq!(
+        codes_paths(&d),
+        [
+            ("E-CNF-006", "question.hypotheses[1].claim"),
+            ("E-HYP-002", "question.hypotheses[1].strata[0]")
+        ]
+    );
+}
+
+#[test]
+fn a_reserve_stratum_no_claim_lists_is_refused() {
+    let dir = study_dir();
+    let two = resized(vec![plus(&[reserve(0, "fiction"), reserve(1, "news")])]);
+    let d = named(&edited(&two), dir.path());
+    assert_eq!(
+        rsv(&d),
+        [(
+            "E-RSV-004",
+            "design.resize",
+            "A stratum a claim lists has no reserve input, a reserve input's stratum is one no claim lists, or a claim with no strata has reserve inputs in more than one stratum. Stratum news has a reserve and no claim."
+        )]
+    );
+    assert_eq!(d.len(), 1);
+    // A stratum is named once, however many reserve inputs it holds.
+    let again = resized(vec![plus(&[
+        reserve(0, "fiction"),
+        reserve(1, "news"),
+        reserve(1, "news"),
+    ])]);
+    assert_eq!(rsv(&named(&edited(&again), dir.path())).len(), 1);
+    // A mistyped re-size is the type rule's.
+    let mistyped = and(two.clone(), vec![("/design/resize", j(json!("x")))]);
+    assert!(named(&edited(&mistyped), dir.path()).is_empty());
+    // With a claim in news too, each stratum has both.
+    let d = named(
+        &edited(&and(
+            two,
+            vec![hyp("strata", j(json!(["fiction", "news"])))],
+        )),
+        dir.path(),
+    );
+    assert!(rsv(&d).is_empty(), "{d:?}");
+}
+
+#[test]
+fn a_pooled_claim_whose_reserve_spans_strata_is_refused() {
+    let dir = study_dir();
+    let pooled = hyp("strata", j(json!([])));
+    let two = vec![
+        plus(&[reserve(0, "fiction"), reserve(1, "news")]),
+        pooled.clone(),
+    ];
+    let d = named(&edited(&and(resize_design(), two)), dir.path());
+    assert_eq!(
+        rsv(&d),
+        [(
+            "E-RSV-004",
+            "design.resize",
+            "A stratum a claim lists has no reserve input, a reserve input's stratum is one no claim lists, or a claim with no strata has reserve inputs in more than one stratum. A pooled claim's reserve spans strata fiction and news; list the strata in the claim, or keep its reserve in one stratum."
+        )]
+    );
+    assert_eq!(d.len(), 1);
+    // Three strata are listed in order of first mention, each once.
+    let three = vec![
+        plus(&[
+            reserve(0, "news"),
+            reserve(1, "fiction"),
+            reserve(0, "news"),
+            reserve(1, "code"),
+        ]),
+        pooled.clone(),
+    ];
+    let d = named(&edited(&and(resize_design(), three)), dir.path());
+    assert!(
+        rsv(&d)[0].2.ends_with("spans strata news, fiction and code; list the strata in the claim, or keep its reserve in one stratum."),
+        "{d:?}"
+    );
+    // A reserve input with no stratum is named `(none)`.
+    let mut bare = reserve(1, "news");
+    bare.as_object_mut().unwrap().remove("stratum");
+    let d = named(
+        &edited(&and(
+            resize_design(),
+            vec![plus(&[reserve(0, "news"), bare]), pooled.clone()],
+        )),
+        dir.path(),
+    );
+    assert!(rsv(&d)[0].2.ends_with("spans strata news and (none); list the strata in the claim, or keep its reserve in one stratum."), "{d:?}");
+    // A pooled claim with its reserve in one stratum is accepted, however many inputs it holds.
+    let one = vec![plus(&[reserve(0, "news"), reserve(1, "news")]), pooled];
+    let d = named(&edited(&and(resize_design(), one)), dir.path());
+    assert!(rsv(&d).is_empty(), "{d:?}");
+}
+
+#[test]
+fn a_reserve_text_used_by_an_earlier_plan_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "d.txt", b"abc");
+    let mut s = with_input("d.txt", ABC, "reserve");
+    with_resize_design(&mut s);
+    let (prior, seen) = fake(Some(ABC), None);
+    let d = fresh(&s, dir.path(), prior);
+    assert_eq!(codes_paths(&d), [("E-CNF-005", "inputs[0].path")]);
+    assert!(
+        d[0].problem.ends_with("The earlier entry is entry-exact."),
+        "{}",
+        d[0].problem
+    );
+    assert_eq!(seen.borrow().len(), 1);
+    let (prior, _) = fake(Some("nope"), None);
+    assert!(fresh(&s, dir.path(), prior).is_empty());
+}
+
+#[test]
+fn a_reserve_text_that_is_a_confirmation_text_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data/s.txt", b"selection text");
+    write(dir.path(), "data/c.txt", b"one text");
+    write(dir.path(), "data/r.txt", b"ONE  TEXT");
+    write(dir.path(), "data/t.txt", b"selection text");
+    write(dir.path(), "data/u.txt", b"another text");
+    let with_reserve = |path: &str, bytes: &[u8]| {
+        let mut s = pair("data/s.txt", "data/c.txt");
+        let mut r = input(path, "reserve", 5);
+        r["sha256"] = json!(sha256_hex(bytes));
+        s["inputs"].as_array_mut().unwrap().push(r);
+        with_resize_design(&mut s);
+        s
+    };
+    // The confirmation text in other case and spacing.
+    let d = named(&with_reserve("data/r.txt", b"ONE  TEXT"), dir.path());
+    assert_eq!(codes_paths(&d), [("E-CNF-004", "inputs[37].sha256")]);
+    assert!(
+        d[0].problem
+            .ends_with(" It holds the data of inputs[2], a confirmation input."),
+        "{}",
+        d[0].problem
+    );
+    // The selection text.
+    let d = named(&with_reserve("data/t.txt", b"selection text"), dir.path());
+    assert_eq!(codes_paths(&d), [("E-CNF-004", "inputs[37].sha256")]);
+    assert!(
+        d[0].problem
+            .ends_with(" It holds the data of inputs[1], a selection input."),
+        "{}",
+        d[0].problem
+    );
+    assert!(named(&with_reserve("data/u.txt", b"another text"), dir.path()).is_empty());
+}
+
+/// `pair`'s plan with a re-size and the reserve inputs `(path, bytes)`, at inputs[37] on.
+fn reserved_pair(dir: &Path, reserves: &[(&str, &[u8])]) -> Value {
+    write(dir, "data/s.txt", b"selection text");
+    write(dir, "data/c.txt", b"one text");
+    let mut s = pair("data/s.txt", "data/c.txt");
+    for (path, bytes) in reserves {
+        write(dir, path, bytes);
+        let mut r = input(path, "reserve", 5);
+        r["sha256"] = json!(sha256_hex(bytes));
+        s["inputs"].as_array_mut().unwrap().push(r);
+    }
+    with_resize_design(&mut s);
+    s
+}
+
+#[test]
+fn two_reserve_inputs_with_one_text_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = reserved_pair(
+        dir.path(),
+        &[
+            ("data/r1.txt", b"same reserve"),
+            ("data/r2.txt", b"same reserve"),
+            ("data/r3.txt", b"other reserve"),
+        ],
+    );
+    let d = named(&s, dir.path());
+    // Only the later one is flagged, and it names the earlier.
+    assert_eq!(codes_paths(&d), [("E-CNF-004", "inputs[38].sha256")]);
+    assert!(
+        d[0].problem
+            .ends_with(" It holds the data of inputs[37], a reserve input."),
+        "{}",
+        d[0].problem
+    );
+    // Two reserve inputs of different texts, and a lone one, are fine.
+    let s = reserved_pair(
+        dir.path(),
+        &[
+            ("data/r1.txt", b"same reserve"),
+            ("data/r3.txt", b"other reserve"),
+        ],
+    );
+    assert!(named(&s, dir.path()).is_empty());
+}
+
+#[test]
+fn a_reserve_text_in_other_case_and_spacing_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = reserved_pair(
+        dir.path(),
+        &[
+            ("data/r1.txt", b"Same  Reserve"),
+            ("data/r2.txt", b"same reserve\n"),
+        ],
+    );
+    let d = named(&s, dir.path());
+    assert_eq!(codes_paths(&d), [("E-CNF-004", "inputs[38].sha256")]);
+    assert!(
+        d[0].problem
+            .ends_with(" It holds the data of inputs[37], a reserve input."),
+        "{}",
+        d[0].problem
+    );
+}
+
+#[test]
+fn a_spec_whose_reserve_pushes_it_past_the_row_cap_is_refused() {
+    let dir = study_dir();
+    // 365 rows before the reserve; a reserve cluster adds its units x 2 conditions.
+    let at = |units: u64| {
+        let mut r = reserve(0, "fiction");
+        r["units"] = json!(units);
+        edited(&resized(vec![
+            plus(&[r]),
+            ("/design/units_per_cluster", j(json!(50_000))),
+        ]))
+    };
+    let cap = |units: u64| -> Vec<Diagnostic> {
+        (named(&at(units), dir.path()).into_iter())
+            .filter(|d| d.code == "E-UNT-002")
+            .collect()
+    };
+    assert!(cap(49_817).is_empty());
+    let d = cap(49_818);
+    assert_eq!(d.len(), 1);
+    assert_eq!(
+        d[0].problem,
+        "The schedule has more rows than the box allows. It would hold 100001 rows; the cap is 100000."
+    );
+    // The count is the schedule's.
+    let spec = ignorarium::spec::model::Spec::from_value(&at(49_818)).unwrap();
+    assert_eq!(
+        ignorarium::schedule::rows(&spec, &[0; 32], false)
+            .unwrap()
+            .len(),
+        100_001
+    );
+}
+
+#[test]
+fn an_exploratory_resize_is_refused() {
+    let dir = study_dir();
+    let d = named(&edited(&exploring(resized(vec![]))), dir.path());
+    assert_eq!(
+        rsv(&d),
+        [(
+            "E-RSV-005",
+            "design.resize",
+            "design.resize declares a re-size that no test can use. An exploratory study tests no claim."
+        )]
+    );
+    assert_eq!(d.len(), 1);
+    // A mistyped re-size is the type rule's.
+    let mistyped = exploring(resized(vec![("/design/resize", j(json!("x")))]));
+    assert!(named(&edited(&mistyped), dir.path()).is_empty());
+    // A reserve input alone is no refusal in an exploratory study.
+    let d = named(
+        &edited(&exploring(vec![plus(&[reserve(0, "fiction")])])),
+        dir.path(),
+    );
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn a_resize_on_a_quantile_claim_is_refused() {
+    let dir = study_dir();
+    let quantile = resized(vec![hyp("statistic", j(json!({ "quantile": 0.5 })))]);
+    let d = named(&edited(&quantile), dir.path());
+    assert_eq!(
+        rsv(&d),
+        [(
+            "E-RSV-005",
+            "design.resize",
+            "design.resize declares a re-size that no test can use. A re-size reads one observation per cluster; a quantile claim's bounds read different ones."
+        )]
+    );
+    assert_eq!(d.len(), 1);
+    // A quantile hypothesis with no claim is not tested, so it bars no re-size; E-CNF-006
+    // refuses it.
+    let mut other = descriptive("P1");
+    other["statistic"] = json!({ "quantile": 0.5 });
+    let d = named(
+        &edited(&resized(vec![(
+            "/question/hypotheses",
+            j(json!([h1(), other])),
+        )])),
+        dir.path(),
+    );
+    assert_eq!(
+        codes_paths(&d),
+        [("E-CNF-006", "question.hypotheses[1].claim")]
+    );
+}
+
+/// The resize fixture's folder: each input file holds its own path and a newline, and study
+/// `my-pilot` has finished with the template contrast's pooled estimate.
+fn resize_fixture() -> (Value, tempfile::TempDir, common::Studies) {
+    let s = spec_at("tests/fixtures/specs/resize.toml");
+    let dir = tempfile::tempdir().unwrap();
+    for i in s["inputs"].as_array().unwrap() {
+        let path = i["path"].as_str().unwrap();
+        write(dir.path(), path, format!("{path}\n").as_bytes());
+    }
+    let pilot = common::finished(vec![common::arm_a()]);
+    let b = common::Studies(vec![(
+        "my-pilot",
+        Ok(common::records_for("my-pilot", &pilot)),
+    )]);
+    (s, dir, b)
+}
+
+#[test]
+fn the_resize_fixture_checks_clean_but_for_power() {
+    let (s, dir, b) = resize_fixture();
+    let c = with_box(dir.path(), b);
+    let (_, _, d) = rules::check_all(&s, v0(), &c);
+    let problems: Vec<&str> = d.iter().map(|x| x.problem.as_str()).collect();
+    assert_eq!(codes_paths(&d), [POWER], "{problems:?}");
+    assert_eq!(problems[0], format!("{WHOLE}0.00 of 0.80."));
+}
+
+/// `s` without its reserve inputs and its re-size.
+fn unreserved(s: &Value) -> Value {
+    let mut s = s.clone();
+    let inputs = s["inputs"].as_array_mut().unwrap();
+    inputs.retain(|i| i["role"] != "reserve");
+    s["design"].as_object_mut().unwrap().remove("resize");
+    s
+}
+
+#[test]
+fn reserve_inputs_add_their_rows_after_the_confirmation_rows() {
+    use ignorarium::estimate::estimate;
+    use ignorarium::machine::Machine;
+    use ignorarium::schedule;
+    use ignorarium::spec::model::Spec;
+    let (s, _, _) = resize_fixture();
+    let without = unreserved(&s);
+    assert_eq!(s["inputs"].as_array().unwrap().len(), 8);
+    assert_eq!(without["inputs"].as_array().unwrap().len(), 4);
+    let hash = [9; 32];
+    let planned = |v: &Value| {
+        let spec = Spec::from_value(v).unwrap();
+        let rows = schedule::rows(&spec, &hash, false).unwrap();
+        let cost = estimate(&spec, &Machine::default(), &rows);
+        (rows, cost)
+    };
+    let (rows, cost) = planned(&s);
+    // 4 clusters of 3 units, each running the reference and arm-a, then the 4 reserve
+    // clusters the same way, after them.
+    let (base_rows, base_cost) = planned(&without);
+    assert_eq!(base_rows.len(), 24);
+    assert_eq!(rows.len(), 48);
+    assert_eq!(rows[..24], base_rows[..]);
+    assert!(
+        rows[..24]
+            .iter()
+            .all(|r| r.stage == "confirmation" && r.cluster.contains("-c"))
+    );
+    assert!(
+        rows[24..]
+            .iter()
+            .all(|r| r.stage == "reserve" && r.cluster.contains("-r"))
+    );
+    assert_eq!((cost.rows, base_cost.rows), (48, 24));
+    // The power report counts the first batch.
+    let dir = study_dir();
+    let found = rules::power(&edited(&resized(vec![])), &ctx(dir.path()));
+    assert_eq!(found[0].clusters, [("fiction".to_string(), 35)]);
+    assert!(found[0].resized);
+}
+
+#[test]
+fn a_reserve_input_declares_its_units_and_stratum() {
+    let dir = study_dir();
+    let d = named(
+        &edited(&resized(vec![("/inputs/37/units", None)])),
+        dir.path(),
+    );
+    assert_eq!(codes_paths(&d), [("E-UNT-001", "inputs[37].units")]);
+    let d = named(
+        &edited(&resized(vec![("/inputs/37/stratum", j(json!("")))])),
+        dir.path(),
+    );
+    assert_eq!(
+        codes_paths(&d),
+        [
+            ("E-UNT-001", "inputs[37].stratum"),
+            ("E-RSV-004", "design.resize"),
+            ("E-RSV-004", "design.resize")
+        ]
+    );
+    // A reserve input alone gives the schedule no rows, and the stratum no confirmation data.
+    let d = named(
+        &edited(&unstaged(vec![
+            ("/study/mode", j(json!("exploratory"))),
+            UNDECLARED,
+            ("/inputs", j(json!([reserve(0, "fiction")]))),
+        ])),
+        dir.path(),
+    );
+    assert_eq!(
+        codes_paths(&d),
+        [
+            ("E-UNT-001", "inputs"),
+            ("E-HYP-002", "question.hypotheses[0].strata[0]")
+        ]
+    );
+}
+
+/// A re-size study: `ok()` with a re-size, `first` confirmation clusters of 5 units and
+/// `reserve` reserve clusters in each of `strata`, which `h1()` claims, sized 1 below the
+/// margin with cluster means in [-2, 2]. The reserve clusters give 5 and 4 units in turn, each
+/// pinned to its file, which this writes under `dir`.
+fn resize_study(dir: &Path, strata: &[&str], first: usize, reserve: usize) -> Value {
+    let mut list = inputs(0, 5).as_array().unwrap().clone();
+    for s in strata {
+        for i in 0..first {
+            let mut c = input(&format!("texts/c-{s}-{i:02}.txt"), "confirmation", 5);
+            c["stratum"] = json!(s);
+            list.push(c);
+        }
+    }
+    for s in strata {
+        for i in 0..reserve {
+            let path = format!("texts/r-{s}-{i:02}.txt");
+            write(dir, &path, format!("{path}\n").as_bytes());
+            let mut r = input(&path, "reserve", 5 - (i % 2) as u64);
+            r["sha256"] = json!(sha256_hex(format!("{path}\n").as_bytes()));
+            r["stratum"] = json!(s);
+            list.push(r);
+        }
+    }
+    edited(&[
+        resize(),
+        ("/inputs", j(Value::Array(list))),
+        hyp("strata", j(json!(strata))),
+        hyp("power_at", j(json!(-1.0))),
+        hyp("statistic", j(json!({ "mean": [-2.0, 2.0] }))),
+    ])
+}
+
+/// The units of the reserve clusters of `stratum` in `spec`, in the order of their pins.
+fn pinned_units(spec: &Value, stratum: &str) -> Vec<u32> {
+    let mut held: Vec<(&str, u32)> = (spec["inputs"].as_array().unwrap().iter())
+        .filter(|i| i["role"] == "reserve" && i["stratum"] == stratum)
+        .map(|i| {
+            let units = i["units"].as_u64().unwrap();
+            (i["sha256"].as_str().unwrap(), units as u32)
+        })
+        .collect();
+    held.sort();
+    held.into_iter().map(|(_, u)| u).collect()
+}
+
+/// The whole-design sentence the gate states for a re-size study.
+const WHOLE: &str = "The confirmation sample is too small. The whole design, re-size and reserve included, reaches power ";
+
+#[test]
+fn a_resize_study_with_ample_reserve_passes_the_gate() {
+    use evidence::claim::{Bound, Statistic};
+    use evidence::power::{Staged, StagedStratum, staged};
+    let dir = study_dir();
+    let strata = ["fiction", "news"];
+    let spec = resize_study(dir.path(), &strata, 8, 80);
+    let d = named(&spec, dir.path());
+    assert!(d.is_empty(), "{d:?}");
+    // The gate simulates the whole design: the first batch from the borrowed sd 2 and icc 0
+    // about power_at, the re-size at power_at, each stratum at 0.8^(1/2), and the reserve
+    // clusters appended in the order of their pins.
+    let c = ctx(dir.path());
+    let level = rules::granted(&spec, &c).unwrap().unwrap().level;
+    let plan = Staged {
+        stat: Statistic::Mean { lo: -2.0, hi: 2.0 },
+        bounds: vec![Bound {
+            tail: evidence::Tail::Lower,
+            margin: 0.0,
+        }],
+        strata: (strata.iter())
+            .map(|s| StagedStratum {
+                first: vec![5; 8],
+                reserve: pinned_units(&spec, s),
+                sd: 2.0,
+                icc: 0.0,
+                unit_mean: -1.0,
+                size_at: -1.0,
+            })
+            .collect(),
+        level,
+        target_each: 0.8f64.powf(1.0 / 2.0),
+    };
+    let seed = ignorarium::seed::seed(&[0; 32], "power/H1");
+    let whole = staged(&plan, 4000, seed).unwrap();
+    assert_eq!(whole, 0.91975);
+    assert_eq!(
+        rules::power(&spec, &c),
+        [Power {
+            hypothesis: "H1".into(),
+            power: whole,
+            target: 0.8,
+            clusters: vec![("fiction".into(), 8), ("news".into(), 8)],
+            needed: None,
+            resized: true,
+        }]
+    );
+    // The pins, not the spec's order, fix the reserve's order.
+    let mut turned = spec.clone();
+    turned["inputs"].as_array_mut().unwrap()[18..].reverse();
+    assert_eq!(rules::power(&turned, &c)[0].power, whole);
+}
+
+#[test]
+fn a_resize_study_with_a_small_reserve_fails_with_the_whole_design_power() {
+    let dir = study_dir();
+    // 40 reserve clusters fall short of the count the re-size asks for in most replicates.
+    let spec = resize_study(dir.path(), &["fiction"], 8, 40);
+    assert_eq!(
+        problems(&spec, dir.path()),
+        [format!("{WHOLE}0.24 of 0.80.")]
+    );
+    let p = &rules::power(&spec, &ctx(dir.path()))[0];
+    assert_eq!((p.power, p.needed, p.resized), (0.24325, None, true));
+}
+
+#[test]
+fn a_resize_study_skips_the_z_floor() {
+    // 8 clusters fall short of the z count of 10 a fixed study needs; the reserve makes up for
+    // them.
+    let dir = study_dir();
+    let spec = resize_study(dir.path(), &["fiction"], 8, 60);
+    let d = named(&spec, dir.path());
+    assert!(d.is_empty(), "{d:?}");
+    assert_eq!(
+        problems(&unreserved(&spec), dir.path()),
+        [
+            "The confirmation sample is too small. Stratum fiction has 8 of the 10 clusters the power gate needs."
+        ]
+    );
+}
+
+#[test]
+fn the_gate_for_a_fixed_study_is_unchanged() {
+    let dir = study_dir();
+    // Reserve inputs without a re-size leave the gate's numbers as they were; E-RSV-001
+    // refuses them.
+    let mut e = two_strata(26);
+    let mut list = e[0].1.clone().unwrap().as_array().unwrap().clone();
+    list.extend([reserve(0, "code"), reserve(1, "article")]);
+    e[0] = ("/inputs", j(Value::Array(list)));
+    let spec = edited(&e);
+    let fixed = Power {
+        hypothesis: "H1".into(),
+        power: 0.0,
+        target: 0.8,
+        clusters: vec![("code".into(), 26), ("article".into(), 26)],
+        needed: Some(96),
+        resized: false,
+    };
+    assert_eq!(rules::power(&spec, &ctx(dir.path())), [fixed]);
+    let unasked = "A reserve input is listed, and design.resize declares no re-size.";
+    assert_eq!(
+        problems(&spec, dir.path()),
+        [
+            format!(
+                "{SIM}0.00 with 26 clusters in code and 26 in article; about 96 per stratum reach 0.80."
+            ),
+            unasked.into(),
+            unasked.into(),
+        ]
+    );
+    // A mistyped re-size is the type rule's, and a re-size on a quantile claim E-RSV-005's:
+    // the gate waits for them. 12 clusters pass the z floor, so a gate that ran would simulate.
+    let mut mistyped = resize_study(dir.path(), &["fiction"], 12, 4);
+    mistyped["design"]["resize"] = json!("x");
+    assert!(rules::power(&mistyped, &ctx(dir.path())).is_empty());
+    let mut quantile = resize_study(dir.path(), &["fiction"], 12, 4);
+    quantile["question"]["hypotheses"][0]["statistic"] = json!({ "quantile": 0.5 });
+    assert!(rules::power(&quantile, &ctx(dir.path())).is_empty());
+}
+
+#[test]
+fn an_unknown_resize_rule_runs_no_simulation() {
+    // The type rule refuses a rule other than blinded-once; the gate waits for it. 12 clusters
+    // pass the z floor, so a gate that ran would simulate.
+    let dir = study_dir();
+    let mut spec = resize_study(dir.path(), &["fiction"], 12, 4);
+    assert!(rules::power(&spec, &ctx(dir.path()))[0].resized);
+    spec["design"]["resize"] = json!({ "rule": "blinded-twice" });
+    assert!(rules::power(&spec, &ctx(dir.path())).is_empty());
 }

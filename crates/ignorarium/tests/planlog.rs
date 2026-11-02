@@ -3,9 +3,9 @@ use ignorarium::planlog::merkle::{
     consistency_proof, inclusion_proof, leaf_hash, node_hash, root, verify_consistency,
     verify_inclusion,
 };
-use ignorarium::planlog::store::{Leaf, LogError, PlanLog, Verified};
+use ignorarium::planlog::store::{Leaf, LogError, PlanLog, PlanLogOnce, Verified};
 use ignorarium::planlog::{commitment, family};
-use ignorarium::prior::PriorUse;
+use ignorarium::prior::{PriorUse, same_data};
 use ignorarium::spec::model::Spec;
 use std::fs;
 use std::path::Path;
@@ -603,6 +603,209 @@ fn prior_use_ignores_an_empty_normalized_hash() {
         log.used("ex-bin", "").unwrap(),
         Some("leaf 0 (legacy)".into())
     );
+}
+
+fn pair(n: &str) -> (String, String) {
+    (format!("ex-{n}"), format!("no-{n}"))
+}
+
+/// The indices of the leaves `uses` finds for data `n`.
+fn uses_of(log: &PlanLog, n: &str) -> Vec<usize> {
+    let (e, no) = pair(n);
+    log.uses(&e, &no).unwrap().iter().map(|(i, _)| *i).collect()
+}
+
+#[test]
+fn a_release_leaf_alone_is_no_use() {
+    let t = tempfile::tempdir().unwrap();
+    let log = PlanLog::open(t.path()).unwrap();
+    let (i, head) = log
+        .append_release("study:s", "c0", vec![pair("a"), pair("b")], &key(1))
+        .unwrap();
+    assert_eq!((i, head.size), (0, 1));
+    let leaves = log.leaves().unwrap();
+    assert_eq!(leaves.len(), 1);
+    let want = Leaf {
+        kind: "release".into(),
+        commitment: Some("c0".into()),
+        family: None,
+        mode: None,
+        data_hashes: vec![pair("a"), pair("b")],
+        label: "study:s".into(),
+        ts: leaves[0].ts.clone(),
+    };
+    assert_eq!(leaves[0], want);
+    assert_eq!(uses_of(&log, "a"), Vec::<usize>::new());
+    assert_eq!(log.used("ex-b", "no-b").unwrap(), None);
+    assert_eq!(log.verify(&vk(1)).unwrap(), ok(1));
+}
+
+#[test]
+fn a_later_release_frees_only_the_data_of_the_leaves_it_names() {
+    let t = tempfile::tempdir().unwrap();
+    let log = PlanLog::open(t.path()).unwrap();
+    // A release before the plan it names frees nothing.
+    log.append_release("study:s", "c1", vec![pair("a")], &key(1))
+        .unwrap();
+    let mut plan = leaf("plan", 1);
+    plan.data_hashes = vec![pair("a"), pair("b"), pair("c")];
+    log.append(plan, &key(1)).unwrap();
+    let mut other = leaf("plan", 2);
+    other.data_hashes = vec![pair("c")];
+    log.append(other, &key(1)).unwrap();
+    let mut late = leaf("legacy", 3);
+    late.label = "study:s".into();
+    late.data_hashes = vec![pair("d")];
+    log.append(late, &key(1)).unwrap();
+    let mut phase = leaf("legacy", 4);
+    phase.label = "study:t".into();
+    phase.data_hashes = vec![pair("d")];
+    log.append(phase, &key(1)).unwrap();
+    assert_eq!(uses_of(&log, "a"), vec![1]);
+    // Plan leaf 1 by its commitment, late-data leaf 3 by its label; leaf 2 is another plan
+    // and leaf 4 another study's, so their hits stay.
+    log.append_release(
+        "study:s",
+        "c1",
+        vec![pair("a"), pair("c"), pair("d")],
+        &key(1),
+    )
+    .unwrap();
+    assert_eq!(uses_of(&log, "a"), Vec::<usize>::new());
+    assert_eq!(uses_of(&log, "b"), vec![1], "b is not released");
+    assert_eq!(uses_of(&log, "c"), vec![2]);
+    assert_eq!(uses_of(&log, "d"), vec![4]);
+    // By the normalized hash alone, as `uses` matches.
+    assert_eq!(log.uses("zzz", "no-a").unwrap(), vec![]);
+    assert_eq!(
+        log.used("ex-c", "zzz").unwrap(),
+        Some("leaf 2 (plan)".into())
+    );
+    // A plan that names the data after the release uses it again.
+    let mut again = leaf("plan", 6);
+    again.data_hashes = vec![pair("a")];
+    log.append(again, &key(1)).unwrap();
+    assert_eq!(uses_of(&log, "a"), vec![6]);
+    // A release with no commitment names no leaf that has none either.
+    let mut bare = leaf("legacy", 7);
+    bare.commitment = None;
+    bare.data_hashes = vec![pair("e")];
+    log.append(bare, &key(1)).unwrap();
+    let mut unnamed = leaf("release", 8);
+    unnamed.commitment = None;
+    unnamed.data_hashes = vec![pair("e")];
+    log.append(unnamed, &key(1)).unwrap();
+    assert_eq!(uses_of(&log, "e"), vec![7]);
+}
+
+/// A log of every kind of hit `uses` sorts: plans, late-data leaves, releases before and
+/// after the leaves they name, a release with no commitment, a leaf with no text, and a leaf
+/// that holds one data by its exact hash in one pair and its normalized hash in another.
+fn mixed_log(dir: &Path) -> PlanLog {
+    let log = PlanLog::open(dir).unwrap();
+    let add = |kind: &str, n: u32, label: &str, commitment: Option<&str>, data: &[&str]| {
+        let mut l = leaf(kind, n);
+        l.label = label.into();
+        l.commitment = commitment.map(String::from);
+        l.data_hashes = data.iter().map(|d| pair(d)).collect();
+        log.append(l, &key(1)).unwrap();
+    };
+    add("release", 0, "study:s", Some("c1"), &["a"]);
+    add("plan", 1, "confirmed", Some("c1"), &["a", "b", "c"]);
+    add("plan", 2, "confirmed", Some("c2"), &["c", "f"]);
+    add("legacy", 3, "study:s", None, &["d"]);
+    add("legacy", 4, "study:t", None, &["d", "g"]);
+    add("release", 5, "study:s", Some("c1"), &["a", "c", "d"]);
+    add("plan", 6, "signal", Some("c6"), &["a"]);
+    add("legacy", 7, "phase", None, &["e"]);
+    add("release", 8, "other", None, &["e", "f"]);
+    let mut split = leaf("legacy", 9);
+    split.data_hashes = vec![
+        ("ex-h".into(), "no-x".into()),
+        ("ex-y".into(), "no-h".into()),
+        ("ex-bin".into(), String::new()),
+    ];
+    log.append(split, &key(1)).unwrap();
+    log
+}
+
+/// The uses of the data `(exact, normalized)` in `leaves` by a scan of every leaf: the hits
+/// by `same_data`, less the releases and the hits a later release frees.
+fn scan(leaves: &[Leaf], exact: &str, normalized: &str) -> Vec<(usize, Leaf)> {
+    let data = (exact.to_string(), normalized.to_string());
+    let hits: Vec<(usize, &Leaf)> = (leaves.iter().enumerate())
+        .filter(|(_, l)| l.data_hashes.iter().any(|h| same_data(&data, h)))
+        .collect();
+    let names = |r: &Leaf, l: &Leaf| {
+        r.label == l.label || (r.commitment.is_some() && r.commitment == l.commitment)
+    };
+    let freed = |i: usize, l: &Leaf| {
+        (hits.iter()).any(|(j, r)| r.kind == "release" && *j > i && names(r, l))
+    };
+    (hits.iter())
+        .filter(|(i, l)| l.kind != "release" && !freed(*i, l))
+        .map(|(i, l)| (*i, (*l).clone()))
+        .collect()
+}
+
+#[test]
+fn a_log_read_once_gives_the_answers_of_uses() {
+    let t = tempfile::tempdir().unwrap();
+    let log = mixed_log(t.path());
+    let leaves = log.leaves().unwrap();
+    let once = PlanLogOnce::new(PlanLog::open(t.path()).unwrap());
+    let names = ["a", "b", "c", "d", "e", "f", "g", "h", "x", "y", "zzz"];
+    let mut exacts: Vec<String> = names.iter().map(|n| format!("ex-{n}")).collect();
+    let mut normals: Vec<String> = names.iter().map(|n| format!("no-{n}")).collect();
+    exacts.extend(["no-a".into(), "ex-bin".into(), String::new()]);
+    normals.extend(["ex-a".into(), String::new()]);
+    let mut hits = 0;
+    for e in &exacts {
+        for n in &normals {
+            let want = scan(&leaves, e, n);
+            hits += want.len();
+            assert_eq!(log.uses(e, n).unwrap(), want, "{e} {n}");
+            assert_eq!(once.uses(e, n).unwrap(), want, "{e} {n}");
+            assert_eq!(once.used(e, n), log.used(e, n), "{e} {n}");
+        }
+    }
+    // The probes meet every kind of hit, and some data are found by both hashes.
+    assert_eq!(uses_of(&log, "a"), vec![6]);
+    assert_eq!(uses_of(&log, "c"), vec![2]);
+    assert_eq!(uses_of(&log, "d"), vec![4]);
+    assert_eq!(uses_of(&log, "e"), vec![7]);
+    assert_eq!(uses_of(&log, "h"), vec![9]);
+    assert_eq!(log.uses("ex-bin", "").unwrap().len(), 1);
+    assert_eq!(hits, 233);
+}
+
+#[test]
+fn a_log_read_once_reads_its_leaves_on_the_first_lookup_only() {
+    let t = tempfile::tempdir().unwrap();
+    let log = mixed_log(t.path());
+    let path = t.path().join("leaves.jsonl");
+    let good = fs::read(&path).unwrap();
+    let once = PlanLogOnce::new(PlanLog::open(t.path()).unwrap());
+    let first = once.used("ex-h", "zzz").unwrap();
+    assert_eq!(first, Some("leaf 9 (legacy)".into()));
+    // A log that changes after the first lookup leaves the answers as they were.
+    fs::write(
+        &path,
+        b"nonsense
+",
+    )
+    .unwrap();
+    assert!(log.used("ex-h", "zzz").is_err());
+    assert_eq!(once.used("ex-h", "zzz").unwrap(), first);
+    assert_eq!(once.uses("ex-a", "no-a").unwrap().len(), 1);
+    // A log that cannot be read on the first lookup fails every lookup, as `uses` fails.
+    let broken = PlanLogOnce::new(PlanLog::open(t.path()).unwrap());
+    let e = broken.used("ex-h", "zzz").unwrap_err();
+    assert_eq!(e, log.used("ex-h", "zzz").unwrap_err());
+    assert!(e.to_string().contains("leaf 0"), "{e}");
+    fs::write(&path, good).unwrap();
+    assert_eq!(broken.used("ex-h", "zzz").unwrap_err(), e);
+    assert!(broken.uses("ex-a", "no-a").is_err());
 }
 
 #[test]

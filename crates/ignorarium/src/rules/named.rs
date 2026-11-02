@@ -12,7 +12,7 @@ use crate::diag::{Diagnostic, printable};
 use crate::inputs::{self, Found, input_path};
 use crate::payload::{self, PayloadError};
 use crate::power::{required_clusters, z};
-use crate::prior::{PriorUse, same_data};
+use crate::prior::{PriorUse, Seen, same_data};
 use crate::records;
 use crate::schedule::ROW_CAP;
 use crate::seed::seed;
@@ -20,7 +20,10 @@ use crate::spec::model::{Claim, Outcome, SELECTED, StatisticSpec};
 use crate::store::{Store, is_digest};
 use crate::stream::{self, LogName};
 use evidence::claim::{Bound, Statistic};
-use evidence::power::{Plan, Stratum, WORK, clusters_needed, mean_sd, simulate};
+pub use evidence::power::CAP;
+use evidence::power::{
+    Plan, Staged, StagedStratum, Stratum, WORK, clusters_needed, mean_sd, simulate, staged,
+};
 use evidence::rng::Rng;
 use evidence::{Error, Tail};
 use serde_json::{Value, json};
@@ -106,6 +109,10 @@ const NAMED: &[(&str, NamedFn)] = &[
     ("units-declared", units_declared),
     ("row-cap", row_cap),
     ("selection-stage", selection_stage),
+    ("reserve-declared", reserve_declared),
+    ("reserve-pinned", reserve_pinned),
+    ("reserve-strata", reserve_strata),
+    ("resize-tested", resize_tested),
     ("condition-declared", condition_declared),
     ("param-shape", param_shape),
     ("claim-required", claim_required),
@@ -238,9 +245,14 @@ fn role(input: &Value) -> Option<&str> {
     input.get("role")?.as_str()
 }
 
-/// A selection or confirmation input: one cluster of the schedule.
+/// A selection, confirmation or reserve input: one cluster, with units, a stratum and fresh
+/// data.
 fn is_cluster(input: &Value) -> bool {
-    matches!(role(input), Some("selection" | "confirmation"))
+    matches!(role(input), Some("selection" | "confirmation" | "reserve"))
+}
+
+fn is_reserve(input: &Value) -> bool {
+    role(input) == Some("reserve")
 }
 
 /// The input's `(exact, normalized)` hashes, from the store first; `None` when there is no
@@ -347,9 +359,7 @@ fn open_unit(x: f64) -> bool {
 }
 
 /// Replicates of each power simulation.
-const REPS: u32 = 4000;
-/// The most clusters per stratum the search for the count that would pass tries.
-pub const CAP: u32 = 1024;
+pub const REPS: u32 = 4000;
 
 /// E-CNF-002, at each hypothesis with a claim that E-CNF-001, E-HYP-003 and E-HYP-004 accept
 /// and whose estimates are found: `gate` must find the power the claim needs. An absent power
@@ -382,11 +392,9 @@ fn power_met(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
         match ctx.gates.of(spec, &path, || gate(spec, ctx, h, design)) {
             None => {}
             Some(Gate::Floor(short)) => out.extend(short.into_iter().map(|(group, have, need)| {
-                let group = group_name(&group);
                 at(format!(
-                    "{}{} has {have} of the {need} clusters the power gate needs.",
-                    group[..1].to_ascii_uppercase(),
-                    &group[1..]
+                    "{} has {have} of the {need} clusters the power gate needs.",
+                    group_subject(&group)
                 ))
             })),
             Some(Gate::Simulated(p)) if p.power >= p.target => {}
@@ -409,13 +417,27 @@ pub struct Power {
     /// stratum as `shown` prints it, `""` for the pooled group.
     pub clusters: Vec<(String, usize)>,
     /// When the power falls short: the smallest common count of clusters per group that
-    /// reaches the target, or `None` when 1,024 do not. `None` too when the power reaches it.
+    /// reaches the target, or `None` when [`CAP`] do not. `None` too when the power reaches it.
     pub needed: Option<u32>,
+    /// The power is the whole design's, re-size and reserve included; `clusters` counts the
+    /// first batch, and `needed` is `None`.
+    pub resized: bool,
 }
 
 impl Power {
     /// `Simulated power 0.62 with 26 clusters in code and 26 in article`, then what would pass.
     pub fn sentence(&self) -> String {
+        // Truncated, so a power just short of the target never prints as the target; the
+        // 1e-9 absorbs the rounding of k / REPS.
+        let power = (self.power * 100.0 + 1e-9).floor() / 100.0;
+        let target = decimals(self.target);
+        let passes = self.power >= self.target;
+        if self.resized {
+            let then = if passes { "; the target is " } else { " of " };
+            return format!(
+                "The whole design, re-size and reserve included, reaches power {power:.2}{then}{target}."
+            );
+        }
         let groups: Vec<String> = (self.clusters.iter().enumerate())
             .map(|(i, (stratum, n))| {
                 let unit = match (i, n) {
@@ -426,21 +448,14 @@ impl Power {
                 format!("{n}{unit} in {}", in_group(stratum))
             })
             .collect();
-        let groups = match groups.split_last() {
-            Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
-            _ => groups.concat(),
-        };
-        let target = decimals(self.target);
+        let groups = and_list(&groups);
         let pooled = matches!(self.clusters.as_slice(), [(stratum, _)] if stratum.is_empty());
         let per = if pooled { "clusters" } else { "per stratum" };
-        let then = match (self.power >= self.target, self.needed) {
+        let then = match (passes, self.needed) {
             (true, _) => format!("the target is {target}"),
             (false, Some(n)) => format!("about {n} {per} reach {target}"),
             (false, None) => format!("{CAP} {per} do not reach {target}"),
         };
-        // Truncated, so a power just short of the target never prints as the target; the
-        // 1e-9 absorbs the rounding of k / REPS.
-        let power = (self.power * 100.0 + 1e-9).floor() / 100.0;
         format!("Simulated power {power:.2} with {groups}; {then}.")
     }
 }
@@ -604,24 +619,42 @@ impl Gates {
 /// meets the one-sided z count for every bound: the box estimates the statistic as the
 /// unweighted mean of the cluster means, so a cluster mean has sd `sd x sqrt(icc + (1 - icc) /
 /// m)` on average, m the harmonic mean of the units the group's clusters give. A shortfall
-/// there fails without simulating. `None` when a rule before it reports the hypothesis, or a
-/// group has no cluster (E-HYP-002).
+/// there fails without simulating.
+///
+/// A study that re-sizes (`design.resize`) is simulated whole instead
+/// (`evidence::power::staged`): a group's first batch is its confirmation clusters, its reserve
+/// its reserve clusters in the order the re-size appends them, the units lie about `power_at`,
+/// and the re-size sizes each of k groups at `power_at` for `design.power`^(1/k). It meets no z
+/// floor, which assumes a fixed count of clusters.
+///
+/// `None` when a rule before it reports the hypothesis, a group has no cluster (E-HYP-002) or
+/// a re-sized group no reserve cluster (E-RSV-002, E-RSV-004), or the re-size is mistyped or
+/// names an unknown rule (the type rule's) or is on a quantile claim (E-RSV-005's).
 fn gate(spec: &Value, ctx: &CheckCtx, h: &Value, design: (f64, f64, u64)) -> Option<Gate> {
     let (stream_level, target, per) = design;
     let sized = sizing(h)?;
+    let resized = match val(spec, "design.resize") {
+        None => false,
+        Some(r)
+            if r.get("rule").and_then(Value::as_str) == Some("blinded-once")
+                && matches!(sized.stat, Statistic::Mean { .. }) =>
+        {
+            true
+        }
+        Some(_) => return None,
+    };
     let Some(Lookup::Found(groups)) = estimates_of(spec, h, ctx) else {
         return None;
     };
     let level = stream_level * sized.share;
+    let confirmation = clusters_of(spec, ctx, "confirmation", per);
     let groups: Vec<(StratumInput, Vec<u32>)> = (groups.into_iter())
         .map(|g| {
-            let sizes = (cluster_sizes(spec, ctx, &g.stratum, per).into_iter())
-                .map(|u| u32::try_from(u).unwrap_or(u32::MAX))
-                .collect();
-            (g, sizes)
+            let first = units_in(&confirmation, &g.stratum);
+            (g, first)
         })
         .collect();
-    if let Statistic::Mean { .. } = sized.stat {
+    if !resized && matches!(sized.stat, Statistic::Mean { .. }) {
         let short: Vec<(String, u64, u64)> = (groups.iter())
             .filter(|(_, sizes)| !sizes.is_empty())
             .filter_map(|(g, sizes)| {
@@ -641,33 +674,58 @@ fn gate(spec: &Value, ctx: &CheckCtx, h: &Value, design: (f64, f64, u64)) -> Opt
     if groups.iter().any(|(_, sizes)| sizes.is_empty()) {
         return None;
     }
-    let strata = (groups.iter())
-        .map(|(g, sizes)| Stratum {
-            sizes: sizes.clone(),
-            sd: g.sd,
-            icc: g.icc,
-            unit_mean: match sized.stat {
-                Statistic::Mean { .. } => sized.at,
-                Statistic::Quantile(q) => sized.at - g.sd * z(q),
-            },
-        })
-        .collect();
-    let plan = Plan {
-        stat: sized.stat,
-        bounds: sized.bounds,
-        strata,
-        level,
-    };
     let id = h.get("id").and_then(Value::as_str).unwrap_or_default();
     let seed = seed(&ctx.spec_hash, &format!("power/{id}"));
-    let found = simulate(&plan, REPS, &mut Rng::from_seed(seed)).and_then(|power| {
-        let needed = if power < target {
-            clusters_needed(&plan, target, REPS, seed, CAP)?
-        } else {
-            None
+    let found = if resized {
+        let reserve = clusters_of(spec, ctx, "reserve", per);
+        let strata: Vec<StagedStratum> = (groups.iter())
+            .map(|(g, first)| StagedStratum {
+                first: first.clone(),
+                reserve: units_in(&reserve, &g.stratum),
+                sd: g.sd,
+                icc: g.icc,
+                unit_mean: sized.at,
+                size_at: sized.at,
+            })
+            .collect();
+        if strata.iter().any(|s| s.reserve.is_empty()) {
+            return None;
+        }
+        let plan = Staged {
+            stat: sized.stat,
+            bounds: sized.bounds,
+            target_each: target.powf(1.0 / strata.len() as f64),
+            strata,
+            level,
         };
-        Ok((power, needed))
-    });
+        staged(&plan, REPS, seed).map(|power| (power, None))
+    } else {
+        let strata = (groups.iter())
+            .map(|(g, sizes)| Stratum {
+                sizes: sizes.clone(),
+                sd: g.sd,
+                icc: g.icc,
+                unit_mean: match sized.stat {
+                    Statistic::Mean { .. } => sized.at,
+                    Statistic::Quantile(q) => sized.at - g.sd * z(q),
+                },
+            })
+            .collect();
+        let plan = Plan {
+            stat: sized.stat,
+            bounds: sized.bounds,
+            strata,
+            level,
+        };
+        simulate(&plan, REPS, &mut Rng::from_seed(seed)).and_then(|power| {
+            let needed = if power < target {
+                clusters_needed(&plan, target, REPS, seed, CAP)?
+            } else {
+                None
+            };
+            Ok((power, needed))
+        })
+    };
     Some(match found {
         Err(Error::Parameter("work")) => Gate::Fault(format!(
             "it would draw more than {} million values",
@@ -686,6 +744,7 @@ fn gate(spec: &Value, ctx: &CheckCtx, h: &Value, design: (f64, f64, u64)) -> Opt
                 })
                 .collect(),
             needed,
+            resized,
         }),
     })
 }
@@ -740,16 +799,17 @@ fn inside_range(h: &Value, margins: &[f64]) -> bool {
     }
 }
 
-/// The units each confirmation cluster of `stratum` gives (every confirmation input for the
-/// pooled group `""`): its declared units, at most `per`. As in `analysis::distinct_clusters`,
-/// an input that holds the same data as an earlier confirmation input, in any stratum, is no
-/// cluster; an input whose data cannot be read counts on its own. An input with no units is
-/// not counted: E-UNT-001 reports it.
-fn cluster_sizes(spec: &Value, ctx: &CheckCtx, stratum: &str, per: u64) -> Vec<u64> {
-    let mut seen: Vec<(String, String)> = vec![];
-    let mut sizes = vec![];
+/// Each cluster of input role `of`, as its stratum and the units it gives: its declared units,
+/// at most `per`. As in `analysis::distinct_clusters`, an input that holds the same data as an
+/// earlier input of the role, in any stratum, is no cluster; an input whose data cannot be
+/// read counts on its own. An input with no units is not counted: E-UNT-001 reports it.
+/// Confirmation clusters come in spec order; reserve clusters in the order the schedule runs
+/// them: by stratum, then pin, then path.
+fn clusters_of<'a>(spec: &'a Value, ctx: &CheckCtx, of: &str, per: u64) -> Vec<(&'a str, u32)> {
+    let mut seen = Seen::default();
+    let mut clusters = vec![];
     for (_, input) in nodes(spec, "inputs[*]") {
-        if role(input) != Some("confirmation") {
+        if role(input) != Some(of) {
             continue;
         }
         let Some(units) = input
@@ -759,19 +819,27 @@ fn cluster_sizes(spec: &Value, ctx: &CheckCtx, stratum: &str, per: u64) -> Vec<u
         else {
             continue;
         };
-        if let Some(h) = input_hashes(ctx, input) {
-            if seen.iter().any(|s| same_data(s, &h)) {
-                continue;
-            }
-            seen.push(h);
+        if input_hashes(ctx, input).is_some_and(|h| !seen.insert(&h)) {
+            continue;
         }
-        let in_group =
-            stratum.is_empty() || input.get("stratum").and_then(Value::as_str) == Some(stratum);
-        if in_group {
-            sizes.push(units.min(per));
-        }
+        let field = |k: &str| input.get(k).and_then(Value::as_str).unwrap_or_default();
+        let order = (of == "reserve").then(|| (field("sha256"), field("path")));
+        let units = u32::try_from(units.min(per)).unwrap_or(u32::MAX);
+        clusters.push((field("stratum"), order, units));
     }
-    sizes
+    clusters.sort_by_key(|&(stratum, order, _)| order.map(|o| (stratum, o)));
+    (clusters.into_iter())
+        .map(|(stratum, _, units)| (stratum, units))
+        .collect()
+}
+
+/// The units of each of `clusters` (`clusters_of`) in `stratum`; every one for the pooled
+/// group `""`.
+fn units_in(clusters: &[(&str, u32)], stratum: &str) -> Vec<u32> {
+    (clusters.iter())
+        .filter(|(s, _)| stratum.is_empty() || *s == stratum)
+        .map(|&(_, units)| units)
+        .collect()
 }
 
 /// The claim of a hypothesis, when it is well formed.
@@ -1005,6 +1073,20 @@ fn group_name(stratum: &str) -> String {
     } else {
         format!("stratum {}", shown(stratum))
     }
+}
+
+/// `a`, `a and b`, `a, b and c`.
+fn and_list(items: &[String]) -> String {
+    match items.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => items.concat(),
+    }
+}
+
+/// `group_name` at the start of a sentence: `Stratum <name>`, or `The pooled group`.
+fn group_subject(stratum: &str) -> String {
+    let group = group_name(stratum);
+    format!("{}{}", group[..1].to_ascii_uppercase(), &group[1..])
 }
 
 /// A name read from the spec, as a diagnostic may print it.
@@ -1415,10 +1497,11 @@ fn reference_not_self(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     hits
 }
 
-/// At `inputs`: no confirmation input. At `inputs[*].<field>`: a confirmation input holds the
-/// data of a selection or calibration input: the same exact hash, or the same normalized hash
-/// (text that differs only in case and spacing). An empty normalized hash (not UTF-8 text)
-/// matches nothing. The detail names the first such input in spec order.
+/// At `inputs`: no confirmation input. At `inputs[*].<field>`: a confirmation or reserve input
+/// holds the data of a selection or calibration input, or a reserve input that of a
+/// confirmation input or of an earlier reserve input: the same exact hash, or the same
+/// normalized hash (text that differs only in case and spacing). An empty normalized hash (not
+/// UTF-8 text) matches nothing. The detail names the first such input in spec order.
 fn confirmation_disjoint(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     if !pat.contains('.') {
         return flag(spec, pat, |v| {
@@ -1426,19 +1509,34 @@ fn confirmation_disjoint(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
                 .is_some_and(|a| !a.iter().any(|i| role(i) == Some("confirmation")))
         });
     }
-    let held: Vec<(String, &str, (String, String))> = nodes(spec, "inputs[*]")
+    let held: Vec<(String, &str, (String, String), &Value)> = nodes(spec, "inputs[*]")
         .into_iter()
         .filter_map(|(p, i)| match role(i)? {
-            r @ ("selection" | "calibration") => Some((p, r, input_hashes(ctx, i)?)),
+            r @ ("selection" | "calibration" | "confirmation" | "reserve") => {
+                Some((p, r, input_hashes(ctx, i)?, i))
+            }
             _ => None,
         })
         .collect();
     with_parent(spec, pat)
         .into_iter()
-        .filter(|(_, input, _)| role(input) == Some("confirmation"))
+        .filter(|(_, input, _)| matches!(role(input), Some("confirmation" | "reserve")))
         .filter_map(|(path, input, _)| {
-            let h = input_hashes(ctx, input)?;
-            let (other, r, _) = held.iter().find(|(_, _, s)| same_data(s, &h))?;
+            // `held` and `with_parent` borrow the same spec nodes, so the address finds the
+            // input's own entry and its hashes; an input whose data was not read has none.
+            let own = (held.iter()).position(|(_, _, _, i)| std::ptr::eq(*i, input))?;
+            let h = &held[own].2;
+            // Two confirmation inputs may hold one text. A reserve input holds the data of no
+            // selection, calibration or confirmation input, nor of an earlier reserve input.
+            let barred = |at: usize, r: &str| match (is_reserve(input), r) {
+                (true, "reserve") => at < own,
+                (true, _) => true,
+                (false, "confirmation" | "reserve") => false,
+                (false, _) => true,
+            };
+            let (other, r, _, _) = (held.iter().enumerate())
+                .find(|(at, (_, r, s, _))| barred(*at, r) && same_data(s, h))?
+                .1;
             Some(Hit {
                 path,
                 detail: Some(format!("It holds the data of {other}, a {r} input.")),
@@ -1448,12 +1546,13 @@ fn confirmation_disjoint(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
 }
 
 /// At `inputs`: no selection or confirmation input, so the schedule has no rows. At
-/// `inputs[*].units`: such an input does not declare its units. At `inputs[*].stratum`: such an
-/// input has no stratum, or `""`, while `design.stratum` names strata.
+/// `inputs[*].units`: a cluster input does not declare its units. At `inputs[*].stratum`: a
+/// cluster input has no stratum, or `""`, while `design.stratum` names strata.
 fn units_declared(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
     let Some((_, field)) = pat.rsplit_once('.') else {
+        let staged = |i: &Value| matches!(role(i), Some("selection" | "confirmation"));
         return flag(spec, pat, |v| {
-            v.as_array().is_some_and(|a| !a.iter().any(is_cluster))
+            v.as_array().is_some_and(|a| !a.iter().any(staged))
         });
     };
     let strata = text(spec, "design.stratum").is_some_and(|s| !s.is_empty());
@@ -1477,7 +1576,7 @@ fn units_declared(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
 fn stage_size(spec: &Value, role: &str) -> Option<u64> {
     let list = match role {
         "selection" => list(spec, "design.selection.conditions")?,
-        "confirmation" => list(spec, "design.confirmation.conditions")?,
+        "confirmation" | "reserve" => list(spec, "design.confirmation.conditions")?,
         _ => return None,
     };
     Some(1 + list.len() as u64)
@@ -1542,6 +1641,111 @@ fn selection_stage(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
         "design.conditions[*].id" => flag(spec, pat, |v| v.as_str() == Some(SELECTED)),
         _ => vec![],
     }
+}
+
+// ---- reserve inputs and the re-size ----
+
+/// E-RSV-001 at `inputs[*].role`: a reserve input, and no `design.resize`. E-RSV-002 at
+/// `design.resize`: a re-size, and no reserve input. A mistyped re-size counts as present.
+fn reserve_declared(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    if pat == "design.resize" {
+        return match list(spec, "inputs") {
+            Some(inputs) if !inputs.iter().any(is_reserve) => flag(spec, pat, Value::is_object),
+            _ => vec![],
+        };
+    }
+    let resized = val(spec, "design.resize").is_some();
+    flag(spec, pat, |v| !resized && v.as_str() == Some("reserve"))
+}
+
+/// E-RSV-003 at `inputs[*].sha256`: a reserve input with an empty pin. The reserve clusters
+/// are taken in the order of their pins. A malformed pin is E-FMT-003's.
+fn reserve_pinned(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    (with_parent(spec, pat).into_iter())
+        .filter(|(_, input, sha)| is_reserve(input) && sha.as_str() == Some(""))
+        .map(|(path, _, _)| hit(path))
+        .collect()
+}
+
+/// E-RSV-004 at a re-size table, when some input is a reserve: a group a claim is tested in that
+/// no reserve input holds, then a reserve stratum that no claim's group holds, each once, in
+/// order of first mention. The pooled group `""` holds every reserve input, which must lie in
+/// one stratum: the run appends reserve clusters stratum by stratum, so a pooled count spread
+/// over strata would add the first stratum's clusters before any of the next. A mistyped
+/// stratum is skipped.
+fn reserve_strata(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let Some(inputs) = list(spec, "inputs") else {
+        return vec![];
+    };
+    let mut reserves: Vec<&str> = vec![];
+    for s in (inputs.iter().filter(|i| is_reserve(i)))
+        .filter_map(|i| i.get("stratum").map_or(Some(""), Value::as_str))
+    {
+        if !reserves.contains(&s) {
+            reserves.push(s);
+        }
+    }
+    if reserves.is_empty() {
+        return vec![];
+    }
+    let mut claimed: Vec<&str> = vec![];
+    for (_, h) in nodes(spec, "question.hypotheses[*]") {
+        for g in groups_of(h).filter(|_| has_claim(h)).unwrap_or_default() {
+            if !claimed.contains(&g) {
+                claimed.push(g);
+            }
+        }
+    }
+    let mut details: Vec<String> = (claimed.iter())
+        .filter(|g| !g.is_empty() && !reserves.contains(g))
+        .map(|g| format!("{} has a claim and no reserve.", group_subject(g)))
+        .collect();
+    if !claimed.contains(&"") {
+        details.extend(
+            (reserves.iter())
+                .filter(|s| !claimed.contains(s))
+                .map(|s| format!("{} has a reserve and no claim.", group_subject(s))),
+        );
+    } else if reserves.len() > 1 {
+        let names: Vec<String> = (reserves.iter())
+            .map(|s| if s.is_empty() { "(none)" } else { shown(s) }.to_string())
+            .collect();
+        details.push(format!(
+            "A pooled claim's reserve spans strata {}; list the strata in the claim, or keep its reserve in one stratum.",
+            and_list(&names)
+        ));
+    }
+    (nodes(spec, pat).into_iter())
+        .filter(|(_, v)| v.is_object())
+        .flat_map(|(path, _)| {
+            (details.iter()).map(move |d| Hit {
+                path: path.clone(),
+                detail: Some(d.clone()),
+            })
+        })
+        .collect()
+}
+
+/// E-RSV-005 at a re-size table: the study is exploratory, so it tests no claim, or a
+/// hypothesis's claim reads a quantile, whose bounds read other observations than the one per
+/// cluster the re-size reads.
+fn resize_tested(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let quantile =
+        |h: &Value| has_claim(h) && matches!(statistic_of(h), Some(Statistic::Quantile(_)));
+    let detail = if text(spec, "study.mode") == Some("exploratory") {
+        "An exploratory study tests no claim."
+    } else if (nodes(spec, "question.hypotheses[*]").iter()).any(|(_, h)| quantile(h)) {
+        "A re-size reads one observation per cluster; a quantile claim's bounds read different ones."
+    } else {
+        return vec![];
+    };
+    (nodes(spec, pat).into_iter())
+        .filter(|(_, v)| v.is_object())
+        .map(|(path, _)| Hit {
+            path,
+            detail: Some(detail.into()),
+        })
+        .collect()
 }
 
 const CONTRAST_KEYS: &str = "question.hypotheses[*].contrast.*";

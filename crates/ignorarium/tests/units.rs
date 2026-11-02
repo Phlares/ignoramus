@@ -124,6 +124,24 @@ fn clusters_are_the_selection_and_confirmation_inputs_in_spec_order() {
 }
 
 #[test]
+fn a_reserve_input_is_a_cluster_of_its_own_role() {
+    let mut s = spec("seeded");
+    s.inputs[0].role = Role::Reserve;
+    s.inputs[0].stratum = "fiction".into();
+    let got = units::clusters(&s, &hash());
+    assert_eq!(
+        got[0],
+        Cluster {
+            path: "data/cal.txt".into(),
+            stratum: "fiction".into(),
+            role: Role::Reserve,
+            picked: pick(3, 9, Pick::Seeded, seed_of("data/cal.txt")),
+        }
+    );
+    assert_eq!(got.len(), 3);
+}
+
+#[test]
 fn an_input_without_units_gives_no_units() {
     let mut s = spec("seeded");
     s.inputs[3].units = None;

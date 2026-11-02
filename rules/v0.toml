@@ -59,6 +59,7 @@ target = [
   { path = "design.selection.rule", check = "required" },
   { path = "design.confirmation", check = "required" },
   { path = "design.confirmation.conditions", check = "required" },
+  { path = "design.resize.rule", check = "required" },
   { path = "inputs", check = "required" },
   { path = "inputs[*].path", check = "required" },
   { path = "inputs[*].sha256", check = "required" },
@@ -182,6 +183,8 @@ target = [
   { path = "design.confirmation", check = "type", kind = "table" },
   { path = "design.confirmation.conditions", check = "type", kind = "array" },
   { path = "design.confirmation.conditions[*]", check = "type", kind = "string" },
+  { path = "design.resize", check = "type", kind = "table" },
+  { path = "design.resize.rule", check = "type", kind = "string" },
   { path = "inputs", check = "type", kind = "array" },
   { path = "inputs[*]", check = "type", kind = "table" },
   { path = "inputs[*].path", check = "type", kind = "string" },
@@ -244,8 +247,9 @@ target = [
   { path = "scope.end_of_run.route", check = "enum", values = ["report", "follow-on", "share"] },
   { path = "design.pick", check = "enum", values = ["seeded", "first"] },
   { path = "design.selection.rule", check = "enum", values = ["best-mean"] },
+  { path = "design.resize.rule", check = "enum", values = ["blinded-once"] },
   { path = "outcomes[*].paired", check = "enum", values = ["difference", "percent", "log-ratio"] },
-  { path = "inputs[*].role", check = "enum", values = ["calibration", "selection", "confirmation", "model"] },
+  { path = "inputs[*].role", check = "enum", values = ["calibration", "selection", "confirmation", "model", "reserve"] },
   { path = "inputs[*].licence.type", check = "enum", values = ["common", "custom", "request-form", "unspecified"] },
   { path = "mutations.operators[*].type", check = "enum", values = ["int", "float", "enum"] },
   { path = "report.publish", check = "enum", values = ["none", "zenodo-sandbox"] },
@@ -469,8 +473,8 @@ target = [
 code = "E-CNF-002"
 severity = "error"
 problem = "The confirmation sample is too small."
-instruction = "Add confirmation inputs to each stratum the detail names, until each has the clusters the power gate needs. The detail states the simulated power and about how many clusters per stratum reach design.power. Raising design.units_per_cluster helps only as far as the icc allows, since the test takes one value per cluster. A mean range wider than the cluster means need also costs power. Two inputs that hold the same data are one cluster."
-why = "A test with too few clusters misses real effects and exaggerates the ones it finds. The gate simulates the test the box runs: one value per cluster, a bounded betting e-value for each bound in each stratum the claim lists (all confirmation inputs when it lists none), and a pass only when every bound in every stratum reaches 1 / (the level the stream gives the study x alpha_share). It draws 4,000 replicates of each stratum's own clusters from a normal model with the sd and icc from the study in estimates, centred on power_at; for a quantile claim, the units' quantile lies at power_at. For a mean claim each simulated cluster mean is clipped to the declared range, as the test clips each unit; the two agree while the units stay inside the range, and the claim is about the clipped mean. Each simulation draws at most 100 million values, so a quantile claim on very large clusters fails closed instead of running for hours. The power is that of the joint event, so each of several strata needs more than the target alone. The seed comes from the spec hash and the hypothesis id, so every check of a spec gives the same power. A one-sided z-test needs fewer clusters than the e-value test, so a mean claim with fewer clusters than the z count fails first, without the simulation. The z count assumes the box estimates the statistic as the unweighted mean of the cluster means, and so uses the harmonic mean of the units the clusters give. The model is normal: a skewed outcome can have another power."
+instruction = "Add confirmation inputs to each stratum the detail names, until each has the clusters the power gate needs. The detail states the simulated power and about how many clusters per stratum reach design.power. Raising design.units_per_cluster helps only as far as the icc allows, since the test takes one value per cluster. A mean range wider than the cluster means need also costs power. Two inputs that hold the same data are one cluster. In a study that re-sizes, add reserve inputs to each stratum the claim lists instead, and keep the first batch as declared."
+why = "A test with too few clusters misses real effects and exaggerates the ones it finds. The gate simulates the test the box runs: one value per cluster, a bounded betting e-value for each bound in each stratum the claim lists (all confirmation inputs when it lists none), and a pass only when every bound in every stratum reaches 1 / (the level the stream gives the study x alpha_share). It draws 4,000 replicates of each stratum's own clusters from a normal model with the sd and icc from the study in estimates, centred on power_at; for a quantile claim, the units' quantile lies at power_at. For a mean claim each simulated cluster mean is clipped to the declared range, as the test clips each unit; the two agree while the units stay inside the range, and the claim is about the clipped mean. Each simulation draws at most 2,000 million values, so a quantile claim on very large clusters fails closed instead of running for hours. The power is that of the joint event, so each of several strata needs more than the target alone. The seed comes from the spec hash and the hypothesis id, so every check of a spec gives the same power. A one-sided z-test needs fewer clusters than the e-value test, so a mean claim with fewer clusters than the z count fails first, without the simulation. The z count assumes the box estimates the statistic as the unweighted mean of the cluster means, and so uses the harmonic mean of the units the clusters give. The model is normal: a skewed outcome can have another power. A study that re-sizes is simulated whole: each replicate draws the first batch, sizes it as the re-size would from its spread about 0, fails when the reserve holds too few clusters, and tests the first batch then the clusters added, with no z count, since that assumes a fixed number of clusters."
 sources = ["https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661", "https://doi.org/10.1186/1471-2288-11-94", "https://arxiv.org/abs/2010.09686", "https://doi.org/10.1080/00401706.1982.10487790"]
 when = { mode = "confirmatory" }
 target = [
@@ -504,9 +508,9 @@ target = [
 [[rule]]
 code = "E-CNF-004"
 severity = "error"
-problem = "The plan has no confirmation input, or a confirmation input holds the same data as a selection or calibration input."
-instruction = "Add a confirmation input. Give each one data that no selection or calibration input holds: not the same bytes, and not the same text in other case or spacing."
-why = "A winner picked on some data looks better on that same data. Only fresh data gives an honest test. The content decides, not the file name. A model calibrated on a text has adapted to it; its error there is not its error on new text."
+problem = "The plan has no confirmation input, or a confirmation or reserve input holds the same data as a selection or calibration input, or a reserve input holds the data of a confirmation input or of an earlier reserve input."
+instruction = "Add a confirmation input. Give each confirmation and reserve input data that no selection or calibration input holds, and each reserve input data that no confirmation input and no earlier reserve input holds: not the same bytes, and not the same text in other case or spacing."
+why = "A winner picked on some data looks better on that same data. Only fresh data gives an honest test. The content decides, not the file name. A model calibrated on a text has adapted to it; its error there is not its error on new text. A reserve cluster the re-size adds must be new to the test too, or the test counts one text twice."
 sources = ["https://doi.org/10.1038/s41562-016-0021", "https://arxiv.org/html/2311.09755v2"]
 when = { mode = "confirmatory" }
 target = [
@@ -517,9 +521,9 @@ target = [
 [[rule]]
 code = "E-CNF-005"
 severity = "error"
-problem = "Selection or confirmation data was used by an earlier study."
-instruction = "Use data no earlier plan used for selection or confirmation, or change the role of this input."
-why = "Reused data has already shaped a decision. A test on it is not independent."
+problem = "Selection, confirmation or reserve data was used by an earlier study."
+instruction = "Use data no earlier plan used for selection, confirmation or reserve, or change the role of this input."
+why = "Reused data has already shaped a decision. A test on it is not independent. A reserve input is confirmation data held back, so it must be fresh too."
 sources = ["https://doi.org/10.1038/s41562-016-0021"]
 when = { mode = "confirmatory" }
 target = [
@@ -542,9 +546,9 @@ target = [
 [[rule]]
 code = "E-UNT-001"
 severity = "error"
-problem = "The plan has no selection or confirmation input, or one does not declare its units, or its stratum while the design names strata."
-instruction = "List each file of units as a selection or confirmation input. Set its units to the number of units the file holds. When design.stratum is set, give each such input its stratum."
-why = "Each selection or confirmation input is one cluster, and the schedule picks its units from the count the input declares. The box does not count units itself. A plan without a cluster runs nothing."
+problem = "The plan has no selection or confirmation input, or a selection, confirmation or reserve input does not declare its units, or its stratum while the design names strata."
+instruction = "List each file of units as a selection or confirmation input. Set its units to the number of units the file holds. When design.stratum is set, give each such input its stratum. A reserve input declares its units and stratum the same way."
+why = "Each selection, confirmation or reserve input is one cluster, and the schedule picks its units from the count the input declares. The box does not count units itself. A plan without a selection or confirmation cluster runs nothing."
 sources = []
 target = [
   { path = "inputs", check = "named:units-declared" },
@@ -578,6 +582,65 @@ target = [
   { path = "design.selection.metric", check = "named:selection-stage" },
   { path = "design.confirmation.conditions[*]", check = "named:condition-declared" },
   { path = "design.conditions[*].id", check = "named:selection-stage" },
+]
+
+[[rule]]
+code = "E-RSV-001"
+severity = "error"
+problem = "A reserve input is listed, and design.resize declares no re-size."
+instruction = "Declare the re-size: add [design.resize] with rule = \"blinded-once\". Or give the input another role."
+why = "A reserve input holds confirmation clusters that run only when the re-size asks for them. Without a declared re-size, nothing fixed before the data decides whether they run, so the choice could follow the results."
+sources = ["https://www.fda.gov/media/78495/download"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "inputs[*].role", check = "named:reserve-declared" },
+]
+
+[[rule]]
+code = "E-RSV-002"
+severity = "error"
+problem = "design.resize declares a re-size, and no input is a reserve."
+instruction = "List the clusters the re-size may add as inputs with role = \"reserve\", in the strata the claims list. Or remove [design.resize]."
+why = "The re-size runs once, after the confirmation clusters, and counts how many reserve clusters each claimed stratum adds. With no reserve it can add nothing. The count reads the root mean square of the first clusters' observations about 0 and no condition's name. It computes no mean, but the square carries the squared effect, so the count shows a little of the effect. The e-value test keeps its level whatever count the re-size picks, because each bet uses only the observations before it."
+sources = ["https://www.fda.gov/media/78495/download", "https://doi.org/10.1002/sim.1585"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "design.resize", check = "named:reserve-declared" },
+]
+
+[[rule]]
+code = "E-RSV-003"
+severity = "error"
+problem = "A reserve input has no SHA-256 pin."
+instruction = "Pin each reserve input: set sha256 to the 64 lowercase hex characters of its file's SHA-256, or import the file and use the digest `ignorarium import` prints."
+why = "The re-size takes reserve clusters in the order of their pins, so the pins fix which data the test adds before any result is seen. Without a pin the order, and so the added data, could be picked after the first results. A test is honest on data fixed in advance."
+sources = ["https://ar5iv.labs.arxiv.org/html/1902.10811"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "inputs[*].sha256", check = "named:reserve-pinned" },
+]
+
+[[rule]]
+code = "E-RSV-004"
+severity = "error"
+problem = "A stratum a claim lists has no reserve input, a reserve input's stratum is one no claim lists, or a claim with no strata has reserve inputs in more than one stratum."
+instruction = "Give each stratum a claim lists at least one reserve input in that stratum, and list no reserve input in a stratum no claim lists. A claim with no strata takes every reserve input, so keep them all in one stratum, or list the strata in the claim."
+why = "The re-size counts the clusters each claimed stratum needs and takes them from that stratum's reserve. A claimed stratum with no reserve cannot grow, and a reserve that no claim reads holds data no test uses. A claim with no strata takes reserve clusters one stratum after another, so a count smaller than the reserve would add only the first stratum's clusters and shift the pooled mean toward that stratum."
+sources = ["https://www.fda.gov/media/78495/download"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "design.resize", check = "named:reserve-strata" },
+]
+
+[[rule]]
+code = "E-RSV-005"
+severity = "error"
+problem = "design.resize declares a re-size that no test can use."
+instruction = "In an exploratory study, remove [design.resize] or make the study confirmatory. In a study that re-sizes, give each claim a mean statistic."
+why = "The re-size sizes a confirmatory test from one observation per cluster. An exploratory study tests no claim, and the bounds of a quantile claim each read their own observation, so the count would size a test that does not run."
+sources = ["https://www.fda.gov/media/78495/download"]
+target = [
+  { path = "design.resize", check = "named:resize-tested" },
 ]
 
 [[rule]]

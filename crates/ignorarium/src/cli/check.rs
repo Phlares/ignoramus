@@ -6,7 +6,7 @@ use crate::estimate::{Estimate, defaults_json, estimate};
 use crate::home::Home;
 use crate::inputs;
 use crate::keys;
-use crate::planlog::store::PlanLog;
+use crate::planlog::store::{PlanLog, PlanLogOnce};
 use crate::prior::{PriorError, PriorUse};
 use crate::records;
 use crate::rules::{self, BoxRecords, CheckCtx, ReadOnce};
@@ -263,7 +263,7 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
     })?;
     let machine = crate::machine::load(&home.root).map_err(|e| CliError::usage(e.to_string()))?;
     let prior: Box<dyn PriorUse> = match PlanLog::open(&home.root.join("planlog")) {
-        Ok(log) => Box::new(log),
+        Ok(log) => Box::new(PlanLogOnce::new(log)),
         Err(e) => Box::new(Unreadable(e.to_string())),
     };
     let key = keys::load(home)
@@ -405,8 +405,9 @@ fn render_json(a: &Assessed) -> Result<String, CliError> {
             let clusters: serde_json::Map<String, Value> = (p.clusters.into_iter())
                 .map(|(stratum, n)| (stratum, json!(n)))
                 .collect();
-            // `null` when the power reaches the target; a count, or `>1024` beyond the cap.
-            let needed = match (p.power >= p.target, p.needed) {
+            // `null` when the power reaches the target, or for a re-size study, whose gate
+            // counts no clusters; else a count, or `">{CAP}"` beyond the cap.
+            let needed = match (p.power >= p.target || p.resized, p.needed) {
                 (true, _) => Value::Null,
                 (false, Some(n)) => json!(n),
                 (false, None) => json!(format!(">{}", rules::CAP)),

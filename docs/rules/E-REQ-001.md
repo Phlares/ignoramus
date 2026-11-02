@@ -68,6 +68,7 @@ The checker and the run need every field. A silent default would hide a gap in t
 - `design.selection.rule` (required)
 - `design.confirmation` (required)
 - `design.confirmation.conditions` (required)
+- `design.resize.rule` (required)
 - `inputs` (required)
 - `inputs[*].path` (required)
 - `inputs[*].sha256` (required)

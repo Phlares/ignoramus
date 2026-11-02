@@ -12,11 +12,13 @@ use std::path::Path;
 /// The stage names a row carries: the roles of the clusters each stage runs on.
 pub const SELECTION_STAGE: &str = "selection";
 pub const CONFIRMATION_STAGE: &str = "confirmation";
+/// Reserve clusters run the confirmation stage's conditions, after every confirmation row.
+pub const RESERVE_STAGE: &str = "reserve";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Row {
     pub index: u64,
-    /// `SELECTION_STAGE` or `CONFIRMATION_STAGE`.
+    /// `SELECTION_STAGE`, `CONFIRMATION_STAGE` or `RESERVE_STAGE`.
     pub stage: String,
     pub unit: String,
     pub cluster: String,
@@ -90,13 +92,15 @@ fn stage(spec: &Spec, role: Role) -> Option<(&'static str, &[String])> {
             .as_ref()
             .map(|s| (SELECTION_STAGE, &s.conditions[..])),
         Role::Confirmation => Some((CONFIRMATION_STAGE, &spec.design.confirmation.conditions[..])),
+        Role::Reserve => Some((RESERVE_STAGE, &spec.design.confirmation.conditions[..])),
         Role::Calibration | Role::Model => None,
     }
 }
 
-/// Rows in the order stage (selection first), stratum, cluster path, then each picked unit,
-/// then the reference condition, then the stage's conditions in the order it lists them, then
-/// repeat 0..repeats. The order of `clusters` does not matter.
+/// Rows in the order stage (selection, confirmation, reserve), stratum, cluster path (a
+/// reserve cluster's input pin instead), then each picked unit, then the reference condition,
+/// then the stage's conditions in the order it lists them, then repeat 0..repeats. The order
+/// of `clusters` does not matter.
 pub fn expand(
     spec: &Spec,
     spec_hash: &[u8; 32],
@@ -110,7 +114,8 @@ pub fn expand(
         .iter()
         .filter_map(|c| stage(spec, c.role).map(|(name, conds)| (name, conds, c)))
         .collect();
-    staged.sort_by_key(|(_, _, c)| (c.role == Role::Confirmation, &c.stratum, &c.path));
+    let pins = pins(spec);
+    staged.sort_by_key(|&(_, _, c)| place(&pins, c));
     let mut rows = Vec::new();
     let mut index: u64 = 0;
     for (name, conditions, c) in staged {
@@ -138,6 +143,36 @@ pub fn expand(
     Ok(rows)
 }
 
+/// Each input's pin by path; the first input with a path names it.
+fn pins(spec: &Spec) -> BTreeMap<&str, &str> {
+    (spec.inputs.iter().rev())
+        .map(|i| (&i.path[..], &i.sha256[..]))
+        .collect()
+}
+
+/// The sort key of a cluster's rows: its stage, its stratum, its path (a reserve cluster's
+/// input pin instead), then its path. A reserve cluster goes by its pin, so a re-size admits
+/// the same clusters whatever the files are named.
+fn place<'a>(pins: &BTreeMap<&'a str, &'a str>, c: &'a Cluster) -> (u8, &'a str, &'a str, &'a str) {
+    let (rank, key) = match c.role {
+        Role::Selection => (0, &c.path[..]),
+        Role::Reserve => (2, pins.get(&c.path[..]).copied().unwrap_or("")),
+        _ => (1, &c.path[..]),
+    };
+    (rank, &c.stratum[..], key, &c.path[..])
+}
+
+/// The reserve clusters of `clusters`, in the order the schedule runs them and a re-size
+/// appends them: by stratum, then pin, then path.
+pub fn reserve_order<'a>(spec: &'a Spec, clusters: &'a [Cluster]) -> Vec<&'a Cluster> {
+    let pins = pins(spec);
+    let mut reserve: Vec<&Cluster> = (clusters.iter())
+        .filter(|c| c.role == Role::Reserve)
+        .collect();
+    reserve.sort_by_key(|c| place(&pins, c));
+    reserve
+}
+
 /// The schedule `run` writes for `spec`: its clusters' picked units, expanded, and with
 /// `rechecks`, a recheck copy per condition (`with_rechecks`).
 pub fn rows(spec: &Spec, spec_hash: &[u8; 32], rechecks: bool) -> Result<Vec<Row>, ExpandError> {
@@ -150,14 +185,18 @@ pub fn rows(spec: &Spec, spec_hash: &[u8; 32], rechecks: bool) -> Result<Vec<Row
 }
 
 /// `rows` with one copy of a row of each condition id, which repeats that row's job so the
-/// two outputs can be compared. The j-th condition id, in order of first appearance, has its
-/// row drawn from `seed(spec_hash, "recheck/<condition>")`; the copy takes index
-/// `rows.len() + j` and `recheck_of` the original's index, keeps every other field, and runs
-/// right after the original.
+/// two outputs can be compared. A reserve row has no copy. The j-th condition id, in order of
+/// first appearance, has its row drawn from `seed(spec_hash, "recheck/<condition>")`; the copy
+/// takes index `rows.len() + j` and `recheck_of` the original's index, keeps every other
+/// field, and runs right after the original.
 pub fn with_rechecks(rows: Vec<Row>, spec_hash: &[u8; 32]) -> Vec<Row> {
     // Each condition id with the positions of its rows, in order of first appearance.
     let mut conditions: Vec<(&str, Vec<usize>)> = Vec::new();
-    for (at, r) in rows.iter().enumerate() {
+    let first_batch = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.stage != RESERVE_STAGE);
+    for (at, r) in first_batch {
         match conditions.iter_mut().find(|(c, _)| *c == r.condition) {
             Some((_, of)) => of.push(at),
             None => conditions.push((&r.condition, vec![at])),

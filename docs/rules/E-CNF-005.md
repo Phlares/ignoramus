@@ -4,15 +4,15 @@ Severity: error
 
 ## Problem
 
-Selection or confirmation data was used by an earlier study.
+Selection, confirmation or reserve data was used by an earlier study.
 
 ## Fix
 
-Use data no earlier plan used for selection or confirmation, or change the role of this input.
+Use data no earlier plan used for selection, confirmation or reserve, or change the role of this input.
 
 ## Why
 
-Reused data has already shaped a decision. A test on it is not independent.
+Reused data has already shaped a decision. A test on it is not independent. A reserve input is confirmation data held back, so it must be fresh too.
 
 ## Sources
 

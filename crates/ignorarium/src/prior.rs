@@ -1,5 +1,6 @@
 //! Earlier-use lookup: has a data file already been seen by an earlier study?
 use crate::canon::sha256_hex;
+use std::collections::HashSet;
 
 /// The largest file that gets a normalized hash. Larger files, and files that are not
 /// UTF-8 text, have none.
@@ -51,6 +52,30 @@ pub fn normalized_sha256(text: &str) -> String {
 /// normalized hash (no text) matches nothing.
 pub fn same_data(a: &(String, String), b: &(String, String)) -> bool {
     a.0 == b.0 || (!a.1.is_empty() && a.1 == b.1)
+}
+
+/// The data kept so far, for a walk that keeps only the first input of each data
+/// (`same_data`), at a set lookup per input.
+#[derive(Default)]
+pub struct Seen {
+    exact: HashSet<String>,
+    normalized: HashSet<String>,
+}
+
+impl Seen {
+    /// Keeps `h` and returns `true` when no data kept so far is the same; else `false`, and `h`
+    /// stays out, so a later input is compared with the kept data alone.
+    pub fn insert(&mut self, h: &(String, String)) -> bool {
+        let empty = h.1.is_empty();
+        if self.exact.contains(&h.0) || (!empty && self.normalized.contains(&h.1)) {
+            return false;
+        }
+        self.exact.insert(h.0.clone());
+        if !empty {
+            self.normalized.insert(h.1.clone());
+        }
+        true
+    }
 }
 
 /// `(exact, normalized)` SHA-256 of a file. The normalized hash is empty

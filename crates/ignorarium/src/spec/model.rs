@@ -244,6 +244,24 @@ pub struct Design {
     /// The stage that picks one candidate on the selection inputs; `None` when there is none.
     pub selection: Option<Selection>,
     pub confirmation: Stage,
+    /// A re-size of each claimed stratum from its reserve inputs; `None` when there is none.
+    #[serde(default)]
+    pub resize: Option<Resize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Resize {
+    pub rule: ResizeRule,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ResizeRule {
+    /// One count, after the confirmation clusters: from their spread about 0, the reserve
+    /// clusters each claimed stratum adds. The count computes no mean (its root mean square
+    /// carries the squared effect), and the test keeps its level whatever count the re-size picks.
+    BlindedOnce,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -318,18 +336,20 @@ pub struct Input {
     /// The stratum of this cluster; "" when the design names none.
     #[serde(default)]
     pub stratum: String,
-    /// The units the file holds. Selection and confirmation inputs declare it.
+    /// The units the file holds. Selection, confirmation and reserve inputs declare it.
     pub units: Option<u32>,
     pub licence: Licence,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Role {
     Calibration,
     Selection,
     Confirmation,
     Model,
+    /// Confirmation data held back: the re-size appends some of these clusters.
+    Reserve,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

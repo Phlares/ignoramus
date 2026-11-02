@@ -483,6 +483,8 @@ pub fn finished_with(
         slot: None,
         instrument,
         recheck,
+        resize_sd: None,
+        appended_sd: None,
     };
     let head = [
         ("register", serde_json::to_value(register).unwrap()),
@@ -635,15 +637,61 @@ pub fn confirmatory(t: String) -> String {
     .replace("label = \"signal\"", "label = \"confirmed\"")
 }
 
-/// `n` confirmation inputs `data/<stratum>-<i>.txt` of 3 units in `stratum`, as spec text.
-pub fn clusters(stratum: &str, n: usize) -> String {
-    (0..n)
-        .map(|i| {
-            format!(
-                "[[inputs]]
-path = \"data/{stratum}-{i:02}.txt\"
-sha256 = \"\"
-role = \"confirmation\"
+/// The text of reserve input `i` of `resize_plan`, which its pin names: its path and a newline.
+pub fn reserve_file(i: usize) -> (String, String) {
+    let path = format!("data/reserve-{i:02}.txt");
+    let text = format!("{path}\n");
+    (path, text)
+}
+
+/// `confirmatory` as a plan that re-sizes once from `reserve` reserve inputs
+/// (`reserve_file`), each one unit in `fiction`. Its 15 confirmation clusters give one unit
+/// each; the claim's statistic is a mean in [-2, 2], sized at -1 with the pooled estimate of
+/// `resize_pilot`. A row costs 1 s in the estimate.
+pub fn resize_plan(reserve: usize) -> impl Fn(String) -> String {
+    move |t| {
+        let inputs: String = (0..reserve)
+            .map(|i| {
+                let (path, text) = reserve_file(i);
+                let pin = ignorarium::canon::sha256_hex(text.as_bytes());
+                listed(&path, "reserve", "fiction", &pin)
+            })
+            .collect();
+        confirmatory(t)
+            .replace("{ quantile = 0.5 }", "{ mean = [-2.0, 2.0] }")
+            .replace("power_at = -20.0", "power_at = -1.0")
+            .replace("units_per_cluster = 3", "units_per_cluster = 1")
+            .replace("row_seconds = 60.0", "row_seconds = 1.0")
+            .replacen("# [design.resize]", "[design.resize]", 1)
+            .replacen("# rule = \"blinded-once\"", "rule = \"blinded-once\"", 1)
+            .replacen("[pins]", &format!("{inputs}[pins]"), 1)
+    }
+}
+
+/// The finished `my-pilot` that `resize_plan` takes its estimate from: the pooled `arm-a`
+/// contrast with sd 0.01 and icc 0.1, so the re-size reads a spread near |power_at| = 1.
+pub fn resize_pilot(home: &Home) {
+    let arm_a = estimate(
+        &[("arm-a", 1.0, serde_json::json!({}))],
+        "",
+        0.0001,
+        Some(0.1),
+    );
+    pilot(home, vec![arm_a]);
+}
+
+/// `resize_plan`'s files at registration: every reserve input.
+pub fn reserve_files(reserve: usize) -> Vec<(String, String)> {
+    (0..reserve).map(reserve_file).collect()
+}
+
+/// One input of 3 units, as spec text.
+fn listed(path: &str, role: &str, stratum: &str, sha256: &str) -> String {
+    format!(
+        "[[inputs]]
+path = \"{path}\"
+sha256 = \"{sha256}\"
+role = \"{role}\"
 stratum = \"{stratum}\"
 units = 3
 [inputs.licence]
@@ -653,6 +701,18 @@ source = \"\"
 creators = []
 
 "
+    )
+}
+
+/// `n` confirmation inputs `data/<stratum>-<i>.txt` of 3 units in `stratum`, as spec text.
+pub fn clusters(stratum: &str, n: usize) -> String {
+    (0..n)
+        .map(|i| {
+            listed(
+                &format!("data/{stratum}-{i:02}.txt"),
+                "confirmation",
+                stratum,
+                "",
             )
         })
         .collect()

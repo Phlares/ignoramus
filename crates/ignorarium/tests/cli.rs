@@ -1417,14 +1417,14 @@ fn the_gate_gives_the_same_verdict_on_every_check() {
         ),
         "{page}"
     );
-    // Sized just below the margin, half the units lie on each side, and 1,024 clusters do
+    // Sized just below the margin, half the units lie on each side, and 16,384 clusters do
     // not reach the target: `needed` says so, apart from the null of a plan that passes.
     let edge = |t: String| common::confirmatory(t).replace("power_at = -20.0", "power_at = -0.01");
     std::fs::write(&spec, edge(std::fs::read_to_string(TEMPLATE).unwrap())).unwrap();
     let beyond = power(1);
-    assert_eq!(beyond[0]["needed"], ">1024", "{beyond}");
+    assert_eq!(beyond[0]["needed"], ">16384", "{beyond}");
     assert!(
-        check_out(&home, &spec, 1).contains("; 1024 clusters do not reach 0.80."),
+        check_out(&home, &spec, 1).contains("; 16384 clusters do not reach 0.80."),
         "{beyond}"
     );
 }
@@ -2062,4 +2062,49 @@ fn register_accepts_an_input_that_only_the_store_holds() {
         serde_json::json!([[digest, ignorarium::canon::sha256_hex(b"stored words")]])
     );
     common::unseal(&home);
+}
+
+#[test]
+fn a_resize_shortfall_states_no_needed_count() {
+    // The resize fixture: 2 first and 2 reserve clusters per stratum fall short of the power.
+    // Its gate simulates the whole design and counts no clusters, so `needed` is null.
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(home.join("machine.toml"), "max_level = 1\n").unwrap();
+    let text = std::fs::read_to_string("tests/fixtures/specs/resize.toml").unwrap();
+    let study = dir.path().join("study");
+    for line in text.lines().filter_map(|l| l.strip_prefix("path = \"")) {
+        let path = line.trim_end_matches('"');
+        let file = study.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, format!("{path}\n")).unwrap();
+    }
+    let spec = study.join("spec.toml");
+    std::fs::write(&spec, text).unwrap();
+    common::pilot(&Home::open_at(&home).unwrap(), vec![common::arm_a()]);
+    let v = json_out(
+        &bin(&home)
+            .arg("check")
+            .arg(&spec)
+            .arg("--json")
+            .assert()
+            .code(1),
+    );
+    assert_eq!(
+        v["power"],
+        json!([{
+            "hypothesis": "H1", "power": 0.0, "target": 0.8,
+            "clusters": { "fiction": 2, "news": 2 }, "needed": null
+        }])
+    );
+    let out = check_out(&home, &spec, 1);
+    assert!(
+        out.contains("The whole design, re-size and reserve included, reaches power 0.00 of 0.80."),
+        "{out}"
+    );
+    assert!(
+        !out.contains(">16384") && !out.contains("16384 per stratum"),
+        "{out}"
+    );
 }

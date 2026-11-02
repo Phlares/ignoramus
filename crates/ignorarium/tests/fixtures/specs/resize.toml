@@ -1,0 +1,185 @@
+# A confirmatory plan that re-sizes once from a reserve: two confirmation clusters and two
+# reserve clusters in each of two strata. Each input holds its own path and a newline.
+[study]
+id = "resize-study"
+template = "numeric-ablation"
+mode = "confirmatory"
+label = "confirmed"
+test_log = false
+
+[question]
+population = ""
+intervention = ""
+comparator = ""
+negative_control = ""
+[[question.hypotheses]]
+id = "H1"
+statement = ""
+rival = ""
+outcome = "ppl-ratio"
+contrast = { arm-a = 1.0 }
+strata = ["fiction", "news"]
+claim = { below = 0.0 }
+statistic = { mean = [-50.0, 50.0] }
+power_at = -1.0
+estimates = { from = "my-pilot" }
+alpha_share = 1.0
+
+[[outcomes]]
+id = "ppl-ratio"
+unit = "ratio"
+direction = "lower"
+measure = "ppl"
+paired = "percent"
+registered = true
+
+[scope]
+min_isolation = 1
+stop_rule = "budget-only"
+[scope.budget]
+cpu_hours = 1.0
+wall_hours = 1.0
+money_usd = 0.0
+[scope.end_of_run]
+route = "report"
+follow_on = []
+
+[design]
+unit = "window"
+cluster = "text"
+stratum = "genre"
+reference = "exact"
+repeats = 1
+row_seconds = 60.0
+power = 0.8
+units_per_cluster = 3
+pick = "seeded"
+[[design.conditions]]
+id = "exact"
+[[design.conditions]]
+id = "arm-a"
+[design.confirmation]
+conditions = ["arm-a"]
+[design.resize]
+rule = "blinded-once"
+
+[[inputs]]
+path = "data/fiction-c0.txt"
+sha256 = "db99aa9a0b5a5e50cf46553ff59d2aa87b87789a6f24f76b2c6ec50d9e925029"
+role = "confirmation"
+stratum = "fiction"
+units = 3
+[inputs.licence]
+spdx = "CC0-1.0"
+type = "common"
+source = ""
+creators = []
+
+[[inputs]]
+path = "data/fiction-c1.txt"
+sha256 = "fcbf735c53507e01e4d8438e184d300607b88ffcbf79126af0fbb6ed0cb28fd1"
+role = "confirmation"
+stratum = "fiction"
+units = 3
+[inputs.licence]
+spdx = "CC0-1.0"
+type = "common"
+source = ""
+creators = []
+
+[[inputs]]
+path = "data/news-c0.txt"
+sha256 = "6084ee011e94a3cc45d096f0cdd57133b783da8c5891f7d55304d67d2e13692c"
+role = "confirmation"
+stratum = "news"
+units = 3
+[inputs.licence]
+spdx = "CC0-1.0"
+type = "common"
+source = ""
+creators = []
+
+[[inputs]]
+path = "data/news-c1.txt"
+sha256 = "ecf3339f4d3b44f3038e42666f3936f45a0dbd7eb19feee26f81757e421455ec"
+role = "confirmation"
+stratum = "news"
+units = 3
+[inputs.licence]
+spdx = "CC0-1.0"
+type = "common"
+source = ""
+creators = []
+
+[[inputs]]
+path = "data/fiction-r0.txt"
+sha256 = "52a1a1d7fba12ec5b0bee9ca9af91d2436fde0208a954d88c8282f386c6c0afc"
+role = "reserve"
+stratum = "fiction"
+units = 3
+[inputs.licence]
+spdx = "CC0-1.0"
+type = "common"
+source = ""
+creators = []
+
+[[inputs]]
+path = "data/fiction-r1.txt"
+sha256 = "e6b58803a19923e58dc07d235d3877d3154a13aa496094b6fbf6669e9203cbb4"
+role = "reserve"
+stratum = "fiction"
+units = 3
+[inputs.licence]
+spdx = "CC0-1.0"
+type = "common"
+source = ""
+creators = []
+
+[[inputs]]
+path = "data/news-r0.txt"
+sha256 = "69676ff88b4963f710a312bf97ef96746f065abc4076d5aa52d62ba410b3a2ff"
+role = "reserve"
+stratum = "news"
+units = 3
+[inputs.licence]
+spdx = "CC0-1.0"
+type = "common"
+source = ""
+creators = []
+
+[[inputs]]
+path = "data/news-r1.txt"
+sha256 = "9c7c94d2fb644f8b2e9b86ecc142023f798dd2371de0348da24457af894f57b5"
+role = "reserve"
+stratum = "news"
+units = 3
+[inputs.licence]
+spdx = "CC0-1.0"
+type = "common"
+source = ""
+creators = []
+
+[pins]
+environment = ""
+payload = ""
+rule_base = ""
+[[pins.deviations]]
+from = "my-pilot"
+reason = "the payload changed after the pilot"
+timing = "before-collection"
+
+[mutations]
+depth_cap = 2
+operators = []
+triggers = []
+[mutations.seeds]
+spawn = "spawn/"
+report = "report/"
+
+[access]
+blind = false
+
+[report]
+licence_code = "Apache-2.0"
+licence_data = "CC0-1.0"
+publish = "none"

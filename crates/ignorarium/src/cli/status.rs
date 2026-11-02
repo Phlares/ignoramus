@@ -5,7 +5,7 @@ use crate::canon::sha256_hex;
 use crate::control::{ControlFile, Signal, State, run_is_live};
 use crate::records::Record;
 use crate::runner::progress;
-use crate::seed;
+use crate::{resize, seed};
 use serde_json::{Value, json};
 
 /// The condition ids in a fixed order that depends on the spec hash and on nothing else:
@@ -110,6 +110,18 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
         Some(Signal::Stop(_)) => Some("stop"),
         None => None,
     };
+    // The re-size shows its decision and counts alone: no spread, mean or e-value.
+    let resize = resize::recorded(&all).map_err(|e| bad(&e))?.map(|r| {
+        let strata: Vec<Value> = (r.strata.iter())
+            .map(|g| {
+                json!({
+                    "stratum": g.stratum, "first": g.first, "needed": g.needed,
+                    "appended": g.appended,
+                })
+            })
+            .collect();
+        json!({ "decision": r.decision, "strata": strata })
+    });
     Ok(json!({
         "study": id,
         "state": state,
@@ -138,6 +150,7 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
         "triggers": [],
         "blind": blind,
         "conditions": conditions,
+        "resize": resize,
     }))
 }
 
@@ -164,6 +177,22 @@ fn render(r: &Value) -> String {
         s.push_str(&format!("request: {q}\n"));
     }
     s.push_str(&format!("rows: {}/{}\n", r["done"], r["total"]));
+    if let Some(d) = r["resize"]["decision"].as_str() {
+        s.push_str(&format!("resize: {d}\n"));
+    }
+    for g in r["resize"]["strata"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice)
+    {
+        let name = g["stratum"].as_str().filter(|n| !n.is_empty());
+        let needed = g["needed"].as_u64().map_or("n/a".into(), |n| n.to_string());
+        s.push_str(&format!(
+            "resize {}: first {}, needed {needed}, appended {}\n",
+            name.unwrap_or("pooled"),
+            g["first"],
+            g["appended"]
+        ));
+    }
     s.push_str(&format!(
         "rate: {}\n",
         num_or_na(&r["rows_per_hour"], "rows/hour")
