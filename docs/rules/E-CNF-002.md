@@ -8,7 +8,7 @@ The confirmation sample is too small.
 
 ## Fix
 
-Add confirmation inputs to each stratum the detail names, until each has the clusters the power gate needs. The detail states the simulated power and about how many clusters per stratum reach design.power. Raising design.units_per_cluster helps only as far as the icc allows, since the test takes one value per cluster. A mean range wider than the cluster means need also costs power. Two inputs that hold the same data are one cluster.
+Add confirmation inputs to each stratum the detail names, until each has the clusters the power gate needs. The detail states the simulated power and about how many clusters per stratum reach design.power. Raising design.units_per_cluster helps only as far as the icc allows, since the test takes one value per cluster. A mean range wider than the cluster means need also costs power. Two inputs that hold the same data are one cluster. In a study that re-sizes, add reserve inputs to each stratum the claim lists instead, and keep the first batch as declared.
 
 ## Why
 

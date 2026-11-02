@@ -631,14 +631,19 @@ impl Gates {
 /// floor, which assumes a fixed count of clusters.
 ///
 /// `None` when a rule before it reports the hypothesis, a group has no cluster (E-HYP-002) or
-/// a re-sized group no reserve cluster (E-RSV-002, E-RSV-004), or the re-size is mistyped (the
-/// type rule's) or on a quantile claim (E-RSV-005's).
+/// a re-sized group no reserve cluster (E-RSV-002, E-RSV-004), or the re-size is mistyped or
+/// names an unknown rule (the type rule's) or is on a quantile claim (E-RSV-005's).
 fn gate(spec: &Value, ctx: &CheckCtx, h: &Value, design: (f64, f64, u64)) -> Option<Gate> {
     let (stream_level, target, per) = design;
     let sized = sizing(h)?;
     let resized = match val(spec, "design.resize") {
         None => false,
-        Some(r) if r.is_object() && matches!(sized.stat, Statistic::Mean { .. }) => true,
+        Some(r)
+            if r.get("rule").and_then(Value::as_str) == Some("blinded-once")
+                && matches!(sized.stat, Statistic::Mean { .. }) =>
+        {
+            true
+        }
         Some(_) => return None,
     };
     let Some(Lookup::Found(groups)) = estimates_of(spec, h, ctx) else {

@@ -5222,3 +5222,14 @@ fn the_gate_for_a_fixed_study_is_unchanged() {
     quantile["question"]["hypotheses"][0]["statistic"] = json!({ "quantile": 0.5 });
     assert!(rules::power(&quantile, &ctx(dir.path())).is_empty());
 }
+
+#[test]
+fn an_unknown_resize_rule_runs_no_simulation() {
+    // The type rule refuses a rule other than blinded-once; the gate waits for it. 12 clusters
+    // pass the z floor, so a gate that ran would simulate.
+    let dir = study_dir();
+    let mut spec = resize_study(dir.path(), &["fiction"], 12, 4);
+    assert!(rules::power(&spec, &ctx(dir.path()))[0].resized);
+    spec["design"]["resize"] = json!({ "rule": "blinded-twice" });
+    assert!(rules::power(&spec, &ctx(dir.path())).is_empty());
+}
