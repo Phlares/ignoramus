@@ -4,11 +4,11 @@ Severity: error
 
 ## Problem
 
-The plan has no confirmation input, or a confirmation or reserve input holds the same data as a selection or calibration input, or a reserve input holds the data of a confirmation input.
+The plan has no confirmation input, or a confirmation or reserve input holds the same data as a selection or calibration input, or a reserve input holds the data of a confirmation input or of an earlier reserve input.
 
 ## Fix
 
-Add a confirmation input. Give each confirmation and reserve input data that no selection or calibration input holds, and each reserve input data that no confirmation input holds: not the same bytes, and not the same text in other case or spacing.
+Add a confirmation input. Give each confirmation and reserve input data that no selection or calibration input holds, and each reserve input data that no confirmation input and no earlier reserve input holds: not the same bytes, and not the same text in other case or spacing.
 
 ## Why
 

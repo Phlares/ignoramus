@@ -12,11 +12,13 @@ use std::path::Path;
 /// The stage names a row carries: the roles of the clusters each stage runs on.
 pub const SELECTION_STAGE: &str = "selection";
 pub const CONFIRMATION_STAGE: &str = "confirmation";
+/// Reserve clusters run the confirmation stage's conditions, after every confirmation row.
+pub const RESERVE_STAGE: &str = "reserve";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Row {
     pub index: u64,
-    /// `SELECTION_STAGE` or `CONFIRMATION_STAGE`.
+    /// `SELECTION_STAGE`, `CONFIRMATION_STAGE` or `RESERVE_STAGE`.
     pub stage: String,
     pub unit: String,
     pub cluster: String,
@@ -81,8 +83,7 @@ impl std::error::Error for ExpandError {}
 pub const ROW_CAP: u64 = 100_000;
 
 /// The stage a cluster of `role` runs in, and the conditions that stage runs besides the
-/// reference. A selection cluster has a stage only when the spec declares one; a reserve
-/// cluster has none in this schedule.
+/// reference. A selection cluster has a stage only when the spec declares one.
 fn stage(spec: &Spec, role: Role) -> Option<(&'static str, &[String])> {
     match role {
         Role::Selection => spec
@@ -91,11 +92,13 @@ fn stage(spec: &Spec, role: Role) -> Option<(&'static str, &[String])> {
             .as_ref()
             .map(|s| (SELECTION_STAGE, &s.conditions[..])),
         Role::Confirmation => Some((CONFIRMATION_STAGE, &spec.design.confirmation.conditions[..])),
-        Role::Calibration | Role::Model | Role::Reserve => None,
+        Role::Reserve => Some((RESERVE_STAGE, &spec.design.confirmation.conditions[..])),
+        Role::Calibration | Role::Model => None,
     }
 }
 
-/// Rows in the order stage (selection first), stratum, cluster path, then each picked unit,
+/// Rows in the order stage (selection, confirmation, reserve), stratum, cluster path (a
+/// reserve cluster's input pin instead), then each picked unit,
 /// then the reference condition, then the stage's conditions in the order it lists them, then
 /// repeat 0..repeats. The order of `clusters` does not matter.
 pub fn expand(
@@ -111,7 +114,22 @@ pub fn expand(
         .iter()
         .filter_map(|c| stage(spec, c.role).map(|(name, conds)| (name, conds, c)))
         .collect();
-    staged.sort_by_key(|(_, _, c)| (c.role == Role::Confirmation, &c.stratum, &c.path));
+    // A reserve cluster goes by its input's pin, so a re-size admits the same clusters
+    // whatever the file names.
+    fn key<'a>(spec: &'a Spec, c: &'a Cluster) -> &'a str {
+        match c.role {
+            Role::Reserve => (spec.inputs.iter())
+                .find(|i| i.path == c.path)
+                .map_or("", |i| &i.sha256[..]),
+            _ => &c.path[..],
+        }
+    }
+    let rank = |r: Role| match r {
+        Role::Selection => 0,
+        Role::Reserve => 2,
+        _ => 1,
+    };
+    staged.sort_by_key(|(_, _, c)| (rank(c.role), &c.stratum, key(spec, c), &c.path));
     let mut rows = Vec::new();
     let mut index: u64 = 0;
     for (name, conditions, c) in staged {
@@ -151,14 +169,19 @@ pub fn rows(spec: &Spec, spec_hash: &[u8; 32], rechecks: bool) -> Result<Vec<Row
 }
 
 /// `rows` with one copy of a row of each condition id, which repeats that row's job so the
-/// two outputs can be compared. The j-th condition id, in order of first appearance, has its
+/// two outputs can be compared. A reserve row has no copy. The j-th condition id, in order of
+/// first appearance, has its
 /// row drawn from `seed(spec_hash, "recheck/<condition>")`; the copy takes index
 /// `rows.len() + j` and `recheck_of` the original's index, keeps every other field, and runs
 /// right after the original.
 pub fn with_rechecks(rows: Vec<Row>, spec_hash: &[u8; 32]) -> Vec<Row> {
     // Each condition id with the positions of its rows, in order of first appearance.
     let mut conditions: Vec<(&str, Vec<usize>)> = Vec::new();
-    for (at, r) in rows.iter().enumerate() {
+    let first_batch = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.stage != RESERVE_STAGE);
+    for (at, r) in first_batch {
         match conditions.iter_mut().find(|(c, _)| *c == r.condition) {
             Some((_, of)) => of.push(at),
             None => conditions.push((&r.condition, vec![at])),

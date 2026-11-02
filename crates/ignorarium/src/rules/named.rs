@@ -1429,7 +1429,8 @@ fn reference_not_self(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
 
 /// At `inputs`: no confirmation input. At `inputs[*].<field>`: a confirmation or reserve input
 /// holds the data of a selection or calibration input, or a reserve input that of a
-/// confirmation input: the same exact hash, or the same normalized hash (text that differs only
+/// confirmation input or of an earlier reserve input: the same exact hash, or the same
+/// normalized hash (text that differs only
 /// in case and spacing). An empty normalized hash (not UTF-8 text) matches nothing. The detail
 /// names the first such input in spec order.
 fn confirmation_disjoint(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
@@ -1439,11 +1440,11 @@ fn confirmation_disjoint(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
                 .is_some_and(|a| !a.iter().any(|i| role(i) == Some("confirmation")))
         });
     }
-    let held: Vec<(String, &str, (String, String))> = nodes(spec, "inputs[*]")
+    let held: Vec<(String, &str, (String, String), &Value)> = nodes(spec, "inputs[*]")
         .into_iter()
         .filter_map(|(p, i)| match role(i)? {
-            r @ ("selection" | "calibration" | "confirmation") => {
-                Some((p, r, input_hashes(ctx, i)?))
+            r @ ("selection" | "calibration" | "confirmation" | "reserve") => {
+                Some((p, r, input_hashes(ctx, i)?, i))
             }
             _ => None,
         })
@@ -1453,9 +1454,18 @@ fn confirmation_disjoint(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
         .filter(|(_, input, _)| matches!(role(input), Some("confirmation" | "reserve")))
         .filter_map(|(path, input, _)| {
             let h = input_hashes(ctx, input)?;
-            // Two confirmation inputs may hold one text; a reserve input holds no other's.
-            let barred = |r: &str| r != "confirmation" || is_reserve(input);
-            let (other, r, _) = (held.iter()).find(|(_, r, s)| barred(r) && same_data(s, &h))?;
+            // Two confirmation inputs may hold one text. A reserve input holds the data of no
+            // selection, calibration or confirmation input, nor of an earlier reserve input.
+            let own = (held.iter()).position(|(_, _, _, i)| std::ptr::eq(*i, input));
+            let barred = |at: usize, r: &str| match (is_reserve(input), r) {
+                (true, "reserve") => own.is_some_and(|o| at < o),
+                (true, _) => true,
+                (false, "confirmation" | "reserve") => false,
+                (false, _) => true,
+            };
+            let (other, r, _, _) = (held.iter().enumerate())
+                .find(|(at, (_, r, s, _))| barred(*at, r) && same_data(s, &h))?
+                .1;
             Some(Hit {
                 path,
                 detail: Some(format!("It holds the data of {other}, a {r} input.")),
@@ -1495,7 +1505,7 @@ fn units_declared(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
 fn stage_size(spec: &Value, role: &str) -> Option<u64> {
     let list = match role {
         "selection" => list(spec, "design.selection.conditions")?,
-        "confirmation" => list(spec, "design.confirmation.conditions")?,
+        "confirmation" | "reserve" => list(spec, "design.confirmation.conditions")?,
         _ => return None,
     };
     Some(1 + list.len() as u64)

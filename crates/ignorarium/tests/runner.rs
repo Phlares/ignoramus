@@ -205,6 +205,38 @@ fn the_pick_waits_for_every_selection_row() {
     assert!(selections_of(&lab, "partial").is_empty());
 }
 
+#[test]
+fn a_reserve_row_of_selected_runs_the_pick() {
+    let lab = lab();
+    let dir = register_study(&lab, "rsv-pick", staged, &[], STAGED);
+    let mut plan = plan_of(&lab, "rsv-pick");
+    // The rows after the selection stage are reserve rows: the pick still comes before them.
+    for row in &mut plan.schedule.rows[6..] {
+        row.stage = schedule::RESERVE_STAGE.into();
+    }
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let sel = selections_of(&lab, "rsv-pick");
+    assert_eq!(sel.len(), 1);
+    let hash = records::hash(&sel[0]);
+    let mut picked = 0;
+    for r in rows_of(&lab, "rsv-pick") {
+        let i = r.row.unwrap();
+        let row = &plan.schedule.rows[i as usize];
+        if row.stage == "reserve" && row.condition == "selected" {
+            picked += 1;
+            assert_eq!(r.body["picked"], "arm-b");
+            assert_eq!(r.body["selection"], hash.as_str());
+            let ran =
+                std::fs::read_to_string(dir.join(format!("run/rows/{i}/out/result"))).unwrap();
+            assert_eq!(ran, format!("arm-b {} 0", row.unit));
+        }
+    }
+    assert_eq!(picked, 3);
+    let all = common::records_of(&lab, "rsv-pick");
+    let at = all.iter().position(|r| r.kind == "selection").unwrap();
+    assert_eq!((all[at - 1].row, all[at + 1].row), (Some(5), Some(6)));
+}
+
 const NO_HOST_PATHS: &str = "a_backend_message_reaches_records_without_host_paths";
 
 /// A backend's messages name the study root, the box home and the user's home, each as given

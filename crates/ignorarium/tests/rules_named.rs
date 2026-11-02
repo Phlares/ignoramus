@@ -3386,7 +3386,7 @@ fn two_paths_with_the_same_bytes_are_not_disjoint() {
     assert_eq!(codes_paths(&d), [("E-CNF-004", "inputs[2].sha256")]);
     assert_eq!(
         d[0].problem,
-        "The plan has no confirmation input, or a confirmation or reserve input holds the same data as a selection or calibration input, or a reserve input holds the data of a confirmation input. It holds the data of inputs[1], a selection input."
+        "The plan has no confirmation input, or a confirmation or reserve input holds the same data as a selection or calibration input, or a reserve input holds the data of a confirmation input or of an earlier reserve input. It holds the data of inputs[1], a selection input."
     );
     assert!(named(&pair("data/s.txt", "data/d.txt"), dir.path()).is_empty());
     // A selection input that is not there shares nothing.
@@ -4771,6 +4771,110 @@ fn a_reserve_text_that_is_a_confirmation_text_is_refused() {
     assert!(named(&with_reserve("data/u.txt", b"another text"), dir.path()).is_empty());
 }
 
+/// `pair`'s plan with a re-size and the reserve inputs `(path, bytes)`, at inputs[37] on.
+fn reserved_pair(dir: &Path, reserves: &[(&str, &[u8])]) -> Value {
+    write(dir, "data/s.txt", b"selection text");
+    write(dir, "data/c.txt", b"one text");
+    let mut s = pair("data/s.txt", "data/c.txt");
+    for (path, bytes) in reserves {
+        write(dir, path, bytes);
+        let mut r = input(path, "reserve", 5);
+        r["sha256"] = json!(sha256_hex(bytes));
+        s["inputs"].as_array_mut().unwrap().push(r);
+    }
+    set(
+        &mut s,
+        "/design/resize",
+        j(json!({ "rule": "blinded-once" })),
+    );
+    s
+}
+
+#[test]
+fn two_reserve_inputs_with_one_text_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = reserved_pair(
+        dir.path(),
+        &[
+            ("data/r1.txt", b"same reserve"),
+            ("data/r2.txt", b"same reserve"),
+            ("data/r3.txt", b"other reserve"),
+        ],
+    );
+    let d = named(&s, dir.path());
+    // Only the later one is flagged, and it names the earlier.
+    assert_eq!(codes_paths(&d), [("E-CNF-004", "inputs[38].sha256")]);
+    assert!(
+        d[0].problem
+            .ends_with(" It holds the data of inputs[37], a reserve input."),
+        "{}",
+        d[0].problem
+    );
+    // Two reserve inputs of different texts, and a lone one, are fine.
+    let s = reserved_pair(
+        dir.path(),
+        &[
+            ("data/r1.txt", b"same reserve"),
+            ("data/r3.txt", b"other reserve"),
+        ],
+    );
+    assert!(named(&s, dir.path()).is_empty());
+}
+
+#[test]
+fn a_reserve_text_in_other_case_and_spacing_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = reserved_pair(
+        dir.path(),
+        &[
+            ("data/r1.txt", b"Same  Reserve"),
+            ("data/r2.txt", b"same reserve\n"),
+        ],
+    );
+    let d = named(&s, dir.path());
+    assert_eq!(codes_paths(&d), [("E-CNF-004", "inputs[38].sha256")]);
+    assert!(
+        d[0].problem
+            .ends_with(" It holds the data of inputs[37], a reserve input."),
+        "{}",
+        d[0].problem
+    );
+}
+
+#[test]
+fn a_spec_whose_reserve_pushes_it_past_the_row_cap_is_refused() {
+    let dir = study_dir();
+    // 365 rows before the reserve; a reserve cluster adds its units x 2 conditions.
+    let at = |units: u64| {
+        let mut r = reserve(0, "fiction");
+        r["units"] = json!(units);
+        edited(&resized(vec![
+            plus(&[r]),
+            ("/design/units_per_cluster", j(json!(50_000))),
+        ]))
+    };
+    let cap = |units: u64| -> Vec<Diagnostic> {
+        (named(&at(units), dir.path()).into_iter())
+            .filter(|d| d.code == "E-UNT-002")
+            .collect()
+    };
+    assert!(cap(49_817).is_empty());
+    let d = cap(49_818);
+    assert_eq!(d.len(), 1);
+    assert_eq!(
+        d[0].problem,
+        "The schedule has more rows than the box allows. It would hold 100001 rows; the cap is 100000."
+    );
+    // The count is the schedule's.
+    let spec = ignorarium::spec::model::Spec::from_value(&at(49_818)).unwrap();
+    assert_eq!(
+        ignorarium::schedule::rows(&spec, &[0; 32], false)
+            .unwrap()
+            .len(),
+        100_001
+    );
+}
+
 #[test]
 fn an_exploratory_resize_is_refused() {
     let dir = study_dir();
@@ -4865,7 +4969,7 @@ fn unreserved(s: &Value) -> Value {
 }
 
 #[test]
-fn reserve_inputs_change_no_schedule_estimate_or_gate() {
+fn reserve_inputs_add_their_rows_but_change_no_gate() {
     use ignorarium::estimate::estimate;
     use ignorarium::machine::Machine;
     use ignorarium::schedule;
@@ -4882,10 +4986,23 @@ fn reserve_inputs_change_no_schedule_estimate_or_gate() {
         (rows, cost)
     };
     let (rows, cost) = planned(&s);
-    // 4 clusters of 3 units, each running the reference and arm-a.
-    assert_eq!(rows.len(), 24);
-    assert!(rows.iter().all(|r| r.cluster.contains("-c")));
-    assert_eq!((rows, cost), planned(&without));
+    // 4 clusters of 3 units, each running the reference and arm-a, then the 4 reserve
+    // clusters the same way, after them.
+    let (base_rows, base_cost) = planned(&without);
+    assert_eq!(base_rows.len(), 24);
+    assert_eq!(rows.len(), 48);
+    assert_eq!(rows[..24], base_rows[..]);
+    assert!(
+        rows[..24]
+            .iter()
+            .all(|r| r.stage == "confirmation" && r.cluster.contains("-c"))
+    );
+    assert!(
+        rows[24..]
+            .iter()
+            .all(|r| r.stage == "reserve" && r.cluster.contains("-r"))
+    );
+    assert_eq!((cost.rows, base_cost.rows), (48, 24));
     // The gate's finding: the z floor in the fixture, the simulation in the base plan.
     let c = with_box(dir.path(), b);
     let power = |v: &Value| -> Vec<Diagnostic> {

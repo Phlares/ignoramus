@@ -18,7 +18,9 @@ use crate::planlog::store::{Leaf, LogError, PlanLog};
 use crate::prior::same_data;
 use crate::records::{self, RecordDraft, RecordError, VerifyError};
 use crate::redact::Redact;
-use crate::schedule::{self, CONFIRMATION_STAGE, Row, SELECTION_STAGE, Schedule, ScheduleError};
+use crate::schedule::{
+    self, CONFIRMATION_STAGE, RESERVE_STAGE, Row, SELECTION_STAGE, Schedule, ScheduleError,
+};
 use crate::spec::model::{Mode, Param, Role, SELECTED, Spec, param_path};
 use crate::store::Store;
 use crate::stream::{LogName, StreamError};
@@ -972,7 +974,7 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
             return halt(plan, &dir, lock, h, None);
         }
         // The pick comes at the stage boundary: no confirmation row runs before its record.
-        if row.stage == CONFIRMATION_STAGE
+        if [CONFIRMATION_STAGE, RESERVE_STAGE].contains(&row.stage.as_str())
             && plan.spec.design.confirmation.runs_pick()
             && pick.is_none()
         {
