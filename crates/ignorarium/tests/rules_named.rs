@@ -2939,7 +2939,7 @@ fn a_quantile_claim_is_simulated_without_a_floor() {
             "{SIM}0.00 with 14 clusters in fiction; about 15 per stratum reach 0.80."
         )]
     );
-    // Just below the margin about half the units lie on each side, and 1,024 clusters per
+    // Just below the margin about half the units lie on each side, and 16,384 clusters per
     // stratum do not reach the target.
     assert_eq!(
         median(and(
@@ -2947,7 +2947,7 @@ fn a_quantile_claim_is_simulated_without_a_floor() {
             vec![hyp("power_at", j(json!(-0.01)))]
         )),
         [format!(
-            "{SIM}0.00 with 2 clusters in fiction; 1024 per stratum do not reach 0.80."
+            "{SIM}0.00 with 2 clusters in fiction; 16384 per stratum do not reach 0.80."
         )]
     );
     // Pooled, the count is of clusters.
@@ -3020,7 +3020,7 @@ fn a_quantile_claim_too_large_to_simulate_fails_closed() {
     );
     assert_eq!(
         d[0].problem,
-        "The confirmation sample is too small. Cannot simulate power: it would draw more than 100 million values."
+        "The confirmation sample is too small. Cannot simulate power: it would draw more than 2000 million values."
     );
 }
 

@@ -20,6 +20,7 @@ use crate::spec::model::{Claim, Outcome, SELECTED, StatisticSpec};
 use crate::store::{Store, is_digest};
 use crate::stream::{self, LogName};
 use evidence::claim::{Bound, Statistic};
+pub use evidence::power::CAP;
 use evidence::power::{Plan, Stratum, WORK, clusters_needed, mean_sd, simulate};
 use evidence::rng::Rng;
 use evidence::{Error, Tail};
@@ -348,8 +349,6 @@ fn open_unit(x: f64) -> bool {
 
 /// Replicates of each power simulation.
 const REPS: u32 = 4000;
-/// The most clusters per stratum the search for the count that would pass tries.
-pub const CAP: u32 = 1024;
 
 /// E-CNF-002, at each hypothesis with a claim that E-CNF-001, E-HYP-003 and E-HYP-004 accept
 /// and whose estimates are found: `gate` must find the power the claim needs. An absent power
@@ -409,7 +408,7 @@ pub struct Power {
     /// stratum as `shown` prints it, `""` for the pooled group.
     pub clusters: Vec<(String, usize)>,
     /// When the power falls short: the smallest common count of clusters per group that
-    /// reaches the target, or `None` when 1,024 do not. `None` too when the power reaches it.
+    /// reaches the target, or `None` when [`CAP`] do not. `None` too when the power reaches it.
     pub needed: Option<u32>,
 }
 

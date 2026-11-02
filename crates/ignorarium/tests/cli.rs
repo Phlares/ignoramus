@@ -1417,14 +1417,14 @@ fn the_gate_gives_the_same_verdict_on_every_check() {
         ),
         "{page}"
     );
-    // Sized just below the margin, half the units lie on each side, and 1,024 clusters do
+    // Sized just below the margin, half the units lie on each side, and 16,384 clusters do
     // not reach the target: `needed` says so, apart from the null of a plan that passes.
     let edge = |t: String| common::confirmatory(t).replace("power_at = -20.0", "power_at = -0.01");
     std::fs::write(&spec, edge(std::fs::read_to_string(TEMPLATE).unwrap())).unwrap();
     let beyond = power(1);
-    assert_eq!(beyond[0]["needed"], ">1024", "{beyond}");
+    assert_eq!(beyond[0]["needed"], ">16384", "{beyond}");
     assert!(
-        check_out(&home, &spec, 1).contains("; 1024 clusters do not reach 0.80."),
+        check_out(&home, &spec, 1).contains("; 16384 clusters do not reach 0.80."),
         "{beyond}"
     );
 }

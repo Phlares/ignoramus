@@ -405,7 +405,7 @@ fn render_json(a: &Assessed) -> Result<String, CliError> {
             let clusters: serde_json::Map<String, Value> = (p.clusters.into_iter())
                 .map(|(stratum, n)| (stratum, json!(n)))
                 .collect();
-            // `null` when the power reaches the target; a count, or `>1024` beyond the cap.
+            // `null` when the power reaches the target; a count, or `">{CAP}"` beyond the cap.
             let needed = match (p.power >= p.target, p.needed) {
                 (true, _) => Value::Null,
                 (false, Some(n)) => json!(n),

@@ -294,7 +294,7 @@ fn a_plan_over_the_work_budget_is_refused() {
     };
     assert_eq!(work(&plan(vec![stratum(24, 0.0)]), REPS), 24 * 2000);
     assert_eq!(work(&median(vec![4; 24]), REPS), 24 * 5 * 2000);
-    assert_eq!(WORK, 100_000_000);
+    assert_eq!(WORK, 2_000_000_000);
     // 30 clusters of 1,000,000 units are refused before any draw.
     let big = median(vec![1_000_000; 30]);
     let mut rng = Rng::from_seed(SEED);
@@ -306,26 +306,26 @@ fn a_plan_over_the_work_budget_is_refused() {
         clusters_needed(&big, 0.8, REPS, SEED, 1024),
         Err(Error::Parameter("work"))
     );
-    // At the budget a plan runs; one value more, it does not.
-    let edge = median(vec![99]);
+    // At the budget a plan runs; one value more, it does not. The search at target 0 stops
+    // after its first replicate, so the plan at the budget runs in a moment.
+    let edge = median(vec![1999]);
     assert_eq!(work(&edge, 1_000_000), WORK);
-    assert!(simulate(&edge, 1_000_000, &mut rng).is_ok());
-    assert_eq!(
-        simulate(&median(vec![100]), 1_000_000, &mut rng),
-        Err(Error::Parameter("work"))
-    );
-    // The search runs at the budget too, and refuses one value more.
     assert_eq!(clusters_needed(&edge, 0.0, 1_000_000, SEED, 1), Ok(Some(1)));
     assert_eq!(
-        clusters_needed(&median(vec![100]), 0.0, 1_000_000, SEED, 1),
+        clusters_needed(&median(vec![2000]), 0.0, 1_000_000, SEED, 1),
         Err(Error::Parameter("work"))
     );
-    // The search counts every trial: 1 cluster of 20,000 units draws 40 million values, and
-    // 2 clusters 80 million, each within the budget but 120 million in all.
-    let wide = median(vec![19_999]);
-    assert_eq!(clusters_needed(&wide, 0.8, REPS, SEED, 1), Ok(None));
     assert_eq!(
-        clusters_needed(&wide, 0.8, REPS, SEED, 2),
+        simulate(&median(vec![2000]), 1_000_000, &mut rng),
+        Err(Error::Parameter("work"))
+    );
+    // The search counts every trial: 1 cluster of 400,000 units draws 800 million values, and
+    // 2 clusters 1,600 million, each within the budget but 2,400 million in all. At target 1
+    // the first replicate that fails ends a trial.
+    let wide = median(vec![399_999]);
+    assert_eq!(clusters_needed(&wide, 1.0, REPS, SEED, 1), Ok(None));
+    assert_eq!(
+        clusters_needed(&wide, 1.0, REPS, SEED, 2),
         Err(Error::Parameter("work"))
     );
 }
