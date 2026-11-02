@@ -1241,3 +1241,226 @@ fn a_pilot_then_a_follow_on_resolve_end_to_end() {
     let (code, v) = check_json(&lab, &follow("wide-pilot"));
     assert_eq!((code, codes(&v)), (1, vec!["E-CNF-002"]), "{v}");
 }
+
+// ---- a study that re-sizes once from its reserve ----
+
+/// The reserve inputs of the re-size studies here.
+const RESERVE: usize = 32;
+const FIRST: usize = 15;
+
+/// A payload that writes 100 for the reference and `arm` for `arm-a` on every unit.
+fn flat(arm: &str) -> String {
+    format!(
+        "#!/bin/sh\ncase \"$2\" in exact) v=100;; *) v={arm};; esac\nprintf '{{\"ppl\": %s}}' \"$v\" > \"$IGNORARIUM_OUT/values.json\"\n"
+    )
+}
+
+/// Register re-size study `id` (`common::resize_plan`) with `payload`, in a lab that holds
+/// `common::resize_pilot`, and prepare its run at level 0.
+fn resize_study(lab: &Lab, id: &str, payload: &str) -> ignorarium::runner::RunPlan {
+    use ignorarium::backend::level0::Level0;
+    let files = common::reserve_files(RESERVE);
+    let before: Vec<(&str, &str)> = files.iter().map(|(p, t)| (&p[..], &t[..])).collect();
+    register_study(lab, id, common::resize_plan(RESERVE), &before, payload);
+    let root = common::work_of(&lab.home, id);
+    ignorarium::runner::prepare_with(&lab.home, id, &root, vec![Box::new(Level0)]).unwrap()
+}
+
+/// The count the re-size gives a first batch whose every observation is `x`: the pooled
+/// claim at the study's level, sized at -1 for the whole power over every cluster.
+fn needed_at(
+    plan: &ignorarium::runner::RunPlan,
+    records: &[ignorarium::records::Record],
+    x: f64,
+) -> Option<u64> {
+    use evidence::claim::{Bound, Statistic};
+    use evidence::power::{Plan, blinded_sd, resize_count};
+    let level = records
+        .iter()
+        .find_map(Register::of)
+        .unwrap()
+        .alpha
+        .unwrap()
+        .level;
+    let p = Plan {
+        stat: Statistic::Mean { lo: -2.0, hi: 2.0 },
+        bounds: vec![Bound {
+            tail: evidence::Tail::Lower,
+            margin: 0.0,
+        }],
+        strata: vec![],
+        level,
+    };
+    let s = blinded_sd(&[x.max(-2.0); FIRST]).unwrap();
+    let cap = (FIRST + RESERVE) as u32;
+    let seed = ignorarium::seed::seed(&plan.spec_hash, "resize/H1/");
+    let sizes = vec![1; cap as usize];
+    let n = resize_count(&p, &sizes, s, -1.0, 0.8, 4000, seed, cap).unwrap();
+    n.map(u64::from)
+}
+
+/// The paths of the reserve inputs of `plan` by pin.
+fn by_pin(plan: &ignorarium::runner::RunPlan) -> Vec<String> {
+    use ignorarium::spec::model::Role;
+    let mut held: Vec<(&str, &str)> = (plan.spec.inputs.iter())
+        .filter(|i| i.role == Role::Reserve)
+        .map(|i| (&i.sha256[..], &i.path[..]))
+        .collect();
+    held.sort();
+    held.into_iter().map(|(_, p)| p.to_string()).collect()
+}
+
+/// The clusters of the reserve rows recorded in `records`, each once, in the order they ran,
+/// and the count of those rows.
+fn reserve_ran(
+    plan: &ignorarium::runner::RunPlan,
+    records: &[ignorarium::records::Record],
+) -> (Vec<String>, usize) {
+    let rows: Vec<&ignorarium::schedule::Row> = (records.iter())
+        .filter(|r| r.kind == "row")
+        .map(|r| &plan.schedule.rows[r.row.unwrap() as usize])
+        .filter(|row| row.stage == "reserve")
+        .collect();
+    let mut clusters: Vec<String> = vec![];
+    for row in &rows {
+        if !clusters.contains(&row.cluster) {
+            clusters.push(row.cluster.clone());
+        }
+    }
+    (clusters, rows.len())
+}
+
+#[test]
+fn no_reserve_row_runs_before_the_record() {
+    use ignorarium::derived::{Resize, ResizeStratum};
+    use ignorarium::runner::{RunStatus, run};
+    let lab = lab();
+    common::resize_pilot(&lab.home);
+    // Every observation is 99 against 100: -1 %.
+    let plan = resize_study(&lab, "grows", &flat("99"));
+    let rows = plan.schedule.rows.len();
+    assert_eq!(rows, 2 * (FIRST + RESERVE));
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let all = common::records_of(&lab, "grows");
+    let resized: Vec<usize> = (0..all.len())
+        .filter(|&i| all[i].kind == "resize")
+        .collect();
+    assert_eq!(resized.len(), 1);
+    let at = resized[0];
+    // Each first-batch row before the record, each reserve row after it.
+    let stage =
+        |r: &ignorarium::records::Record| plan.schedule.rows[r.row.unwrap() as usize].stage.clone();
+    let before: Vec<String> = all[..at]
+        .iter()
+        .filter(|r| r.kind == "row")
+        .map(stage)
+        .collect();
+    assert_eq!(before, vec!["confirmation".to_string(); 2 * FIRST]);
+    let after = &all[at + 1..];
+    assert!(
+        after
+            .iter()
+            .filter(|r| r.kind == "row")
+            .all(|r| stage(r) == "reserve")
+    );
+    // The count of the uncentred sd of the first batch, then the rest of it from the reserve,
+    // by pin.
+    let needed = needed_at(&plan, &all, 100.0 * (99.0f64 / 100.0 - 1.0));
+    let appended = needed.unwrap() - FIRST as u64;
+    assert!(appended > 0 && appended < RESERVE as u64, "{needed:?}");
+    assert_eq!(
+        Resize::of(&all[at]).unwrap(),
+        Resize {
+            strata: vec![ResizeStratum {
+                stratum: String::new(),
+                first: FIRST as u64,
+                reserve: RESERVE as u64,
+                needed,
+                appended,
+            }],
+            decision: "continue".into(),
+            reason: None,
+        }
+    );
+    let (ran, count) = reserve_ran(&plan, after);
+    assert_eq!(ran, by_pin(&plan)[..appended as usize].to_vec());
+    assert_eq!(count, 2 * appended as usize);
+}
+
+#[test]
+fn a_stopped_re_size_runs_no_reserve_row() {
+    use ignorarium::derived::{Resize, ResizeStratum};
+    use ignorarium::runner::run;
+    let lab = lab();
+    common::resize_pilot(&lab.home);
+    // Every observation is -2 %: the spread of 2 needs more clusters than the 47 there are.
+    let plan = resize_study(&lab, "short", &flat("98"));
+    run(&plan).unwrap();
+    let all = common::records_of(&lab, "short");
+    assert_eq!(needed_at(&plan, &all, -2.0), None);
+    let resized = kind_of(&lab, "short", "resize");
+    assert_eq!(resized.len(), 1);
+    assert_eq!(
+        Resize::of(&resized[0]).unwrap(),
+        Resize {
+            strata: vec![ResizeStratum {
+                stratum: String::new(),
+                first: FIRST as u64,
+                reserve: RESERVE as u64,
+                needed: None,
+                appended: 0,
+            }],
+            decision: "stop".into(),
+            reason: Some("the reserve cannot reach the power the claim needs".into()),
+        }
+    );
+    assert_eq!(reserve_ran(&plan, &all), (vec![], 0));
+    assert_eq!(kind_of(&lab, "short", "row").len(), 2 * FIRST);
+}
+
+#[test]
+fn a_resumed_run_writes_one_resize_record() {
+    use ignorarium::derived::{RESIZE, Resize};
+    use ignorarium::runner::{RunStatus, run};
+    let lab = lab();
+    common::resize_pilot(&lab.home);
+    let plan = resize_study(&lab, "again", &flat("99"));
+    run(&plan).unwrap();
+    let dir = lab.home.study_dir("again");
+    let log = dir.join("records.jsonl");
+    let whole = std::fs::read_to_string(&log).unwrap();
+    let all = common::records_of(&lab, "again");
+    let at = all.iter().position(|r| r.kind == RESIZE).unwrap();
+    let made = Resize::of(&all[at]).unwrap();
+    let ran = reserve_ran(&plan, &all);
+    // A box killed before the record, or after it and one reserve row, then resumed: one
+    // record, the same decision, the same reserve rows and no other.
+    for (n, kept) in [(0, at), (1, at + 2)] {
+        let text: String = whole.split_inclusive('\n').take(kept).collect();
+        std::fs::write(&log, text).unwrap();
+        std::fs::rename(dir.join("run"), dir.join(format!("run-old-{n}"))).unwrap();
+        assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+        let again = common::records_of(&lab, "again");
+        let resized: Vec<_> = again.iter().filter(|r| r.kind == RESIZE).collect();
+        assert_eq!(resized.len(), 1, "{n}");
+        assert_eq!(Resize::of(resized[0]).unwrap(), made, "{n}");
+        assert_eq!(reserve_ran(&plan, &again), ran, "{n}");
+        assert_eq!(again.len(), all.len(), "{n}");
+    }
+    // A resume reads the record it finds and never makes it again: one that admits a single
+    // reserve cluster runs that one alone.
+    let text: String = whole.split_inclusive('\n').take(at).collect();
+    std::fs::write(&log, text).unwrap();
+    std::fs::rename(dir.join("run"), dir.join("run-old-2")).unwrap();
+    let mut one = made.clone();
+    one.strata[0].appended = 1;
+    common::plant(
+        &lab.home,
+        "again",
+        &[(RESIZE, serde_json::to_value(&one).unwrap())],
+    );
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let again = common::records_of(&lab, "again");
+    assert_eq!(again.iter().filter(|r| r.kind == RESIZE).count(), 1);
+    assert_eq!(reserve_ran(&plan, &again), (by_pin(&plan)[..1].to_vec(), 2));
+}

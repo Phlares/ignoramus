@@ -359,7 +359,7 @@ fn open_unit(x: f64) -> bool {
 }
 
 /// Replicates of each power simulation.
-const REPS: u32 = 4000;
+pub const REPS: u32 = 4000;
 
 /// E-CNF-002, at each hypothesis with a claim that E-CNF-001, E-HYP-003 and E-HYP-004 accept
 /// and whose estimates are found: `gate` must find the power the claim needs. An absent power

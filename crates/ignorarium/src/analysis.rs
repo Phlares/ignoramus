@@ -253,7 +253,7 @@ pub fn estimates(
 /// contrast's value for each picked unit that counts, and the count of picked units that do
 /// not. A unit counts when every term pairs in at least `repeats` repeats; its value is the
 /// weighted sum of the terms' means. A cluster with no unit that counts is left out.
-fn group(
+pub(crate) fn group(
     clusters: &[Cluster],
     stratum: &str,
     outcome: &str,
@@ -516,7 +516,7 @@ fn finite(e: f64) -> f64 {
 
 /// The strata a claim of `h` is held in: each it lists, once, in order; `""`, the pooled
 /// group, when it lists none.
-fn claim_strata(h: &Hypothesis) -> Vec<&str> {
+pub(crate) fn claim_strata(h: &Hypothesis) -> Vec<&str> {
     let mut strata: Vec<&str> = Vec::new();
     for s in &h.strata {
         if !strata.contains(&s.as_str()) {

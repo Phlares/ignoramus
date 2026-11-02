@@ -1341,6 +1341,88 @@ fn late_confirmation_data_used_before_is_refused() {
     assert!(!a.join("schedule.json").exists());
 }
 
+/// The template with an unpinned reserve input `data/res.txt` in `fiction`. The plan is
+/// exploratory, so no rule asks for a pin or a re-size.
+fn with_reserve(t: String) -> String {
+    let input = r#"[[inputs]]
+path = "data/res.txt"
+sha256 = ""
+role = "reserve"
+stratum = "fiction"
+units = 3
+[inputs.licence]
+spdx = ""
+type = "unspecified"
+source = ""
+creators = []
+
+[pins]"#;
+    t.replacen("[pins]", input, 1)
+}
+
+#[test]
+fn late_reserve_data_used_before_is_refused() {
+    let lab = lab();
+    let a = register_study(&lab, "plan-a", with_reserve, &[], PAYLOAD);
+    register_study(&lab, "plan-b", with_reserve, &[], PAYLOAD);
+    for id in ["plan-a", "plan-b"] {
+        std::fs::write(common::work(&lab, id).join("data/res.txt"), "late file").unwrap();
+    }
+    // B runs first: its late reserve data lands under its own label.
+    plan_of(&lab, "plan-b");
+    let (exact, norm) = file_hashes(b"late file");
+    let log = PlanLog::open(&lab.home.root.join("planlog")).unwrap();
+    let uses = log.uses(&exact, &norm).unwrap();
+    assert_eq!(uses.len(), 1);
+    assert_eq!(uses[0].1.label, "study:plan-b");
+    match err_of(&lab, "plan-a") {
+        RunError::DataReused { path, label } => {
+            assert_eq!(path, "data/res.txt");
+            assert_eq!(label, "study plan-b");
+        }
+        e => panic!("{e}"),
+    }
+    assert!(!a.join("schedule.json").exists());
+}
+
+#[test]
+fn a_late_calibration_copy_of_a_reserve_input_is_refused() {
+    let lab = lab();
+    common::resize_pilot(&lab.home);
+    let files = common::reserve_files(32);
+    let before: Vec<(&str, &str)> = files.iter().map(|(p, t)| (&p[..], &t[..])).collect();
+    let (reserve, text) = common::reserve_file(0);
+    let cal = "data/example.txt";
+    // The calibration input is absent at registration, then written with a reserve text in
+    // other case and spacing.
+    let dir = register_study(&lab, "rsv-cal", common::resize_plan(32), &before, PAYLOAD);
+    let near = format!("  {}", text.to_uppercase());
+    std::fs::write(common::work(&lab, "rsv-cal").join(cal), near).unwrap();
+    let err = err_of(&lab, "rsv-cal");
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "E-CNF-004: the reserve input {reserve} holds the same data as the calibration input {cal}. See docs/rules/E-CNF-004.md"
+        )
+    );
+    match err {
+        RunError::DataShared {
+            path,
+            path_role,
+            other,
+            role,
+        } => assert_eq!(
+            (path, path_role, other, role),
+            (reserve, Role::Reserve, cal.into(), Role::Calibration)
+        ),
+        e => panic!("{e}"),
+    }
+    assert!(!dir.join("schedule.json").exists());
+    // Other calibration data passes.
+    std::fs::write(common::work(&lab, "rsv-cal").join(cal), "other text").unwrap();
+    plan_of(&lab, "rsv-cal");
+}
+
 /// `staged` as a confirmatory plan, with the sd and icc of each candidate from `my-pilot`.
 fn confirmatory_staged(t: String) -> String {
     common::confirmatory(staged(t))
@@ -1416,6 +1498,7 @@ fn a_late_input_with_the_data_of_the_other_role_is_refused() {
 fn the_shared_data_refusal_names_the_role_and_escapes_the_paths() {
     let e = RunError::DataShared {
         path: "data/c\u{202e}txt".into(),
+        path_role: Role::Confirmation,
         other: "data/a\nb".into(),
         role: Role::Calibration,
     };
@@ -1448,10 +1531,20 @@ fn a_late_calibration_copy_of_a_confirmation_input_is_refused() {
         .err()
         .unwrap_or_else(|| panic!("{id}: prepare should refuse"));
         match err {
-            RunError::DataShared { path, other, role } => {
+            RunError::DataShared {
+                path,
+                path_role,
+                other,
+                role,
+            } => {
                 assert_eq!(
-                    (path, other, role),
-                    (conf.into(), cal.into(), Role::Calibration)
+                    (path, path_role, other, role),
+                    (
+                        conf.into(),
+                        Role::Confirmation,
+                        cal.into(),
+                        Role::Calibration
+                    )
                 )
             }
             e => panic!("{id}: {e}"),

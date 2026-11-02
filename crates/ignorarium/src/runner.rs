@@ -5,7 +5,7 @@ use crate::backend::{
 };
 use crate::budget::{Alerts, Cost, CostMeter, Decision, HostMeter, decide, dimension_name};
 use crate::control::{self, ControlError, ControlFile, RunLock, Signal, State};
-use crate::derived::{INPUTS, Inputs, REGISTER, Register, SELECTION, Selection};
+use crate::derived::{INPUTS, Inputs, REGISTER, RESIZE, Register, Resize, SELECTION, Selection};
 use crate::diag::printable;
 use crate::environ::{Builder, Built, Recipe};
 use crate::estimate::{apply_defaults, estimate};
@@ -25,7 +25,7 @@ use crate::spec::model::{Mode, Param, Role, SELECTED, Spec, param_path};
 use crate::store::Store;
 use crate::stream::{LogName, StreamError};
 use crate::view::{self, ViewError};
-use crate::{analysis, canon, keys, spec, sys, values};
+use crate::{analysis, canon, keys, resize, spec, sys, units, values};
 use ed25519_dalek::SigningKey;
 use ignorarium_guest::image;
 use serde_json::{Value, json};
@@ -146,15 +146,18 @@ pub enum RunError {
         need: u8,
         have: Vec<u8>,
     },
-    /// A selection or confirmation input that was absent at registration was used before.
+    /// A selection, confirmation or reserve input that was absent at registration was used
+    /// before.
     DataReused {
         path: String,
         label: String,
     },
-    /// In a confirmatory plan, a confirmation input holds the same data as a selection or
-    /// calibration input; one of them was absent when `check` compared them.
+    /// In a confirmatory plan, a confirmation or reserve input holds the same data as a
+    /// selection or calibration input; one of them was absent when `check` compared them.
     DataShared {
         path: String,
+        /// The role of `path`.
+        path_role: Role,
         other: String,
         /// The role of `other`.
         role: Role,
@@ -220,9 +223,15 @@ impl fmt::Display for RunError {
                 f,
                 "E-CNF-005: input {path} was used by an earlier study ({label}). See docs/rules/E-CNF-005.md"
             ),
-            RunError::DataShared { path, other, role } => write!(
+            RunError::DataShared {
+                path,
+                path_role,
+                other,
+                role,
+            } => write!(
                 f,
-                "E-CNF-004: the confirmation input {} holds the same data as the {} input {}. See docs/rules/E-CNF-004.md",
+                "E-CNF-004: the {} input {} holds the same data as the {} input {}. See docs/rules/E-CNF-004.md",
+                json!(path_role).as_str().unwrap_or_default(),
                 printable(path),
                 json!(role).as_str().unwrap_or_default(),
                 printable(other)
@@ -776,13 +785,13 @@ pub fn progress(
     })
 }
 
-/// In a confirmatory plan, refuse a confirmation input that holds the same data as a selection
-/// or calibration input (E-CNF-004): `check` cannot compare a file that was absent at
-/// registration, and a late copy of a registered file has a registered hash. Then a selection
-/// or confirmation input that the registered plan leaf did not hold is late: refuse it if
-/// another study used it, else record it under this study's id once. The study's own leaves,
-/// its plan leaf and its late-data leaves, are no earlier use. `all` are the inputs' hashes in
-/// spec order.
+/// In a confirmatory plan, refuse a confirmation or reserve input that holds the same data as
+/// a selection or calibration input (E-CNF-004): `check` cannot compare a file that was absent
+/// at registration, and a late copy of a registered file has a registered hash. Then a
+/// selection, confirmation or reserve input that the registered plan leaf did not hold is
+/// late: refuse it if another study used it, else record it under this study's id once. The
+/// study's own leaves, its plan leaf and its late-data leaves, are no earlier use. `all` are
+/// the inputs' hashes in spec order.
 /// Every lookup finishes before the append takes its lock.
 fn gate_late_data(
     home: &Home,
@@ -804,19 +813,20 @@ fn gate_late_data(
         .collect();
     let of = |roles: &'static [Role]| present.iter().filter(move |(_, r, _)| roles.contains(r));
     if spec.study.mode == Mode::Confirmatory {
-        for (path, _, hashes) in of(&[Role::Confirmation]) {
+        for (path, path_role, hashes) in of(&[Role::Confirmation, Role::Reserve]) {
             let mut held = of(&[Role::Selection, Role::Calibration]);
             if let Some((other, role, _)) = held.find(|(_, _, h)| same_data(h, hashes)) {
                 return Err(RunError::DataShared {
                     path: (*path).into(),
+                    path_role: *path_role,
                     other: (*other).into(),
                     role: *role,
                 });
             }
         }
     }
-    let late =
-        of(&[Role::Selection, Role::Confirmation]).filter(|(_, _, h)| !registered.contains(h));
+    let late = of(&[Role::Selection, Role::Confirmation, Role::Reserve])
+        .filter(|(_, _, h)| !registered.contains(h));
     let own = own_label(id);
     let mut new = Vec::new();
     for (path, _, hashes) in late {
@@ -877,7 +887,9 @@ fn no_links(base: &Path, parts: &[&str]) -> Result<(), RunError> {
 /// Run every row that has no record, holding the run lock; a second run gets `Busy`. A
 /// study whose records hold a stop, or a confirmatory study whose records hold a recheck
 /// mismatch (`recheck_stop`), ends with the stop trace before any row.
-/// A row a dead box left running is killed first. At each row boundary the control file is
+/// A row a dead box left running is killed first. In a study that declares a re-size, the
+/// first reserve row waits for the `resize` record (`resized`), and a reserve row of a cluster
+/// it does not admit never runs. At each row boundary the control file is
 /// read: a stop ends the run with the stop trace, a pause ends it at that boundary. Then the
 /// gate runs before each attempt, retries included: the run pauses instead of starting it
 /// when a cap is reached or the attempt would reach one, or when the payload or an input
@@ -961,12 +973,23 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
         .collect();
     let mut books = Books::open(plan, &all, &machine);
     let mut pick = None;
+    let mut admitted = None;
     for row in plan
         .schedule
         .rows
         .iter()
         .filter(|r| !done.contains(&r.index))
     {
+        // In a re-size study no reserve row runs before the `resize` record, and only the
+        // rows of the clusters it admits run: none when it stops.
+        if row.stage == RESERVE_STAGE && plan.spec.design.resize.is_some() {
+            if admitted.is_none() {
+                admitted = Some(resized(plan, &log)?);
+            }
+            if !admitted.as_ref().is_some_and(|a| a.contains(&row.cluster)) {
+                continue;
+            }
+        }
         if let Some(h) = at_boundary(&control) {
             return halt(plan, &dir, lock, h, None);
         }
@@ -1361,6 +1384,30 @@ fn selection(plan: &RunPlan, log: &Path) -> Result<Result<Pick, String>, RunErro
         id: s.selected,
         record: records::hash(&record),
     }))
+}
+
+/// The paths of the reserve clusters that run in a re-size study, from its `resize` record:
+/// the one its records hold, or else one made now from the first batch (`resize::or_stop`) and
+/// signed. A resume reads the record and never makes it again.
+fn resized(plan: &RunPlan, log: &Path) -> Result<BTreeSet<String>, RunError> {
+    let all = records::read_all(log, &plan.key.verifying_key())?;
+    let clusters =
+        analysis::distinct_clusters(units::clusters(&plan.spec, &plan.spec_hash), &plan.inputs);
+    let decided = match all.iter().find(|r| r.kind == RESIZE) {
+        Some(r) => Resize::of(r)
+            .ok_or_else(|| RunError::Records("the resize record does not parse".into()))?,
+        None => {
+            let r = resize::or_stop(&plan.spec, &plan.spec_hash, &all, &clusters);
+            analysis::append(plan, log, RESIZE, &r)?;
+            r
+        }
+    };
+    let order = schedule::reserve_order(&plan.spec, &clusters);
+    Ok(decided
+        .admitted(&order)
+        .into_iter()
+        .map(String::from)
+        .collect())
 }
 
 /// One row in its own span: `row.start`, the attempts, `row.end`. `Some` ends the run.

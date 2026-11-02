@@ -114,23 +114,8 @@ pub fn expand(
         .iter()
         .filter_map(|c| stage(spec, c.role).map(|(name, conds)| (name, conds, c)))
         .collect();
-    // A reserve cluster goes by its input's pin, so a re-size admits the same clusters
-    // whatever the file names. The first input with a path names its pin.
-    let pins: BTreeMap<&str, &str> = (spec.inputs.iter().rev())
-        .map(|i| (&i.path[..], &i.sha256[..]))
-        .collect();
-    let rank = |r: Role| match r {
-        Role::Selection => 0,
-        Role::Reserve => 2,
-        _ => 1,
-    };
-    staged.sort_by_key(|&(_, _, c)| {
-        let key = match c.role {
-            Role::Reserve => pins.get(&c.path[..]).copied().unwrap_or(""),
-            _ => &c.path[..],
-        };
-        (rank(c.role), &c.stratum, key, &c.path)
-    });
+    let pins = pins(spec);
+    staged.sort_by_key(|&(_, _, c)| place(&pins, c));
     let mut rows = Vec::new();
     let mut index: u64 = 0;
     for (name, conditions, c) in staged {
@@ -156,6 +141,36 @@ pub fn expand(
         }
     }
     Ok(rows)
+}
+
+/// Each input's pin by path; the first input with a path names it.
+fn pins(spec: &Spec) -> BTreeMap<&str, &str> {
+    (spec.inputs.iter().rev())
+        .map(|i| (&i.path[..], &i.sha256[..]))
+        .collect()
+}
+
+/// The sort key of a cluster's rows: its stage, its stratum, its path (a reserve cluster's
+/// input pin instead), then its path. A reserve cluster goes by its pin, so a re-size admits
+/// the same clusters whatever the files are named.
+fn place<'a>(pins: &BTreeMap<&'a str, &'a str>, c: &'a Cluster) -> (u8, &'a str, &'a str, &'a str) {
+    let (rank, key) = match c.role {
+        Role::Selection => (0, &c.path[..]),
+        Role::Reserve => (2, pins.get(&c.path[..]).copied().unwrap_or("")),
+        _ => (1, &c.path[..]),
+    };
+    (rank, &c.stratum[..], key, &c.path[..])
+}
+
+/// The reserve clusters of `clusters`, in the order the schedule runs them and a re-size
+/// appends them: by stratum, then pin, then path.
+pub fn reserve_order<'a>(spec: &'a Spec, clusters: &'a [Cluster]) -> Vec<&'a Cluster> {
+    let pins = pins(spec);
+    let mut reserve: Vec<&Cluster> = (clusters.iter())
+        .filter(|c| c.role == Role::Reserve)
+        .collect();
+    reserve.sort_by_key(|c| place(&pins, c));
+    reserve
 }
 
 /// The schedule `run` writes for `spec`: its clusters' picked units, expanded, and with
