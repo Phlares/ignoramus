@@ -4,6 +4,7 @@
 //! is missing or mistyped: the generic rules report that.
 use super::generic::{applies, diagnostic, join, join_key, plain_key, safe_key, select};
 use super::{BoxRecords, Check, NoRecords, Rule, has_format, is_study_id};
+use crate::analysis::{Fit, Refit, Source};
 use crate::backend::PINNED_LEVEL;
 use crate::derived::{
     ANALYSIS, Alpha, Analysis, Carried, Estimate, Instrument, Selection, StudyState, contrast_key,
@@ -913,7 +914,10 @@ pub struct StratumInput {
 /// (the pooled group `""` when none) and each contrast it stands for (with `selected`, each
 /// candidate of this plan's selection stage, with its params), the estimate with that
 /// contrast's key and the stratum, else the pooled one. An estimate without an icc, or with
-/// no variance above 0, is skipped. Several such estimates must agree. Over the candidates,
+/// no variance above 0, is skipped. Several such estimates must agree. For a `mean = [lo, hi]`
+/// statistic the pair is fitted again from the study's unit values in that group, each
+/// clipped to [lo, hi] (`analysis::Source`), unless every one lies inside it; a stored plan or
+/// record that cannot be read makes it missing. Over the candidates,
 /// the one pair whose cluster mean has the largest sd; ties keep the first. Without a usable
 /// `design.units_per_cluster` the pairs rank as at 1 unit per cluster, by sd alone.
 pub fn estimate_inputs(spec: &Value, h: usize, ctx: &CheckCtx) -> Lookup {
@@ -981,7 +985,8 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
         return Some(Lookup::Missing("The hypothesis names no study.".into()));
     };
     let from = study_ref(spec, reference)?;
-    let state = ctx.records.study(from).and_then(|all| {
+    let log = ctx.records.study(from);
+    let state = log.clone().and_then(|all| {
         StudyState::of(all, |log, slot| ctx.records.stream_closed(log, from, slot))
     });
     let records = match state {
@@ -998,6 +1003,29 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
     };
     let contrasts = contrasts(spec, hyp, ctx)?;
     let groups = groups_of(hyp)?;
+    let range = match hyp.get("statistic").and_then(mean_range) {
+        Some(Ok(range)) => range,
+        _ => None,
+    };
+    let source = match range.map(|_| ctx.records.spec(from)) {
+        None => None,
+        Some(text) => {
+            let log = log.ok().flatten().unwrap_or_default();
+            let read = match text {
+                Ok(Some(text)) => Source::read(&text, &log),
+                Ok(None) => Err("it holds no plan of the study".into()),
+                Err(e) => Err(e),
+            };
+            match read {
+                Ok(source) => Some(source),
+                Err(why) => {
+                    return Some(Lookup::Missing(format!(
+                        "The box cannot read the unit values of study {from} again: {why}."
+                    )));
+                }
+            }
+        }
+    };
     let estimates: Vec<(String, Estimate)> = records
         .iter()
         .filter_map(|r| Some((records::hash(r), Estimate::of(r)?)))
@@ -1058,7 +1086,35 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
                     group_name(group)
                 )));
             }
-            let pair = (e.var.sqrt(), e.icc.unwrap_or_default().max(0.0));
+            let stored = (e.var, e.icc.unwrap_or_default());
+            let (var, icc) = match source
+                .as_ref()
+                .map(|s| s.refit(&e.hypothesis, group, range))
+            {
+                None => stored,
+                Some(Err(why)) => {
+                    return Some(Lookup::Missing(format!(
+                        "The box cannot read the unit values of study {from} again: {why}."
+                    )));
+                }
+                Some(Ok(r)) if !r.clipped => stored,
+                Some(Ok(Refit {
+                    fit:
+                        Some(Fit {
+                            var,
+                            icc: Some(icc),
+                            ..
+                        }),
+                    ..
+                })) if var > 0.0 => (var, icc),
+                Some(Ok(_)) => {
+                    return Some(Lookup::Missing(format!(
+                        "Study {from}'s unit values of this contrast{pick} in {}, clipped to the statistic's range, give no icc, or no variance above 0.",
+                        group_name(group)
+                    )));
+                }
+            };
+            let pair = (var.sqrt(), icc.max(0.0));
             if widest.is_none_or(|w| spread(pair) > spread(w)) {
                 widest = Some(pair);
             }

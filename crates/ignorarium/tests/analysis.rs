@@ -4,7 +4,8 @@ use evidence::claim::{Bound, Statistic, e_value, order};
 use evidence::rng::Rng;
 use evidence::{Tail, tree};
 use ignorarium::analysis::{
-    Paired, distinct_clusters, estimates, instrument, paired, select, study_e_value, verdicts,
+    Paired, Source, distinct_clusters, estimates, instrument, paired, select, study_e_value,
+    verdicts,
 };
 use ignorarium::backend::level0::Level0;
 use ignorarium::canon::sha256_hex;
@@ -1566,4 +1567,74 @@ fn rows_in_two_environments_give_no_environment() {
     };
     assert_eq!(named(&[ran(Some("host")), spend.clone()]), "host");
     assert_eq!(named(&[spend]), "");
+}
+
+// ---- a finished study read again ----
+
+/// `arm-a` writes a value each unit's name sets, from 1 to 50; `exact` writes 10.
+const VARYING: &str = "#!/bin/sh
+if [ \"$2\" = exact ]; then v=10; else v=$(( $(printf '%s' \"$4\" | cksum | cut -d' ' -f1) % 50 + 1 )); fi
+printf '{\"ppl\": %s}' \"$v\" > \"$IGNORARIUM_OUT/values.json\"
+";
+
+/// A confirmation input at `path` in stratum fiction with 3 units, as spec text.
+fn confirmation_input(path: &str) -> String {
+    format!(
+        "[[inputs]]
+path = \"{path}\"
+sha256 = \"\"
+role = \"confirmation\"
+stratum = \"fiction\"
+units = 3
+[inputs.licence]
+spdx = \"\"
+type = \"unspecified\"
+source = \"\"
+creators = []
+
+"
+    )
+}
+
+#[test]
+fn a_refit_without_a_clip_gives_the_estimate_record_bit_for_bit() {
+    let lab = common::lab();
+    // data/again.txt holds the text of data/confirm.txt: one cluster, as the analysis counts it.
+    let extra = confirmation_input("data/other.txt") + &confirmation_input("data/again.txt");
+    let edit = |t: String| t.replacen("[pins]", &format!("{extra}[pins]"), 1);
+    let before = [
+        ("data/example.txt", "calibration"),
+        ("data/confirm.txt", "text one"),
+        ("data/other.txt", "text two"),
+        ("data/again.txt", "text one"),
+    ];
+    common::register_study(&lab, "refit", edit, &before, VARYING);
+    let work = common::work(&lab, "refit");
+    let plan = prepare_with(&lab.home, "refit", &work, vec![Box::new(Level0)]).unwrap();
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let all = common::records_of(&lab, "refit");
+    let text = std::fs::read(lab.home.study_dir("refit").join("spec.toml")).unwrap();
+    let source = Source::read(&text, &all).unwrap();
+    let held: Vec<Estimate> = all.iter().filter_map(Estimate::of).collect();
+    assert_eq!(held.len(), 1);
+    let e = &held[0];
+    assert_eq!((e.stratum.as_str(), e.clusters, e.units), ("", 2, 6));
+    let bits = |var: f64, icc: Option<f64>| (var.to_bits(), icc.map(f64::to_bits));
+    let refit = source.refit(&e.hypothesis, "", None).unwrap();
+    assert!(!refit.clipped);
+    let f = refit.fit.clone().unwrap();
+    assert_eq!(bits(f.var, f.icc), bits(e.var, e.icc));
+    // A range that holds every unit clips none and fits the same values.
+    let wide = source
+        .refit(&e.hypothesis, "", Some((-1000.0, 1000.0)))
+        .unwrap();
+    assert_eq!(wide, refit);
+    // Percent values run from -90 to 400: [-1, 1] clips most of them.
+    let narrow = source.refit(&e.hypothesis, "", Some((-1.0, 1.0))).unwrap();
+    assert!(narrow.clipped);
+    assert!(narrow.fit.unwrap().var < f.var);
+    assert_eq!(
+        source.refit("H9", "", None),
+        Err("its plan has no hypothesis its estimate names".into())
+    );
 }

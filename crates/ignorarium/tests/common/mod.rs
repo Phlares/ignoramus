@@ -449,6 +449,15 @@ pub fn instrument() -> derived::Instrument {
     }
 }
 
+/// The plan text of each study `finished` builds and `plant` stores: the template, whose
+/// hypothesis `H1` tests `arm-a` on `ppl-ratio`.
+pub const SOURCE_SPEC: &str = include_str!("../../../../templates/numeric-ablation.toml");
+
+/// The hash a register record holds for `SOURCE_SPEC`.
+pub fn source_hash() -> String {
+    spec::parse(SOURCE_SPEC.as_bytes()).unwrap().hash
+}
+
 /// `finished_with` the common `instrument` and no recheck.
 pub fn finished(estimates: Vec<serde_json::Value>) -> Vec<(&'static str, serde_json::Value)> {
     finished_with(instrument(), None, estimates)
@@ -462,7 +471,7 @@ pub fn finished_with(
     estimates: Vec<serde_json::Value>,
 ) -> Vec<(&'static str, serde_json::Value)> {
     let register = derived::Register {
-        spec_hash: format!("sha256:{}", "ab".repeat(32)),
+        spec_hash: source_hash(),
         leaf: 0,
         log: "testlog".into(),
         defaults: serde_json::json!([]),
@@ -539,6 +548,12 @@ impl BoxRecords for Studies {
         }
     }
 
+    /// `SOURCE_SPEC` for each study it holds.
+    fn spec(&self, id: &str) -> Result<Option<Vec<u8>>, String> {
+        let held = self.0.iter().any(|(s, _)| *s == id);
+        Ok(held.then(|| SOURCE_SPEC.as_bytes().to_vec()))
+    }
+
     /// Each stream is empty.
     fn stream_next(&self, log: &str) -> Result<stream::Next, String> {
         let log = stream::LogName::parse(log).map_err(|e| e.to_string())?;
@@ -560,6 +575,10 @@ pub struct Streamed {
 impl BoxRecords for Streamed {
     fn study(&self, id: &str) -> Result<Option<Vec<records::Record>>, String> {
         self.studies.study(id)
+    }
+
+    fn spec(&self, id: &str) -> Result<Option<Vec<u8>>, String> {
+        self.studies.spec(id)
     }
 
     fn stream_next(&self, log: &str) -> Result<stream::Next, String> {
@@ -587,11 +606,15 @@ pub fn next_slot(
     stream::next_of(log, &all, &[])
 }
 
-/// Sign `bodies` into the record log of study `id` in the box at `home`. Returns the hash of
-/// each record.
+/// Sign `bodies` into the record log of study `id` in the box at `home`, and store
+/// `SOURCE_SPEC` as its plan unless it has one. Returns the hash of each record.
 pub fn plant(home: &Home, id: &str, bodies: &[(&str, serde_json::Value)]) -> Vec<String> {
     let key = keys::load_or_create(home).unwrap();
     std::fs::create_dir_all(home.study_dir(id)).unwrap();
+    let plan = home.study_dir(id).join("spec.toml");
+    if !plan.exists() {
+        std::fs::write(&plan, SOURCE_SPEC).unwrap();
+    }
     let path = home.study_dir(id).join("records.jsonl");
     bodies
         .iter()

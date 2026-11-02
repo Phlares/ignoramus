@@ -2,16 +2,17 @@
 //! condition's value for the same unit and repeat.
 use crate::canon::{sha256_hex, to_canonical};
 use crate::derived::{
-    ANALYSIS, Analysis, BoundResult, CONTINUE, Candidate, ESTIMATE, Estimate, Instrument, Recheck,
-    Register, Selection, VERDICT, Verdict, contrast_key,
+    ANALYSIS, Analysis, BoundResult, CONTINUE, Candidate, ESTIMATE, Estimate, Inputs, Instrument,
+    Recheck, Register, Selection, VERDICT, Verdict, contrast_key,
 };
 use crate::planlog::store::{PlanLog, RELEASE};
 use crate::prior::Seen;
 use crate::records::{self, Record, RecordDraft};
 use crate::resize;
-use crate::runner::{InputHashes, RunError, RunPlan, own_label, stored_spec};
+use crate::runner::{InputHashes, RunError, RunPlan, own_label, stored_spec, typed};
 use crate::schedule::{self, Row, SELECTION_STAGE};
 use crate::seed::seed;
+use crate::spec;
 use crate::spec::model::{
     Claim, Direction, Hypothesis, Mode, Paired as Rule, Role, SELECTED, Spec,
 };
@@ -231,9 +232,7 @@ pub fn estimates(
             groups.push("");
         }
         for stratum in groups {
-            // An estimate takes a unit that pairs in any repeat.
-            let of = |role| group(clusters, role, stratum, &outcome.id, &h.contrast, paired, 1).0;
-            let samples = [of(Role::Confirmation), of(Role::Reserve)].concat();
+            let samples = samples(clusters, h, stratum, paired);
             if let Some(f) = fit(&samples) {
                 out.push(Estimate {
                     hypothesis: h.id.clone(),
@@ -251,6 +250,122 @@ pub fn estimates(
         }
     }
     out
+}
+
+/// The values `estimates` fits for `h` in group `stratum`: per cluster of `clusters`, the
+/// confirmation clusters then the reserve ones, the contrast's value of each unit that pairs
+/// in any repeat.
+fn samples(clusters: &[Cluster], h: &Hypothesis, stratum: &str, paired: &Paired) -> Vec<Vec<f64>> {
+    let of = |role| group(clusters, role, stratum, &h.outcome, &h.contrast, paired, 1).0;
+    [of(Role::Confirmation), of(Role::Reserve)].concat()
+}
+
+/// A finished study read again from what the box keeps of it: the plan text it stored at
+/// registration and its signed records. It gives the unit values its estimates were fitted
+/// from, so a later plan can fit them as its own test reads them.
+pub struct Source {
+    spec: Spec,
+    pairs: Paired,
+    clusters: Vec<Cluster>,
+}
+
+/// What `Source::refit` gives: whether the clip moved a unit value, and the fit of the
+/// values, `None` where `estimates` gives none.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Refit {
+    pub clipped: bool,
+    pub fit: Option<Fit>,
+}
+
+impl Source {
+    /// The study of `records` whose stored plan is `text`. Its clusters are those `finish`
+    /// measured: the data of each input comes from the `inputs` record and the rows
+    /// (`held_by`), and the reserve clusters that ran from the `resize` record. `Err` (why)
+    /// when the text does not parse, is not the plan the register record names, or a record
+    /// the clusters need is missing or does not parse.
+    pub fn read(text: &[u8], records: &[Record]) -> Result<Source, String> {
+        let register =
+            (records.iter().find_map(Register::of)).ok_or("it has no register record")?;
+        let unparsed = "its stored plan does not parse";
+        let raw = spec::parse(text).map_err(|_| unparsed)?;
+        if raw.hash != register.spec_hash {
+            return Err("its stored plan is not the one the study registered".into());
+        }
+        let (spec, _, hash, _) = typed(raw).map_err(|_| unparsed)?;
+        let all = distinct_clusters(units::clusters(&spec, &hash), &held_by(records)?);
+        let resize = resize::recorded(records).map_err(|_| "its resize record does not parse")?;
+        let ran = resize::ran(&spec, &all, resize.as_ref());
+        let clusters = measured(&spec, &all, &ran);
+        Ok(Source {
+            pairs: paired(&spec, records),
+            spec,
+            clusters,
+        })
+    }
+
+    /// The fit `estimates` gives hypothesis `id` in group `stratum`, over the unit values,
+    /// each clipped to `clip` (`[lo, hi]`) when one is given. `Err` when the plan has no
+    /// hypothesis `id`.
+    pub fn refit(
+        &self,
+        id: &str,
+        stratum: &str,
+        clip: Option<(f64, f64)>,
+    ) -> Result<Refit, String> {
+        let h = (self.spec.question.hypotheses.iter())
+            .find(|h| h.id == id)
+            .ok_or("its plan has no hypothesis its estimate names")?;
+        let mut values = samples(&self.clusters, h, stratum, &self.pairs);
+        let mut clipped = false;
+        if let Some((lo, hi)) = clip {
+            for x in values.iter_mut().flatten() {
+                let inside = x.max(lo).min(hi);
+                clipped |= inside != *x;
+                *x = inside;
+            }
+        }
+        Ok(Refit {
+            clipped,
+            fit: fit(&values),
+        })
+    }
+}
+
+/// Each input of a study, in spec order, with the (exact, normalized) hashes of the data its
+/// rows ran on. The `inputs` record names each input's exact hash, or none for one that was
+/// absent, and every row names the pair of each input present, in the same order. A study
+/// with no row names no data, and each input stands alone (`distinct_clusters`).
+fn held_by(records: &[Record]) -> Result<InputHashes, String> {
+    let Some(row) = own_rows(records).next() else {
+        return Ok(vec![]);
+    };
+    let frozen = (records.iter().find_map(Inputs::of)).ok_or("it has rows and no inputs record")?;
+    let other = "its rows and its inputs record name other data";
+    let named: Vec<(String, String)> =
+        serde_json::from_value(row.body["data_hashes"].clone()).map_err(|_| other)?;
+    let mut named = named.into_iter();
+    let mut out = Vec::new();
+    for (path, exact) in frozen.inputs {
+        let hashes = match exact {
+            None => None,
+            Some(exact) => Some(named.next().filter(|(x, _)| *x == exact).ok_or(other)?),
+        };
+        out.push((path, hashes));
+    }
+    match named.next() {
+        Some(_) => Err(other.into()),
+        None => Ok(out),
+    }
+}
+
+/// The clusters a study measured, of `clusters`: each that is no reserve cluster, then the
+/// reserve clusters whose rows ran (`ran`), in the order they are appended.
+fn measured(spec: &Spec, clusters: &[Cluster], ran: &BTreeSet<&str>) -> Vec<Cluster> {
+    let order = schedule::reserve_order(spec, clusters);
+    (clusters.iter().filter(|c| c.role != Role::Reserve))
+        .chain(order.into_iter().filter(|c| ran.contains(c.path.as_str())))
+        .cloned()
+        .collect()
 }
 
 /// The clusters of `role` in `stratum` (every stratum for the pooled group `""`), in the order
@@ -293,13 +408,14 @@ pub(crate) fn group(
     (samples, incomplete)
 }
 
-struct Fit {
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fit {
     /// The unweighted mean of the cluster means: what a follow-on's test targets.
-    mean: f64,
+    pub mean: f64,
     /// The variance of one unit: between plus within clusters.
-    var: f64,
+    pub var: f64,
     /// Between over total; `None` when it is not defined.
-    icc: Option<f64>,
+    pub icc: Option<f64>,
 }
 
 /// A one-way analysis of variance over the clusters, `None` when the mean or the variance is
@@ -664,11 +780,7 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
     if (plan.schedule.rows.iter().filter(runs)).any(|r| !rowed.contains(&r.index)) {
         return Ok(());
     }
-    let order = schedule::reserve_order(&plan.spec, &clusters);
-    let measured: Vec<Cluster> = (clusters.iter().filter(|c| c.role != Role::Reserve))
-        .chain(order.into_iter().filter(|c| ran.contains(c.path.as_str())))
-        .cloned()
-        .collect();
+    let measured = measured(&plan.spec, &clusters, &ran);
     let selection = all.iter().find_map(Selection::of);
     let pairs = paired(&plan.spec, &all);
     let wanted = estimates(
