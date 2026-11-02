@@ -32,7 +32,14 @@ Measured. A null simulation of the design, in release mode on one 6-CPU cloud ho
 | 2,500 | 0.15 | 0.1 | 0.00002 (0.00001) | 0.00002 (0.00001) |
 | 2,500 | 0.15 | 0.8 | 0.00012 (0.00003) | 0.10277 (0.00096) |
 
-Every share is far below the bound. The scenarios cover a re-size that stops every time (a reserve of 0), one that stops in part, and one that never stops. No scenario appends none of its reserve: at this margin and level, 21 clusters never reach the count.
+At level 0.005 the test almost never rejects, so these shares cannot show a fault that raises rejections. Two more scenarios run the same design at level 0.05, with a reserve of 2,500 and an icc of 0.1, against the bound 0.05 + 3 × √(0.05 × 0.95 / 100,000) = 0.0520676. Both ran at once on the same host in 763 s:
+
+| Level | Reserve | sd | icc | Rejection share (se) | Stop share (se) |
+|---|---|---|---|---|---|
+| 0.05 | 2,500 | 0.03 | 0.1 | 0 | 0 |
+| 0.05 | 2,500 | 0.15 | 0.1 | 0.00089 (0.00009) | 0.00001 (0.00001) |
+
+Every share is far below its bound. The scenarios at level 0.005 cover a re-size that stops every time (a reserve of 0), one that stops in part, and one that never stops. None of them appends none of its reserve: at this margin and level, 21 clusters never reach the count.
 
 The same design at a confirmatory study's planning values, an sd of 0.176 and an icc of 0.82, and at a third of that sd, with a reserve of 2,500 and the data at `power_at`:
 
@@ -54,7 +61,7 @@ Case against:
 
 - Every re-size source studies t-tests. A blinded re-size of a non-inferiority t-test acts like an unblinded re-size of a superiority test, since the total variance carries the observed difference times the margin; its error excess is larger and persists at larger n (Glimm and Läuter; Friede and Kieser 2003, as cited by FDA 2019). A claim below a margin is a non-inferiority claim, and the root mean square here also carries the squared effect. The e-value test does not depend on the count being free of the effect, and the null simulation above is the evidence; a t-test would not inherit it.
 - The count shows a function of s, which grows with the squared effect. A person who reads `needed` learns a little about the effect, and aggregate blinded statistics can unblind (Żebrowska et al.). The level holds whatever the count shows, but the count is not fully blind.
-- The e-value test pays for its validity in power. At an sd of 0.176 and an icc of 0.82, 2,500 reserve clusters reach the count in only 14% of replicates, and the design passes 9% of the time; such a study fails the registration gate. At a third of that sd it never stops and passes 96% of the time. The rejection shares under the null, at most 0.00012 against a level of 0.005, show how far the test sits inside its level.
+- The e-value test pays for its validity in power. At an sd of 0.176 and an icc of 0.82, 2,500 reserve clusters reach the count in only 14% of replicates, and the design passes 9% of the time; such a study fails the registration gate. At a third of that sd it never stops and passes 96% of the time. The rejection shares under the null, at most 0.00012 against a level of 0.005 and 0.00089 against 0.05, show how far the test sits inside its level.
 - The rounded-up table makes the gate's count larger than the runner's, so the gate errs low on power. A replicate with an s past the table's top value stops in the gate even if the reserve could reach it.
 - The model is normal within a stratum, and the reserve is assumed to come from the same population as the first batch. A reserve gathered later or from another source changes what the claim is about, though not its level.
 
