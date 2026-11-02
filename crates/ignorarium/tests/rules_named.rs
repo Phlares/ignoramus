@@ -4671,7 +4671,7 @@ fn a_claim_stratum_without_reserve_is_refused() {
         [(
             "E-RSV-004",
             "design.resize",
-            "A stratum a claim lists has no reserve input, or a reserve input's stratum is one no claim lists. Stratum code has a claim and no reserve."
+            "A stratum a claim lists has no reserve input, a reserve input's stratum is one no claim lists, or a claim with no strata has reserve inputs in more than one stratum. Stratum code has a claim and no reserve."
         )]
     );
     // A pooled claim holds every reserve input.
@@ -4701,7 +4701,7 @@ fn a_reserve_stratum_no_claim_lists_is_refused() {
         [(
             "E-RSV-004",
             "design.resize",
-            "A stratum a claim lists has no reserve input, or a reserve input's stratum is one no claim lists. Stratum news has a reserve and no claim."
+            "A stratum a claim lists has no reserve input, a reserve input's stratum is one no claim lists, or a claim with no strata has reserve inputs in more than one stratum. Stratum news has a reserve and no claim."
         )]
     );
     assert_eq!(d.len(), 1);
@@ -4723,6 +4723,56 @@ fn a_reserve_stratum_no_claim_lists_is_refused() {
         )),
         dir.path(),
     );
+    assert!(rsv(&d).is_empty(), "{d:?}");
+}
+
+#[test]
+fn a_pooled_claim_whose_reserve_spans_strata_is_refused() {
+    let dir = study_dir();
+    let pooled = hyp("strata", j(json!([])));
+    let two = vec![
+        plus(&[reserve(0, "fiction"), reserve(1, "news")]),
+        pooled.clone(),
+    ];
+    let d = named(&edited(&and(resize_design(), two)), dir.path());
+    assert_eq!(
+        rsv(&d),
+        [(
+            "E-RSV-004",
+            "design.resize",
+            "A stratum a claim lists has no reserve input, a reserve input's stratum is one no claim lists, or a claim with no strata has reserve inputs in more than one stratum. A pooled claim's reserve spans strata fiction and news; list the strata in the claim, or keep its reserve in one stratum."
+        )]
+    );
+    assert_eq!(d.len(), 1);
+    // Three strata are listed in order of first mention, each once.
+    let three = vec![
+        plus(&[
+            reserve(0, "news"),
+            reserve(1, "fiction"),
+            reserve(0, "news"),
+            reserve(1, "code"),
+        ]),
+        pooled.clone(),
+    ];
+    let d = named(&edited(&and(resize_design(), three)), dir.path());
+    assert!(
+        rsv(&d)[0].2.ends_with("spans strata news, fiction and code; list the strata in the claim, or keep its reserve in one stratum."),
+        "{d:?}"
+    );
+    // A reserve input with no stratum is named `(none)`.
+    let mut bare = reserve(1, "news");
+    bare.as_object_mut().unwrap().remove("stratum");
+    let d = named(
+        &edited(&and(
+            resize_design(),
+            vec![plus(&[reserve(0, "news"), bare]), pooled.clone()],
+        )),
+        dir.path(),
+    );
+    assert!(rsv(&d)[0].2.ends_with("spans strata news and (none); list the strata in the claim, or keep its reserve in one stratum."), "{d:?}");
+    // A pooled claim with its reserve in one stratum is accepted, however many inputs it holds.
+    let one = vec![plus(&[reserve(0, "news"), reserve(1, "news")]), pooled];
+    let d = named(&edited(&and(resize_design(), one)), dir.path());
     assert!(rsv(&d).is_empty(), "{d:?}");
 }
 

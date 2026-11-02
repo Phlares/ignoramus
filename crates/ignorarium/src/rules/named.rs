@@ -448,10 +448,7 @@ impl Power {
                 format!("{n}{unit} in {}", in_group(stratum))
             })
             .collect();
-        let groups = match groups.split_last() {
-            Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
-            _ => groups.concat(),
-        };
+        let groups = and_list(&groups);
         let pooled = matches!(self.clusters.as_slice(), [(stratum, _)] if stratum.is_empty());
         let per = if pooled { "clusters" } else { "per stratum" };
         let then = match (passes, self.needed) {
@@ -1078,6 +1075,14 @@ fn group_name(stratum: &str) -> String {
     }
 }
 
+/// `a`, `a and b`, `a, b and c`.
+fn and_list(items: &[String]) -> String {
+    match items.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => items.concat(),
+    }
+}
+
 /// `group_name` at the start of a sentence: `Stratum <name>`, or `The pooled group`.
 fn group_subject(stratum: &str) -> String {
     let group = group_name(stratum);
@@ -1664,15 +1669,22 @@ fn reserve_pinned(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
 
 /// E-RSV-004 at a re-size table, when some input is a reserve: a group a claim is tested in that
 /// no reserve input holds, then a reserve stratum that no claim's group holds, each once, in
-/// order of first mention. The pooled group `""` holds every reserve input. A mistyped stratum
-/// is skipped.
+/// order of first mention. The pooled group `""` holds every reserve input, which must lie in
+/// one stratum: the run appends reserve clusters stratum by stratum, so a pooled count spread
+/// over strata would add the first stratum's clusters before any of the next. A mistyped
+/// stratum is skipped.
 fn reserve_strata(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
     let Some(inputs) = list(spec, "inputs") else {
         return vec![];
     };
-    let reserves: Vec<&str> = (inputs.iter().filter(|i| is_reserve(i)))
+    let mut reserves: Vec<&str> = vec![];
+    for s in (inputs.iter().filter(|i| is_reserve(i)))
         .filter_map(|i| i.get("stratum").map_or(Some(""), Value::as_str))
-        .collect();
+    {
+        if !reserves.contains(&s) {
+            reserves.push(s);
+        }
+    }
     if reserves.is_empty() {
         return vec![];
     }
@@ -1689,13 +1701,19 @@ fn reserve_strata(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
         .map(|g| format!("{} has a claim and no reserve.", group_subject(g)))
         .collect();
     if !claimed.contains(&"") {
-        let mut unclaimed: Vec<&str> = vec![];
-        for s in reserves {
-            if !claimed.contains(&s) && !unclaimed.contains(&s) {
-                unclaimed.push(s);
-                details.push(format!("{} has a reserve and no claim.", group_subject(s)));
-            }
-        }
+        details.extend(
+            (reserves.iter())
+                .filter(|s| !claimed.contains(s))
+                .map(|s| format!("{} has a reserve and no claim.", group_subject(s))),
+        );
+    } else if reserves.len() > 1 {
+        let names: Vec<String> = (reserves.iter())
+            .map(|s| if s.is_empty() { "(none)" } else { shown(s) }.to_string())
+            .collect();
+        details.push(format!(
+            "A pooled claim's reserve spans strata {}; list the strata in the claim, or keep its reserve in one stratum.",
+            and_list(&names)
+        ));
     }
     (nodes(spec, pat).into_iter())
         .filter(|(_, v)| v.is_object())

@@ -1466,6 +1466,75 @@ fn a_resumed_run_writes_one_resize_record() {
     assert_eq!(reserve_ran(&plan, &again), (by_pin(&plan)[..1].to_vec(), 2));
 }
 
+#[test]
+fn a_pooled_re_size_takes_its_reserve_from_one_stratum() {
+    use ignorarium::runner::{RunStatus, run};
+    let lab = lab();
+    common::resize_pilot(&lab.home);
+    // The pooled claim's first batch spans fiction and 3 clusters in news; its reserve is
+    // all in fiction, or with its first input moved to news, in both, named in input order.
+    let news = |t: String| {
+        let extra = format!("{}[pins]", common::clusters("news", 3));
+        common::resize_plan(RESERVE)(t).replacen("[pins]", &extra, 1)
+    };
+    let fiction = "role = \"reserve\"\nstratum = \"fiction\"";
+    let split = |t: String| news(t).replacen(fiction, "role = \"reserve\"\nstratum = \"news\"", 1);
+    let dir = lab.root.join("plans");
+    std::fs::create_dir_all(dir.join("data")).unwrap();
+    for (p, text) in common::reserve_files(RESERVE) {
+        std::fs::write(dir.join(p), text).unwrap();
+    }
+    let template = std::fs::read_to_string("../../templates/numeric-ablation.toml").unwrap();
+    let mut checked = vec![];
+    for (name, edit) in [("one", &news as &dyn Fn(String) -> String), ("two", &split)] {
+        let path = dir.join(format!("{name}.toml"));
+        std::fs::write(&path, edit(template.clone())).unwrap();
+        checked.push(check_json(&lab, &path));
+    }
+    assert_eq!(
+        (checked[0].0, codes(&checked[0].1)),
+        (0, vec![]),
+        "{}",
+        checked[0].1
+    );
+    let (code, v) = &checked[1];
+    assert_eq!((*code, codes(v)), (1, vec!["E-RSV-004"]), "{v}");
+    let problem = (v["diagnostics"].as_array().unwrap().iter())
+        .find(|d| d["code"] == "E-RSV-004")
+        .map(|d| d["problem"].as_str().unwrap())
+        .unwrap();
+    assert!(
+        problem.ends_with("A pooled claim's reserve spans strata news and fiction; list the strata in the claim, or keep its reserve in one stratum."),
+        "{problem}"
+    );
+    // The accepted plan runs: one pooled count over the 18 first-batch clusters, then the
+    // reserve clusters it appends, by pin, after them.
+    let files = common::reserve_files(RESERVE);
+    let before: Vec<(&str, &str)> = files.iter().map(|(p, t)| (&p[..], &t[..])).collect();
+    register_study(&lab, "pooled", news, &before, &flat("99"));
+    let root = common::work_of(&lab.home, "pooled");
+    let level0: Box<dyn Backend> = Box::new(ignorarium::backend::level0::Level0);
+    let plan = ignorarium::runner::prepare_with(&lab.home, "pooled", &root, vec![level0]).unwrap();
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let resize = resize_of(&lab, "pooled");
+    assert_eq!(resize.decision, "continue");
+    assert_eq!(resize.strata.len(), 1);
+    let s = &resize.strata[0];
+    assert_eq!(
+        (s.stratum.as_str(), s.first, s.reserve),
+        ("", 18, RESERVE as u64)
+    );
+    let appended = s.appended as usize;
+    assert!(appended > 0 && appended < RESERVE, "{s:?}");
+    let all = common::records_of(&lab, "pooled");
+    assert_eq!(
+        reserve_ran(&plan, &all),
+        (by_pin(&plan)[..appended].to_vec(), 2 * appended)
+    );
+    let v = verdict_of(&lab, "pooled");
+    assert_eq!(v.bounds[0].clusters, (18 + appended) as u64);
+}
+
 // ---- the end of a re-sized study ----
 
 /// A payload that writes 100 for the reference and, for `arm-a`, 98.6 to 101.4 in steps of
