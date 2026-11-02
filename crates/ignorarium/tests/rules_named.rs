@@ -1335,7 +1335,8 @@ fn an_unreadable_box_fails_closed() {
 
 #[test]
 fn selected_takes_the_worst_candidate_estimate() {
-    // arm-a has the larger icc, arm-b the larger sd: the gate takes both.
+    // arm-a has the larger icc, arm-b the larger sd. At 5 units per cluster arm-b's cluster
+    // mean has sd 3 x sqrt(0.28) = 1.59, arm-a's 2 x sqrt(0.44) = 1.33: the gate takes arm-b's.
     let held = vec![
         common::estimate(&[("arm-a", 1.0, json!({}))], "", 4.0, Some(0.3)),
         common::estimate(&[("arm-b", 1.0, json!({ "bits": 4 }))], "", 9.0, Some(0.1)),
@@ -1345,7 +1346,7 @@ fn selected_takes_the_worst_candidate_estimate() {
         inputs_of(&[], held.clone()),
         Lookup::Found(vec![StratumInput {
             pooled: true,
-            ..stratum("fiction", 3.0, 0.3, &[&h[2], &h[3]])
+            ..stratum("fiction", 3.0, 0.1, &[&h[2], &h[3]])
         }])
     );
     // The other way round: arm-a has the larger sd, arm-b the larger icc.
@@ -1358,18 +1359,83 @@ fn selected_takes_the_worst_candidate_estimate() {
         inputs_of(&[], swapped),
         Lookup::Found(vec![StratumInput {
             pooled: true,
-            ..stratum("fiction", 3.0, 0.3, &[&s[2], &s[3]])
+            ..stratum("fiction", 3.0, 0.1, &[&s[2], &s[3]])
         }])
     );
-    // At sd 3 and icc 0.3 with 5 units per cluster, 1 below the margin, the gate needs 47.
+    // At sd 3 and icc 0.1 with 5 units per cluster, 1 below the margin, the gate needs 30.
     let dir = study_dir();
     let spec = edited(&and(near(), power_edits(5, 11)));
     let d = rules::check_named(&spec, v0(), &with_box(dir.path(), holding(held)));
     assert_eq!(
         d.iter().map(|x| x.problem.as_str()).collect::<Vec<_>>(),
         [
-            "The confirmation sample is too small. Stratum fiction has 11 of the 47 clusters the power gate needs."
+            "The confirmation sample is too small. Stratum fiction has 11 of the 30 clusters the power gate needs."
         ]
+    );
+}
+
+/// `pilot`'s pooled estimates of `arm-a` and `arm-b`, each an (sd, icc) pair.
+fn arms(a: (f64, f64), b: (f64, f64)) -> Vec<Value> {
+    vec![
+        common::estimate(&[("arm-a", 1.0, json!({}))], "", a.0 * a.0, Some(a.1)),
+        common::estimate(
+            &[("arm-b", 1.0, json!({ "bits": 4 }))],
+            "",
+            b.0 * b.0,
+            Some(b.1),
+        ),
+    ]
+}
+
+#[test]
+fn the_gate_takes_one_arms_pair_not_two_maxima() {
+    let (a, b) = ((2.0, 0.0), (1.0, 0.9));
+    let units = |m: Value| vec![("/design/units_per_cluster", j(m))];
+    let taken = |m: Value, held: Vec<Value>| {
+        let h = hashes(held.clone());
+        let Lookup::Found(got) = inputs_of(&units(m), held) else {
+            panic!("no estimate found");
+        };
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].records, [h[2].clone(), h[3].clone()]);
+        assert!(got[0].pooled);
+        (got[0].sd, got[0].icc)
+    };
+    // At 4 units per cluster a cluster mean has sd 2 x sqrt(1/4) = 1 under a, and
+    // sqrt(0.9 + 0.1/4) = 0.96 under b: a's pair, whichever arm holds it, never sd 2 with icc
+    // 0.9.
+    assert_eq!(taken(json!(4), arms(a, b)), a);
+    assert_eq!(taken(json!(4), arms(b, a)), a);
+    // At 50, a gives 2 x sqrt(1/50) = 0.28 and b 0.95: b's pair.
+    assert_eq!(taken(json!(50), arms(a, b)), b);
+    assert_eq!(taken(json!(50), arms(b, a)), b);
+    // At 4, sd 1 with icc 1 also gives exactly 1: a tie keeps the first candidate's pair.
+    let c = (1.0, 1.0);
+    assert_eq!(taken(json!(4), arms(a, c)), a);
+    assert_eq!(taken(json!(4), arms(c, a)), c);
+    // sd 1.5 with icc 1 gives 1.5 at any count, a gives 2 at 1 unit per cluster and at most
+    // 1.41 from 2 up. Without a usable count the pairs rank as at 1, by sd alone.
+    let d = (1.5, 1.0);
+    assert_eq!(taken(json!(1), arms(d, a)), a);
+    assert_eq!(taken(json!(2), arms(d, a)), d);
+    for m in [json!(0), json!(-4), json!("4")] {
+        assert_eq!(taken(m.clone(), arms(d, a)), a, "{m}");
+    }
+}
+
+#[test]
+fn a_single_candidate_keeps_its_pair() {
+    let pooled = unstaged(vec![hyp("strata", j(json!([])))]);
+    let held = vec![common::estimate(
+        &[("arm-a", 1.0, json!({}))],
+        "",
+        4.0,
+        Some(0.9),
+    )];
+    let h = hashes(held.clone());
+    assert_eq!(
+        inputs_of(&pooled, held),
+        Lookup::Found(vec![stratum("", 2.0, 0.9, &[&h[2]])])
     );
 }
 

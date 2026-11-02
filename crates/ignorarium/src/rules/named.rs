@@ -892,8 +892,9 @@ pub enum Lookup {
     Found(Vec<StratumInput>),
 }
 
-/// The sd and icc the power gate uses in one group: the largest over the contrasts the
-/// hypothesis stands for, and the hashes of the estimate records they come from. A negative
+/// The sd and icc the power gate uses in one group: the pair of the contrast, among those the
+/// hypothesis stands for, whose cluster mean has the largest sd (`mean_sd`) at
+/// `design.units_per_cluster`, and the hashes of every estimate record consulted. A negative
 /// icc, which an analysis of variance can give, counts as 0, the larger and so safer value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StratumInput {
@@ -912,7 +913,9 @@ pub struct StratumInput {
 /// (the pooled group `""` when none) and each contrast it stands for (with `selected`, each
 /// candidate of this plan's selection stage, with its params), the estimate with that
 /// contrast's key and the stratum, else the pooled one. An estimate without an icc, or with
-/// no variance above 0, is skipped. Several such estimates must agree. The largest sd and icc over the candidates.
+/// no variance above 0, is skipped. Several such estimates must agree. Over the candidates,
+/// the one pair whose cluster mean has the largest sd; ties keep the first. Without a usable
+/// `design.units_per_cluster` the pairs rank as at 1 unit per cluster, by sd alone.
 pub fn estimate_inputs(spec: &Value, h: usize, ctx: &CheckCtx) -> Lookup {
     estimates_of(spec, &spec["question"]["hypotheses"][h], ctx)
         .unwrap_or_else(|| Lookup::Missing("The hypothesis is not well formed.".into()))
@@ -999,8 +1002,13 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
         .iter()
         .filter_map(|r| Some((records::hash(r), Estimate::of(r)?)))
         .collect();
+    let units = [val(spec, "design.units_per_cluster")
+        .and_then(Value::as_u64)
+        .map_or(1, |m| m.clamp(1, u32::MAX.into()) as u32)];
+    let spread = |(sd, icc): (f64, f64)| mean_sd(sd, icc, &units);
     let mut out = Vec::new();
     for stratum in groups {
+        let mut widest: Option<(f64, f64)> = None;
         let mut input = StratumInput {
             stratum: stratum.into(),
             sd: 0.0,
@@ -1050,13 +1058,15 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
                     group_name(group)
                 )));
             }
-            let icc = e.icc.unwrap_or_default();
-            input.sd = input.sd.max(e.var.sqrt());
-            input.icc = input.icc.max(icc);
+            let pair = (e.var.sqrt(), e.icc.unwrap_or_default().max(0.0));
+            if widest.is_none_or(|w| spread(pair) > spread(w)) {
+                widest = Some(pair);
+            }
             input
                 .records
                 .extend(all.iter().map(|(hash, _)| hash.clone()));
         }
+        (input.sd, input.icc) = widest.unwrap_or_default();
         out.push(input);
     }
     Some(Lookup::Found(out))
