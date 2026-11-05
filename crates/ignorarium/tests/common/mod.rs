@@ -720,9 +720,12 @@ pub fn plant(home: &Home, id: &str, bodies: &[(&str, serde_json::Value)]) -> Vec
 /// A finished study `my-pilot`, the one the template's commented `estimates` names, with
 /// `estimates`. Returns the hash of each estimate record.
 pub fn pilot(home: &Home, estimates: Vec<serde_json::Value>) -> Vec<String> {
-    let n = estimates.len();
-    let hashes = plant(home, "my-pilot", &finished(estimates));
-    hashes[hashes.len() - n..].to_vec()
+    let bodies = finished(estimates);
+    let hashes = plant(home, "my-pilot", &bodies);
+    (bodies.iter().zip(hashes))
+        .filter(|((kind, _), _)| *kind == "estimate")
+        .map(|(_, h)| h)
+        .collect()
 }
 
 /// The template text as a confirmatory plan with its example claim, power_at, estimates,
