@@ -917,7 +917,8 @@ pub struct StratumInput {
 /// no variance above 0, is skipped. Several such estimates must agree. For a `mean = [lo, hi]`
 /// statistic the pair is fitted again from the study's unit values in that group, each
 /// clipped to [lo, hi] (`analysis::Source`), unless every one lies inside it; a stored plan or
-/// record that cannot be read makes it missing. Over the candidates,
+/// record that cannot be read, or rows that do not give the clusters and units the estimate
+/// counts, make it missing. Over the candidates,
 /// the one pair whose cluster mean has the largest sd; ties keep the first. Without a usable
 /// `design.units_per_cluster` the pairs rank as at 1 unit per cluster, by sd alone.
 pub fn estimate_inputs(spec: &Value, h: usize, ctx: &CheckCtx) -> Lookup {
@@ -985,8 +986,14 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
         return Some(Lookup::Missing("The hypothesis names no study.".into()));
     };
     let from = study_ref(spec, reference)?;
+    let statistic = hyp.get("statistic").and_then(mean_range);
     let log = ctx.records.study(from);
-    let state = log.clone().and_then(|all| {
+    // Only a mean claim reads the records again (`Source`).
+    let kept = match (&statistic, &log) {
+        (Some(Ok(Some(_))), Ok(Some(all))) => all.clone(),
+        _ => vec![],
+    };
+    let state = log.and_then(|all| {
         StudyState::of(all, |log, slot| ctx.records.stream_closed(log, from, slot))
     });
     let records = match state {
@@ -1003,16 +1010,16 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
     };
     let contrasts = contrasts(spec, hyp, ctx)?;
     let groups = groups_of(hyp)?;
-    let range = match hyp.get("statistic").and_then(mean_range) {
+    let range = match statistic {
+        Some(Err(())) => return None,
         Some(Ok(range)) => range,
-        _ => None,
+        None => None,
     };
     let source = match range.map(|_| ctx.records.spec(from)) {
         None => None,
         Some(text) => {
-            let log = log.ok().flatten().unwrap_or_default();
             let read = match text {
-                Ok(Some(text)) => Source::read(&text, &log),
+                Ok(Some(text)) => Source::read(&text, &kept),
                 Ok(None) => Err("it holds no plan of the study".into()),
                 Err(e) => Err(e),
             };
@@ -1095,6 +1102,12 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
                 Some(Err(why)) => {
                     return Some(Lookup::Missing(format!(
                         "The box cannot read the unit values of study {from} again: {why}."
+                    )));
+                }
+                Some(Ok(r)) if (r.clusters, r.units) != (e.clusters, e.units) => {
+                    return Some(Lookup::Missing(format!(
+                        "Study {from}'s rows do not give the values its estimate of this contrast{pick} in {} counts.",
+                        group_name(group)
                     )));
                 }
                 Some(Ok(r)) if !r.clipped => stored,

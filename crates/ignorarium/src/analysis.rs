@@ -269,10 +269,13 @@ pub struct Source {
     clusters: Vec<Cluster>,
 }
 
-/// What `Source::refit` gives: whether the clip moved a unit value, and the fit of the
-/// values, `None` where `estimates` gives none.
+/// What `Source::refit` gives: the clusters and units it fitted, as an estimate counts them,
+/// whether the clip moved a unit value, and the fit of the values, `None` where `estimates`
+/// gives none.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Refit {
+    pub clusters: u64,
+    pub units: u64,
     pub clipped: bool,
     pub fit: Option<Fit>,
 }
@@ -325,6 +328,8 @@ impl Source {
             }
         }
         Ok(Refit {
+            clusters: values.len() as u64,
+            units: values.iter().map(Vec::len).sum::<usize>() as u64,
             clipped,
             fit: fit(&values),
         })
@@ -333,14 +338,18 @@ impl Source {
 
 /// Each input of a study, in spec order, with the (exact, normalized) hashes of the data its
 /// rows ran on. The `inputs` record names each input's exact hash, or none for one that was
-/// absent, and every row names the pair of each input present, in the same order. A study
-/// with no row names no data, and each input stands alone (`distinct_clusters`).
+/// absent, and every row names the pair of each input present, in the same order; all rows
+/// name the same. A study with no row names no data, and each input stands alone
+/// (`distinct_clusters`).
 fn held_by(records: &[Record]) -> Result<InputHashes, String> {
     let Some(row) = own_rows(records).next() else {
         return Ok(vec![]);
     };
     let frozen = (records.iter().find_map(Inputs::of)).ok_or("it has rows and no inputs record")?;
     let other = "its rows and its inputs record name other data";
+    if own_rows(records).any(|r| r.body["data_hashes"] != row.body["data_hashes"]) {
+        return Err(other.into());
+    }
     let named: Vec<(String, String)> =
         serde_json::from_value(row.body["data_hashes"].clone()).map_err(|_| other)?;
     let mut named = named.into_iter();

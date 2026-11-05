@@ -1772,7 +1772,7 @@ fn the_box_reads_the_plan_a_study_stored() {
         home: box_home,
         key: Ok(None),
     };
-    let stored = common::SOURCE_SPEC.as_bytes().to_vec();
+    let stored = common::source_spec(&["fiction".into()]).into_bytes();
     assert_eq!(records.spec("my-pilot"), Ok(Some(stored)));
     // No plan, and an id that is not a study id, whatever its path holds.
     assert_eq!(records.spec("other-study"), Ok(None));

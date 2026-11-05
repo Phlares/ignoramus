@@ -1622,6 +1622,7 @@ fn a_refit_without_a_clip_gives_the_estimate_record_bit_for_bit() {
     let bits = |var: f64, icc: Option<f64>| (var.to_bits(), icc.map(f64::to_bits));
     let refit = source.refit(&e.hypothesis, "", None).unwrap();
     assert!(!refit.clipped);
+    assert_eq!((refit.clusters, refit.units), (e.clusters, e.units));
     let f = refit.fit.clone().unwrap();
     assert_eq!(bits(f.var, f.icc), bits(e.var, e.icc));
     // A range that holds every unit clips none and fits the same values.

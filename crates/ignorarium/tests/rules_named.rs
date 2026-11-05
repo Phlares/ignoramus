@@ -1551,6 +1551,7 @@ fn measured_rows(xs: &[[f64; 2]]) -> Vec<(&'static str, Value)> {
 /// which names the plan's hash, the inputs record, the rows, the analysis record, the estimate.
 fn measured(plan: &Value, xs: &[[f64; 2]], estimate: Value) -> Vec<(&'static str, Value)> {
     let mut all = common::finished(vec![estimate]);
+    all.retain(|(kind, _)| !["inputs", "row"].contains(kind));
     all[0].1["spec_hash"] = json!(hash_of_plan(plan));
     let inputs: Vec<Value> = (0..xs.len())
         .map(|i| json!([format!("texts/p{i}.txt"), pilot_data(i)]))
@@ -1598,9 +1599,12 @@ fn clipped(xs: &[[f64; 2]], lo: f64, hi: f64) -> Vec<[f64; 2]> {
     xs.iter().map(|u| u.map(|x| x.clamp(lo, hi))).collect()
 }
 
-/// The estimate of `arm-a` in fiction that `pilot` stores, with this variance and icc.
+/// The estimate of `arm-a` in fiction that `pilot` stores, with this variance and icc, over the
+/// 4 clusters and 8 units of `measured_plan(4, ..)`.
 fn arm_a_in_fiction((var, icc): (f64, f64)) -> Value {
-    common::estimate(&[("arm-a", 1.0, json!({}))], "fiction", var, Some(icc))
+    let mut e = common::estimate(&[("arm-a", 1.0, json!({}))], "fiction", var, Some(icc));
+    (e["clusters"], e["units"]) = (json!(4), json!(8));
+    e
 }
 
 /// What the gate reads for `unstaged(extra)`, from box `b`.
@@ -1689,6 +1693,62 @@ fn the_clip_uses_the_borrowers_range_not_the_sources() {
     let got = pair_from(narrow, measured_box(&plan, &OUTLIER, stored));
     assert_eq!(got, at(-5.0, 5.0));
     assert_ne!(at(-5.0, 5.0), at(-50.0, 50.0));
+    // A statistic the shape rule refuses is no range: the lookup skips it and reads nothing.
+    let mut b = measured_box(&plan, &OUTLIER, arm_a_in_fiction((4.0, 0.1)));
+    b.plan = Err("not read".into());
+    let reversed = vec![hyp("statistic", j(json!({ "mean": [5.0, -5.0] })))];
+    assert_eq!(
+        borrowed_from(reversed, b),
+        Lookup::Missing("The hypothesis is not well formed.".into())
+    );
+}
+
+/// `pilot` measured as `OUTLIER`, with `keep` choosing the rows it holds, against h1's range.
+fn with_rows(keep: impl Fn(&Value) -> bool) -> Lookup {
+    let plan = measured_plan(4, json!({ "mean": [-50.0, 50.0] }));
+    let stored = arm_a_in_fiction(fit_of(&plan, &OUTLIER));
+    let bodies: Vec<(&str, Value)> = (measured(&plan, &OUTLIER, stored).into_iter())
+        .filter(|(kind, body)| *kind != "row" || keep(body))
+        .collect();
+    borrowed_from(vec![], planned(&bodies, Ok(Some(text_of(&plan)))))
+}
+
+const UNCOUNTED: &str = "Study pilot's rows do not give the values its estimate of this contrast in stratum fiction counts.";
+
+#[test]
+fn a_source_whose_rows_give_no_values_is_missing() {
+    let missing = Lookup::Missing(UNCOUNTED.into());
+    assert_eq!(with_rows(|_| false), missing);
+    // Rows of another measure, or of other conditions, pair to no value of the contrast.
+    let mut b = measured(
+        &measured_plan(4, json!({ "mean": [-50.0, 50.0] })),
+        &OUTLIER,
+        arm_a_in_fiction((4.0, 0.1)),
+    );
+    for (kind, body) in b.iter_mut() {
+        if *kind == "row" {
+            body["values"] = json!({ "loss": 1.0 });
+        }
+    }
+    let plan = measured_plan(4, json!({ "mean": [-50.0, 50.0] }));
+    assert_eq!(
+        borrowed_from(vec![], planned(&b, Ok(Some(text_of(&plan))))),
+        missing
+    );
+    assert_eq!(with_rows(|r| r["condition"] != "arm-a"), missing);
+}
+
+#[test]
+fn a_source_whose_rows_give_part_of_the_values_is_missing() {
+    let missing = Lookup::Missing(UNCOUNTED.into());
+    // One unit short, and one cluster short.
+    assert_eq!(with_rows(|r| r["unit"] != "texts/p0.txt#1"), missing);
+    assert_eq!(
+        with_rows(|r| !r["unit"].as_str().unwrap().starts_with("texts/p3.txt")),
+        missing
+    );
+    // Every row: the values the estimate counts.
+    assert!(matches!(with_rows(|_| true), Lookup::Found(_)));
 }
 
 #[test]
@@ -1751,13 +1811,20 @@ fn an_unreadable_source_spec_is_missing() {
     more.as_array_mut().unwrap().push(json!(["ff", "n9"]));
     missing(shown(more), other_data);
     missing(shown(Value::Null), other_data);
+    // A later row that names other data than the first.
+    let mut later = bodies.clone();
+    let last_row = later.iter().rposition(|(k, _)| *k == "row").unwrap();
+    later[last_row].1["data_hashes"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
+    missing(planned(&later, text.clone()), other_data);
     // An input absent at the first run is in the inputs record with no data, and in no row.
     let mut absent = bodies.clone();
     absent[1].1["inputs"][3][1] = Value::Null;
-    absent[first_row].1["data_hashes"]
-        .as_array_mut()
-        .unwrap()
-        .pop();
+    for (_, row) in absent.iter_mut().filter(|(k, _)| *k == "row") {
+        row["data_hashes"].as_array_mut().unwrap().pop();
+    }
     assert!(matches!(
         borrowed_from(vec![], planned(&absent, text.clone())),
         Lookup::Found(_)

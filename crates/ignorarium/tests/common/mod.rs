@@ -449,13 +449,82 @@ pub fn instrument() -> derived::Instrument {
     }
 }
 
-/// The plan text of each study `finished` builds and `plant` stores: the template, whose
-/// hypothesis `H1` tests `arm-a` on `ppl-ratio`.
-pub const SOURCE_SPEC: &str = include_str!("../../../../templates/numeric-ablation.toml");
+/// The clusters per stratum, and units per cluster, of a study `finished` builds.
+const SOURCE_CLUSTERS: usize = 4;
+const SOURCE_UNITS: usize = 5;
 
-/// The hash a register record holds for `SOURCE_SPEC`.
-pub fn source_hash() -> String {
-    spec::parse(SOURCE_SPEC.as_bytes()).unwrap().hash
+/// The strata a study with `estimates` measured: each the estimates name, in order of first
+/// appearance; `fiction` when they name none.
+pub fn source_strata<'a>(
+    estimates: impl IntoIterator<Item = &'a serde_json::Value>,
+) -> Vec<String> {
+    let mut strata: Vec<String> = Vec::new();
+    for e in estimates {
+        let s = e["stratum"].as_str().unwrap_or_default();
+        if !s.is_empty() && !strata.iter().any(|x| x == s) {
+            strata.push(s.into());
+        }
+    }
+    if strata.is_empty() {
+        strata.push("fiction".into());
+    }
+    strata
+}
+
+/// The confirmation inputs of a study that measured `strata`: `SOURCE_CLUSTERS` per stratum.
+fn source_inputs(strata: &[String]) -> Vec<(String, String)> {
+    (strata.iter())
+        .flat_map(|s| (0..SOURCE_CLUSTERS).map(move |i| (format!("src/{s}-{i}.txt"), s.clone())))
+        .collect()
+}
+
+/// The plan text a study that measured `strata` stored: the template, whose hypothesis `H1`
+/// tests `arm-a` on `ppl-ratio`, taking `SOURCE_UNITS` units per cluster, with
+/// `SOURCE_CLUSTERS` confirmation inputs of that many units in each stratum.
+pub fn source_spec(strata: &[String]) -> String {
+    let template = include_str!("../../../../templates/numeric-ablation.toml");
+    let blocks: String = (source_inputs(strata).iter())
+        .map(|(path, stratum)| {
+            format!(
+                "[[inputs]]\npath = \"{path}\"\nsha256 = \"\"\nrole = \"confirmation\"\nstratum = \"{stratum}\"\nunits = {SOURCE_UNITS}\n[inputs.licence]\nspdx = \"\"\ntype = \"unspecified\"\nsource = \"\"\ncreators = []\n\n"
+            )
+        })
+        .collect();
+    template
+        .replace(
+            "units_per_cluster = 1 ",
+            &format!("units_per_cluster = {SOURCE_UNITS} "),
+        )
+        .replacen("[pins]", &format!("{blocks}[pins]"), 1)
+}
+
+/// The `inputs` record and the rows of a study that measured `strata`: on every unit of each
+/// input, `exact` and `arm-a` both write 10, so `arm-a` pairs to 0. The template's own two
+/// inputs were absent.
+fn source_rows(strata: &[String]) -> Vec<(&'static str, serde_json::Value)> {
+    let inputs = source_inputs(strata);
+    let exact = |path: &str| ignorarium::canon::sha256_hex(path.as_bytes());
+    let data: Vec<serde_json::Value> = (inputs.iter())
+        .map(|(p, _)| serde_json::json!([exact(p), format!("n-{p}")]))
+        .collect();
+    let mut frozen = vec![
+        serde_json::json!(["data/example.txt", null]),
+        serde_json::json!(["data/confirm.txt", null]),
+    ];
+    frozen.extend(inputs.iter().map(|(p, _)| serde_json::json!([p, exact(p)])));
+    let mut out = vec![("inputs", serde_json::json!({ "inputs": frozen }))];
+    for (path, _) in &inputs {
+        for k in 0..SOURCE_UNITS {
+            for condition in ["exact", "arm-a"] {
+                let row = serde_json::json!({
+                    "stage": "confirmation", "condition": condition, "unit": format!("{path}#{k}"),
+                    "repeat": 0, "exit": "ok", "values": { "ppl": 10.0 }, "data_hashes": data,
+                });
+                out.push(("row", row));
+            }
+        }
+    }
+    out
 }
 
 /// `finished_with` the common `instrument` and no recheck.
@@ -468,10 +537,16 @@ pub fn finished(estimates: Vec<serde_json::Value>) -> Vec<(&'static str, serde_j
 pub fn finished_with(
     instrument: derived::Instrument,
     recheck: Option<derived::Recheck>,
-    estimates: Vec<serde_json::Value>,
+    mut estimates: Vec<serde_json::Value>,
 ) -> Vec<(&'static str, serde_json::Value)> {
+    let strata = source_strata(&estimates);
+    // The pooled group holds the clusters of every stratum.
+    for e in estimates.iter_mut().filter(|e| e["stratum"] == "") {
+        e["clusters"] = serde_json::json!(SOURCE_CLUSTERS * strata.len());
+        e["units"] = serde_json::json!(SOURCE_CLUSTERS * SOURCE_UNITS * strata.len());
+    }
     let register = derived::Register {
-        spec_hash: source_hash(),
+        spec_hash: spec::parse(source_spec(&strata).as_bytes()).unwrap().hash,
         leaf: 0,
         log: "testlog".into(),
         defaults: serde_json::json!([]),
@@ -499,8 +574,10 @@ pub fn finished_with(
         ("register", serde_json::to_value(register).unwrap()),
         ("analysis", serde_json::to_value(analysis).unwrap()),
     ];
+    // The rows come last, so the other records keep their places.
     head.into_iter()
         .chain(estimates.into_iter().map(|e| ("estimate", e)))
+        .chain(source_rows(&strata))
         .collect()
 }
 
@@ -548,10 +625,16 @@ impl BoxRecords for Studies {
         }
     }
 
-    /// `SOURCE_SPEC` for each study it holds.
+    /// The `source_spec` of each study it holds, from the strata its estimates name.
     fn spec(&self, id: &str) -> Result<Option<Vec<u8>>, String> {
-        let held = self.0.iter().any(|(s, _)| *s == id);
-        Ok(held.then(|| SOURCE_SPEC.as_bytes().to_vec()))
+        let Some((_, found)) = self.0.iter().find(|(s, _)| *s == id) else {
+            return Ok(None);
+        };
+        let bodies: Vec<&serde_json::Value> = (found.iter().flatten())
+            .filter(|r| r.kind == "estimate")
+            .map(|r| &r.body)
+            .collect();
+        Ok(Some(source_spec(&source_strata(bodies)).into_bytes()))
     }
 
     /// Each stream is empty.
@@ -607,13 +690,17 @@ pub fn next_slot(
 }
 
 /// Sign `bodies` into the record log of study `id` in the box at `home`, and store
-/// `SOURCE_SPEC` as its plan unless it has one. Returns the hash of each record.
+/// `source_spec` for the strata of its estimates as its plan unless it has one. Returns the
+/// hash of each record.
 pub fn plant(home: &Home, id: &str, bodies: &[(&str, serde_json::Value)]) -> Vec<String> {
     let key = keys::load_or_create(home).unwrap();
     std::fs::create_dir_all(home.study_dir(id)).unwrap();
     let plan = home.study_dir(id).join("spec.toml");
     if !plan.exists() {
-        std::fs::write(&plan, SOURCE_SPEC).unwrap();
+        let estimates = (bodies.iter())
+            .filter(|(kind, _)| *kind == "estimate")
+            .map(|(_, body)| body);
+        std::fs::write(&plan, source_spec(&source_strata(estimates))).unwrap();
     }
     let path = home.study_dir(id).join("records.jsonl");
     bodies
