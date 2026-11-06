@@ -707,11 +707,15 @@ fn stale(plan: &RunPlan, dir: &Path) -> Option<String> {
     (!faults.is_empty()).then(|| faults.join("; "))
 }
 
-/// The stored spec with defaults filled, its hash bytes, and its hash text.
 /// The stored spec, typed and as the defaulted JSON value, with its hash as bytes and text.
 pub(crate) fn stored_spec(dir: &Path) -> Result<(Spec, Value, [u8; 32], String), RunError> {
+    let raw = spec::load(&dir.join("spec.toml")).map_err(|e| RunError::Spec(e.to_string()))?;
+    typed(raw)
+}
+
+/// `raw` with defaults filled, typed and as the JSON value, with its hash as bytes and text.
+pub(crate) fn typed(raw: spec::RawSpec) -> Result<(Spec, Value, [u8; 32], String), RunError> {
     let fault = |e: &dyn fmt::Display| RunError::Spec(e.to_string());
-    let raw = spec::load(&dir.join("spec.toml")).map_err(|e| fault(&e))?;
     let mut value = raw.value;
     apply_defaults(&mut value);
     let spec = Spec::from_value(&value).map_err(|e| fault(&e))?;

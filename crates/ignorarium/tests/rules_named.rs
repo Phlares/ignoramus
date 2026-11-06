@@ -1335,7 +1335,8 @@ fn an_unreadable_box_fails_closed() {
 
 #[test]
 fn selected_takes_the_worst_candidate_estimate() {
-    // arm-a has the larger icc, arm-b the larger sd: the gate takes both.
+    // arm-a has the larger icc, arm-b the larger sd. At 5 units per cluster arm-b's cluster
+    // mean has sd 3 x sqrt(0.28) = 1.59, arm-a's 2 x sqrt(0.44) = 1.33: the gate takes arm-b's.
     let held = vec![
         common::estimate(&[("arm-a", 1.0, json!({}))], "", 4.0, Some(0.3)),
         common::estimate(&[("arm-b", 1.0, json!({ "bits": 4 }))], "", 9.0, Some(0.1)),
@@ -1345,7 +1346,7 @@ fn selected_takes_the_worst_candidate_estimate() {
         inputs_of(&[], held.clone()),
         Lookup::Found(vec![StratumInput {
             pooled: true,
-            ..stratum("fiction", 3.0, 0.3, &[&h[2], &h[3]])
+            ..stratum("fiction", 3.0, 0.1, &[&h[2], &h[3]])
         }])
     );
     // The other way round: arm-a has the larger sd, arm-b the larger icc.
@@ -1358,18 +1359,550 @@ fn selected_takes_the_worst_candidate_estimate() {
         inputs_of(&[], swapped),
         Lookup::Found(vec![StratumInput {
             pooled: true,
-            ..stratum("fiction", 3.0, 0.3, &[&s[2], &s[3]])
+            ..stratum("fiction", 3.0, 0.1, &[&s[2], &s[3]])
         }])
     );
-    // At sd 3 and icc 0.3 with 5 units per cluster, 1 below the margin, the gate needs 47.
+    // At sd 3 and icc 0.1 with 5 units per cluster, 1 below the margin, the gate needs 30.
     let dir = study_dir();
     let spec = edited(&and(near(), power_edits(5, 11)));
     let d = rules::check_named(&spec, v0(), &with_box(dir.path(), holding(held)));
     assert_eq!(
         d.iter().map(|x| x.problem.as_str()).collect::<Vec<_>>(),
         [
-            "The confirmation sample is too small. Stratum fiction has 11 of the 47 clusters the power gate needs."
+            "The confirmation sample is too small. Stratum fiction has 11 of the 30 clusters the power gate needs."
         ]
+    );
+}
+
+/// `pilot`'s pooled estimates of `arm-a` and `arm-b`, each an (sd, icc) pair.
+fn arms(a: (f64, f64), b: (f64, f64)) -> Vec<Value> {
+    vec![
+        common::estimate(&[("arm-a", 1.0, json!({}))], "", a.0 * a.0, Some(a.1)),
+        common::estimate(
+            &[("arm-b", 1.0, json!({ "bits": 4 }))],
+            "",
+            b.0 * b.0,
+            Some(b.1),
+        ),
+    ]
+}
+
+#[test]
+fn the_gate_takes_one_arms_pair_not_two_maxima() {
+    let (a, b) = ((2.0, 0.0), (1.0, 0.9));
+    let units = |m: Value| vec![("/design/units_per_cluster", j(m))];
+    let taken = |m: Value, held: Vec<Value>| {
+        let h = hashes(held.clone());
+        let Lookup::Found(got) = inputs_of(&units(m), held) else {
+            panic!("no estimate found");
+        };
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].records, [h[2].clone(), h[3].clone()]);
+        assert!(got[0].pooled);
+        (got[0].sd, got[0].icc)
+    };
+    // At 4 units per cluster a cluster mean has sd 2 x sqrt(1/4) = 1 under a, and
+    // sqrt(0.9 + 0.1/4) = 0.96 under b: a's pair, whichever arm holds it, never sd 2 with icc
+    // 0.9.
+    assert_eq!(taken(json!(4), arms(a, b)), a);
+    assert_eq!(taken(json!(4), arms(b, a)), a);
+    // At 50, a gives 2 x sqrt(1/50) = 0.28 and b 0.95: b's pair.
+    assert_eq!(taken(json!(50), arms(a, b)), b);
+    assert_eq!(taken(json!(50), arms(b, a)), b);
+    // At 4, sd 1 with icc 1 also gives exactly 1: a tie keeps the first candidate's pair.
+    let c = (1.0, 1.0);
+    assert_eq!(taken(json!(4), arms(a, c)), a);
+    assert_eq!(taken(json!(4), arms(c, a)), c);
+    // sd 1.5 with icc 1 gives 1.5 at any count, a gives 2 at 1 unit per cluster and at most
+    // 1.41 from 2 up. Without a usable count the pairs rank as at 1, by sd alone.
+    let d = (1.5, 1.0);
+    assert_eq!(taken(json!(1), arms(d, a)), a);
+    assert_eq!(taken(json!(2), arms(d, a)), d);
+    for m in [json!(0), json!(-4), json!("4")] {
+        assert_eq!(taken(m.clone(), arms(d, a)), a, "{m}");
+    }
+}
+
+/// The (sd, icc) the gate reads for `ok()`'s pooled group, with these edits, from `arms(a, b)`.
+fn pair_read(edits: Vec<Edit>, a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    let Lookup::Found(got) = inputs_of(&edits, arms(a, b)) else {
+        panic!("no estimate found");
+    };
+    (got[0].sd, got[0].icc)
+}
+
+#[test]
+fn the_arms_rank_at_the_units_the_clusters_give() {
+    // ok()'s inputs give 5 units each. At 50 units, e's cluster mean has sd
+    // sqrt(0.7 + 0.3/50) = 0.84 and a's 2 x sqrt(1/50) = 0.28; at the 5 the clusters give, a's
+    // is 2 x sqrt(1/5) = 0.89 and e's sqrt(0.7 + 0.3/5) = 0.87.
+    let (a, e) = ((2.0, 0.0), (1.0, 0.7));
+    let at = |m: u64| vec![("/design/units_per_cluster", j(json!(m)))];
+    assert_eq!(pair_read(at(50), a, e), a);
+    assert_eq!(pair_read(at(50), e, a), a);
+    // At 4 the clusters give 4: a 1.0, e sqrt(0.7 + 0.3/4) = 0.88.
+    assert_eq!(pair_read(at(4), e, a), a);
+    // At 1, sd alone: a.
+    assert_eq!(pair_read(at(1), e, a), a);
+}
+
+#[test]
+fn a_quantile_claim_takes_the_largest_sd_and_the_largest_icc() {
+    // A quantile test's power does not follow the cluster mean's sd, so no arm's pair ranks
+    // first for it: the gate takes the largest of each, as for one arm worse than both.
+    let (a, b) = ((2.0, 0.0), (1.0, 0.9));
+    let quantile = vec![hyp("statistic", j(json!({ "quantile": 0.5 })))];
+    assert_eq!(pair_read(quantile.clone(), a, b), (2.0, 0.9));
+    assert_eq!(pair_read(quantile, b, a), (2.0, 0.9));
+    // A mean claim takes one arm's pair.
+    assert_eq!(pair_read(vec![], a, b), b);
+}
+
+#[test]
+fn a_single_candidate_keeps_its_pair() {
+    let pooled = unstaged(vec![hyp("strata", j(json!([])))]);
+    let held = vec![common::estimate(
+        &[("arm-a", 1.0, json!({}))],
+        "",
+        4.0,
+        Some(0.9),
+    )];
+    let h = hashes(held.clone());
+    assert_eq!(
+        inputs_of(&pooled, held),
+        Lookup::Found(vec![stratum("", 2.0, 0.9, &[&h[2]])])
+    );
+}
+
+#[test]
+fn the_pair_is_chosen_again_in_each_stratum() {
+    let arm = |id: &str, params: Value, stratum: &str, (sd, icc): (f64, f64)| {
+        common::estimate(&[(id, 1.0, params)], stratum, sd * sd, Some(icc))
+    };
+    let b = || json!({ "bits": 4 });
+    // In fiction arm-a has the wider cluster mean, in code arm-b. Code never takes fiction's
+    // pair, which is wider than either of its own.
+    let held = vec![
+        arm("arm-a", json!({}), "fiction", (3.0, 0.9)),
+        arm("arm-b", b(), "fiction", (1.0, 0.0)),
+        arm("arm-a", json!({}), "code", (1.0, 0.0)),
+        arm("arm-b", b(), "code", (1.5, 0.0)),
+    ];
+    let h = hashes(held.clone());
+    let both = vec![hyp("strata", j(json!(["fiction", "code"])))];
+    assert_eq!(
+        inputs_of(&both, held),
+        Lookup::Found(vec![
+            stratum("fiction", 3.0, 0.9, &[&h[2], &h[3]]),
+            stratum("code", 1.5, 0.0, &[&h[4], &h[5]]),
+        ])
+    );
+}
+
+// ---- the source's unit values, clipped to the declared range ----
+
+/// A box whose studies are `studies`, with `plan` as the stored plan of each.
+struct Planned {
+    studies: common::Studies,
+    plan: Result<Option<Vec<u8>>, String>,
+}
+
+impl BoxRecords for Planned {
+    fn study(&self, id: &str) -> Result<Option<Vec<records::Record>>, String> {
+        self.studies.study(id)
+    }
+
+    fn spec(&self, _: &str) -> Result<Option<Vec<u8>>, String> {
+        self.plan.clone()
+    }
+
+    fn stream_next(&self, log: &str) -> Result<Next, String> {
+        self.studies.stream_next(log)
+    }
+
+    fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String> {
+        self.studies.stream_closed(log, study, slot)
+    }
+}
+
+/// The plan of a measured `pilot`: the template, with H1 on `arm-a` in stratum fiction by
+/// `statistic`, `arm-a` paired with `exact` by difference, and `clusters` confirmation inputs
+/// `texts/p<i>.txt` in stratum fiction, each giving its first 2 units.
+fn measured_plan(clusters: usize, statistic: Value) -> Value {
+    let mut s = spec_at("../../templates/numeric-ablation.toml");
+    let inputs = (0..clusters).map(|i| input(&format!("texts/p{i}.txt"), "confirmation", 2));
+    let edits = [
+        ("/study/id", json!("pilot")),
+        ("/outcomes/0/paired", json!("difference")),
+        ("/design/pick", json!("first")),
+        ("/design/units_per_cluster", json!(2)),
+        ("/question/hypotheses/0/statistic", statistic),
+        ("/question/hypotheses/0/strata", json!(["fiction"])),
+        ("/inputs", Value::Array(inputs.collect())),
+    ];
+    for (p, v) in edits {
+        set(&mut s, p, Some(v));
+    }
+    s
+}
+
+fn text_of(plan: &Value) -> Vec<u8> {
+    toml::to_string(plan).unwrap().into_bytes()
+}
+
+fn hash_of_plan(plan: &Value) -> String {
+    ignorarium::spec::parse(&text_of(plan)).unwrap().hash
+}
+
+/// The exact hash of the data of `texts/p<i>.txt`.
+fn pilot_data(i: usize) -> String {
+    sha256_hex(format!("pilot text {i}").as_bytes())
+}
+
+/// `pilot`'s rows: for unit j of cluster i, `exact` at 10 and `arm-a` at 10 + `xs[i][j]`. Each
+/// names the (exact, normalized) data of every input.
+fn measured_rows(xs: &[[f64; 2]]) -> Vec<(&'static str, Value)> {
+    let data: Vec<Value> = (0..xs.len())
+        .map(|i| json!([pilot_data(i), format!("n{i}")]))
+        .collect();
+    let row = |unit: &str, condition: &str, ppl: f64| {
+        json!({
+            "stage": "confirmation", "condition": condition, "unit": unit, "repeat": 0,
+            "exit": "ok", "values": { "ppl": ppl }, "data_hashes": data,
+        })
+    };
+    let mut rows = Vec::new();
+    for (i, units) in xs.iter().enumerate() {
+        for (j, x) in units.iter().enumerate() {
+            let unit = format!("texts/p{i}.txt#{j}");
+            rows.push(("row", row(&unit, "exact", 10.0)));
+            rows.push(("row", row(&unit, "arm-a", 10.0 + x)));
+        }
+    }
+    rows
+}
+
+/// `pilot`'s records, measured as `xs` under `plan`, holding `estimate`: the register record,
+/// which names the plan's hash, the inputs record, the rows, the analysis record, the estimate.
+fn measured(plan: &Value, xs: &[[f64; 2]], estimate: Value) -> Vec<(&'static str, Value)> {
+    let mut all = common::finished(vec![estimate]);
+    all.retain(|(kind, _)| !["inputs", "row"].contains(kind));
+    all[0].1["spec_hash"] = json!(hash_of_plan(plan));
+    let inputs: Vec<Value> = (0..xs.len())
+        .map(|i| json!([format!("texts/p{i}.txt"), pilot_data(i)]))
+        .collect();
+    let tail = all.split_off(1);
+    all.push(("inputs", json!({ "inputs": inputs })));
+    all.extend(measured_rows(xs));
+    all.extend(tail);
+    all
+}
+
+/// A box that holds `bodies` as `pilot`'s records and `plan` as its stored plan.
+fn planned(bodies: &[(&str, Value)], plan: Result<Option<Vec<u8>>, String>) -> Planned {
+    let records = common::records_for("pilot", bodies);
+    Planned {
+        studies: common::Studies(vec![("pilot", Ok(records))]),
+        plan,
+    }
+}
+
+/// `pilot` measured as `xs` under `plan`, holding `estimate`.
+fn measured_box(plan: &Value, xs: &[[f64; 2]], estimate: Value) -> Planned {
+    planned(&measured(plan, xs, estimate), Ok(Some(text_of(plan))))
+}
+
+/// The variance and icc `finish` gives H1 of `plan` in stratum fiction, with units `xs`.
+fn fit_of(plan: &Value, xs: &[[f64; 2]]) -> (f64, f64) {
+    let spec = ignorarium::spec::model::Spec::from_value(plan).unwrap();
+    let hash = ignorarium::spec::hash_bytes(&hash_of_plan(plan)).unwrap();
+    let rows = common::records_for("pilot", &measured_rows(xs));
+    let clusters = ignorarium::units::clusters(&spec, &hash);
+    let pairs = ignorarium::analysis::paired(&spec, &rows);
+    let all = ignorarium::analysis::estimates(&spec, &Default::default(), &pairs, &clusters, None);
+    let e = all.into_iter().find(|e| e.stratum == "fiction").unwrap();
+    (e.var, e.icc.unwrap())
+}
+
+/// The pair the gate reads from a variance and icc.
+fn as_pair((var, icc): (f64, f64)) -> (f64, f64) {
+    (var.sqrt(), icc.max(0.0))
+}
+
+/// `xs` with each value clipped to `[lo, hi]`.
+fn clipped(xs: &[[f64; 2]], lo: f64, hi: f64) -> Vec<[f64; 2]> {
+    xs.iter().map(|u| u.map(|x| x.clamp(lo, hi))).collect()
+}
+
+/// The estimate of `arm-a` in fiction that `pilot` stores, with this variance and icc, over the
+/// 4 clusters and 8 units of `measured_plan(4, ..)`.
+fn arm_a_in_fiction((var, icc): (f64, f64)) -> Value {
+    let mut e = common::estimate(&[("arm-a", 1.0, json!({}))], "fiction", var, Some(icc));
+    (e["clusters"], e["units"]) = (json!(4), json!(8));
+    e
+}
+
+/// What the gate reads for `unstaged(extra)`, from box `b`.
+fn borrowed_from(extra: Vec<Edit>, b: Planned) -> Lookup {
+    let dir = study_dir();
+    let ctx = CheckCtx {
+        records: Box::new(b),
+        ..ctx(dir.path())
+    };
+    estimate_inputs(&edited(&unstaged(extra)), 0, &ctx)
+}
+
+/// The one pair `borrowed_from` finds.
+fn pair_from(extra: Vec<Edit>, b: Planned) -> (f64, f64) {
+    match borrowed_from(extra, b) {
+        Lookup::Found(got) if got.len() == 1 => {
+            assert!(!got[0].pooled);
+            (got[0].sd, got[0].icc)
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Three texts inside [-50, 50] and one far above it.
+const OUTLIER: [[f64; 2]; 4] = [[1.0, 3.0], [2.0, -2.0], [4.0, 0.0], [200.0, 180.0]];
+
+#[test]
+fn clipping_shrinks_the_borrowed_sd_of_an_outlier_text() {
+    let plan = measured_plan(4, json!({ "mean": [-50.0, 50.0] }));
+    let raw = fit_of(&plan, &OUTLIER);
+    // h1's range is [-50, 50]: the outlier text's units count as 50 each, as the test counts
+    // them.
+    let want = as_pair(fit_of(&plan, &clipped(&OUTLIER, -50.0, 50.0)));
+    let got = pair_from(vec![], measured_box(&plan, &OUTLIER, arm_a_in_fiction(raw)));
+    assert_eq!(got, want);
+    assert!(got.0 < as_pair(raw).0 / 2.0, "{got:?} {raw:?}");
+    // Units that all lie past the range clip to one value: no variance is left.
+    let past = [[60.0, 70.0], [80.0, 90.0], [100.0, 60.0], [75.0, 65.0]];
+    let b = measured_box(&plan, &past, arm_a_in_fiction(fit_of(&plan, &past)));
+    assert_eq!(
+        borrowed_from(vec![], b),
+        Lookup::Missing(
+            "Study pilot's unit values of this contrast in stratum fiction, clipped to the statistic's range, give no icc, or no variance above 0. A range that every value lies past leaves no spread: widen it, or borrow from another study.".into()
+        )
+    );
+}
+
+#[test]
+fn a_range_that_clips_nothing_keeps_the_stored_estimate() {
+    let plan = measured_plan(4, json!({ "mean": [-50.0, 50.0] }));
+    // Units at both ends of the range are inside it.
+    let inside = [[1.0, 3.0], [2.0, -2.0], [4.0, 0.0], [50.0, -50.0]];
+    let stored = fit_of(&plan, &inside);
+    let got = pair_from(
+        vec![],
+        measured_box(&plan, &inside, arm_a_in_fiction(stored)),
+    );
+    let want = as_pair(stored);
+    assert_eq!(
+        (got.0.to_bits(), got.1.to_bits()),
+        (want.0.to_bits(), want.1.to_bits())
+    );
+    // The record stands: a pair the rows would not give is taken as it is.
+    let b = measured_box(&plan, &inside, arm_a_in_fiction((9.0, 0.2)));
+    assert_eq!(pair_from(vec![], b), (3.0, 0.2));
+    // 0.5 past the end, the rows decide: that unit counts as 50.
+    let past = [[1.0, 3.0], [2.0, -2.0], [4.0, 0.0], [50.5, -50.0]];
+    let b = measured_box(&plan, &past, arm_a_in_fiction(fit_of(&plan, &past)));
+    assert_eq!(pair_from(vec![], b), want);
+    // A quantile claim clips nothing, and reads no plan.
+    let quantile = vec![hyp("statistic", j(json!({ "quantile": 0.5 })))];
+    let mut b = measured_box(&plan, &OUTLIER, arm_a_in_fiction((9.0, 0.2)));
+    b.plan = Err("not read".into());
+    assert_eq!(pair_from(quantile, b), (3.0, 0.2));
+}
+
+#[test]
+fn the_clip_uses_the_borrowers_range_not_the_sources() {
+    // pilot's own range holds every unit; h1's does not.
+    let plan = measured_plan(4, json!({ "mean": [-1000.0, 1000.0] }));
+    let stored = arm_a_in_fiction(fit_of(&plan, &OUTLIER));
+    let at = |lo: f64, hi: f64| as_pair(fit_of(&plan, &clipped(&OUTLIER, lo, hi)));
+    let got = pair_from(vec![], measured_box(&plan, &OUTLIER, stored.clone()));
+    assert_eq!(got, at(-50.0, 50.0));
+    let narrow = vec![hyp("statistic", j(json!({ "mean": [-5.0, 5.0] })))];
+    let got = pair_from(narrow, measured_box(&plan, &OUTLIER, stored));
+    assert_eq!(got, at(-5.0, 5.0));
+    assert_ne!(at(-5.0, 5.0), at(-50.0, 50.0));
+    // A statistic the shape rule refuses is no range: the lookup skips it and reads nothing.
+    let mut b = measured_box(&plan, &OUTLIER, arm_a_in_fiction((4.0, 0.1)));
+    b.plan = Err("not read".into());
+    let reversed = vec![hyp("statistic", j(json!({ "mean": [5.0, -5.0] })))];
+    assert_eq!(
+        borrowed_from(reversed, b),
+        Lookup::Missing("The hypothesis is not well formed.".into())
+    );
+}
+
+/// `pilot` measured as `OUTLIER`, with `keep` choosing the rows it holds, against h1's range.
+fn with_rows(keep: impl Fn(&Value) -> bool) -> Lookup {
+    let plan = measured_plan(4, json!({ "mean": [-50.0, 50.0] }));
+    let stored = arm_a_in_fiction(fit_of(&plan, &OUTLIER));
+    let bodies: Vec<(&str, Value)> = (measured(&plan, &OUTLIER, stored).into_iter())
+        .filter(|(kind, body)| *kind != "row" || keep(body))
+        .collect();
+    borrowed_from(vec![], planned(&bodies, Ok(Some(text_of(&plan)))))
+}
+
+const UNCOUNTED: &str =
+    "Study pilot's rows do not give back its estimate of this contrast in stratum fiction.";
+
+#[test]
+fn a_source_whose_rows_give_no_values_is_missing() {
+    let missing = Lookup::Missing(UNCOUNTED.into());
+    assert_eq!(with_rows(|_| false), missing);
+    // Rows of another measure, or of other conditions, pair to no value of the contrast.
+    let mut b = measured(
+        &measured_plan(4, json!({ "mean": [-50.0, 50.0] })),
+        &OUTLIER,
+        arm_a_in_fiction((4.0, 0.1)),
+    );
+    for (kind, body) in b.iter_mut() {
+        if *kind == "row" {
+            body["values"] = json!({ "loss": 1.0 });
+        }
+    }
+    let plan = measured_plan(4, json!({ "mean": [-50.0, 50.0] }));
+    assert_eq!(
+        borrowed_from(vec![], planned(&b, Ok(Some(text_of(&plan))))),
+        missing
+    );
+    assert_eq!(with_rows(|r| r["condition"] != "arm-a"), missing);
+}
+
+#[test]
+fn a_clipped_source_must_give_back_its_estimate() {
+    // The rows give the counts the estimate holds, but not its variance and icc: the box no
+    // longer reads the values the estimate was fitted from, so it lends no clipped fit of them.
+    let plan = measured_plan(4, json!({ "mean": [-50.0, 50.0] }));
+    let (var, icc) = fit_of(&plan, &OUTLIER);
+    let off = (var * 1.5, icc);
+    for stored in [off, (var, icc / 2.0)] {
+        assert_eq!(
+            borrowed_from(
+                vec![],
+                measured_box(&plan, &OUTLIER, arm_a_in_fiction(stored))
+            ),
+            Lookup::Missing(UNCOUNTED.into()),
+            "{stored:?}"
+        );
+    }
+    // A range that clips nothing lends the stored pair, whatever the rows give.
+    let wide = vec![hyp("statistic", j(json!({ "mean": [-500.0, 500.0] })))];
+    assert_eq!(
+        pair_from(wide, measured_box(&plan, &OUTLIER, arm_a_in_fiction(off))),
+        as_pair(off)
+    );
+}
+
+#[test]
+fn a_source_whose_rows_give_part_of_the_values_is_missing() {
+    let missing = Lookup::Missing(UNCOUNTED.into());
+    // One unit short, and one cluster short.
+    assert_eq!(with_rows(|r| r["unit"] != "texts/p0.txt#1"), missing);
+    assert_eq!(
+        with_rows(|r| !r["unit"].as_str().unwrap().starts_with("texts/p3.txt")),
+        missing
+    );
+    // Every row: the values the estimate counts.
+    assert!(matches!(with_rows(|_| true), Lookup::Found(_)));
+}
+
+#[test]
+fn an_unreadable_source_spec_is_missing() {
+    let plan = measured_plan(4, json!({ "mean": [-50.0, 50.0] }));
+    let stored = arm_a_in_fiction(fit_of(&plan, &OUTLIER));
+    let bodies = measured(&plan, &OUTLIER, stored.clone());
+    let text = Ok(Some(text_of(&plan)));
+    let missing = |b: Planned, why: &str| {
+        assert_eq!(
+            borrowed_from(vec![], b),
+            Lookup::Missing(format!(
+                "The box cannot read the unit values of study pilot again: {why}."
+            )),
+            "{why}"
+        );
+    };
+    missing(planned(&bodies, Err("disk fault".into())), "disk fault");
+    missing(planned(&bodies, Ok(None)), "it holds no plan of the study");
+    let unparsed = "its stored plan does not parse";
+    missing(planned(&bodies, Ok(Some(b"x = [".to_vec()))), unparsed);
+    // A plan the register record names that is not a plan.
+    let mut not_a_plan = bodies.clone();
+    let text_x = b"x = 1\n".to_vec();
+    not_a_plan[0].1["spec_hash"] = json!(ignorarium::spec::parse(&text_x).unwrap().hash);
+    missing(planned(&not_a_plan, Ok(Some(text_x))), unparsed);
+    // Another plan than the one the study registered.
+    let other = measured_plan(4, json!({ "mean": [-60.0, 60.0] }));
+    missing(
+        planned(&bodies, Ok(Some(text_of(&other)))),
+        "its stored plan is not the one the study registered",
+    );
+    let without = |kind: &str| -> Vec<(&str, Value)> {
+        bodies.iter().filter(|(k, _)| *k != kind).cloned().collect()
+    };
+    missing(
+        planned(&without("register"), text.clone()),
+        "it has no register record",
+    );
+    missing(
+        planned(&without("inputs"), text.clone()),
+        "it has rows and no inputs record",
+    );
+    // Rows that name other data than the inputs record, fewer inputs, more, or none.
+    let other_data = "its rows and its inputs record name other data";
+    let first_row = bodies.iter().position(|(k, _)| *k == "row").unwrap();
+    let data = bodies[first_row].1["data_hashes"].clone();
+    let shown = |hashes: Value| {
+        let mut b = bodies.clone();
+        b[first_row].1["data_hashes"] = hashes;
+        planned(&b, text.clone())
+    };
+    let mut swapped = data.clone();
+    swapped.as_array_mut().unwrap().swap(0, 1);
+    missing(shown(swapped), other_data);
+    let mut fewer = data.clone();
+    fewer.as_array_mut().unwrap().pop();
+    missing(shown(fewer), other_data);
+    let mut more = data.clone();
+    more.as_array_mut().unwrap().push(json!(["ff", "n9"]));
+    missing(shown(more), other_data);
+    missing(shown(Value::Null), other_data);
+    // A later row that names other data than the first.
+    let mut later = bodies.clone();
+    let last_row = later.iter().rposition(|(k, _)| *k == "row").unwrap();
+    later[last_row].1["data_hashes"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
+    missing(planned(&later, text.clone()), other_data);
+    // An input absent at the first run is in the inputs record with no data, and in no row.
+    let mut absent = bodies.clone();
+    absent[1].1["inputs"][3][1] = Value::Null;
+    for (_, row) in absent.iter_mut().filter(|(k, _)| *k == "row") {
+        row["data_hashes"].as_array_mut().unwrap().pop();
+    }
+    assert!(matches!(
+        borrowed_from(vec![], planned(&absent, text.clone())),
+        Lookup::Found(_)
+    ));
+    let mut resized = bodies.clone();
+    resized.insert(1, ("resize", json!({ "decision": 1 })));
+    missing(
+        planned(&resized, text.clone()),
+        "its resize record does not parse",
+    );
+    // A stored plan whose hypothesis is not the one the estimate names.
+    let mut renamed = plan.clone();
+    renamed["question"]["hypotheses"][0]["id"] = json!("H2");
+    let b = measured(&renamed, &OUTLIER, stored);
+    missing(
+        planned(&b, Ok(Some(text_of(&renamed)))),
+        "its plan has no hypothesis its estimate names",
     );
 }
 
@@ -2199,6 +2732,10 @@ impl BoxRecords for Torn {
         self.studies.study(id)
     }
 
+    fn spec(&self, id: &str) -> Result<Option<Vec<u8>>, String> {
+        self.studies.spec(id)
+    }
+
     fn stream_next(&self, _: &str) -> Result<Next, String> {
         self.reads.set(self.reads.get() + 1);
         if self.reads.get() == 1 {
@@ -2226,6 +2763,10 @@ impl BoxRecords for Counted {
     fn study(&self, id: &str) -> Result<Option<Vec<records::Record>>, String> {
         self.reads.set(self.reads.get() + 1);
         self.studies.study(id)
+    }
+
+    fn spec(&self, id: &str) -> Result<Option<Vec<u8>>, String> {
+        self.studies.spec(id)
     }
 
     fn stream_next(&self, log: &str) -> Result<Next, String> {
@@ -2302,6 +2843,10 @@ struct Slots(Result<bool, String>);
 
 impl BoxRecords for Slots {
     fn study(&self, _: &str) -> Result<Option<Vec<records::Record>>, String> {
+        Ok(None)
+    }
+
+    fn spec(&self, _: &str) -> Result<Option<Vec<u8>>, String> {
         Ok(None)
     }
 

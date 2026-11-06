@@ -111,6 +111,19 @@ impl BoxRecords for HomeRecords {
         Ok(registered.then_some(all))
     }
 
+    /// The `spec.toml` that `register` stored in the study's folder. Only a file that does
+    /// not exist means "none"; any other fault is an error.
+    fn spec(&self, id: &str) -> Result<Option<Vec<u8>>, String> {
+        if !rules::is_study_id(id) {
+            return Ok(None);
+        }
+        match std::fs::read(self.home.study_dir(id).join("spec.toml")) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
     /// A stream with no log is empty and needs no key. Each slot a signed `register` record
     /// of the box names must be in the stream, so a stream log that was moved, cut or rolled
     /// back is an error, never a fresh budget. The register records are read first: a slot

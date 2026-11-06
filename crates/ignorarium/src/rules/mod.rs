@@ -19,6 +19,8 @@ pub trait BoxRecords {
     /// The verified records of the registered study `id`, in order; `None` when no study
     /// with that id is registered in the box.
     fn study(&self, id: &str) -> Result<Option<Vec<crate::records::Record>>, String>;
+    /// The plan text the box stored when study `id` registered; `None` when it holds none.
+    fn spec(&self, id: &str) -> Result<Option<Vec<u8>>, String>;
     /// The slot and level the stream of `log` would give a study that opened a slot now.
     fn stream_next(&self, log: &str) -> Result<Next, String>;
     /// True when slot `slot` of the stream of `log` was opened by study `study` and is closed.
@@ -30,6 +32,10 @@ pub struct NoRecords;
 
 impl BoxRecords for NoRecords {
     fn study(&self, _: &str) -> Result<Option<Vec<crate::records::Record>>, String> {
+        Ok(None)
+    }
+
+    fn spec(&self, _: &str) -> Result<Option<Vec<u8>>, String> {
         Ok(None)
     }
 
@@ -63,6 +69,10 @@ impl<B> ReadOnce<B> {
 impl<B: BoxRecords> BoxRecords for ReadOnce<B> {
     fn study(&self, id: &str) -> Result<Option<Vec<crate::records::Record>>, String> {
         self.inner.study(id)
+    }
+
+    fn spec(&self, id: &str) -> Result<Option<Vec<u8>>, String> {
+        self.inner.spec(id)
     }
 
     fn stream_next(&self, log: &str) -> Result<Next, String> {

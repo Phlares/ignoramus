@@ -1223,23 +1223,35 @@ fn a_pilot_then_a_follow_on_resolve_end_to_end() {
         "{:?}",
         e.icc
     );
-    let follow = |from: &str| {
+    let follow = |from: &str, range: &str| {
         let t = std::fs::read_to_string("../../templates/numeric-ablation.toml").unwrap();
         let path = lab.root.join(format!("follow-{from}.toml"));
-        // A claim on a mean statistic in [-22, 22], sized 20 below the margin: with a small
-        // variance each of the 16 clusters scores about 0.91, enough to reach 1/0.005.
+        // A claim on a mean statistic in `range`, sized 20 below the margin: in [-22, 22],
+        // with a small variance each of the 16 clusters scores about 0.91, enough to reach
+        // 1/0.005.
         let text = common::confirmatory(two_clusters(t))
-            .replace("{ quantile = 0.5 }", "{ mean = [-22.0, 22.0] }");
+            .replace("{ quantile = 0.5 }", &format!("{{ mean = {range} }}"));
         std::fs::write(&path, text.replace("my-pilot", from)).unwrap();
         path
     };
     // The estimate resolves: no pending value, no missing estimate, and the power gate
     // passes on the small variance.
-    let (code, v) = check_json(&lab, &follow("my-pilot"));
+    let (code, v) = check_json(&lab, &follow("my-pilot", "[-22.0, 22.0]"));
     assert_eq!((code, codes(&v)), (0, Vec::<&str>::new()), "{v}");
     assert_eq!(v["pending"], serde_json::json!([]));
-    // The wide pilot resolves too, and the gate refuses on its variance alone.
-    let (code, v) = check_json(&lab, &follow("wide-pilot"));
+    // The wide pilot's units, 100 % to 700 %, all lie past 22: clipped, each counts as 22,
+    // and no spread is left to size from.
+    let (code, v) = check_json(&lab, &follow("wide-pilot", "[-22.0, 22.0]"));
+    assert_eq!((code, codes(&v)), (1, vec!["E-CNF-003"]), "{v}");
+    assert!(
+        (v["diagnostics"].as_array().unwrap().iter())
+            .any(|d| d["problem"].as_str().unwrap().ends_with(
+                "Study wide-pilot's unit values of this contrast in the pooled group, clipped to the statistic's range, give no icc, or no variance above 0. A range that every value lies past leaves no spread: widen it, or borrow from another study."
+            )),
+        "{v}"
+    );
+    // In a range that holds them it resolves, and the gate refuses on its variance alone.
+    let (code, v) = check_json(&lab, &follow("wide-pilot", "[-1000.0, 1000.0]"));
     assert_eq!((code, codes(&v)), (1, vec!["E-CNF-002"]), "{v}");
 }
 

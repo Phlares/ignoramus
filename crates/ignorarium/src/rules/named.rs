@@ -4,6 +4,7 @@
 //! is missing or mistyped: the generic rules report that.
 use super::generic::{applies, diagnostic, join, join_key, plain_key, safe_key, select};
 use super::{BoxRecords, Check, NoRecords, Rule, has_format, is_study_id};
+use crate::analysis::Source;
 use crate::backend::PINNED_LEVEL;
 use crate::derived::{
     ANALYSIS, Alpha, Analysis, Carried, Estimate, Instrument, Selection, StudyState, contrast_key,
@@ -892,8 +893,10 @@ pub enum Lookup {
     Found(Vec<StratumInput>),
 }
 
-/// The sd and icc the power gate uses in one group: the largest over the contrasts the
-/// hypothesis stands for, and the hashes of the estimate records they come from. A negative
+/// The sd and icc the power gate uses in one group: for a mean claim the pair of the contrast,
+/// among those the hypothesis stands for, whose cluster mean has the largest sd (`mean_sd`)
+/// over the group's clusters, for a quantile claim the largest of each, and the hashes of
+/// every estimate record consulted. A negative
 /// icc, which an analysis of variance can give, counts as 0, the larger and so safer value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StratumInput {
@@ -912,7 +915,15 @@ pub struct StratumInput {
 /// (the pooled group `""` when none) and each contrast it stands for (with `selected`, each
 /// candidate of this plan's selection stage, with its params), the estimate with that
 /// contrast's key and the stratum, else the pooled one. An estimate without an icc, or with
-/// no variance above 0, is skipped. Several such estimates must agree. The largest sd and icc over the candidates.
+/// no variance above 0, is skipped. Several such estimates must agree. For a `mean = [lo, hi]`
+/// statistic the pair is fitted again from the study's unit values in that group, each
+/// clipped to [lo, hi] (`analysis::Source`), unless every one lies inside it; a stored plan or
+/// record that cannot be read, or rows that do not give the clusters and units the estimate
+/// counts or, when the clip moves a value, its variance and icc, make it missing. Over the
+/// candidates of a mean claim, the one pair whose cluster mean has the largest sd at the units
+/// the group's confirmation clusters give (`design.units_per_cluster` when it has none, 1
+/// when that is unusable); ties keep the first. A quantile claim takes the largest sd and the
+/// largest icc.
 pub fn estimate_inputs(spec: &Value, h: usize, ctx: &CheckCtx) -> Lookup {
     estimates_of(spec, &spec["question"]["hypotheses"][h], ctx)
         .unwrap_or_else(|| Lookup::Missing("The hypothesis is not well formed.".into()))
@@ -978,7 +989,14 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
         return Some(Lookup::Missing("The hypothesis names no study.".into()));
     };
     let from = study_ref(spec, reference)?;
-    let state = ctx.records.study(from).and_then(|all| {
+    let statistic = hyp.get("statistic").and_then(mean_range);
+    let log = ctx.records.study(from);
+    // Only a mean claim reads the records again (`Source`).
+    let kept = match (&statistic, &log) {
+        (Some(Ok(Some(_))), Ok(Some(all))) => all.clone(),
+        _ => vec![],
+    };
+    let state = log.and_then(|all| {
         StudyState::of(all, |log, slot| ctx.records.stream_closed(log, from, slot))
     });
     let records = match state {
@@ -995,12 +1013,40 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
     };
     let contrasts = contrasts(spec, hyp, ctx)?;
     let groups = groups_of(hyp)?;
+    let unreadable = |why: String| {
+        Some(Lookup::Missing(format!(
+            "The box cannot read the unit values of study {from} again: {why}."
+        )))
+    };
+    let source = match statistic {
+        Some(Err(())) => return None,
+        None | Some(Ok(None)) => None,
+        Some(Ok(Some(clip))) => {
+            let read = (ctx.records.spec(from))
+                .and_then(|text| text.ok_or_else(|| "it holds no plan of the study".into()))
+                .and_then(|text| Source::read(&text, &kept));
+            match read {
+                Ok(source) => Some((source, clip)),
+                Err(why) => return unreadable(why),
+            }
+        }
+    };
     let estimates: Vec<(String, Estimate)> = records
         .iter()
         .filter_map(|r| Some((records::hash(r), Estimate::of(r)?)))
         .collect();
+    let per = (val(spec, "design.units_per_cluster").and_then(Value::as_u64))
+        .filter(|m| *m >= 1)
+        .unwrap_or(1);
+    let confirmation = clusters_of(spec, ctx, "confirmation", per);
+    let quantile = matches!(statistic, Some(Ok(None)));
     let mut out = Vec::new();
     for stratum in groups {
+        let mut sizes = units_in(&confirmation, stratum);
+        if sizes.is_empty() {
+            sizes.push(u32::try_from(per).unwrap_or(u32::MAX));
+        }
+        let spread = |(sd, icc): (f64, f64)| mean_sd(sd, icc, &sizes);
         let mut input = StratumInput {
             stratum: stratum.into(),
             sd: 0.0,
@@ -1021,7 +1067,7 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
             // The first group with an estimate that has an icc and a variance above 0.
             let found = [stratum, ""].into_iter().find_map(|group| {
                 let usable: Vec<_> = (matching(group).into_iter())
-                    .filter(|(_, e)| e.icc.is_some() && e.var > 0.0)
+                    .filter(|(_, e)| usable(e.var, e.icc).is_some())
                     .collect();
                 (!usable.is_empty()).then_some((group, usable))
             });
@@ -1050,9 +1096,43 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
                     group_name(group)
                 )));
             }
-            let icc = e.icc.unwrap_or_default();
-            input.sd = input.sd.max(e.var.sqrt());
-            input.icc = input.icc.max(icc);
+            let stored = (e.var, e.icc.unwrap_or_default());
+            let (var, icc) = match &source {
+                None => stored,
+                Some((s, clip)) => {
+                    let r = match s.refit(&e.hypothesis, group, *clip) {
+                        Ok(r) => r,
+                        Err(why) => return unreadable(why),
+                    };
+                    // A clipped fit is lent only from the values the estimate was fitted from.
+                    let raw = r.raw.as_ref().map(|f| (f.var, f.icc));
+                    if (r.clusters, r.units) != (e.clusters, e.units)
+                        || (r.clipped && raw != Some((e.var, e.icc)))
+                    {
+                        return Some(Lookup::Missing(format!(
+                            "Study {from}'s rows do not give back its estimate of this contrast{pick} in {}.",
+                            group_name(group)
+                        )));
+                    }
+                    if !r.clipped {
+                        stored
+                    } else if let Some(pair) = r.fit.and_then(|f| usable(f.var, f.icc)) {
+                        pair
+                    } else {
+                        return Some(Lookup::Missing(format!(
+                            "Study {from}'s unit values of this contrast{pick} in {}, clipped to the statistic's range, give no icc, or no variance above 0. A range that every value lies past leaves no spread: widen it, or borrow from another study.",
+                            group_name(group)
+                        )));
+                    }
+                }
+            };
+            // Every usable pair spreads above 0, so the first candidate always replaces (0, 0).
+            let pair = (var.sqrt(), icc.max(0.0));
+            if quantile {
+                (input.sd, input.icc) = (input.sd.max(pair.0), input.icc.max(pair.1));
+            } else if spread(pair) > spread((input.sd, input.icc)) {
+                (input.sd, input.icc) = pair;
+            }
             input
                 .records
                 .extend(all.iter().map(|(hash, _)| hash.clone()));
@@ -1060,6 +1140,11 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
         out.push(input);
     }
     Some(Lookup::Found(out))
+}
+
+/// A variance and icc the gate can size from: an icc, and a variance above 0.
+fn usable(var: f64, icc: Option<f64>) -> Option<(f64, f64)> {
+    icc.filter(|_| var > 0.0).map(|icc| (var, icc))
 }
 
 fn waits(study: &str, state: &str) -> String {

@@ -1763,6 +1763,27 @@ fn a_log_that_holds_another_studys_records_is_an_error() {
     assert!(records.study("first").unwrap().is_some());
 }
 
+#[test]
+fn the_box_reads_the_plan_a_study_stored() {
+    let (_d, home, _) = setup(|t| t);
+    let box_home = Home::open_at(&home).unwrap();
+    common::pilot(&box_home, vec![common::arm_a()]);
+    let records = HomeRecords {
+        home: box_home,
+        key: Ok(None),
+    };
+    let stored = common::source_spec(&["fiction".into()]).into_bytes();
+    assert_eq!(records.spec("my-pilot"), Ok(Some(stored)));
+    // No plan, and an id that is not a study id, whatever its path holds.
+    assert_eq!(records.spec("other-study"), Ok(None));
+    std::fs::create_dir_all(home.join("outside")).unwrap();
+    std::fs::write(home.join("outside/spec.toml"), "x = 1\n").unwrap();
+    assert_eq!(records.spec("../outside"), Ok(None));
+    // A plan that is there and cannot be read is an error, not "none".
+    std::fs::create_dir_all(home.join("studies/folded/spec.toml")).unwrap();
+    assert!(records.spec("folded").is_err());
+}
+
 // ---- import ----
 
 fn blob_lines(home: &Path) -> Vec<Value> {
