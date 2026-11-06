@@ -7,8 +7,8 @@ const SINGLE: u8 = 0;
 const STREAM: u8 = 1;
 const OTHER: u8 = 2;
 const LOOSE: u8 = 3;
-/// One null child tested alone at level 0.05 over 20 units rejects about 1 time in
-/// 1,300, so the family-wise error passes 0.05 only near 70 such children.
+/// One null child tested alone at level 0.05 over 20 units rejects about 1 time in 380,
+/// so the family-wise error passes 0.05 near 20 such children; 100 show it clearly.
 const DEFECT: usize = 100;
 
 fn close_to(a: f64, b: f64, tol: f64) {

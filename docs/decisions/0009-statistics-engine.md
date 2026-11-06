@@ -15,7 +15,7 @@ Decision:
 - The crate computes e-processes, an online false-discovery stream (e-LOND), a tree split for spawned follow-up tests, and scan p-values. It reads no files, network, clock or environment. Every random draw comes from an `Rng` that the caller seeds (xoshiro256**; Blackman and Vigna 2021). The seed must be high-entropy bytes, such as a SHA-256 digest. The same seed gives the same result on one platform and math library. `ln`, `exp`, `cos` and `ln_1p` come from the platform's math library, so the last bits can differ across platforms.
 - **Integer draws.** `Rng::below(n)` draws x and draws again while x ≥ 2^64 − (2^64 mod n), then returns x mod n, so every value in 0..n is equally likely. `Rng::sample(available, k)` returns the first min(k, available) positions of a forward Fisher-Yates shuffle of 0..available: step i swaps position i with i + below(available − i). It stores only the positions it moved, so a large `available` costs no memory. Neither uses floating point, so the same seed gives the same values on every platform. The box picks a cluster's units as the sorted `sample(units, units_per_cluster)` from the seed SHA-256(spec hash, `units/<input path>`).
 - **Selection stage.** A study may pick one candidate condition on its selection inputs, then test the pick on its confirmation inputs. The rule is `best-mean`. Only the selection units with a paired metric value for every candidate count. Each candidate's mean is over those same units. The best mean in the metric outcome's direction wins, and a tie goes to the candidate listed first. With no complete unit, the run pauses. The box signs one `selection` record at the stage boundary, before any confirmation row runs. It holds the metric, the rule, the direction, each candidate's mean, the pick and the complete units, so a reader can check the pick from the record alone. Each row that runs the pick names that record's hash. A rule fixed in advance is what the FDA guidance on adaptive designs asks of a selection step.
-- **E-process.** Each observation x maps to a score s in [-1, 1]. Under the null, the mean of s given the past is at most 0. Wealth is the product of `1 + λ_i s_i`. The bet is `λ_i = clamp(S / (1 + Q), 0, 1/2)`. S is the sum of past scores. Q is the sum of past squared scores. So the bet is the running mean score over the running mean squared score, with one pseudo-observation, capped at 1/2 (the aGRAPA bet; Waudby-Smith and Ramdas). The bet is fixed before x_i is seen. The 1/2 cap keeps every factor at or above 1/2, so wealth never reaches 0 (Ramdas, Grünwald, Vovk and Shafer: never bet the farm). Wealth is kept in log space, so long runs neither overflow to NaN nor underflow to 0.
+- **E-process.** Each observation x maps to a score s in [-1, 1]. Under the null, the mean of s given the past is at most 0. Wealth is the product of `1 + λ_i s_i`. The bet is `λ_i = clamp(S / (1 + Q), 0, 3/4)`. S is the sum of past scores. Q is the sum of past squared scores. So the bet is the running mean score over the running mean squared score, with one pseudo-observation, capped at 3/4 (the aGRAPA bet; Waudby-Smith and Ramdas). The bet is fixed before x_i is seen. The 3/4 cap keeps every factor at or above 1/4, so wealth never reaches 0 (Ramdas, Grünwald, Vovk and Shafer: never bet the farm). The cap was 1/2 until 0022. Wealth is kept in log space, so long runs neither overflow to NaN nor underflow to 0.
   - `Sign`: s = sign(x). Null: P(x > 0 | past) ≤ P(x < 0 | past). This is the sign test. It assumes no shape.
   - `Clip { scale }`: s = clamp(x / scale, -1, 1). Null: x is symmetric about 0 given the past. The study sets the scale, normally to its smallest effect of interest.
   - `Bounded { lo, hi, mean }`: s = (x - mean) / max(hi - mean, mean - lo). Null: E[x | past] ≤ mean, with x in [lo, hi].
@@ -48,51 +48,51 @@ Decision:
   - Size: 100,000 trees for each single-tree scenario. 10,000 streams of 40 trees for each stream scenario. Fewer is fine when the Wilson upper end is below the target.
   - Monte Carlo error is the upper end of the 95% Wilson score interval of the mean (Wilson 1927; Brown, Cai and DasGupta 2001). The results are in [0, 1], so the interval is conservative.
   - A bound "holds" when that upper end is at most the target. The target is α. FWER is checked on every single-tree row. FDR is checked on single-tree rows with no effect, and on every stream row.
-  - Planted defect: each firing hypothesis also tests 100 undeclared null children. Each is tested alone at the slot's full level. The scenario has 3 declared children, depth 1, 20 units, ρ = 0, θ = 2, α = 0.05, and an effect of 2 on the root. With 2,000 replicates the FWER is 0.080 (upper end 0.093), so the bound fails. With no undeclared children it is 0.000 (upper end 0.002), so the bound holds. The suite flags the defect.
+  - Planted defect: each firing hypothesis also tests 100 undeclared null children. Each is tested alone at the slot's full level. The scenario has 3 declared children, depth 1, 20 units, ρ = 0, θ = 2, α = 0.05, and an effect of 2 on the root. With 2,000 replicates the FWER is 0.247 (upper end 0.266), so the bound fails. With no undeclared children it is 0.0005 (upper end 0.003), so the bound holds. The suite flags the defect.
 
-Results of the full run (release build, about 28 s). Each row is one scenario. Columns: α; gamma sequence; trees per stream; declared children per hypothesis; depth; units per data role; ρ; θ; chance a tree has an effect; where the effect sits and its size; replicates; FWER mean / upper end; FDR mean / upper end; power. Power is the share of trees with an effect that were discovered. A dash means the scenario has no such trees. Single-tree rows use one slot at level α (`Bounded` with m = 1).
+Results of the full run (release build, 47 s on one 6-CPU cloud host, with the bet cap at 3/4; 0022). Each row is one scenario. Columns: α; gamma sequence; trees per stream; declared children per hypothesis; depth; units per data role; ρ; θ; chance a tree has an effect; where the effect sits and its size; replicates; FWER mean / upper end; FDR mean / upper end; power. Power is the share of trees with an effect that were discovered. A dash means the scenario has no such trees. Single-tree rows use one slot at level α (`Bounded` with m = 1).
 
 | α | gamma | trees | children | depth | units | ρ | θ | effect chance | effect | replicates | FWER mean / upper | FDR mean / upper | power |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 0.05 | Bounded m=1 | 1 | 3 | 1 | 20 | 0.0 | 2 | 0.00 | none | 100,000 | 0.00066 / 0.00084 | 0.00066 / 0.00084 | - |
-| 0.05 | Bounded m=1 | 1 | 3 | 1 | 20 | 0.0 | 2 | 1.00 | root 1.0 | 100,000 | 0.00003 / 0.00009 | 0.00000 / 0.00004 | 0.29329 |
-| 0.05 | Bounded m=1 | 1 | 3 | 1 | 20 | 0.0 | 20 | 0.00 | none | 100,000 | 0.00084 / 0.00104 | 0.00084 / 0.00104 | - |
-| 0.05 | Bounded m=1 | 1 | 3 | 1 | 20 | 0.0 | 20 | 1.00 | root 1.0 | 100,000 | 0.00002 / 0.00007 | 0.00000 / 0.00004 | 0.35056 |
-| 0.05 | Bounded m=1 | 1 | 3 | 2 | 20 | 0.0 | 2 | 0.00 | none | 100,000 | 0.00056 / 0.00073 | 0.00056 / 0.00073 | - |
-| 0.05 | Bounded m=1 | 1 | 3 | 2 | 20 | 0.0 | 2 | 1.00 | root 1.0 | 100,000 | 0.00002 / 0.00007 | 0.00000 / 0.00004 | 0.22339 |
-| 0.05 | Bounded m=1 | 1 | 3 | 2 | 20 | 0.0 | 20 | 0.00 | none | 100,000 | 0.00093 / 0.00114 | 0.00093 / 0.00114 | - |
-| 0.05 | Bounded m=1 | 1 | 3 | 2 | 20 | 0.0 | 20 | 1.00 | root 1.0 | 100,000 | 0.00003 / 0.00009 | 0.00000 / 0.00004 | 0.34486 |
-| 0.05 | Bounded m=1 | 1 | 3 | 1 | 20 | 0.9 | 2 | 0.00 | none | 100,000 | 0.00048 / 0.00064 | 0.00054 / 0.00070 | - |
-| 0.05 | Bounded m=1 | 1 | 3 | 1 | 20 | 0.9 | 2 | 1.00 | root 1.0 | 100,000 | 0.00001 / 0.00006 | 0.00000 / 0.00004 | 0.29051 |
-| 0.05 | Bounded m=1 | 1 | 3 | 1 | 20 | 0.9 | 20 | 0.00 | none | 100,000 | 0.00084 / 0.00104 | 0.00085 / 0.00105 | - |
-| 0.05 | Bounded m=1 | 1 | 3 | 1 | 20 | 0.9 | 20 | 1.00 | root 1.0 | 100,000 | 0.00001 / 0.00006 | 0.00000 / 0.00004 | 0.34647 |
-| 0.05 | Bounded m=1 | 1 | 3 | 2 | 20 | 0.9 | 2 | 0.00 | none | 100,000 | 0.00063 / 0.00081 | 0.00078 / 0.00097 | - |
-| 0.05 | Bounded m=1 | 1 | 3 | 2 | 20 | 0.9 | 2 | 1.00 | root 1.0 | 100,000 | 0.00001 / 0.00006 | 0.00000 / 0.00004 | 0.23820 |
-| 0.05 | Bounded m=1 | 1 | 3 | 2 | 20 | 0.9 | 20 | 0.00 | none | 100,000 | 0.00080 / 0.00100 | 0.00080 / 0.00100 | - |
-| 0.05 | Bounded m=1 | 1 | 3 | 2 | 20 | 0.9 | 20 | 1.00 | root 1.0 | 100,000 | 0.00005 / 0.00012 | 0.00000 / 0.00004 | 0.34809 |
-| 0.5 | Bounded m=1 | 1 | 3 | 1 | 20 | 0.0 | 2 | 0.00 | none | 100,000 | 0.05533 / 0.05676 | 0.06048 / 0.06197 | - |
-| 0.5 | Bounded m=1 | 1 | 3 | 2 | 20 | 0.0 | 2 | 0.00 | none | 100,000 | 0.05520 / 0.05663 | 0.06025 / 0.06174 | - |
-| 0.5 | Bounded m=1 | 1 | 3 | 1 | 20 | 0.9 | 2 | 0.00 | none | 100,000 | 0.05378 / 0.05520 | 0.06240 / 0.06392 | - |
-| 0.5 | Bounded m=1 | 1 | 3 | 2 | 20 | 0.9 | 2 | 0.00 | none | 100,000 | 0.05265 / 0.05405 | 0.06279 / 0.06431 | - |
-| 0.5 | Bounded m=1 | 1 | 16 | 1 | 20 | 0.0 | 2 | 1.00 | root 2.0 | 100,000 | 0.00304 / 0.00340 | 0.00000 / 0.00004 | 0.99997 |
+| 0.05 | Bounded m=1 | 1 | 3 | 1 | 20 | 0.0 | 2 | 0.00 | none | 100,000 | 0.00249 / 0.00282 | 0.00249 / 0.00282 | - |
+| 0.05 | Bounded m=1 | 1 | 3 | 1 | 20 | 0.0 | 2 | 1.00 | root 1.0 | 100,000 | 0.00107 / 0.00129 | 0.00000 / 0.00004 | 0.57300 |
+| 0.05 | Bounded m=1 | 1 | 3 | 1 | 20 | 0.0 | 20 | 0.00 | none | 100,000 | 0.00246 / 0.00279 | 0.00246 / 0.00279 | - |
+| 0.05 | Bounded m=1 | 1 | 3 | 1 | 20 | 0.0 | 20 | 1.00 | root 1.0 | 100,000 | 0.00100 / 0.00122 | 0.00000 / 0.00004 | 0.59585 |
+| 0.05 | Bounded m=1 | 1 | 3 | 2 | 20 | 0.0 | 2 | 0.00 | none | 100,000 | 0.00237 / 0.00269 | 0.00237 / 0.00269 | - |
+| 0.05 | Bounded m=1 | 1 | 3 | 2 | 20 | 0.0 | 2 | 1.00 | root 1.0 | 100,000 | 0.00085 / 0.00105 | 0.00000 / 0.00004 | 0.52130 |
+| 0.05 | Bounded m=1 | 1 | 3 | 2 | 20 | 0.0 | 20 | 0.00 | none | 100,000 | 0.00245 / 0.00278 | 0.00245 / 0.00278 | - |
+| 0.05 | Bounded m=1 | 1 | 3 | 2 | 20 | 0.0 | 20 | 1.00 | root 1.0 | 100,000 | 0.00111 / 0.00134 | 0.00000 / 0.00004 | 0.59487 |
+| 0.05 | Bounded m=1 | 1 | 3 | 1 | 20 | 0.9 | 2 | 0.00 | none | 100,000 | 0.00241 / 0.00273 | 0.00241 / 0.00273 | - |
+| 0.05 | Bounded m=1 | 1 | 3 | 1 | 20 | 0.9 | 2 | 1.00 | root 1.0 | 100,000 | 0.00073 / 0.00092 | 0.00000 / 0.00004 | 0.57292 |
+| 0.05 | Bounded m=1 | 1 | 3 | 1 | 20 | 0.9 | 20 | 0.00 | none | 100,000 | 0.00293 / 0.00328 | 0.00293 / 0.00328 | - |
+| 0.05 | Bounded m=1 | 1 | 3 | 1 | 20 | 0.9 | 20 | 1.00 | root 1.0 | 100,000 | 0.00073 / 0.00092 | 0.00000 / 0.00004 | 0.59967 |
+| 0.05 | Bounded m=1 | 1 | 3 | 2 | 20 | 0.9 | 2 | 0.00 | none | 100,000 | 0.00244 / 0.00277 | 0.00244 / 0.00277 | - |
+| 0.05 | Bounded m=1 | 1 | 3 | 2 | 20 | 0.9 | 2 | 1.00 | root 1.0 | 100,000 | 0.00073 / 0.00092 | 0.00000 / 0.00004 | 0.52822 |
+| 0.05 | Bounded m=1 | 1 | 3 | 2 | 20 | 0.9 | 20 | 0.00 | none | 100,000 | 0.00292 / 0.00327 | 0.00292 / 0.00327 | - |
+| 0.05 | Bounded m=1 | 1 | 3 | 2 | 20 | 0.9 | 20 | 1.00 | root 1.0 | 100,000 | 0.00065 / 0.00083 | 0.00000 / 0.00004 | 0.59579 |
+| 0.5 | Bounded m=1 | 1 | 3 | 1 | 20 | 0.0 | 2 | 0.00 | none | 100,000 | 0.03918 / 0.04040 | 0.03918 / 0.04040 | - |
+| 0.5 | Bounded m=1 | 1 | 3 | 2 | 20 | 0.0 | 2 | 0.00 | none | 100,000 | 0.03990 / 0.04113 | 0.03990 / 0.04113 | - |
+| 0.5 | Bounded m=1 | 1 | 3 | 1 | 20 | 0.9 | 2 | 0.00 | none | 100,000 | 0.03684 / 0.03803 | 0.03684 / 0.03803 | - |
+| 0.5 | Bounded m=1 | 1 | 3 | 2 | 20 | 0.9 | 2 | 0.00 | none | 100,000 | 0.03583 / 0.03700 | 0.03583 / 0.03700 | - |
+| 0.5 | Bounded m=1 | 1 | 16 | 1 | 20 | 0.0 | 2 | 1.00 | root 2.0 | 100,000 | 0.02142 / 0.02234 | 0.00000 / 0.00004 | 0.99988 |
 | 0.05 | Unbounded | 40 | 3 | 1 | 30 | 0.5 | 5 | 0.00 | none | 10,000 | 0.00000 / 0.00038 | 0.00000 / 0.00038 | - |
-| 0.05 | Unbounded | 40 | 3 | 1 | 30 | 0.5 | 5 | 0.25 | all 1.5 | 10,000 | 0.00000 / 0.00038 | 0.00000 / 0.00038 | 0.91431 |
-| 0.05 | Bounded m=40 | 40 | 3 | 1 | 30 | 0.5 | 5 | 0.00 | none | 10,000 | 0.00000 / 0.00038 | 0.00000 / 0.00038 | - |
-| 0.05 | Bounded m=40 | 40 | 3 | 1 | 30 | 0.5 | 5 | 0.25 | all 1.5 | 10,000 | 0.00170 / 0.00272 | 0.00015 / 0.00064 | 0.99936 |
+| 0.05 | Unbounded | 40 | 3 | 1 | 30 | 0.5 | 5 | 0.25 | all 1.5 | 10,000 | 0.00040 / 0.00103 | 0.00003 / 0.00045 | 0.99844 |
+| 0.05 | Bounded m=40 | 40 | 3 | 1 | 30 | 0.5 | 5 | 0.00 | none | 10,000 | 0.00040 / 0.00103 | 0.00040 / 0.00103 | - |
+| 0.05 | Bounded m=40 | 40 | 3 | 1 | 30 | 0.5 | 5 | 0.25 | all 1.5 | 10,000 | 0.00990 / 0.01204 | 0.00090 / 0.00171 | 0.99993 |
 
 Every bound holds. The first 16 rows are the strict grid (α = 0.05). The next 5 rows are the loose grid (α = 0.5). The last 4 rows are the stream grid.
 
 What the margins mean:
 
-- At α = 0.05, a null e-value test with 20 units rejects about 1 time in 1,300. That is far below 0.05. It is the price of validity at any stopping time. So the strict grid cannot tell a dropped split from a kept one.
-- The loose grid at α = 0.5 shows the split at work. A null hypothesis over 20 units rejects 6.2% of the time at that level. A null root fires a trigger at θ = 2 for 17.8% of trees. Both rates are from 1,000,000 seeded draws. So the four ordinary loose rows hold even with no split.
-- The partly-null row is the last loose row: a firing root with 16 null children. With the split its FWER is 0.00304 (upper end 0.00340). Without the split each child is tested at the full level, so its FWER is about 0.64. That figure is computed as 1 - (1 - 0.062)^16. This row is the one that fails when the split is dropped.
-- The planted defect needs 100 undeclared children to show. At 10 or 20 undeclared children the FWER is 0.008 and 0.013, still under 0.05. The true FWER crosses 0.05 near 65 to 70 children.
-- FDR can exceed FWER in a null row. The tree's e-value is a mean. It can reach 1/α without any single hypothesis passing its own level.
+- At α = 0.05, a null e-value test with 20 units rejects about 1 time in 380. That is far below 0.05. It is the price of validity at any stopping time. So the strict grid cannot tell a dropped split from a kept one.
+- The loose grid at α = 0.5 shows the split at work. A null hypothesis over 20 units rejects 4.2% of the time at that level. A null root fires a trigger at θ = 2 for 18.0% of trees. Both rates are from 1,000,000 seeded draws. So the four ordinary loose rows hold even with no split.
+- The partly-null row is the last loose row: a firing root with 16 null children. With the split its FWER is 0.02142 (upper end 0.02234). Without the split each child is tested at the full level, so its FWER is about 0.50. That figure is computed as 1 - (1 - 0.042)^16. This row is the one that fails when the split is dropped.
+- The planted defect shows clearly with 100 undeclared children. At 10 undeclared children the FWER is 0.031 (upper end 0.040), still under 0.05; at 20 it is 0.053 (upper end 0.064). The true FWER crosses 0.05 near 20 children.
+- FDR can exceed FWER in a null row, though no row of this run shows it. The tree's e-value is a mean. It can reach 1/α without any single hypothesis passing its own level.
 
 Planning consequence:
 
-- An e-value test needs more units than the classical z-formula gives for the same power. A 10-unit `Both` test at α = 0.05 cannot reach 1/α = 20. The first bet is 0 and later bets are at most 1/2. With ten scores of +1 the upper wealth is 1.5^9 = 38.4, the lower wealth stays 1, and their mean is 19.7.
+- An e-value test needs more units than the classical z-formula gives for the same power. A 7-unit `Both` test at α = 0.05 cannot reach 1/α = 20. With seven scores of +1 the upper bets are 0, 1/2, 2/3, then the cap 3/4, so the upper wealth is 1.5 × (5/3) × 1.75^4 = 23.4, the lower wealth stays 1, and their mean is 12.2.
 - Sizing a confirmatory e-value test needs a simulated power check.
 
 Why:
