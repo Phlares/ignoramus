@@ -20,8 +20,8 @@ Validity:
 
 - Any bet in [0, 1) fixed before its observation keeps wealth a test supermartingale under the null, so by Ville's inequality the chance it ever reaches 1 / level is at most the level. The cap changes power, not validity.
 - The evidence is the re-run of the 0009 tree suite and of the 0020 re-size suite, and the two-point nulls added to 0020. Their cluster observations take two values with mean at the margin, at the ends of the range or at its top and just below the margin. Every bound holds. The largest null rejection share in the re-size suite is 0.00300 at level 0.05, and the largest share that crossed 1 / level at any observation is 0.01468, both from the skew 0.03 null. 0009 and 0020 give the tables.
-- The 0020 suite never reaches the 1/4 factor. On its range the top scores 0.893, so its smallest factor is 1 − 0.75 × 0.893 = 0.33. Its ends and skew 0.3 rows stop on almost every replicate, so their zero shares hold by construction and test nothing.
-- The 1/4 factor is reached at fixed n in `crates/evidence/tests/claim.rs`: `a_null_at_the_margin_rejects_at_most_alpha` (the two ends of [0, 1], margin 0.5) and `a_skewed_null_still_holds_alpha` (0 or 1, margin 0.2) score ±1. Each checks the level, the mean e-value and the mean of every step's factor.
+- The 0020 suite never reaches the 1/4 factor. On its range the top scores 0.893, so its smallest factor is 1 − 0.75 × 0.893 = 0.33. Its ends and skew 0.3 rows stop on almost every replicate, so almost none of their runs test the claim.
+- The fixed-n tests in `crates/evidence/tests/claim.rs` can reach the 1/4 factor: `a_null_at_the_margin_rejects_at_most_alpha` (the two ends of [0, 1], margin 0.5) scores ±1, and `a_skewed_null_still_holds_alpha` (0 or 1, margin 0.2) scores +1 or −1/4. Each checks the level, the mean e-value and the mean of every step's factor.
 - The NaN path fails closed, as above.
 
 Case against:
