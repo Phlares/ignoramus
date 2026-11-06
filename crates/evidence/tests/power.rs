@@ -1,7 +1,7 @@
 use evidence::claim::{Bound, Statistic};
 use evidence::power::{Plan, Stratum, WORK, clusters_needed, mean_sd, simulate, work};
 use evidence::rng::Rng;
-use evidence::{Error, Tail};
+use evidence::{Error, Tail, rejects};
 
 const REPS: u32 = 2000;
 const SEED: [u8; 32] = [11; 32];
@@ -210,6 +210,17 @@ fn a_bound_passes_when_its_e_value_reaches_one_over_the_level() {
     let below = (-8..0).rev().map(near).find(|l| 1.0 / l > e).unwrap();
     assert_eq!(power(&Plan { level, ..p.clone() }), 1.0);
     assert_eq!(power(&Plan { level: below, ..p }), 0.0);
+}
+
+#[test]
+fn a_nan_e_value_never_reaches_one_over_the_level() {
+    // Every e-value test in the crate passes through `rejects`; a NaN fails it.
+    assert!(!rejects(f64::NAN, 0.25));
+    assert!(rejects(4.0, 0.25));
+    assert!(!rejects(4.0f64.next_down(), 0.25));
+    assert!(rejects(f64::INFINITY, 0.25));
+    // A level of 0 never rejects, even at +inf.
+    assert!(!rejects(f64::INFINITY, 0.0));
 }
 
 #[test]

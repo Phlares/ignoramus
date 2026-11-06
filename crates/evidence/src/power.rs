@@ -4,9 +4,9 @@
 //! (intersection-union, each test at the full level), so the power is that of the joint event.
 //! A call draws at most [`WORK`] values, so a check that sizes a study cannot run for hours.
 //! [`staged`] simulates a design with a blinded re-size from a reserve.
-use crate::Error;
 use crate::claim::{Bound, Statistic, e_value, observation, order};
 use crate::rng::Rng;
+use crate::{Error, rejects};
 
 /// The clusters of one stratum and their unit model: unit x = `unit_mean` + `sd` (sqrt(icc)
 /// Z_c + sqrt(1 - icc) N_u), with Z_c per cluster and N_u per unit, both standard normal.
@@ -162,7 +162,7 @@ fn observe(
 /// Every bound's e-value over its observations reaches 1 / level.
 fn holds_all(plan: &Plan, obs: &[Vec<f64>]) -> Result<bool, Error> {
     for (b, o) in plan.bounds.iter().zip(obs) {
-        if e_value(&plan.stat, b, o)? < 1.0 / plan.level {
+        if !rejects(e_value(&plan.stat, b, o)?, plan.level) {
             return Ok(false);
         }
     }
