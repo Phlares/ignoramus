@@ -171,18 +171,65 @@ const SPECS: [(&str, &str); 20] = [
     ),
 ];
 
+/// TOML the parser's changelog names: times without seconds, duplicate and dotted keys,
+/// digit separators, bad unquoted keys. Each spec text with its hash, or the error.
+const T0732: &str = "sha256:e106a362634244ff37dabd30f880218732c7ae8f8bb4744ec17d352a2c801f86";
+const D0732: &str = "sha256:7218b37e5c9d6c5a573de01dfc6ea48d303eb706bcd2fafc22a04bc5858156c0";
+const EDGES: [(&str, &str); 11] = [
+    ("t = 07:32", T0732),
+    ("t = 07:32:00", T0732),
+    ("d = 1979-05-27T07:32Z", D0732),
+    ("d = 1979-05-27T07:32:00Z", D0732),
+    ("a = 1\na = 2", "TOML error at 2:1: duplicate key"),
+    (
+        "[a.b.c]\nx = 1\n[a]\nb.d = 2",
+        "TOML error at 4:3: duplicate key",
+    ),
+    (
+        "a.b.c = 1\n[a.b]\nd = 2",
+        "TOML error at 2:4: duplicate key",
+    ),
+    (
+        "n = -_1",
+        "TOML error at 1:6: `_` may only go between digits, expected nothing",
+    ),
+    (
+        "n = 0b_1",
+        "TOML error at 1:7: `_` may only go between digits, expected nothing",
+    ),
+    (
+        "bad key = 1",
+        "TOML error at 1:5: key with no value, expected `=`",
+    ),
+    (
+        "ü = 1",
+        "TOML error at 1:1: invalid unquoted key, expected letters, numbers, `-`, `_`",
+    ),
+];
+
+/// Each case whose spec hash or error differs from the one pinned.
+fn changed<'a>(
+    cases: impl IntoIterator<Item = (&'a str, &'a str)>,
+    parse: impl Fn(&str) -> Result<spec::RawSpec, spec::LoadError>,
+) -> Vec<String> {
+    let seen = |case| parse(case).map_or_else(|e| e.to_string(), |s| s.hash);
+    cases
+        .into_iter()
+        .filter_map(|(case, want)| {
+            (seen(case) != want).then(|| format!("{case:?}: {}", seen(case)))
+        })
+        .collect()
+}
+
 #[test]
 fn every_toml_file_parses_as_before() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut got = Vec::new();
-    for (path, want) in SPECS {
-        let seen = match spec::load(&root.join(path)) {
-            Ok(s) => s.hash,
-            Err(e) => e.to_string(),
-        };
-        if seen != want {
-            got.push(format!("{path}: {seen}"));
-        }
-    }
+    let got = changed(SPECS, |path| spec::load(&root.join(path)));
+    assert!(got.is_empty(), "{}", got.join("\n"));
+}
+
+#[test]
+fn toml_edge_cases_parse_as_before() {
+    let got = changed(EDGES, |text| spec::parse(text.as_bytes()));
     assert!(got.is_empty(), "{}", got.join("\n"));
 }
