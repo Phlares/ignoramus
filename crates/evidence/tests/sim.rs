@@ -7,8 +7,8 @@ const SINGLE: u8 = 0;
 const STREAM: u8 = 1;
 const OTHER: u8 = 2;
 const LOOSE: u8 = 3;
-/// One null child tested alone at level 0.05 over 20 units rejects about 1 time in
-/// 1,300, so the family-wise error passes 0.05 only near 70 such children.
+/// One null child tested alone at level 0.05 over 20 units rejects about 1 time in 380,
+/// so the family-wise error passes 0.05 near 20 such children; 100 show it clearly.
 const DEFECT: usize = 100;
 
 fn close_to(a: f64, b: f64, tol: f64) {
@@ -342,7 +342,7 @@ fn a_small_mixed_scenario_is_pinned() {
     let r = simulate(&s, 300, &mut seed(OTHER, 9)).unwrap();
     assert_eq!(
         (r.fwer.mean, r.fdr.mean, r.power.mean, r.power.n),
-        (0.12, 0.0125, 0.6895833333333332, 280)
+        (0.12, 0.015555555555555553, 0.7714958775029445, 283)
     );
 }
 

@@ -15,38 +15,49 @@ Decision:
 - **The registration gate.** For a study that re-sizes, the power gate simulates the whole design at the borrowed sd and icc, with units about `power_at`. Per replicate and stratum, it draws the first batch, takes its s, reads the count from a table, stops the replicate when the count exceeds the first batch plus the reserve, and otherwise draws the appended clusters and tests the first batch then the appended ones. A replicate that stops fails. The gate passes when the share of passing replicates reaches `design.power`. The table holds 8 values of s, geometric from s0 / 4 to 4 s0, with s0 = √(sd_c² + `power_at`²) and sd_c the sd of a first-batch cluster's mean (0013). Each value has its count as above. A replicate's s takes the count of the first value at or above it, which rounds the count up; past the top value it stops. The z count floor (0013) is skipped, since it assumes a fixed count of clusters.
 - **Limits.** The search for a count tries up to 16,384 clusters per stratum, and one call draws at most 2,000 million values. The numbers in 0013 (1,024 clusters, 100 million values) describe the earlier version.
 
-Measured. A null simulation of the design, in release mode on one 6-CPU cloud host, all 14 scenarios below at once, took 1,179 s (20 minutes). Each scenario has one stratum, a first batch of 21 clusters of 4 units, a mean claim below ln 1.04 on [−ln 2, ln 2] at level 0.005, and a re-size at `power_at` = ln 1.02 for power 0.894 (0.8^(1/2), one stratum's share of a two-stratum claim at power 0.8). The data are drawn with their mean at the margin, the edge of the null. Each scenario runs 100,000 replicates in 25 batches of 4,000, each batch on its own seed with its own table. A rejection is a pass of the claim. The test passes when every rejection share is at most 0.005 + 3 × √(0.005 × 0.995 / 100,000) = 0.0056691. Shares are given with their Monte Carlo standard error.
+Measured. A null simulation of the design, in release mode on one 6-CPU cloud host, all 22 scenarios below at once, took 1,915 s (32 minutes), with the bet cap at 3/4 (0022). Each scenario has one stratum, a first batch of 21 clusters of 4 units, a mean claim below ln 1.04 on [−ln 2, ln 2] at level 0.005, and a re-size at `power_at` = ln 1.02 for power 0.894 (0.8^(1/2), one stratum's share of a two-stratum claim at power 0.8). The data are drawn with their mean at the margin, the edge of the null. Each scenario runs 100,000 replicates in 25 batches of 4,000, each batch on its own seed with its own table. A rejection is a pass of the claim. The test passes when every rejection share is at most 0.005 + 3 × √(0.005 × 0.995 / 100,000) = 0.0056691. A crossed replicate is one whose e-value reached 1 / level after some observation, not only the last; by Ville's inequality its share is at most the level too. A replicate that stops is neither passed nor crossed. That share is shown and not tested. Shares are given with their Monte Carlo standard error.
 
-| Reserve | sd | icc | Rejection share (se) | Stop share (se) |
-|---|---|---|---|---|
-| 0 | 0.03 | 0.1 | 0 | 1 |
-| 0 | 0.03 | 0.8 | 0 | 1 |
-| 0 | 0.15 | 0.1 | 0 | 1 |
-| 0 | 0.15 | 0.8 | 0 | 1 |
-| 500 | 0.03 | 0.1 | 0 | 0.09191 (0.00091) |
-| 500 | 0.03 | 0.8 | 0 | 0.87021 (0.00106) |
-| 500 | 0.15 | 0.1 | 0 | 0.99974 (0.00005) |
-| 500 | 0.15 | 0.8 | 0 | 1 |
-| 2,500 | 0.03 | 0.1 | 0 | 0 |
-| 2,500 | 0.03 | 0.8 | 0 | 0 |
-| 2,500 | 0.15 | 0.1 | 0.00002 (0.00001) | 0.00002 (0.00001) |
-| 2,500 | 0.15 | 0.8 | 0.00012 (0.00003) | 0.10277 (0.00096) |
-
-At level 0.005 the test almost never rejects, so these shares cannot show a fault that raises rejections. Two more scenarios run the same design at level 0.05, with a reserve of 2,500 and an icc of 0.1, against the bound 0.05 + 3 × √(0.05 × 0.95 / 100,000) = 0.0520676. At level 0.05 the sd 0.03 scenario still rejects 0 times in 100,000, so only the sd 0.15 scenario can show a raised error rate; it measured 0.00089 against a bound of 0.0520676. Both ran at once on the same host in 763 s:
-
-| Level | Reserve | sd | icc | Rejection share (se) | Stop share (se) |
+| Reserve | sd | icc | Rejection share (se) | Stop share (se) | Crossed share (se) |
 |---|---|---|---|---|---|
-| 0.05 | 2,500 | 0.03 | 0.1 | 0 | 0 |
-| 0.05 | 2,500 | 0.15 | 0.1 | 0.00089 (0.00009) | 0.00001 (0.00001) |
+| 0 | 0.03 | 0.1 | 0 | 1 | 0 |
+| 0 | 0.03 | 0.8 | 0 | 1 | 0 |
+| 0 | 0.15 | 0.1 | 0 | 1 | 0 |
+| 0 | 0.15 | 0.8 | 0 | 1 | 0 |
+| 500 | 0.03 | 0.1 | 0 | 0 | 0 |
+| 500 | 0.03 | 0.8 | 0 | 0.00563 (0.00024) | 0 |
+| 500 | 0.15 | 0.1 | 0 | 0.93451 (0.00078) | 0.00001 (0.00001) |
+| 500 | 0.15 | 0.8 | 0 | 0.99948 (0.00007) | 0 |
+| 2,500 | 0.03 | 0.1 | 0 | 0 | 0 |
+| 2,500 | 0.03 | 0.8 | 0 | 0 | 0 |
+| 2,500 | 0.15 | 0.1 | 0.00006 (0.00002) | 0 | 0.00040 (0.00006) |
+| 2,500 | 0.15 | 0.8 | 0.00008 (0.00003) | 0.10136 (0.00095) | 0.00168 (0.00013) |
 
-Every share is far below its bound. The scenarios at level 0.005 cover a re-size that stops every time (a reserve of 0), one that stops in part, and one that never stops. None of them appends none of its reserve: at this margin and level, 21 clusters never reach the count.
+At level 0.005 the test almost never rejects, so these shares cannot show a fault that raises rejections. Two more scenarios run the same design at level 0.05, with a reserve of 2,500 and an icc of 0.1, against the bound 0.05 + 3 × √(0.05 × 0.95 / 100,000) = 0.0520676. At level 0.05 the sd 0.03 scenario still rejects 0 times in 100,000, so only the sd 0.15 scenario can show a raised error rate; it measured 0.00228 against a bound of 0.0520676:
+
+| Level | Reserve | sd | icc | Rejection share (se) | Stop share (se) | Crossed share (se) |
+|---|---|---|---|---|---|---|
+| 0.05 | 2,500 | 0.03 | 0.1 | 0 | 0 | 0 |
+| 0.05 | 2,500 | 0.15 | 0.1 | 0.00228 (0.00015) | 0.00002 (0.00001) | 0.00702 (0.00026) |
+
+Normal data at the margin never bring a score near the top of the range, where the bet cap acts (0022). Six more scenarios draw each cluster's observation from a two-point null whose mean is the margin m = ln 1.04: the two ends of the range, or the top of the range, ln 2, and m − a (ln 2 − m) for a skew a of 0.03 or 0.3. On this range the top scores 0.893, not 1, since the score divides by the longer side, m + ln 2. Each runs at levels 0.005 and 0.05 with a reserve of 2,500. Its sd is the two points' sd, with an icc of 1, so the re-size table centres on the spread the data have:
+
+| Level | Shape | Points | Chance of the top | sd | Rejection share (se) | Stop share (se) | Crossed share (se) |
+|---|---|---|---|---|---|---|---|
+| 0.005 | ends, not informative | −0.693147, 0.693147 | 0.52829 | 0.69204 | 0 | 1 | 0 |
+| 0.005 | skew 0.03 | 0.019603, 0.693147 | 0.02913 | 0.11326 | 0.00007 (0.00003) | 0.46219 (0.00158) | 0.00018 (0.00004) |
+| 0.005 | skew 0.3, not informative | −0.156957, 0.693147 | 0.23077 | 0.35817 | 0 | 1 | 0 |
+| 0.05 | ends, not informative | −0.693147, 0.693147 | 0.52829 | 0.69204 | 0 | 1 | 0 |
+| 0.05 | skew 0.03 | 0.019603, 0.693147 | 0.02913 | 0.11326 | 0.00300 (0.00017) | 0.12281 (0.00104) | 0.01468 (0.00038) |
+| 0.05 | skew 0.3, not informative | −0.156957, 0.693147 | 0.23077 | 0.35817 | 0 | 0.99600 (0.00020) | 0.00400 (0.00020) |
+
+Every share is far below its bound, and so is every crossed share. The scenarios at level 0.005 cover a re-size that stops every time (a reserve of 0), one that stops in part, and one that never stops. None of them appends none of its reserve: at this margin and level, 21 clusters never reach the count. The re-size stops every replicate of the ends null, and nearly every one of the skew 0.3 null: their spread asks for more clusters than the reserve holds. Almost none of their runs test the claim, so the table marks them not informative. Only skew 0.03 runs long enough to test the cap; it rejects 0.00300 and crosses 0.01468 against a level of 0.05. On this range no score reaches 1, so no factor reaches the cap's floor of 1/4; the fixed-n null tests of the claim test can reach it (0022).
 
 The same design at a confirmatory study's planning values, an sd of 0.176 and an icc of 0.82, and at a third of that sd, with a reserve of 2,500 and the data at `power_at`:
 
 | sd | icc | Power (se) | Stop share (se) |
 |---|---|---|---|
-| 0.176 | 0.82 | 0.09060 (0.00091) | 0.86390 (0.00108) |
-| 0.0587 | 0.82 | 0.96451 (0.00059) | 0 |
+| 0.176 | 0.82 | 0.08784 (0.00090) | 0.86528 (0.00108) |
+| 0.0587 | 0.82 | 0.96963 (0.00054) | 0 |
 
 Why:
 
@@ -61,7 +72,7 @@ Case against:
 
 - Every re-size source studies t-tests. A blinded re-size of a non-inferiority t-test acts like an unblinded re-size of a superiority test, since the total variance carries the observed difference times the margin; its error excess is larger and persists at larger n (Glimm and Läuter; Friede and Kieser 2003, as cited by FDA 2019). A claim below a margin is a non-inferiority claim, and the root mean square here also carries the squared effect. The e-value test does not depend on the count being free of the effect, and the null simulation above is the evidence; a t-test would not inherit it.
 - The count shows a function of s, which grows with the squared effect. A person who reads `needed` learns a little about the effect, and aggregate blinded statistics can unblind (Żebrowska et al.). The level holds whatever the count shows, but the count is not fully blind.
-- The e-value test pays for its validity in power. At an sd of 0.176 and an icc of 0.82, 2,500 reserve clusters reach the count in only 14% of replicates, and the design passes 9% of the time; such a study fails the registration gate. At a third of that sd it never stops and passes 96% of the time. The rejection shares under the null, at most 0.00012 against a level of 0.005 and 0.00089 against 0.05, show how far the test sits inside its level.
+- The e-value test pays for its validity in power. At an sd of 0.176 and an icc of 0.82, 2,500 reserve clusters reach the count in only 13% of replicates, and the design passes 9% of the time; such a study fails the registration gate. At a third of that sd it never stops and passes 97% of the time. The rejection shares under the null, at most 0.00008 against a level of 0.005 and 0.00300 against 0.05, show how far the test sits inside its level.
 - The rounded-up table makes the gate's count larger than the runner's, so the gate errs low on power. A replicate with an s past the table's top value stops in the gate even if the reserve could reach it.
 - The model is normal within a stratum, and the reserve is assumed to come from the same population as the first batch. A reserve gathered later or from another source changes what the claim is about, though not its level.
 

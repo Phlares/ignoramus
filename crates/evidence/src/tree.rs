@@ -2,7 +2,7 @@
 //! hypotheses that never ran. The validity argument is this crate's own: the union bound
 //! and Markov's inequality, given that the set of hypotheses that ran does not depend on
 //! report data. Choodari-Oskooei et al. (arXiv:1902.05336) give context on adding arms.
-use crate::Error;
+use crate::{Error, rejects};
 
 /// Outcome of one tree decision.
 #[derive(Debug, Clone, PartialEq)]
@@ -63,7 +63,7 @@ pub fn decide(alpha: f64, weights: &[f64], e_values: &[Option<f64>]) -> Result<V
     let rejected: Vec<bool> = levels
         .iter()
         .zip(e_values)
-        .map(|(&l, e)| l > 0.0 && e.is_some_and(|e| e >= 1.0 / l))
+        .map(|(&l, e)| e.is_some_and(|e| rejects(e, l)))
         .collect();
     // `max` skips the NaN of a share that underflows to 0 times an infinite e-value.
     let e_value = (weights.iter().zip(e_values))

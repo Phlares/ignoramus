@@ -228,28 +228,28 @@ fn the_record_holds_counts_and_no_sd() {
 
 #[test]
 fn continue_appends_needed_minus_first_in_pin_order() {
-    let spec = spec_of(&study(30, 16));
+    let spec = spec_of(&study(24, 16));
     // Fiction's spread is 1, news' 0.75: each stratum takes its own count.
     let all = records(&spec, Role::Confirmation, by_stratum(-1.0, 0.75));
     let r = decide(&spec, &HASH, &all, &clusters_of(&spec)).unwrap();
-    let fiction = count(1.0, "resize/H1/fiction", 46, each(), -1.0, 1.0);
-    let news = count(0.75, "resize/H1/news", 46, each(), -1.0, 1.0);
-    assert_eq!((fiction, news), (Some(39), Some(33)));
+    let fiction = count(1.0, "resize/H1/fiction", 40, each(), -1.0, 1.0);
+    let news = count(0.75, "resize/H1/news", 40, each(), -1.0, 1.0);
+    assert_eq!((fiction, news), (Some(32), Some(26)));
     assert_eq!(
         r.strata,
         [
-            group("fiction", 30, 16, fiction),
-            group("news", 30, 16, news)
+            group("fiction", 24, 16, fiction),
+            group("news", 24, 16, news)
         ]
     );
-    assert_eq!((r.strata[0].appended, r.strata[1].appended), (9, 3));
+    assert_eq!((r.strata[0].appended, r.strata[1].appended), (8, 2));
     assert_eq!(r.decision, CONTINUE);
-    // The first 9 of fiction's reserve and the first 3 of news', by pin, not by path.
+    // The first 8 of fiction's reserve and the first 2 of news', by pin, not by path.
     let pinned = |s: &str, n: usize| by_pin(&spec, s)[..n].to_vec();
-    let want = [pinned("fiction", 9), pinned("news", 3)].concat();
+    let want = [pinned("fiction", 8), pinned("news", 2)].concat();
     assert_ne!(
-        pinned("fiction", 9),
-        (0..9)
+        pinned("fiction", 8),
+        (0..8)
             .map(|i| format!("data/fiction-reserve-{i:02}.txt"))
             .collect::<Vec<_>>()
     );
@@ -274,7 +274,7 @@ fn each_stratum_counts_its_own_clusters() {
     let r = decide(&spec, &HASH, &all, &clusters_of(&spec)).unwrap();
     let fiction = count(1.0, "resize/H1/fiction", 46, each(), -1.0, 1.0);
     let news = count(0.5, "resize/H1/news", 30, each(), -1.0, 1.0);
-    assert_eq!((fiction, news), (Some(39), Some(29)));
+    assert_eq!((fiction, news), (Some(32), Some(22)));
     assert_eq!(
         r.strata,
         [
@@ -410,16 +410,16 @@ fn a_pooled_claim_sizes_every_first_cluster_as_one_group() {
     let r = decide(&spec, &HASH, &all, &clusters_of(&spec)).unwrap();
     // One group of 20 first and 32 reserve clusters, sized for the whole power.
     let needed = count(1.25, "resize/H1/", 52, 0.8, -1.0, 1.0);
-    assert_eq!(needed, Some(43));
+    assert_eq!(needed, Some(37));
     assert_eq!(r.strata, [group("", 20, 32, needed)]);
     assert_eq!(r.decision, CONTINUE);
-    // 23 appended: every fiction reserve cluster by pin, then the first 7 of news'.
+    // 17 appended: every fiction reserve cluster by pin, then the first of news'.
     let want = [
         by_pin(&spec, "fiction"),
-        by_pin(&spec, "news")[..7].to_vec(),
+        by_pin(&spec, "news")[..1].to_vec(),
     ]
     .concat();
-    assert_eq!(want, by_pin(&spec, "")[..23].to_vec());
+    assert_eq!(want, by_pin(&spec, "")[..17].to_vec());
     assert_eq!(admitted(&spec, &r), want);
 }
 

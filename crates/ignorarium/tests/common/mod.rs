@@ -731,8 +731,8 @@ pub fn pilot(home: &Home, estimates: Vec<serde_json::Value>) -> Vec<String> {
 /// The template text as a confirmatory plan with its example claim, power_at, estimates,
 /// alpha share and deviation uncommented: below 0 by the median, with the sd and icc of
 /// `my-pilot`, whose code it does not pin, at the whole level. It is sized at -20, where every
-/// unit lies below the margin, and 14 more confirmation inputs give the 15 clusters the median
-/// test needs: each scores 1, and 1.5^14 = 292 reaches 1/0.005.
+/// unit lies below the margin, and 14 more confirmation inputs give 15 clusters. Each scores 1,
+/// so the median test needs 11: 11 clusters give 2.5 x 1.75^8 = 220, past 1/0.005.
 pub fn confirmatory(t: String) -> String {
     [
         "power_at = ",

@@ -1,7 +1,7 @@
 //! Online false discovery rate control by e-LOND (Xu and Ramdas, arXiv:2311.06412).
 //! Bounded gamma: Robertson, Wason and Ramdas, arXiv:2208.11418. Unbounded gamma:
 //! Javanmard and Montanari 2018, eq. 31.
-use crate::Error;
+use crate::{Error, rejects};
 
 /// Published constant; the series sums to about 0.976.
 const UNBOUNDED_C: f64 = 0.07720838;
@@ -103,7 +103,7 @@ impl Stream {
         if e.is_nan() || e < 0.0 {
             return Err(Error::Parameter("e-value"));
         }
-        let discovery = slot.level > 0.0 && e >= 1.0 / slot.level;
+        let discovery = rejects(e, slot.level);
         self.discoveries += u64::from(discovery);
         Ok(discovery)
     }

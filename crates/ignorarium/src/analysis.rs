@@ -474,7 +474,7 @@ fn fit(samples: &[Vec<f64>]) -> Option<Fit> {
 /// `stopped: ` and, in a test, e-value 0.
 ///
 /// An e-value past the largest float is kept as that float: records and the stream hold
-/// finite numbers, and a smaller e-value is still one.
+/// finite numbers, and a smaller e-value is still one. A NaN e-value is kept as 0.
 pub fn verdicts(
     spec: &Spec,
     paired: &Paired,
@@ -678,8 +678,9 @@ fn held(
     Ok(out)
 }
 
+/// `e` kept finite: above the largest float it is that float, and NaN is 0, so it fails.
 fn finite(e: f64) -> f64 {
-    e.min(f64::MAX)
+    if e >= 0.0 { e.min(f64::MAX) } else { 0.0 }
 }
 
 /// The strata a claim of `h` is held in: each it lists, once, in order; `""`, the pooled
@@ -936,4 +937,17 @@ pub fn distinct_clusters(
             None => true,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_nan_e_value_is_kept_as_0() {
+        assert_eq!(finite(f64::NAN), 0.0);
+        assert_eq!(finite(f64::INFINITY), f64::MAX);
+        assert_eq!(finite(3.0), 3.0);
+        assert_eq!(finite(0.0), 0.0);
+    }
 }

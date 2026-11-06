@@ -1,7 +1,8 @@
-use evidence::claim::{Bound, Statistic, e_value, holds, observation, order};
+use evidence::claim::{Bound, Statistic, e_value, e_values, holds, observation, order};
+use evidence::eprocess::{EProcess, Score};
 use evidence::rng::Rng;
 use evidence::sim::Estimate;
-use evidence::{Error, Tail};
+use evidence::{Error, Tail, rejects};
 
 /// The level a box study runs at, and a looser one.
 const LEVELS: [f64; 2] = [0.05, 0.005];
@@ -32,11 +33,48 @@ fn rng(family: u8) -> Rng {
     Rng::from_seed(s)
 }
 
+/// The e-process the claim test runs for `bound`, built here so a check can read its value
+/// after each observation. `path` checks it against `e_values`.
+fn process(stat: Statistic, bound: Bound) -> EProcess {
+    let (lo, hi, mean, tail) = match stat {
+        Statistic::Mean { lo, hi } => (lo, hi, bound.margin, bound.tail),
+        Statistic::Quantile(q) if bound.tail == Tail::Lower => (0.0, 1.0, q, Tail::Upper),
+        Statistic::Quantile(q) => (0.0, 1.0, 1.0 - q, Tail::Upper),
+    };
+    EProcess::new(Score::Bounded { lo, hi, mean }, tail, f64::INFINITY).unwrap()
+}
+
+/// The test's value before any observation, then after each one.
+fn path(stat: Statistic, bound: Bound, obs: &[f64]) -> Vec<f64> {
+    let mut p = process(stat, bound);
+    let mut out = vec![p.value()];
+    for &x in obs {
+        p.observe(x).unwrap();
+        out.push(p.value());
+    }
+    let peak = out.iter().copied().fold(0.0, f64::max);
+    assert_eq!(e_values(&stat, &bound, obs), Ok((out[obs.len()], peak)));
+    out
+}
+
+/// The mean of `xs` and its standard error.
+fn mean_se(xs: &[f64]) -> (f64, f64) {
+    let n = xs.len() as f64;
+    let mean = xs.iter().sum::<f64>() / n;
+    let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
+    (mean, (var / n).sqrt())
+}
+
 /// Checks the test of `bound` on a null at its margin, over `REPS` replicates of `n`
 /// observations from `draw`. First, `n` copies of `best`, the observation that argues most
-/// for the claim, reach 1 / 0.005, so the null can reject at either level. Then the share of
-/// replicates that reach 1 / level has a Wilson upper end at most the level, at each level;
-/// and the e-values, a martingale at the margin, have a mean within 4 standard errors of 1.
+/// for the claim, reach 1 / 0.005, so the null can reject at either level. Then:
+/// - the share of replicates that reach 1 / level has a Wilson upper end at most the level, at
+///   each level;
+/// - the mean e-value is at most 1 + 4 standard errors. At the margin it is 1. A heavy right
+///   tail pulls a sample mean below 1, not above, so only this side is tested;
+/// - each factor e_k / e_(k-1), pooled over every step and replicate, has a mean within 4
+///   standard errors of 1, as the steps of a martingale do. Factors lie in [1 - cap, 1 + cap],
+///   so their tails are light, and a bet that sees its own observation moves their mean.
 fn holds_at_the_margin(
     stat: Statistic,
     bound: Bound,
@@ -47,23 +85,27 @@ fn holds_at_the_margin(
 ) {
     let strongest = e_value(&stat, &bound, &vec![best; n]).unwrap();
     assert!(strongest >= 1.0 / 0.005, "{bound:?}: at most {strongest}");
-    let es: Vec<f64> = (0..REPS)
+    let paths: Vec<Vec<f64>> = (0..REPS)
         .map(|_| {
             let obs: Vec<f64> = (0..n).map(|_| draw(rng)).collect();
-            e_value(&stat, &bound, &obs).unwrap()
+            path(stat, bound, &obs)
         })
         .collect();
+    let es: Vec<f64> = paths.iter().map(|p| p[n]).collect();
     for level in LEVELS {
-        let hits = es.iter().filter(|&&e| e >= 1.0 / level).count();
+        let hits = es.iter().filter(|&&e| rejects(e, level)).count();
         let rate = Estimate::of(hits as f64, REPS);
         assert!(rate.holds(level), "{bound:?} at {level}: {rate:?}");
     }
-    let mean = es.iter().sum::<f64>() / REPS as f64;
-    let var = es.iter().map(|e| (e - mean).powi(2)).sum::<f64>() / (REPS - 1) as f64;
-    let se = (var / REPS as f64).sqrt();
+    let (mean, se) = mean_se(&es);
+    assert!(mean - 1.0 <= 4.0 * se, "{bound:?}: mean e {mean}, se {se}");
+    let factors: Vec<f64> = (paths.iter())
+        .flat_map(|p| p.windows(2).map(|w| w[1] / w[0]))
+        .collect();
+    let (mean, se) = mean_se(&factors);
     assert!(
         (mean - 1.0).abs() <= 4.0 * se,
-        "{bound:?}: mean e {mean}, se {se}"
+        "{bound:?}: mean factor {mean}, se {se}"
     );
 }
 
@@ -129,7 +171,7 @@ fn clipped_units_hold_alpha_at_the_clipped_mean() {
 
 #[test]
 fn e_value_follows_the_table() {
-    // Two observations: the first bet is 0, the second is S / (1 + Q) capped at 1/2.
+    // Two observations: the first bet is 0, the second is S / (1 + Q), 1/2 after a score of 1.
     let mean = Statistic::Mean { lo: 0.0, hi: 1.0 };
     // A mean below 0.5: scores -1, -1; the lower tail bets 1/2 and gains 1/2.
     close(e_value(&mean, &below(0.5), &[0.0, 0.0]).unwrap(), 1.5);
@@ -155,6 +197,25 @@ fn e_value_follows_the_table() {
     close(reversed, 1.0);
     // No observation: no evidence.
     close(e_value(&mean, &below(0.5), &[]).unwrap(), 1.0);
+}
+
+#[test]
+fn e_values_give_the_last_and_the_largest() {
+    let mean = Statistic::Mean { lo: 0.0, hi: 1.0 };
+    // Scores -1, -1, 1 below 0.5: 1, 1.5, then a bet of 2/3 on the wrong side gives 0.5.
+    let (last, peak) = e_values(&mean, &below(0.5), &[0.0, 0.0, 1.0]).unwrap();
+    close(last, 0.5);
+    close(peak, 1.5);
+    // The start counts: a process that never bets peaks at 1.
+    let (last, peak) = e_values(&mean, &below(0.5), &[1.0, 1.0, 1.0]).unwrap();
+    close(last, 1.0);
+    close(peak, 1.0);
+    // An observation the test refuses makes both 0.
+    assert_eq!(e_values(&mean, &below(0.5), &[0.0, 2.0]), Ok((0.0, 0.0)));
+    assert_eq!(
+        e_values(&mean, &below(0.5), &[0.0, 0.0]).unwrap().0,
+        e_value(&mean, &below(0.5), &[0.0, 0.0]).unwrap()
+    );
 }
 
 #[test]

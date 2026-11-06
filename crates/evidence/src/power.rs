@@ -4,9 +4,9 @@
 //! (intersection-union, each test at the full level), so the power is that of the joint event.
 //! A call draws at most [`WORK`] values, so a check that sizes a study cannot run for hours.
 //! [`staged`] simulates a design with a blinded re-size from a reserve.
-use crate::Error;
-use crate::claim::{Bound, Statistic, e_value, observation, order};
+use crate::claim::{Bound, Statistic, e_values, observation, order};
 use crate::rng::Rng;
+use crate::{Error, rejects};
 
 /// The clusters of one stratum and their unit model: unit x = `unit_mean` + `sd` (sqrt(icc)
 /// Z_c + sqrt(1 - icc) N_u), with Z_c per cluster and N_u per unit, both standard normal.
@@ -62,7 +62,7 @@ fn validate(plan: &Plan, reps: u32) -> Result<(), Error> {
         return Err(Error::Parameter("bounds"));
     }
     for b in &plan.bounds {
-        e_value(&plan.stat, b, &[])?;
+        e_values(&plan.stat, b, &[])?;
     }
     if plan.strata.is_empty() {
         return Err(Error::Parameter("strata"));
@@ -136,18 +136,22 @@ fn replicate(plan: &Plan, rng: &mut Rng) -> Result<bool, Error> {
 fn stratum_passes(plan: &Plan, s: &Stratum, rng: &mut Rng) -> Result<bool, Error> {
     let mut obs = vec![Vec::with_capacity(s.sizes.len()); plan.bounds.len()];
     let seeded = order(s.sizes.len(), rng);
-    observe(plan, s, seeded, rng, &mut obs)?;
-    holds_all(plan, &obs)
+    observe(plan, s, seeded, rng, &mut obs, &unit_model)?;
+    Ok(holds_all(plan, &obs)?.last)
 }
 
-/// Draws the clusters of `s` at `indices`, in that order, and adds each one's observation for
-/// each bound to that bound's list in `obs`.
+/// Fills `out` with the values of one cluster of `m` units of stratum `s`.
+type Draw<'a> = &'a dyn Fn(&Statistic, &Stratum, u32, &mut Rng, &mut Vec<f64>);
+
+/// Draws the clusters of `s` at `indices` by `draw`, in that order, and adds each one's
+/// observation for each bound to that bound's list in `obs`.
 fn observe(
     plan: &Plan,
     s: &Stratum,
     indices: impl IntoIterator<Item = usize>,
     rng: &mut Rng,
     obs: &mut [Vec<f64>],
+    draw: Draw,
 ) -> Result<(), Error> {
     let mut values = Vec::new();
     for i in indices {
@@ -159,14 +163,29 @@ fn observe(
     Ok(())
 }
 
-/// Every bound's e-value over its observations reaches 1 / level.
-fn holds_all(plan: &Plan, obs: &[Vec<f64>]) -> Result<bool, Error> {
+/// What the tests reached: `last`, every bound's e-value reaches 1 / level after the last
+/// observation; `ever`, every bound's reaches it after some observation.
+#[derive(Debug, Clone, Copy)]
+struct Reached {
+    last: bool,
+    ever: bool,
+}
+
+/// What each bound's test over its observations reached.
+fn holds_all(plan: &Plan, obs: &[Vec<f64>]) -> Result<Reached, Error> {
+    let mut last = true;
     for (b, o) in plan.bounds.iter().zip(obs) {
-        if e_value(&plan.stat, b, o)? < 1.0 / plan.level {
-            return Ok(false);
+        let (e, peak) = e_values(&plan.stat, b, o)?;
+        // The peak is at least the last value, so a bound that never reaches 1 / level ends it.
+        if !rejects(peak, plan.level) {
+            return Ok(Reached {
+                last: false,
+                ever: false,
+            });
         }
+        last &= rejects(e, plan.level);
     }
-    Ok(true)
+    Ok(Reached { last, ever: true })
 }
 
 /// The values one cluster of `m` units gives `observation`. A mean's observation is the mean
@@ -174,7 +193,7 @@ fn holds_all(plan: &Plan, obs: &[Vec<f64>]) -> Result<bool, Error> {
 /// the m units, and `observation` clips it to the range as it clips each unit of a real
 /// cluster. The two agree while the units stay inside the range. A quantile's observation
 /// needs every unit.
-fn draw(stat: &Statistic, s: &Stratum, m: u32, rng: &mut Rng, out: &mut Vec<f64>) {
+fn unit_model(stat: &Statistic, s: &Stratum, m: u32, rng: &mut Rng, out: &mut Vec<f64>) {
     out.clear();
     match stat {
         Statistic::Mean { .. } => {
@@ -319,10 +338,23 @@ pub struct Staged {
 
 /// The share of `reps` replicates of the whole design that pass; see [`staged_detail`].
 pub fn staged(plan: &Staged, reps: u32, seed: [u8; 32]) -> Result<f64, Error> {
-    Ok(staged_detail(plan, reps, seed)?.0)
+    Ok(staged_detail(plan, reps, seed)?.pass)
 }
 
-/// The shares of `reps` replicates of the whole design that pass and that stop. A replicate
+/// Shares of the replicates of a staged design.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Shares {
+    /// Every bound in every stratum reaches 1 / level after the last observation.
+    pub pass: f64,
+    /// The re-size stops.
+    pub stop: f64,
+    /// Every bound in every stratum reaches 1 / level after some observation. Under the null
+    /// Ville's inequality bounds this share by the level too. A replicate that stops is
+    /// neither passed nor crossed.
+    pub crossed: f64,
+}
+
+/// The shares of `reps` replicates of the whole design that pass, stop and cross. A replicate
 /// draws each stratum's first batch in a seeded order and takes the blinded sd `s` of its
 /// observations for the first bound (a mean gives every bound the same one). The stratum's
 /// table gives the count that `s` needs; the replicate stops, and fails, when a stratum has no
@@ -335,7 +367,31 @@ pub fn staged(plan: &Staged, reps: u32, seed: [u8; 32]) -> Result<f64, Error> {
 /// `size_at`, `target_each` and `reps`, capped at first + reserve. A replicate's `s` takes the
 /// count of the first value at or above it; above the top value it has none. The table's
 /// searches and the replicates run on `seed`, and draw at most [`WORK`] values in all.
-pub fn staged_detail(plan: &Staged, reps: u32, seed: [u8; 32]) -> Result<(f64, f64), Error> {
+pub fn staged_detail(plan: &Staged, reps: u32, seed: [u8; 32]) -> Result<Shares, Error> {
+    staged_run(plan, reps, seed, &unit_model)
+}
+
+/// [`staged_detail`] with each replicate's cluster means drawn by `draw`, one value per
+/// cluster, in place of the unit model; the re-size table still assumes the unit model. Every
+/// stratum draws from the same `draw`. For null simulations of shapes the unit model cannot
+/// give. A mean claim only: a quantile needs every unit, so it is refused with
+/// `Error::Parameter("stat")`.
+pub fn staged_detail_by(
+    plan: &Staged,
+    reps: u32,
+    seed: [u8; 32],
+    draw: impl Fn(&mut Rng) -> f64,
+) -> Result<Shares, Error> {
+    if !matches!(plan.stat, Statistic::Mean { .. }) {
+        return Err(Error::Parameter("stat"));
+    }
+    staged_run(plan, reps, seed, &|_, _, _, rng, out| {
+        out.clear();
+        out.push(draw(rng));
+    })
+}
+
+fn staged_run(plan: &Staged, reps: u32, seed: [u8; 32], draw: Draw) -> Result<Shares, Error> {
     let whole = Plan {
         stat: plan.stat,
         bounds: plan.bounds.clone(),
@@ -380,28 +436,36 @@ pub fn staged_detail(plan: &Staged, reps: u32, seed: [u8; 32]) -> Result<(f64, f
         .map(|(st, s)| table(st, s))
         .collect::<Result<Vec<_>, _>>()?;
     let mut rng = Rng::from_seed(seed);
-    let (mut passed, mut stopped) = (0, 0);
+    let (mut passed, mut stopped, mut crossed) = (0, 0, 0);
     for _ in 0..reps {
-        match staged_replicate(&whole, plan, &tables, &mut rng)? {
-            Some(pass) => passed += u32::from(pass),
+        match staged_replicate(&whole, plan, &tables, &mut rng, draw)? {
+            Some(r) => {
+                passed += u32::from(r.last);
+                crossed += u32::from(r.ever);
+            }
             None => stopped += 1,
         }
     }
-    Ok((share(passed, reps), share(stopped, reps)))
+    Ok(Shares {
+        pass: share(passed, reps),
+        stop: share(stopped, reps),
+        crossed: share(crossed, reps),
+    })
 }
 
-/// `Some(passes)`, or `None` when the re-size stops.
+/// What the replicate's tests reached, or `None` when the re-size stops.
 fn staged_replicate(
     whole: &Plan,
     plan: &Staged,
     tables: &[Vec<(f64, Option<u32>)>],
     rng: &mut Rng,
-) -> Result<Option<bool>, Error> {
+    draw: Draw,
+) -> Result<Option<Reached>, Error> {
     let mut sized = Vec::with_capacity(tables.len());
     for ((st, s), table) in plan.strata.iter().zip(&whole.strata).zip(tables) {
         let mut obs = vec![Vec::with_capacity(s.sizes.len()); plan.bounds.len()];
         let seeded = order(st.first.len(), rng);
-        observe(whole, s, seeded, rng, &mut obs)?;
+        observe(whole, s, seeded, rng, &mut obs, draw)?;
         let count = blinded_sd(&obs[0])
             .and_then(|sd| table.iter().find(|&&(at, _)| at >= sd))
             .and_then(|&(_, n)| n);
@@ -410,11 +474,14 @@ fn staged_replicate(
         };
         sized.push((s, obs, (n as usize).max(st.first.len())));
     }
+    let mut last = true;
     for ((s, mut obs, n), st) in sized.into_iter().zip(&plan.strata) {
-        observe(whole, s, st.first.len()..n, rng, &mut obs)?;
-        if !holds_all(whole, &obs)? {
-            return Ok(Some(false));
+        observe(whole, s, st.first.len()..n, rng, &mut obs, draw)?;
+        let r = holds_all(whole, &obs)?;
+        if !r.ever {
+            return Ok(Some(r));
         }
+        last &= r.last;
     }
-    Ok(Some(true))
+    Ok(Some(Reached { last, ever: true }))
 }

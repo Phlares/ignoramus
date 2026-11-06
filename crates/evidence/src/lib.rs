@@ -37,6 +37,11 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// Whether e-value `e` reaches 1 / `level`. A NaN never does, nor anything at a level of 0.
+pub fn rejects(e: f64, level: f64) -> bool {
+    level > 0.0 && e >= 1.0 / level
+}
+
 /// Which side of the null counts as evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tail {
