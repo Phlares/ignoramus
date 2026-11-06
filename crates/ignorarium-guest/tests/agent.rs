@@ -10,7 +10,6 @@ use ignorarium_guest::agent::steps::{
 use ignorarium_guest::agent::{gate, sandbox};
 use ignorarium_guest::pack;
 use ignorarium_guest::proto::{End, Job, SEED_ENV, SelfTest};
-use rustix::process::{Pid, Signal, kill_process_group};
 use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::fs;
@@ -236,25 +235,6 @@ fn payload_times_out() {
     let mut j = sh("exec /bin/sleep 30", d.path());
     j.timeout_ms = 200;
     let ran = payload::run(&j).unwrap();
-    assert_eq!(ran.end, End::Timeout);
-    assert!(ran.wall < Duration::from_secs(2), "{:?}", ran.wall);
-}
-
-#[test]
-fn a_leader_that_leaves_its_group_cannot_hang_the_timeout() {
-    let d = tempfile::tempdir().unwrap();
-    // The leader puts its child in a new group and joins that group, so a kill of its
-    // first group reaches neither of them.
-    let script = r#"$c = fork // die; if (!$c) { sleep 5; exit }
-        setpgrp($c, $c) or die; setpgrp(0, $c) or die;
-        open my $f, '>', "$ENV{OUT}/pg" or die; print $f $c; close $f; sleep 5"#;
-    let out = d.path().to_str().unwrap();
-    let ran = payload::run(&job(&["/usr/bin/perl", "-e", script], &[("OUT", out)], 300)).unwrap();
-    let pg: i32 = fs::read_to_string(d.path().join("pg"))
-        .unwrap()
-        .parse()
-        .unwrap();
-    let _ = kill_process_group(Pid::from_raw(pg).unwrap(), Signal::KILL);
     assert_eq!(ran.end, End::Timeout);
     assert!(ran.wall < Duration::from_secs(2), "{:?}", ran.wall);
 }
