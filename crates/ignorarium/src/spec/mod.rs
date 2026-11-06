@@ -80,8 +80,9 @@ pub fn parse(bytes: &[u8]) -> Result<RawSpec, LoadError> {
 }
 
 /// Integer vs float and the sign of zero are part of the hash (`1` and `1.0` differ).
-/// Datetimes hash as the toml crate's Display writes them, with seconds always present:
-/// `07:32` hashes as `07:32:00`, as it did before toml 1.0.
+/// Datetimes hash as the toml crate's Display writes them, with the seconds always written
+/// and a zero fraction dropped: `07:32` and `07:32:00.000` hash as `07:32:00`, as they did
+/// before toml 1.0.
 /// Non-finite floats become `"!nonfinite:…"` strings so loading never fails;
 /// the `Finite` check reports them later.
 fn to_json(v: toml::Value) -> Value {
@@ -98,6 +99,7 @@ fn to_json(v: toml::Value) -> Value {
         toml::Value::Datetime(mut d) => {
             if let Some(t) = d.time.as_mut() {
                 t.second.get_or_insert(0);
+                t.nanosecond = t.nanosecond.filter(|&n| n != 0);
             }
             Value::String(d.to_string())
         }

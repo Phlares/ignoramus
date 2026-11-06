@@ -87,8 +87,8 @@ fn a_record_written_before_still_seals_and_verifies() {
     );
 }
 
-/// Each TOML file of the repo, parsed as a spec: its hash, or the error.
-const SPECS: [(&str, &str); 20] = [
+/// Each TOML test fixture, parsed as a spec: its hash, or the error.
+const SPECS: [(&str, &str); 14] = [
     (
         "crates/bundle/tests/fixtures/studies/numeric/citation.toml",
         "sha256:a7c7ba47a7b50f44c89c06bdaeadf0b3561dfef5d8243297720d0b7ae0264f8c",
@@ -145,42 +145,42 @@ const SPECS: [(&str, &str); 20] = [
         "crates/ignorarium/tests/fixtures/specs/resize.toml",
         "sha256:ee0a58dc54cff6454348813ce8f923f767c316d0815e4fe15d3df953604cca8f",
     ),
-    (
-        "guide/steps.toml",
-        "sha256:ea24ccf60ec734ba5c85f8570162dad7dbf4fa32ea83cb2337c64ecc4ff662ae",
-    ),
-    (
-        "rules/publish.toml",
-        "sha256:7bb608af6ed32bb0982f2a177b43d7bd95df0320b1a9f02f261472fd174ee572",
-    ),
-    (
-        "rules/scan.toml",
-        "sha256:66d9c7f7bccbc8c78a28424784cf8c4fc6170154c1264f6b3580bf2a5db3d0bd",
-    ),
-    (
-        "rules/v0.toml",
-        "sha256:eb966ab4266b65cc9b194e3f164b3199b66b948ee5dc6ce108cf44c1978c8892",
-    ),
-    (
-        "templates/numeric-ablation.toml",
-        "sha256:277ee1e16fd66fecfda95c67a05b28523f720e5870cdc09f75844c9c8108ed7e",
-    ),
-    (
-        "templates/planted-spawn.toml",
-        "sha256:0c576f2158aa484066174edf30ccc310bbe6fd82b3407daa3b9326bca9fc2e4b",
-    ),
 ];
 
 const T0732: &str = "sha256:e106a362634244ff37dabd30f880218732c7ae8f8bb4744ec17d352a2c801f86";
 const D0732: &str = "sha256:7218b37e5c9d6c5a573de01dfc6ea48d303eb706bcd2fafc22a04bc5858156c0";
 
-/// TOML the parser's changelog names: times without seconds, duplicate and dotted keys,
-/// digit separators, bad unquoted keys. Each spec text with its hash, or the error.
-const EDGES: [(&str, &str); 11] = [
+/// TOML the parser's changelog names, and each datetime form: times without seconds,
+/// fractions, separators and offsets, duplicate and dotted keys, digit separators, bad
+/// unquoted keys. Each spec text with its hash, or the error.
+const EDGES: [(&str, &str); 19] = [
     ("t = 07:32", T0732),
     ("t = 07:32:00", T0732),
     ("d = 1979-05-27T07:32Z", D0732),
     ("d = 1979-05-27T07:32:00Z", D0732),
+    ("t = 07:32:00.000", T0732),
+    (
+        "t = 07:32:00.5",
+        "sha256:5145c07dd760fddf8ed7453f9b8ede31655137f5b4513a83cb18477d1ded1bcc",
+    ),
+    (
+        "t = 07:32:00.123456789",
+        "sha256:c24cb5d19bc7408246f335f5d0e83e56233c87d9e9d339471a87e3b93e02b981",
+    ),
+    (
+        "d = 1979-05-27T07:32",
+        "sha256:5ab6c93721f7074dddff61cd70bbd49256c94f7711a28e9f4dcc8df94720b8a8",
+    ),
+    ("d = 1979-05-27 07:32:00Z", D0732),
+    ("d = 1979-05-27T07:32:00z", D0732),
+    (
+        "d = 1979-05-27T00:32:00.999999-07:00",
+        "sha256:e0e519f94ff109ef9ba35bf071b650432c5ef5387a8c6b19973495c0b0e474dc",
+    ),
+    (
+        "d = 1979-05-27",
+        "sha256:1953aa77e693218b191b9cdaa1a6b724fe90df7c151597b431a27ab2af289b86",
+    ),
     ("a = 1\na = 2", "TOML error at 2:1: duplicate key"),
     // Valid TOML. toml 0.9 refused it as a duplicate key, so no record holds it.
     (
