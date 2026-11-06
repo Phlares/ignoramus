@@ -838,7 +838,7 @@ fn register_refuses_pending_values() {
 
 #[test]
 fn register_freezes_the_estimate_records_it_used() {
-    // Two more strata, each with the 15 clusters the power gate needs.
+    // Two more strata, each with 15 clusters, enough for the power gate.
     let (f, spec) = setup("numeric-ablation", |t| {
         common::confirmatory(t)
             .replace(

@@ -36,7 +36,9 @@ fn rng(family: u8) -> Rng {
 /// observations from `draw`. First, `n` copies of `best`, the observation that argues most
 /// for the claim, reach 1 / 0.005, so the null can reject at either level. Then the share of
 /// replicates that reach 1 / level has a Wilson upper end at most the level, at each level;
-/// and the e-values, a martingale at the margin, have a mean within 4 standard errors of 1.
+/// and the last factor, e over n observations divided by e over the first n - 1, has a mean
+/// within 4 standard errors of 1, as a martingale step at the margin does. The factor lies in
+/// [1 - cap, 1 + cap]. The e-value itself has too heavy a tail for its sample mean to test.
 fn holds_at_the_margin(
     stat: Statistic,
     bound: Bound,
@@ -47,23 +49,24 @@ fn holds_at_the_margin(
 ) {
     let strongest = e_value(&stat, &bound, &vec![best; n]).unwrap();
     assert!(strongest >= 1.0 / 0.005, "{bound:?}: at most {strongest}");
-    let es: Vec<f64> = (0..REPS)
+    let (es, steps): (Vec<f64>, Vec<f64>) = (0..REPS)
         .map(|_| {
             let obs: Vec<f64> = (0..n).map(|_| draw(rng)).collect();
-            e_value(&stat, &bound, &obs).unwrap()
+            let e = e_value(&stat, &bound, &obs).unwrap();
+            (e, e / e_value(&stat, &bound, &obs[..n - 1]).unwrap())
         })
-        .collect();
+        .unzip();
     for level in LEVELS {
         let hits = es.iter().filter(|&&e| e >= 1.0 / level).count();
         let rate = Estimate::of(hits as f64, REPS);
         assert!(rate.holds(level), "{bound:?} at {level}: {rate:?}");
     }
-    let mean = es.iter().sum::<f64>() / REPS as f64;
-    let var = es.iter().map(|e| (e - mean).powi(2)).sum::<f64>() / (REPS - 1) as f64;
+    let mean = steps.iter().sum::<f64>() / REPS as f64;
+    let var = steps.iter().map(|f| (f - mean).powi(2)).sum::<f64>() / (REPS - 1) as f64;
     let se = (var / REPS as f64).sqrt();
     assert!(
         (mean - 1.0).abs() <= 4.0 * se,
-        "{bound:?}: mean e {mean}, se {se}"
+        "{bound:?}: mean last factor {mean}, se {se}"
     );
 }
 
@@ -129,7 +132,7 @@ fn clipped_units_hold_alpha_at_the_clipped_mean() {
 
 #[test]
 fn e_value_follows_the_table() {
-    // Two observations: the first bet is 0, the second is S / (1 + Q) capped at 1/2.
+    // Two observations: the first bet is 0, the second is S / (1 + Q), 1/2 after a score of 1.
     let mean = Statistic::Mean { lo: 0.0, hi: 1.0 };
     // A mean below 0.5: scores -1, -1; the lower tail bets 1/2 and gains 1/2.
     close(e_value(&mean, &below(0.5), &[0.0, 0.0]).unwrap(), 1.5);

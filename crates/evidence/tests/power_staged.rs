@@ -164,7 +164,7 @@ fn staged_with_no_reserve_equals_simulate() {
 #[test]
 fn staged_counts_stops_as_failures() {
     // Below power, sized at -1.5, a few replicates stop: each one fails.
-    let d = no_reserve(20, -1.5);
+    let d = no_reserve(16, -1.5);
     let fixed = simulated(&first_batch(&d));
     let (pass, stop) = staged_detail(&d, REPS, SEED).unwrap();
     assert!(fixed < 0.8 && 0.0 < stop && stop < 0.1, "{fixed} {stop}");
@@ -180,7 +180,7 @@ fn staged_detail_reports_the_stop_share() {
     // batch gives: every replicate stops.
     let d = no_reserve(20, -1.0);
     assert_eq!(staged_detail(&d, REPS, SEED), Ok((0.0, 1.0)));
-    let (pass, stop) = staged_detail(&no_reserve(16, -2.0), REPS, SEED).unwrap();
+    let (pass, stop) = staged_detail(&no_reserve(12, -2.0), REPS, SEED).unwrap();
     assert!(pass == 0.0 && 0.0 < stop && stop < 1.0, "{pass} {stop}");
 }
 

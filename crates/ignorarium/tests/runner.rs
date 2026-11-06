@@ -3075,13 +3075,13 @@ fn close_of(id: &str, e: f64, discovery: bool) -> (String, serde_json::Value) {
 fn a_planted_effect_passes_and_closes_a_discovery() {
     let lab = lab();
     // Every unit pairs to -25 %, below the margin 0: each of the 15 clusters scores 1, and the
-    // 14 bets of 1/2 give 1.5^14 = 292, past 1 / 0.005.
+    // bets 0, 1/2, 2/3, then 12 at the cap 3/4 give 2.5 x 1.75^12 = 2,063, past 1 / 0.005.
     tested(&lab, "planted", 1, |t| t, &arm_a_at(6), Box::new(Level0));
     let v = verdict_of(&lab, "planted");
     let level = level_of(&lab, "planted");
     let e = v.e_value.unwrap();
     assert!(
-        (e - 1.5f64.powi(14)).abs() < 1e-9 && e >= 1.0 / level,
+        (e / (2.5 * 1.75f64.powi(12)) - 1.0).abs() < 1e-12 && e >= 1.0 / level,
         "{e}"
     );
     let want = Verdict {
@@ -3141,7 +3141,7 @@ fn a_void_row_in_scope_fails_the_claim() {
     // The bound reports the test on the 14 complete clusters.
     assert_eq!(v.bounds[0].clusters, 14);
     let e = v.bounds[0].value.unwrap();
-    assert!((e - 1.5f64.powi(13)).abs() < 1e-9, "{e}");
+    assert!((e / (2.5 * 1.75f64.powi(11)) - 1.0).abs() < 1e-12, "{e}");
     // The slot still closes, with e-value 0.
     let stream = stream_of(&lab, LogName::Plan);
     assert_eq!(stream.last(), Some(&close_of("void", 0.0, false)));

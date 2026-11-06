@@ -46,9 +46,9 @@ fn power(p: &Plan) -> f64 {
 
 #[test]
 fn power_rises_with_clusters_and_falls_with_icc() {
-    let few = power(&plan(vec![stratum(20, 0.0)]));
-    let more = power(&plan(vec![stratum(24, 0.0)]));
-    let clustered = power(&plan(vec![stratum(24, 0.5)]));
+    let few = power(&plan(vec![stratum(14, 0.0)]));
+    let more = power(&plan(vec![stratum(18, 0.0)]));
+    let clustered = power(&plan(vec![stratum(18, 0.5)]));
     assert!(0.1 < few && few + 0.2 < more && more < 0.99, "{few} {more}");
     assert!(clustered + 0.1 < more, "{clustered} {more}");
 }
@@ -56,8 +56,8 @@ fn power_rises_with_clusters_and_falls_with_icc() {
 #[test]
 fn every_stratum_and_every_bound_must_pass() {
     // Two independent strata pass together about as often as the square of one alone.
-    let one = power(&plan(vec![stratum(24, 0.0)]));
-    let two = power(&plan(vec![stratum(24, 0.0), stratum(24, 0.0)]));
+    let one = power(&plan(vec![stratum(16, 0.0)]));
+    let two = power(&plan(vec![stratum(16, 0.0), stratum(16, 0.0)]));
     assert!(0.3 < one && one < 0.95, "{one}");
     assert!((two - one * one).abs() < 0.04, "{one} {two}");
     // A within claim needs both of its bounds; each alone passes more often. The range is
@@ -66,7 +66,7 @@ fn every_stratum_and_every_bound_must_pass() {
         power(&Plan {
             stat: Statistic::Mean { lo: -3.0, hi: 1.0 },
             bounds,
-            ..plan(vec![stratum(22, 0.0)])
+            ..plan(vec![stratum(16, 0.0)])
         })
     };
     let lower = with(vec![below(0.0)]);
@@ -79,7 +79,7 @@ fn every_stratum_and_every_bound_must_pass() {
 fn the_cluster_mean_has_the_variance_of_its_own_size() {
     // With icc 0, a cluster of 16 units with unit sd 2 has the mean sd of a cluster of 4
     // with unit sd 1, so one seed draws the same cluster means and the same power; one
-    // cluster of 64 and 23 of 1 do not, though their mean size is about 3.6.
+    // cluster of 64 and 17 of 1 do not, though their mean size is 4.5.
     let of = |sizes: Vec<u32>, sd: f64, icc: f64| {
         power(&plan(vec![Stratum {
             sizes,
@@ -88,17 +88,17 @@ fn the_cluster_mean_has_the_variance_of_its_own_size() {
             unit_mean: -1.0,
         }]))
     };
-    let small = of(vec![4; 24], 1.0, 0.0);
-    assert_eq!(small.to_bits(), of(vec![16; 24], 2.0, 0.0).to_bits());
-    let mut mixed = vec![1; 23];
+    let small = of(vec![4; 18], 1.0, 0.0);
+    assert_eq!(small.to_bits(), of(vec![16; 18], 2.0, 0.0).to_bits());
+    let mut mixed = vec![1; 17];
     mixed.push(64);
     assert!(of(mixed, 1.0, 0.0) + 0.2 < small);
     // sd^2 (icc + (1 - icc) / m): icc 0.5, sd 1 and 4 units give 0.625, as icc 0, sd
     // sqrt(0.625) and 1 unit do.
-    let clustered = of(vec![4; 24], 1.0, 0.5);
+    let clustered = of(vec![4; 18], 1.0, 0.5);
     assert_eq!(
         clustered.to_bits(),
-        of(vec![1; 24], 0.625f64.sqrt(), 0.0).to_bits()
+        of(vec![1; 18], 0.625f64.sqrt(), 0.0).to_bits()
     );
     assert!(clustered + 0.1 < small, "{clustered} {small}");
 }
@@ -139,8 +139,9 @@ fn a_quantile_claim_is_sized_on_the_share_of_units() {
 
 #[test]
 fn with_sd_0_every_quantile_unit_sits_at_the_unit_mean() {
-    // Every unit at -1, below the margin 0: each of 9 clusters gives a share of 1, and the
-    // wealth 1.5^8 = 25.6 passes 1 / 0.05 in every replicate. A unit that strays fails some.
+    // Every unit at -1, below the margin 0: each of 9 clusters gives a share of 1. The bets
+    // are 0, 1/2, 2/3, then the cap 3/4, so the wealth 1.5 x (5/3) x 1.75^6 = 71.8 passes
+    // 1 / 0.05 in every replicate. A unit that strays fails some.
     let p = Plan {
         stat: Statistic::Quantile(0.5),
         ..plan(vec![Stratum {
@@ -149,7 +150,7 @@ fn with_sd_0_every_quantile_unit_sits_at_the_unit_mean() {
         }])
     };
     let e = evidence::claim::e_value(&p.stat, &p.bounds[0], &[1.0; 9]).unwrap();
-    assert!((e - 1.5f64.powi(8)).abs() < 1e-9, "{e}");
+    assert!((e - 2.5 * 1.75f64.powi(6)).abs() < 1e-9, "{e}");
     assert_eq!(power(&p), 1.0);
     let mut above = p.clone();
     above.strata[0].unit_mean = 1.0;
@@ -162,7 +163,7 @@ fn the_quantile_simulation_matches_a_direct_one_at_icc_0_and_1() {
     // (p = 0.841). With icc 0 each of a cluster's 4 units draws its own Z; with icc 1 they all
     // share one, so the share is 1 or 0. The simulation's power matches a direct one over such
     // shares, within Monte Carlo error.
-    for (icc, n) in [(0.0, 12), (1.0, 12)] {
+    for (icc, n) in [(0.0, 10), (1.0, 12)] {
         let p = Plan {
             stat: Statistic::Quantile(0.5),
             ..plan(vec![stratum(n, icc)])
@@ -213,7 +214,7 @@ fn a_bound_passes_when_its_e_value_reaches_one_over_the_level() {
 
 #[test]
 fn the_simulation_is_fixed_by_its_seed() {
-    let p = plan(vec![stratum(20, 0.0)]);
+    let p = plan(vec![stratum(16, 0.0)]);
     let a = simulate(&p, REPS, &mut Rng::from_seed(SEED)).unwrap();
     let b = simulate(&p, REPS, &mut Rng::from_seed(SEED)).unwrap();
     let other = simulate(&p, REPS, &mut Rng::from_seed([12; 32])).unwrap();
@@ -238,7 +239,7 @@ fn trial(p: &Plan, n: usize) -> Plan {
 fn clusters_needed_is_the_smallest_passing_count() {
     let p = plan(vec![stratum(3, 0.0), stratum(5, 0.0)]);
     let n = clusters_needed(&p, 0.8, REPS, SEED, 1024).unwrap().unwrap();
-    assert!((20..60).contains(&n), "{n}");
+    assert!((10..40).contains(&n), "{n}");
     let at = |k: u32| power(&trial(&p, k as usize));
     assert!(at(n) >= 0.8, "{n}: {}", at(n));
     assert!(at(n - 1) < 0.8, "{n}: {}", at(n - 1));

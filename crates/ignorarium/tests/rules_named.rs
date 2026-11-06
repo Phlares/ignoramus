@@ -137,7 +137,7 @@ fn descriptive(id: &str) -> Value {
 }
 
 /// `h1()` as `H<i>` for each share, in order. The base plan's 35 clusters pass at each of these
-/// shares: a share of 0.1 needs 31.
+/// shares: a share of 0.1 needs 22.
 fn shared(shares: &[f64]) -> Vec<Edit> {
     let list: Vec<Value> = shares
         .iter()
@@ -161,7 +161,7 @@ fn hyp(field: &str, v: Option<Value>) -> Edit {
 /// A confirmatory plan that passes every named check: 35 confirmation inputs of 5 units. At sd
 /// 2 and icc 0 a cluster mean has sd 0.89; 30 below the margin, in a range of half-width 50,
 /// each scores about -0.6, and the simulated test at the first stream level (0.005) and power
-/// 0.8 needs 22 clusters (31 at a share of 0.1). A selection stage picks `arm-a` or `arm-b` on the selection
+/// 0.8 needs 16 clusters (22 at a share of 0.1). A selection stage picks `arm-a` or `arm-b` on the selection
 /// input, and the confirmation stage runs the pick, which `h1()` tests. Its code is not
 /// `pilot`'s, and it declares a deviation from `pilot`.
 fn ok() -> Value {
@@ -393,13 +393,13 @@ fn faults() -> Vec<Fault> {
         // its end, so no cluster mean falls outside it.
         f(vec![hyp("power_at", j(json!(-50.0)))], vec![]),
         f(vec![hyp("power_at", j(json!("low")))], vec![]),
-        // 9 clusters against the 22 the simulated test needs; 1 below the margin, 9 against
+        // 9 clusters against the 16 the simulated test needs; 1 below the margin, 9 against
         // the z floor's 10.
         f(power_edits(5, 9), vec![POWER]),
         f(and(near(), power_edits(5, 9)), vec![POWER]),
-        // Selection inputs do not count: 22 confirmation inputs pass, 21 do not.
-        f(vec![("/inputs", j(inputs(21, 5)))], vec![POWER]),
-        f(vec![("/inputs", j(inputs(22, 5)))], vec![]),
+        // Selection inputs do not count: 16 confirmation inputs pass, 15 do not.
+        f(vec![("/inputs", j(inputs(15, 5)))], vec![POWER]),
+        f(vec![("/inputs", j(inputs(16, 5)))], vec![]),
         // The sd and icc come from a finished study's estimates. A plan that takes none from
         // pilot declares a deviation from a study it takes no estimates from.
         f(
@@ -2194,27 +2194,27 @@ fn each_stratum_needs_its_own_clusters() {
 
 #[test]
 fn two_confirmation_inputs_with_the_same_data_count_once() {
-    // 22 clusters pass where 22 are needed; a copy of one, in other case and spacing, is the
+    // 16 clusters pass where 16 are needed; a copy of one, in other case and spacing, is the
     // same cluster.
     let dir = study_dir();
     write(dir.path(), "texts/s00.txt", b"selection text");
-    for i in 0..22 {
+    for i in 0..16 {
         write(
             dir.path(),
             &format!("texts/c{i:02}.txt"),
             format!("text {i}").as_bytes(),
         );
     }
-    let spec = edited(&power_edits(5, 22));
+    let spec = edited(&power_edits(5, 16));
     assert!(named(&spec, dir.path()).is_empty());
-    write(dir.path(), "texts/c21.txt", b"TEXT   20");
+    write(dir.path(), "texts/c15.txt", b"TEXT   14");
     assert_eq!(
         named(&spec, dir.path())
             .iter()
             .map(|d| d.problem.as_str())
             .collect::<Vec<_>>(),
         [format!(
-            "{SIM}0.00 with 21 clusters in fiction; about 22 per stratum reach 0.80."
+            "{SIM}0.00 with 15 clusters in fiction; about 16 per stratum reach 0.80."
         )]
     );
 }
@@ -2509,9 +2509,9 @@ fn boundaries_hold_on_both_sides() {
         let d = named(&edited(&edits), dir.path());
         assert!(d.is_empty(), "{edits:?}: {d:?}");
     };
-    // 22 clusters pass where 21 fail (table), with 1 unit each as with 5.
-    passes(power_edits(5, 22));
-    passes(power_edits(1, 22));
+    // 16 clusters pass where 15 fail (table), with 1 unit each as with 5.
+    passes(power_edits(5, 16));
+    passes(power_edits(1, 16));
     passes(vec![("/mutations/depth_cap", j(json!(2)))]);
     passes(vec![("/mutations/depth_cap", j(json!(0)))]);
     passes(vec![("/scope/min_isolation", j(json!(2)))]);
@@ -3512,7 +3512,7 @@ fn the_gate_refuses_what_the_z_formula_passes() {
     assert_eq!(
         problems(&spec, dir.path()),
         [format!(
-            "{SIM}0.00 with 26 clusters in code and 26 in article; about 96 per stratum reach 0.80."
+            "{SIM}0.00 with 26 clusters in code and 26 in article; about 73 per stratum reach 0.80."
         )]
     );
     assert_eq!(
@@ -3522,7 +3522,7 @@ fn the_gate_refuses_what_the_z_formula_passes() {
             power: 0.0,
             target: 0.8,
             clusters: vec![("code".into(), 26), ("article".into(), 26)],
-            needed: Some(96),
+            needed: Some(73),
             resized: false,
         }]
     );
@@ -3532,7 +3532,7 @@ fn the_gate_refuses_what_the_z_formula_passes() {
 fn the_z_floor_fails_without_simulating() {
     // 1 below the margin with 1 unit per cluster a z-test needs 47 clusters. With 46 the gate
     // states the floor's numbers alone. With 47 it passes the floor and simulates the test,
-    // which needs about twice as many.
+    // which needs nearly twice as many.
     let dir = study_dir();
     let at = |n| problems(&edited(&and(near(), power_edits(1, n))), dir.path());
     assert_eq!(
@@ -3544,7 +3544,7 @@ fn the_z_floor_fails_without_simulating() {
     assert_eq!(
         at(47),
         [format!(
-            "{SIM}0.05 with 47 clusters in fiction; about 94 per stratum reach 0.80."
+            "{SIM}0.27 with 47 clusters in fiction; about 84 per stratum reach 0.80."
         )]
     );
 }
@@ -3558,12 +3558,12 @@ fn a_quantile_claim_is_simulated_without_a_floor() {
         problems(&edited(&e), dir.path())
     };
     // 30 below the margin every unit lies below it, so each cluster scores 1 and the e-value
-    // after n clusters is 1.5^(n - 1): 15 clusters reach 1/0.005, 14 do not.
-    assert!(median(power_edits(5, 15)).is_empty());
+    // after n clusters is 2.5 x 1.75^(n - 3): 11 clusters reach 1/0.005, 10 do not.
+    assert!(median(power_edits(5, 11)).is_empty());
     assert_eq!(
-        median(power_edits(5, 14)),
+        median(power_edits(5, 10)),
         [format!(
-            "{SIM}0.00 with 14 clusters in fiction; about 15 per stratum reach 0.80."
+            "{SIM}0.00 with 10 clusters in fiction; about 11 per stratum reach 0.80."
         )]
     );
     // Just below the margin about half the units lie on each side, and 16,384 clusters per
@@ -3579,9 +3579,9 @@ fn a_quantile_claim_is_simulated_without_a_floor() {
     );
     // Pooled, the count is of clusters.
     assert_eq!(
-        median(and(power_edits(5, 14), vec![hyp("strata", j(json!([])))])),
+        median(and(power_edits(5, 10), vec![hyp("strata", j(json!([])))])),
         [format!(
-            "{SIM}0.00 with 14 clusters in the pooled group; about 15 clusters reach 0.80."
+            "{SIM}0.00 with 10 clusters in the pooled group; about 11 clusters reach 0.80."
         )]
     );
     // One cluster, and a target given to three decimals.
@@ -3590,7 +3590,7 @@ fn a_quantile_claim_is_simulated_without_a_floor() {
     assert_eq!(
         median(e),
         [format!(
-            "{SIM}0.00 with 1 cluster in fiction; about 15 per stratum reach 0.999."
+            "{SIM}0.00 with 1 cluster in fiction; about 11 per stratum reach 0.999."
         )]
     );
     // Each stratum the claim lists, named in order.
@@ -3608,7 +3608,7 @@ fn a_quantile_claim_is_simulated_without_a_floor() {
             hyp("strata", j(json!(["fiction", "code", "article"]))),
         ]),
         [format!(
-            "{SIM}0.00 with 2 clusters in fiction, 2 in code and 2 in article; about 15 per stratum reach 0.80."
+            "{SIM}0.00 with 2 clusters in fiction, 2 in code and 2 in article; about 11 per stratum reach 0.80."
         )]
     );
     // The 0.9-quantile of the units at -3: their mean lies 2 sd z(0.9) = 2.56 lower, where
@@ -3620,7 +3620,7 @@ fn a_quantile_claim_is_simulated_without_a_floor() {
     assert_eq!(
         problems(&edited(&and(power_edits(1, 2), tail)), dir.path()),
         [format!(
-            "{SIM}0.00 with 2 clusters in fiction; about 115 per stratum reach 0.80."
+            "{SIM}0.00 with 2 clusters in fiction; about 71 per stratum reach 0.80."
         )]
     );
     // 1 below the margin a mean would fail the z floor with 2 clusters; a quantile has no
@@ -3628,7 +3628,7 @@ fn a_quantile_claim_is_simulated_without_a_floor() {
     assert_eq!(
         median(and(near(), power_edits(5, 2))),
         [format!(
-            "{SIM}0.00 with 2 clusters in fiction; about 42 per stratum reach 0.80."
+            "{SIM}0.00 with 2 clusters in fiction; about 34 per stratum reach 0.80."
         )]
     );
 }
@@ -3693,11 +3693,16 @@ fn a_power_that_meets_the_target_exactly_passes_and_searches_nothing() {
 
 #[test]
 fn the_power_is_seeded_by_the_spec_hash_and_the_hypothesis_id() {
-    // Two hypotheses alike but for their ids, each at half the level with 24 clusters, where
-    // the simulated power lies between 0 and 1.
+    // Two hypotheses alike but for their ids, each sized 1 below the margin on [-5, 5] at half
+    // the level with 48 clusters, where the simulated power lies between 0 and 1.
     let dir = study_dir();
     let mut e = shared(&[0.5, 0.5]);
-    e.extend(power_edits(5, 24));
+    for k in ["/question/hypotheses/0", "/question/hypotheses/1"] {
+        let at = |f: &str| -> &'static str { Box::leak(format!("{k}/{f}").into_boxed_str()) };
+        e.push((at("power_at"), j(json!(-1.0))));
+        e.push((at("statistic"), j(json!({ "mean": [-5.0, 5.0] }))));
+    }
+    e.extend(power_edits(5, 48));
     let spec = edited(&e);
     let of = |hash: [u8; 32]| {
         rules::power(
@@ -5731,7 +5736,7 @@ fn a_resize_study_with_ample_reserve_passes_the_gate() {
     };
     let seed = ignorarium::seed::seed(&[0; 32], "power/H1");
     let whole = staged(&plan, 4000, seed).unwrap();
-    assert_eq!(whole, 0.91975);
+    assert_eq!(whole, 0.939);
     assert_eq!(
         rules::power(&spec, &c),
         [Power {
@@ -5756,10 +5761,10 @@ fn a_resize_study_with_a_small_reserve_fails_with_the_whole_design_power() {
     let spec = resize_study(dir.path(), &["fiction"], 8, 40);
     assert_eq!(
         problems(&spec, dir.path()),
-        [format!("{WHOLE}0.24 of 0.80.")]
+        [format!("{WHOLE}0.23 of 0.80.")]
     );
     let p = &rules::power(&spec, &ctx(dir.path()))[0];
-    assert_eq!((p.power, p.needed, p.resized), (0.24325, None, true));
+    assert_eq!((p.power, p.needed, p.resized), (0.23125, None, true));
 }
 
 #[test]
@@ -5793,7 +5798,7 @@ fn the_gate_for_a_fixed_study_is_unchanged() {
         power: 0.0,
         target: 0.8,
         clusters: vec![("code".into(), 26), ("article".into(), 26)],
-        needed: Some(96),
+        needed: Some(73),
         resized: false,
     };
     assert_eq!(rules::power(&spec, &ctx(dir.path())), [fixed]);
@@ -5802,7 +5807,7 @@ fn the_gate_for_a_fixed_study_is_unchanged() {
         problems(&spec, dir.path()),
         [
             format!(
-                "{SIM}0.00 with 26 clusters in code and 26 in article; about 96 per stratum reach 0.80."
+                "{SIM}0.00 with 26 clusters in code and 26 in article; about 73 per stratum reach 0.80."
             ),
             unasked.into(),
             unasked.into(),

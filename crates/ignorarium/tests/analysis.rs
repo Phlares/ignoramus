@@ -827,11 +827,14 @@ const BELOW_ZERO: Bound = Bound {
     margin: 0.0,
 };
 
-/// The e-value of `n` clusters at -1 below 0 on [-1, 1]: each scores 1, and the n - 1 bets of
-/// 1/2 give 1.5^(n - 1).
+/// The e-value of `n` clusters at -1 below 0 on [-1, 1], n at least 3: each scores 1, and the
+/// bets 0, 1/2, 2/3, then the cap 3/4 give 1.5 x (5/3) x 1.75^(n - 3) = 2.5 x 1.75^(n - 3).
 fn strong(n: usize) -> f64 {
     let e = e_value(&MEAN, &BELOW_ZERO, &vec![-1.0; n]).unwrap();
-    assert!((e / 1.5f64.powi(n as i32 - 1) - 1.0).abs() < 1e-12, "{e}");
+    assert!(
+        (e / (2.5 * 1.75f64.powi(n as i32 - 3)) - 1.0).abs() < 1e-12,
+        "{e}"
+    );
     e
 }
 
@@ -1271,11 +1274,11 @@ fn the_level_splits_by_alpha_share() {
     h3["alpha_share"] = json!(0.25);
     v["question"]["hypotheses"] = json!([h1, h2, h3]);
     let spec = Spec::from_value(&v).unwrap();
-    let groups = [same("c", "code", 15, -1.0), same("a", "article", 16, -1.0)].concat();
+    let groups = [same("c", "code", 12, -1.0), same("a", "article", 13, -1.0)].concat();
     let (p, clusters) = data(&spec, &groups);
     let (vs, study) = decided(&spec, &p, &clusters, Some(LEVEL));
-    let (e1, e3) = (strong(15), strong(16));
-    // H1 needs 1 / 0.00375 = 267 and has 292; H3 needs 1 / 0.00125 = 800 and has 438, which
+    let (e1, e3) = (strong(12), strong(13));
+    // H1 needs 1 / 0.00375 = 267 and has 385; H3 needs 1 / 0.00125 = 800 and has 673, which
     // the whole level (200) would pass.
     let got: Vec<(&str, &str, Option<f64>, Option<f64>)> = (vs.iter())
         .map(|v| {
@@ -1319,8 +1322,8 @@ fn the_level_splits_by_alpha_share() {
 #[test]
 fn a_study_whose_claims_all_fail_is_no_stream_discovery() {
     // H1 holds code and H2 article, each with half the slot's level, so each needs about
-    // 400. With 15 and 13 clusters at -1 they reach 292 and 130 and both fail, though their
-    // mean, 211, passes 1 / level.
+    // 400. With 12 and 11 clusters at -1 they reach 385 and 220 and both fail, though their
+    // mean, 302, passes 1 / level.
     let mut v = ignorarium::spec::load("../../templates/numeric-ablation.toml".as_ref())
         .unwrap()
         .value;
@@ -1337,7 +1340,7 @@ fn a_study_whose_claims_all_fail_is_no_stream_discovery() {
     h2["strata"] = json!(["article"]);
     v["question"]["hypotheses"] = json!([h1, h2]);
     let spec = Spec::from_value(&v).unwrap();
-    let groups = [same("c", "code", 15, -1.0), same("a", "article", 13, -1.0)].concat();
+    let groups = [same("c", "code", 12, -1.0), same("a", "article", 11, -1.0)].concat();
     let (p, clusters) = data(&spec, &groups);
     let dir = tempfile::TempDir::new().unwrap();
     let home = Home::open_at(dir.path()).unwrap();
@@ -1345,7 +1348,7 @@ fn a_study_whose_claims_all_fail_is_no_stream_discovery() {
     let log = Log::of(&home, LogName::Plan);
     let slot = log.open(&key, "s", 0.0).unwrap();
     let (vs, study) = decided(&spec, &p, &clusters, Some(slot.level));
-    let (e1, e2) = (strong(15), strong(13));
+    let (e1, e2) = (strong(12), strong(11));
     assert!(vs.iter().all(|v| v.verdict == "fail"), "{vs:?}");
     assert!(0.5 * e1 + 0.5 * e2 >= 1.0 / slot.level);
     assert_eq!(study, Some(0.5 * e1));
@@ -1382,7 +1385,7 @@ fn a_claim_the_test_cannot_take_fails_closed() {
 
 #[test]
 fn an_e_value_too_large_for_a_float_is_kept_finite() {
-    // 1,800 clusters at -1: 1.5^1799 overflows a float. Records and the stream hold finite
+    // 1,800 clusters at -1: 2.5 x 1.75^1797 overflows a float. Records and the stream hold finite
     // numbers, and the largest float is a smaller e-value, so still one.
     let spec = below_zero("confirmatory", &[]);
     let (p, clusters) = data(&spec, &same("c", "", 1800, -1.0));

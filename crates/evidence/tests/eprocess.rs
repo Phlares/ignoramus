@@ -19,12 +19,25 @@ fn run(p: &mut EProcess, xs: &[f64]) -> Vec<f64> {
 fn sign_upper_matches_hand_values() {
     let mut p = EProcess::new(Score::Sign, Tail::Upper, f64::INFINITY).unwrap();
     let v = run(&mut p, &[1.0, 2.0, -1.0, 3.0]);
-    for (a, b) in v.iter().zip([1.0, 1.5, 0.75, 0.9375]) {
+    // The third bet is 2/3, below the cap; under a cap of 1/2 it would be 1/2.
+    for (a, b) in v.iter().zip([1.0, 1.5, 0.5, 0.625]) {
         close(*a, b);
     }
     close(p.p_value(), 1.0 / 1.5);
     assert_eq!(p.observed(), 4);
-    assert_eq!(MAX_BET, 0.5);
+    assert_eq!(MAX_BET, 0.75);
+}
+
+#[test]
+fn a_score_at_the_far_end_never_zeroes_wealth() {
+    // Scores of 1/2 push each side's bet past 1, so it bets the cap; then a score at the far
+    // end meets it. A cap of 1 makes each log wealth -inf, and their mean NaN.
+    const { assert!(MAX_BET < 1.0) };
+    let mut p = EProcess::new(Score::Clip { scale: 1.0 }, Tail::Both, f64::INFINITY).unwrap();
+    let xs: Vec<f64> = [vec![0.5; 10], vec![-1.0], vec![-0.5; 40], vec![1.0]].concat();
+    for (i, v) in run(&mut p, &xs).into_iter().enumerate() {
+        assert!(v.is_finite() && v > 0.0, "{i}: {v}");
+    }
 }
 
 #[test]
@@ -40,7 +53,7 @@ fn sign_of_zero_is_zero() {
 fn clip_matches_hand_values() {
     let mut p = EProcess::new(Score::Clip { scale: 2.0 }, Tail::Upper, f64::INFINITY).unwrap();
     let v = run(&mut p, &[1.0, 4.0, -1.0]);
-    for (a, b) in v.iter().zip([1.0, 1.4, 1.05]) {
+    for (a, b) in v.iter().zip([1.0, 1.4, 1.4 * (1.0 - 1.0 / 3.0)]) {
         close(*a, b);
     }
 }

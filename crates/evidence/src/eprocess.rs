@@ -2,8 +2,8 @@
 //! arXiv:2010.09686; Vovk and Wang, arXiv:1912.06116 for the two-sided mean).
 use crate::{Error, Tail};
 
-/// Largest bet fraction. Every factor stays at or above 1/2, so wealth never reaches 0.
-pub const MAX_BET: f64 = 0.5;
+/// Largest bet fraction. Every factor stays at or above 1/4, so wealth never reaches 0.
+pub const MAX_BET: f64 = 0.75;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Score {
