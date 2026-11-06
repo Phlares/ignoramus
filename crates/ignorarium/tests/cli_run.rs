@@ -1246,7 +1246,7 @@ fn a_pilot_then_a_follow_on_resolve_end_to_end() {
     assert!(
         (v["diagnostics"].as_array().unwrap().iter())
             .any(|d| d["problem"].as_str().unwrap().ends_with(
-                "Study wide-pilot's unit values of this contrast in the pooled group, clipped to the statistic's range, give no icc, or no variance above 0."
+                "Study wide-pilot's unit values of this contrast in the pooled group, clipped to the statistic's range, give no icc, or no variance above 0. A range that every value lies past leaves no spread: widen it, or borrow from another study."
             )),
         "{v}"
     );

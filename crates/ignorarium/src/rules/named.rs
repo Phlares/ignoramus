@@ -1120,7 +1120,7 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
                         pair
                     } else {
                         return Some(Lookup::Missing(format!(
-                            "Study {from}'s unit values of this contrast{pick} in {}, clipped to the statistic's range, give no icc, or no variance above 0.",
+                            "Study {from}'s unit values of this contrast{pick} in {}, clipped to the statistic's range, give no icc, or no variance above 0. A range that every value lies past leaves no spread: widen it, or borrow from another study.",
                             group_name(group)
                         )));
                     }

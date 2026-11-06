@@ -1682,7 +1682,7 @@ fn clipping_shrinks_the_borrowed_sd_of_an_outlier_text() {
     assert_eq!(
         borrowed_from(vec![], b),
         Lookup::Missing(
-            "Study pilot's unit values of this contrast in stratum fiction, clipped to the statistic's range, give no icc, or no variance above 0.".into()
+            "Study pilot's unit values of this contrast in stratum fiction, clipped to the statistic's range, give no icc, or no variance above 0. A range that every value lies past leaves no spread: widen it, or borrow from another study.".into()
         )
     );
 }
