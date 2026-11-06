@@ -171,19 +171,21 @@ const SPECS: [(&str, &str); 20] = [
     ),
 ];
 
-/// TOML the parser's changelog names: times without seconds, duplicate and dotted keys,
-/// digit separators, bad unquoted keys. Each spec text with its hash, or the error.
 const T0732: &str = "sha256:e106a362634244ff37dabd30f880218732c7ae8f8bb4744ec17d352a2c801f86";
 const D0732: &str = "sha256:7218b37e5c9d6c5a573de01dfc6ea48d303eb706bcd2fafc22a04bc5858156c0";
+
+/// TOML the parser's changelog names: times without seconds, duplicate and dotted keys,
+/// digit separators, bad unquoted keys. Each spec text with its hash, or the error.
 const EDGES: [(&str, &str); 11] = [
     ("t = 07:32", T0732),
     ("t = 07:32:00", T0732),
     ("d = 1979-05-27T07:32Z", D0732),
     ("d = 1979-05-27T07:32:00Z", D0732),
     ("a = 1\na = 2", "TOML error at 2:1: duplicate key"),
+    // Valid TOML. toml 0.9 refused it as a duplicate key, so no record holds it.
     (
         "[a.b.c]\nx = 1\n[a]\nb.d = 2",
-        "TOML error at 4:3: duplicate key",
+        "sha256:d5086b605a2ab6c9721244bc9bdd8e878d578481e7974348b2c98c6898517bc0",
     ),
     (
         "a.b.c = 1\n[a.b]\nd = 2",
@@ -212,12 +214,14 @@ fn changed<'a>(
     cases: impl IntoIterator<Item = (&'a str, &'a str)>,
     parse: impl Fn(&str) -> Result<spec::RawSpec, spec::LoadError>,
 ) -> Vec<String> {
-    let seen = |case| parse(case).map_or_else(|e| e.to_string(), |s| s.hash);
     cases
         .into_iter()
-        .filter_map(|(case, want)| {
-            (seen(case) != want).then(|| format!("{case:?}: {}", seen(case)))
+        .map(|(case, want)| {
+            let seen = parse(case).map_or_else(|e| e.to_string(), |s| s.hash);
+            (case, want, seen)
         })
+        .filter(|(_, want, seen)| seen != want)
+        .map(|(case, _, seen)| format!("{case:?}: {seen}"))
         .collect()
 }
 

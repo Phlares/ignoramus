@@ -2,6 +2,7 @@
 //! The adapter never talks to the real archive. `send` refuses any other host.
 use crate::http::{Body, Method, Request, Response, Transport};
 use crate::{Error, Secret};
+use digest_io::IoWrapper;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -382,9 +383,9 @@ fn safe_name(n: &str) -> bool {
 
 /// The file's SHA-256 and byte count.
 fn file_sha256(path: &Path) -> Result<(String, u64), Error> {
-    let mut h = Sha256::new();
+    let mut h = IoWrapper(Sha256::new());
     let size = std::io::copy(&mut std::fs::File::open(path)?, &mut h)?;
-    Ok((hex::encode(h.finalize()), size))
+    Ok((hex::encode(h.0.finalize()), size))
 }
 
 /// The DataCite entry of `list` whose `key` field equals `want`.

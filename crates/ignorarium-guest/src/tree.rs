@@ -1,6 +1,7 @@
 //! Directory trees: one walk, and the output hash, SHA-256 of the rows
 //! `[relpath, kind, digest]` sorted as whole rows. A file's digest is the SHA-256 of its
 //! bytes and a link's the SHA-256 of its target bytes; other kinds have none.
+use digest_io::IoWrapper;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, FileType, OpenOptions};
 use std::io::{self, Read};
@@ -58,9 +59,9 @@ pub fn tree_rows(dir: &Path) -> io::Result<Vec<TreeRow>> {
 pub fn hash_rows(rows: &[TreeRow]) -> io::Result<String> {
     let mut rows: Vec<_> = rows.iter().map(|r| (&r.path, r.kind, &r.digest)).collect();
     rows.sort();
-    let mut h = Sha256::new();
+    let mut h = IoWrapper(Sha256::new());
     serde_json::to_writer(&mut h, &rows)?;
-    Ok(hex::encode(h.finalize()))
+    Ok(hex::encode(h.0.finalize()))
 }
 
 pub fn tree_hash(dir: &Path) -> io::Result<String> {
@@ -156,7 +157,7 @@ pub fn open_regular(path: &Path) -> io::Result<Option<File>> {
 
 /// SHA-256 of what `r` yields, streamed.
 pub fn sha256_hex(mut r: impl Read) -> io::Result<String> {
-    let mut h = Sha256::new();
+    let mut h = IoWrapper(Sha256::new());
     io::copy(&mut r, &mut h)?;
-    Ok(hex::encode(h.finalize()))
+    Ok(hex::encode(h.0.finalize()))
 }
