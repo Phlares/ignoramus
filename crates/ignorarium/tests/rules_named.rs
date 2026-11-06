@@ -1423,6 +1423,41 @@ fn the_gate_takes_one_arms_pair_not_two_maxima() {
     }
 }
 
+/// The (sd, icc) the gate reads for `ok()`'s pooled group, with these edits, from `arms(a, b)`.
+fn pair_read(edits: Vec<Edit>, a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    let Lookup::Found(got) = inputs_of(&edits, arms(a, b)) else {
+        panic!("no estimate found");
+    };
+    (got[0].sd, got[0].icc)
+}
+
+#[test]
+fn the_arms_rank_at_the_units_the_clusters_give() {
+    // ok()'s inputs give 5 units each. At 50 units, e's cluster mean has sd
+    // sqrt(0.7 + 0.3/50) = 0.84 and a's 2 x sqrt(1/50) = 0.28; at the 5 the clusters give, a's
+    // is 2 x sqrt(1/5) = 0.89 and e's sqrt(0.7 + 0.3/5) = 0.87.
+    let (a, e) = ((2.0, 0.0), (1.0, 0.7));
+    let at = |m: u64| vec![("/design/units_per_cluster", j(json!(m)))];
+    assert_eq!(pair_read(at(50), a, e), a);
+    assert_eq!(pair_read(at(50), e, a), a);
+    // At 4 the clusters give 4: a 1.0, e sqrt(0.7 + 0.3/4) = 0.88.
+    assert_eq!(pair_read(at(4), e, a), a);
+    // At 1, sd alone: a.
+    assert_eq!(pair_read(at(1), e, a), a);
+}
+
+#[test]
+fn a_quantile_claim_takes_the_largest_sd_and_the_largest_icc() {
+    // A quantile test's power does not follow the cluster mean's sd, so no arm's pair ranks
+    // first for it: the gate takes the largest of each, as for one arm worse than both.
+    let (a, b) = ((2.0, 0.0), (1.0, 0.9));
+    let quantile = vec![hyp("statistic", j(json!({ "quantile": 0.5 })))];
+    assert_eq!(pair_read(quantile.clone(), a, b), (2.0, 0.9));
+    assert_eq!(pair_read(quantile, b, a), (2.0, 0.9));
+    // A mean claim takes one arm's pair.
+    assert_eq!(pair_read(vec![], a, b), b);
+}
+
 #[test]
 fn a_single_candidate_keeps_its_pair() {
     let pooled = unstaged(vec![hyp("strata", j(json!([])))]);
@@ -1672,7 +1707,7 @@ fn a_range_that_clips_nothing_keeps_the_stored_estimate() {
     assert_eq!(pair_from(vec![], b), (3.0, 0.2));
     // 0.5 past the end, the rows decide: that unit counts as 50.
     let past = [[1.0, 3.0], [2.0, -2.0], [4.0, 0.0], [50.5, -50.0]];
-    let b = measured_box(&plan, &past, arm_a_in_fiction((9.0, 0.2)));
+    let b = measured_box(&plan, &past, arm_a_in_fiction(fit_of(&plan, &past)));
     assert_eq!(pair_from(vec![], b), want);
     // A quantile claim clips nothing, and reads no plan.
     let quantile = vec![hyp("statistic", j(json!({ "quantile": 0.5 })))];
@@ -1713,7 +1748,8 @@ fn with_rows(keep: impl Fn(&Value) -> bool) -> Lookup {
     borrowed_from(vec![], planned(&bodies, Ok(Some(text_of(&plan)))))
 }
 
-const UNCOUNTED: &str = "Study pilot's rows do not give the values its estimate of this contrast in stratum fiction counts.";
+const UNCOUNTED: &str =
+    "Study pilot's rows do not give back its estimate of this contrast in stratum fiction.";
 
 #[test]
 fn a_source_whose_rows_give_no_values_is_missing() {
@@ -1736,6 +1772,31 @@ fn a_source_whose_rows_give_no_values_is_missing() {
         missing
     );
     assert_eq!(with_rows(|r| r["condition"] != "arm-a"), missing);
+}
+
+#[test]
+fn a_clipped_source_must_give_back_its_estimate() {
+    // The rows give the counts the estimate holds, but not its variance and icc: the box no
+    // longer reads the values the estimate was fitted from, so it lends no clipped fit of them.
+    let plan = measured_plan(4, json!({ "mean": [-50.0, 50.0] }));
+    let (var, icc) = fit_of(&plan, &OUTLIER);
+    let off = (var * 1.5, icc);
+    for stored in [off, (var, icc / 2.0)] {
+        assert_eq!(
+            borrowed_from(
+                vec![],
+                measured_box(&plan, &OUTLIER, arm_a_in_fiction(stored))
+            ),
+            Lookup::Missing(UNCOUNTED.into()),
+            "{stored:?}"
+        );
+    }
+    // A range that clips nothing lends the stored pair, whatever the rows give.
+    let wide = vec![hyp("statistic", j(json!({ "mean": [-500.0, 500.0] })))];
+    assert_eq!(
+        pair_from(wide, measured_box(&plan, &OUTLIER, arm_a_in_fiction(off))),
+        as_pair(off)
+    );
 }
 
 #[test]

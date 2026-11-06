@@ -893,9 +893,10 @@ pub enum Lookup {
     Found(Vec<StratumInput>),
 }
 
-/// The sd and icc the power gate uses in one group: the pair of the contrast, among those the
-/// hypothesis stands for, whose cluster mean has the largest sd (`mean_sd`) at
-/// `design.units_per_cluster`, and the hashes of every estimate record consulted. A negative
+/// The sd and icc the power gate uses in one group: for a mean claim the pair of the contrast,
+/// among those the hypothesis stands for, whose cluster mean has the largest sd (`mean_sd`)
+/// over the group's clusters, for a quantile claim the largest of each, and the hashes of
+/// every estimate record consulted. A negative
 /// icc, which an analysis of variance can give, counts as 0, the larger and so safer value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StratumInput {
@@ -918,9 +919,11 @@ pub struct StratumInput {
 /// statistic the pair is fitted again from the study's unit values in that group, each
 /// clipped to [lo, hi] (`analysis::Source`), unless every one lies inside it; a stored plan or
 /// record that cannot be read, or rows that do not give the clusters and units the estimate
-/// counts, make it missing. Over the candidates, the one pair whose cluster mean has the
-/// largest sd; ties keep the first. Without a usable `design.units_per_cluster` the pairs rank
-/// as at 1 unit per cluster, by sd alone.
+/// counts or, when the clip moves a value, its variance and icc, make it missing. Over the
+/// candidates of a mean claim, the one pair whose cluster mean has the largest sd at the units
+/// the group's confirmation clusters give (`design.units_per_cluster` when it has none, 1
+/// when that is unusable); ties keep the first. A quantile claim takes the largest sd and the
+/// largest icc.
 pub fn estimate_inputs(spec: &Value, h: usize, ctx: &CheckCtx) -> Lookup {
     estimates_of(spec, &spec["question"]["hypotheses"][h], ctx)
         .unwrap_or_else(|| Lookup::Missing("The hypothesis is not well formed.".into()))
@@ -1032,12 +1035,18 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
         .iter()
         .filter_map(|r| Some((records::hash(r), Estimate::of(r)?)))
         .collect();
-    let units = [val(spec, "design.units_per_cluster")
-        .and_then(Value::as_u64)
-        .map_or(1, |m| m.clamp(1, u32::MAX.into()) as u32)];
-    let spread = |(sd, icc): (f64, f64)| mean_sd(sd, icc, &units);
+    let per = (val(spec, "design.units_per_cluster").and_then(Value::as_u64))
+        .filter(|m| *m >= 1)
+        .unwrap_or(1);
+    let confirmation = clusters_of(spec, ctx, "confirmation", per);
+    let quantile = matches!(statistic, Some(Ok(None)));
     let mut out = Vec::new();
     for stratum in groups {
+        let mut sizes = units_in(&confirmation, stratum);
+        if sizes.is_empty() {
+            sizes.push(u32::try_from(per).unwrap_or(u32::MAX));
+        }
+        let spread = |(sd, icc): (f64, f64)| mean_sd(sd, icc, &sizes);
         let mut input = StratumInput {
             stratum: stratum.into(),
             sd: 0.0,
@@ -1095,9 +1104,13 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
                         Ok(r) => r,
                         Err(why) => return unreadable(why),
                     };
-                    if (r.clusters, r.units) != (e.clusters, e.units) {
+                    // A clipped fit is lent only from the values the estimate was fitted from.
+                    let raw = r.raw.as_ref().map(|f| (f.var, f.icc));
+                    if (r.clusters, r.units) != (e.clusters, e.units)
+                        || (r.clipped && raw != Some((e.var, e.icc)))
+                    {
                         return Some(Lookup::Missing(format!(
-                            "Study {from}'s rows do not give the values its estimate of this contrast{pick} in {} counts.",
+                            "Study {from}'s rows do not give back its estimate of this contrast{pick} in {}.",
                             group_name(group)
                         )));
                     }
@@ -1115,7 +1128,9 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
             };
             // Every usable pair spreads above 0, so the first candidate always replaces (0, 0).
             let pair = (var.sqrt(), icc.max(0.0));
-            if spread(pair) > spread((input.sd, input.icc)) {
+            if quantile {
+                (input.sd, input.icc) = (input.sd.max(pair.0), input.icc.max(pair.1));
+            } else if spread(pair) > spread((input.sd, input.icc)) {
                 (input.sd, input.icc) = pair;
             }
             input

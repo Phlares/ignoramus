@@ -270,13 +270,14 @@ pub struct Source {
 }
 
 /// What `Source::refit` gives: the clusters and units it fitted, as an estimate counts them,
-/// whether the clip moved a unit value, and the fit of the values, `None` where `estimates`
-/// gives none.
+/// whether the clip moved a unit value, and the fit of the values before (`raw`) and after the
+/// clip, `None` where `estimates` gives none.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Refit {
     pub clusters: u64,
     pub units: u64,
     pub clipped: bool,
+    pub raw: Option<Fit>,
     pub fit: Option<Fit>,
 }
 
@@ -314,6 +315,7 @@ impl Source {
             .find(|h| h.id == id)
             .ok_or("its plan has no hypothesis its estimate names")?;
         let mut values = samples(&self.clusters, h, stratum, &self.pairs);
+        let raw = fit(&values);
         let mut clipped = false;
         // Not `clamp`, which panics on a reversed range.
         for x in values.iter_mut().flatten() {
@@ -325,6 +327,7 @@ impl Source {
             clusters: values.len() as u64,
             units: values.iter().map(Vec::len).sum::<usize>() as u64,
             clipped,
+            raw,
             fit: fit(&values),
         })
     }

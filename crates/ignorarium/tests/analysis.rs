@@ -1628,12 +1628,14 @@ fn a_refit_without_a_clip_gives_the_estimate_record_bit_for_bit() {
     assert_eq!((refit.clusters, refit.units), (e.clusters, e.units));
     let f = refit.fit.clone().unwrap();
     assert_eq!(bits(f.var, f.icc), bits(e.var, e.icc));
+    assert_eq!(refit.raw, refit.fit);
     // A range that holds every unit clips none and fits the same values.
     let wide = source.refit(&e.hypothesis, "", (-1000.0, 1000.0)).unwrap();
     assert_eq!(wide, refit);
     // Percent values run from -90 to 400: [-1, 1] clips most of them.
     let narrow = source.refit(&e.hypothesis, "", (-1.0, 1.0)).unwrap();
     assert!(narrow.clipped);
+    assert_eq!(narrow.raw, Some(f.clone()));
     assert!(narrow.fit.unwrap().var < f.var);
     assert_eq!(
         source.refit("H9", "", ALL),
