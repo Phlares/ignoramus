@@ -1491,8 +1491,8 @@ impl BoxRecords for Planned {
 }
 
 /// The plan of a measured `pilot`: the template, with H1 on `arm-a` in stratum fiction by
-/// `statistic`, `arm-a` paired with `exact` by difference, and `clusters` confirmation inputs `texts/p<i>.txt` in
-/// stratum fiction, each giving its first 2 units.
+/// `statistic`, `arm-a` paired with `exact` by difference, and `clusters` confirmation inputs
+/// `texts/p<i>.txt` in stratum fiction, each giving its first 2 units.
 fn measured_plan(clusters: usize, statistic: Value) -> Value {
     let mut s = spec_at("../../templates/numeric-ablation.toml");
     let inputs = (0..clusters).map(|i| input(&format!("texts/p{i}.txt"), "confirmation", 2));

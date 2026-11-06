@@ -4,7 +4,7 @@
 //! is missing or mistyped: the generic rules report that.
 use super::generic::{applies, diagnostic, join, join_key, plain_key, safe_key, select};
 use super::{BoxRecords, Check, NoRecords, Rule, has_format, is_study_id};
-use crate::analysis::{Fit, Refit, Source};
+use crate::analysis::Source;
 use crate::backend::PINNED_LEVEL;
 use crate::derived::{
     ANALYSIS, Alpha, Analysis, Carried, Estimate, Instrument, Selection, StudyState, contrast_key,
@@ -918,9 +918,9 @@ pub struct StratumInput {
 /// statistic the pair is fitted again from the study's unit values in that group, each
 /// clipped to [lo, hi] (`analysis::Source`), unless every one lies inside it; a stored plan or
 /// record that cannot be read, or rows that do not give the clusters and units the estimate
-/// counts, make it missing. Over the candidates,
-/// the one pair whose cluster mean has the largest sd; ties keep the first. Without a usable
-/// `design.units_per_cluster` the pairs rank as at 1 unit per cluster, by sd alone.
+/// counts, make it missing. Over the candidates, the one pair whose cluster mean has the
+/// largest sd; ties keep the first. Without a usable `design.units_per_cluster` the pairs rank
+/// as at 1 unit per cluster, by sd alone.
 pub fn estimate_inputs(spec: &Value, h: usize, ctx: &CheckCtx) -> Lookup {
     estimates_of(spec, &spec["question"]["hypotheses"][h], ctx)
         .unwrap_or_else(|| Lookup::Missing("The hypothesis is not well formed.".into()))
@@ -1010,26 +1010,21 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
     };
     let contrasts = contrasts(spec, hyp, ctx)?;
     let groups = groups_of(hyp)?;
-    let range = match statistic {
-        Some(Err(())) => return None,
-        Some(Ok(range)) => range,
-        None => None,
+    let unreadable = |why: String| {
+        Some(Lookup::Missing(format!(
+            "The box cannot read the unit values of study {from} again: {why}."
+        )))
     };
-    let source = match range.map(|_| ctx.records.spec(from)) {
-        None => None,
-        Some(text) => {
-            let read = match text {
-                Ok(Some(text)) => Source::read(&text, &kept),
-                Ok(None) => Err("it holds no plan of the study".into()),
-                Err(e) => Err(e),
-            };
+    let source = match statistic {
+        Some(Err(())) => return None,
+        None | Some(Ok(None)) => None,
+        Some(Ok(Some(clip))) => {
+            let read = (ctx.records.spec(from))
+                .and_then(|text| text.ok_or_else(|| "it holds no plan of the study".into()))
+                .and_then(|text| Source::read(&text, &kept));
             match read {
-                Ok(source) => Some(source),
-                Err(why) => {
-                    return Some(Lookup::Missing(format!(
-                        "The box cannot read the unit values of study {from} again: {why}."
-                    )));
-                }
+                Ok(source) => Some((source, clip)),
+                Err(why) => return unreadable(why),
             }
         }
     };
@@ -1043,7 +1038,6 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
     let spread = |(sd, icc): (f64, f64)| mean_sd(sd, icc, &units);
     let mut out = Vec::new();
     for stratum in groups {
-        let mut widest: Option<(f64, f64)> = None;
         let mut input = StratumInput {
             stratum: stratum.into(),
             sd: 0.0,
@@ -1064,7 +1058,7 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
             // The first group with an estimate that has an icc and a variance above 0.
             let found = [stratum, ""].into_iter().find_map(|group| {
                 let usable: Vec<_> = (matching(group).into_iter())
-                    .filter(|(_, e)| e.icc.is_some() && e.var > 0.0)
+                    .filter(|(_, e)| usable(e.var, e.icc).is_some())
                     .collect();
                 (!usable.is_empty()).then_some((group, usable))
             });
@@ -1094,51 +1088,48 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
                 )));
             }
             let stored = (e.var, e.icc.unwrap_or_default());
-            let (var, icc) = match source
-                .as_ref()
-                .map(|s| s.refit(&e.hypothesis, group, range))
-            {
+            let (var, icc) = match &source {
                 None => stored,
-                Some(Err(why)) => {
-                    return Some(Lookup::Missing(format!(
-                        "The box cannot read the unit values of study {from} again: {why}."
-                    )));
-                }
-                Some(Ok(r)) if (r.clusters, r.units) != (e.clusters, e.units) => {
-                    return Some(Lookup::Missing(format!(
-                        "Study {from}'s rows do not give the values its estimate of this contrast{pick} in {} counts.",
-                        group_name(group)
-                    )));
-                }
-                Some(Ok(r)) if !r.clipped => stored,
-                Some(Ok(Refit {
-                    fit:
-                        Some(Fit {
-                            var,
-                            icc: Some(icc),
-                            ..
-                        }),
-                    ..
-                })) if var > 0.0 => (var, icc),
-                Some(Ok(_)) => {
-                    return Some(Lookup::Missing(format!(
-                        "Study {from}'s unit values of this contrast{pick} in {}, clipped to the statistic's range, give no icc, or no variance above 0.",
-                        group_name(group)
-                    )));
+                Some((s, clip)) => {
+                    let r = match s.refit(&e.hypothesis, group, *clip) {
+                        Ok(r) => r,
+                        Err(why) => return unreadable(why),
+                    };
+                    if (r.clusters, r.units) != (e.clusters, e.units) {
+                        return Some(Lookup::Missing(format!(
+                            "Study {from}'s rows do not give the values its estimate of this contrast{pick} in {} counts.",
+                            group_name(group)
+                        )));
+                    }
+                    if !r.clipped {
+                        stored
+                    } else if let Some(pair) = r.fit.and_then(|f| usable(f.var, f.icc)) {
+                        pair
+                    } else {
+                        return Some(Lookup::Missing(format!(
+                            "Study {from}'s unit values of this contrast{pick} in {}, clipped to the statistic's range, give no icc, or no variance above 0.",
+                            group_name(group)
+                        )));
+                    }
                 }
             };
+            // Every usable pair spreads above 0, so the first candidate always replaces (0, 0).
             let pair = (var.sqrt(), icc.max(0.0));
-            if widest.is_none_or(|w| spread(pair) > spread(w)) {
-                widest = Some(pair);
+            if spread(pair) > spread((input.sd, input.icc)) {
+                (input.sd, input.icc) = pair;
             }
             input
                 .records
                 .extend(all.iter().map(|(hash, _)| hash.clone()));
         }
-        (input.sd, input.icc) = widest.unwrap_or_default();
         out.push(input);
     }
     Some(Lookup::Found(out))
+}
+
+/// A variance and icc the gate can size from: an icc, and a variance above 0.
+fn usable(var: f64, icc: Option<f64>) -> Option<(f64, f64)> {
+    icc.filter(|_| var > 0.0).map(|icc| (var, icc))
 }
 
 fn waits(study: &str, state: &str) -> String {

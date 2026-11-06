@@ -20,7 +20,7 @@ use crate::stream::{Log, LogName};
 use crate::units::{self, Cluster};
 use evidence::rng::Rng;
 use evidence::{Tail, claim, tree};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -307,25 +307,19 @@ impl Source {
     }
 
     /// The fit `estimates` gives hypothesis `id` in group `stratum`, over the unit values,
-    /// each clipped to `clip` (`[lo, hi]`) when one is given. `Err` when the plan has no
+    /// each clipped to `[lo, hi]` (infinite bounds clip nothing). `Err` when the plan has no
     /// hypothesis `id`.
-    pub fn refit(
-        &self,
-        id: &str,
-        stratum: &str,
-        clip: Option<(f64, f64)>,
-    ) -> Result<Refit, String> {
+    pub fn refit(&self, id: &str, stratum: &str, (lo, hi): (f64, f64)) -> Result<Refit, String> {
         let h = (self.spec.question.hypotheses.iter())
             .find(|h| h.id == id)
             .ok_or("its plan has no hypothesis its estimate names")?;
         let mut values = samples(&self.clusters, h, stratum, &self.pairs);
         let mut clipped = false;
-        if let Some((lo, hi)) = clip {
-            for x in values.iter_mut().flatten() {
-                let inside = x.max(lo).min(hi);
-                clipped |= inside != *x;
-                *x = inside;
-            }
+        // Not `clamp`, which panics on a reversed range.
+        for x in values.iter_mut().flatten() {
+            let inside = x.max(lo).min(hi);
+            clipped |= inside != *x;
+            *x = inside;
         }
         Ok(Refit {
             clusters: values.len() as u64,
@@ -350,8 +344,8 @@ fn held_by(records: &[Record]) -> Result<InputHashes, String> {
     if own_rows(records).any(|r| r.body["data_hashes"] != row.body["data_hashes"]) {
         return Err(other.into());
     }
-    let named: Vec<(String, String)> =
-        serde_json::from_value(row.body["data_hashes"].clone()).map_err(|_| other)?;
+    let named =
+        Vec::<(String, String)>::deserialize(&row.body["data_hashes"]).map_err(|_| other)?;
     let mut named = named.into_iter();
     let mut out = Vec::new();
     for (path, exact) in frozen.inputs {
@@ -361,10 +355,10 @@ fn held_by(records: &[Record]) -> Result<InputHashes, String> {
         };
         out.push((path, hashes));
     }
-    match named.next() {
-        Some(_) => Err(other.into()),
-        None => Ok(out),
+    if named.next().is_some() {
+        return Err(other.into());
     }
+    Ok(out)
 }
 
 /// The clusters a study measured, of `clusters`: each that is no reserve cluster, then the

@@ -1596,6 +1596,9 @@ creators = []
     )
 }
 
+/// A clip that holds every value.
+const ALL: (f64, f64) = (f64::NEG_INFINITY, f64::INFINITY);
+
 #[test]
 fn a_refit_without_a_clip_gives_the_estimate_record_bit_for_bit() {
     let lab = common::lab();
@@ -1620,22 +1623,20 @@ fn a_refit_without_a_clip_gives_the_estimate_record_bit_for_bit() {
     let e = &held[0];
     assert_eq!((e.stratum.as_str(), e.clusters, e.units), ("", 2, 6));
     let bits = |var: f64, icc: Option<f64>| (var.to_bits(), icc.map(f64::to_bits));
-    let refit = source.refit(&e.hypothesis, "", None).unwrap();
+    let refit = source.refit(&e.hypothesis, "", ALL).unwrap();
     assert!(!refit.clipped);
     assert_eq!((refit.clusters, refit.units), (e.clusters, e.units));
     let f = refit.fit.clone().unwrap();
     assert_eq!(bits(f.var, f.icc), bits(e.var, e.icc));
     // A range that holds every unit clips none and fits the same values.
-    let wide = source
-        .refit(&e.hypothesis, "", Some((-1000.0, 1000.0)))
-        .unwrap();
+    let wide = source.refit(&e.hypothesis, "", (-1000.0, 1000.0)).unwrap();
     assert_eq!(wide, refit);
     // Percent values run from -90 to 400: [-1, 1] clips most of them.
-    let narrow = source.refit(&e.hypothesis, "", Some((-1.0, 1.0))).unwrap();
+    let narrow = source.refit(&e.hypothesis, "", (-1.0, 1.0)).unwrap();
     assert!(narrow.clipped);
     assert!(narrow.fit.unwrap().var < f.var);
     assert_eq!(
-        source.refit("H9", "", None),
+        source.refit("H9", "", ALL),
         Err("its plan has no hypothesis its estimate names".into())
     );
 }
