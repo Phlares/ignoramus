@@ -1,7 +1,7 @@
 use evidence::claim::{Bound, Statistic};
 use evidence::power::{
-    CAP, Plan, Staged, StagedStratum, Stratum, WORK, blinded_sd, clusters_needed, resize_count,
-    simulate, staged, staged_detail,
+    CAP, Plan, Shares, Staged, StagedStratum, Stratum, WORK, blinded_sd, clusters_needed,
+    resize_count, simulate, staged, staged_detail, staged_detail_by,
 };
 use evidence::rng::Rng;
 use evidence::{Error, Tail};
@@ -154,7 +154,7 @@ fn staged_with_no_reserve_equals_simulate() {
     // Sized at -2, the table's count for every s the first batch gives is at most 24.
     let d = no_reserve(24, -2.0);
     let fixed = simulated(&first_batch(&d));
-    let (pass, stop) = staged_detail(&d, REPS, SEED).unwrap();
+    let Shares { pass, stop, .. } = staged_detail(&d, REPS, SEED).unwrap();
     assert!(fixed > 0.8, "{fixed}");
     assert!((pass - fixed).abs() <= 0.02, "{pass} {fixed}");
     assert_eq!(stop, 0.0);
@@ -166,7 +166,7 @@ fn staged_counts_stops_as_failures() {
     // Below power, sized at -1.5, a few replicates stop: each one fails.
     let d = no_reserve(16, -1.5);
     let fixed = simulated(&first_batch(&d));
-    let (pass, stop) = staged_detail(&d, REPS, SEED).unwrap();
+    let Shares { pass, stop, .. } = staged_detail(&d, REPS, SEED).unwrap();
     assert!(fixed < 0.8 && 0.0 < stop && stop < 0.1, "{fixed} {stop}");
     assert!(
         pass <= fixed && fixed - stop <= pass,
@@ -179,8 +179,9 @@ fn staged_detail_reports_the_stop_share() {
     // Sized at -1, s0 is sqrt(0.5^2 + 1), and 20 clusters fall short at every s the first
     // batch gives: every replicate stops.
     let d = no_reserve(20, -1.0);
-    assert_eq!(staged_detail(&d, REPS, SEED), Ok((0.0, 1.0)));
-    let (pass, stop) = staged_detail(&no_reserve(12, -2.0), REPS, SEED).unwrap();
+    let all = staged_detail(&d, REPS, SEED).unwrap();
+    assert_eq!((all.pass, all.stop, all.crossed), (0.0, 1.0, 0.0));
+    let Shares { pass, stop, .. } = staged_detail(&no_reserve(12, -2.0), REPS, SEED).unwrap();
     assert!(pass == 0.0 && 0.0 < stop && stop < 1.0, "{pass} {stop}");
 }
 
@@ -188,14 +189,17 @@ fn staged_detail_reports_the_stop_share() {
 fn a_reserve_lifts_a_short_first_batch() {
     let d = design(vec![stratum(10, 300)]);
     let fixed = simulated(&first_batch(&d));
-    let (pass, stop) = staged_detail(&d, REPS, SEED).unwrap();
+    let Shares { pass, stop, .. } = staged_detail(&d, REPS, SEED).unwrap();
     assert!(
         fixed < 0.5 && pass > 0.8 && stop < 0.01,
         "{fixed} {pass} {stop}"
     );
     // A study stops when any stratum stops.
-    let (two, stop_two) =
-        staged_detail(&design(vec![stratum(10, 300), stratum(10, 0)]), REPS, SEED).unwrap();
+    let Shares {
+        pass: two,
+        stop: stop_two,
+        ..
+    } = staged_detail(&design(vec![stratum(10, 300), stratum(10, 0)]), REPS, SEED).unwrap();
     assert!(stop_two > 0.5 && two < 0.5, "{two} {stop_two}");
 }
 
@@ -207,10 +211,51 @@ fn drawing_at_the_margin_rarely_passes() {
     };
     let d = Staged {
         level: 0.005,
+        ..design(vec![null.clone()])
+    };
+    let Shares { pass, stop, .. } = staged_detail(&d, REPS, SEED).unwrap();
+    assert!(pass <= 0.02 && stop < 1.0, "{pass} {stop}");
+    // At level 0.5 some replicates reach 1 / level on the way and fall back below it by the end;
+    // one that ends there reached it on the way.
+    let loose = Staged {
+        level: 0.5,
         ..design(vec![null])
     };
-    let (pass, stop) = staged_detail(&d, REPS, SEED).unwrap();
-    assert!(pass <= 0.02 && stop < 1.0, "{pass} {stop}");
+    let Shares { pass, crossed, .. } = staged_detail(&loose, REPS, SEED).unwrap();
+    assert!(
+        0.0 < pass && pass < crossed && crossed <= 0.5,
+        "{pass} {crossed}"
+    );
+}
+
+#[test]
+fn draws_by_the_unit_model_match_staged_detail() {
+    // icc 0, unit sd 1 and 4 units: each cluster mean has sd 0.5 about -1, one normal each.
+    let d = design(vec![stratum(10, 300)]);
+    let by = staged_detail_by(&d, REPS, SEED, |r| -1.0 + 0.5 * r.normal()).unwrap();
+    assert_eq!(by, staged_detail(&d, REPS, SEED).unwrap());
+}
+
+#[test]
+fn draws_replace_the_data_and_not_the_table() {
+    // With sd 0 the table's top value is 4 s0 = 4 x 0.5 (the_table_ends_at_four_times_s0).
+    // Every cluster just past -2 gives s past it: every replicate stops. At -1 every one
+    // continues, passes and crosses.
+    let d = Staged {
+        level: 0.5,
+        target_each: 0.5,
+        ..design(vec![StagedStratum {
+            sd: 0.0,
+            size_at: -0.5,
+            ..stratum(5, 200)
+        }])
+    };
+    let at = |x: f64| staged_detail_by(&d, 200, SEED, |_| x).unwrap();
+    assert_eq!((at(-2.000001).pass, at(-2.000001).stop), (0.0, 1.0));
+    assert_eq!(
+        (at(-1.0).pass, at(-1.0).stop, at(-1.0).crossed),
+        (1.0, 0.0, 1.0)
+    );
 }
 
 #[test]
@@ -230,7 +275,8 @@ fn the_table_ends_at_four_times_s0() {
             target_each: 0.5,
             ..design(vec![s])
         };
-        staged_detail(&d, 200, SEED).unwrap()
+        let s = staged_detail(&d, 200, SEED).unwrap();
+        (s.pass, s.stop)
     };
     assert_eq!(at(-2.0), (1.0, 0.0));
     assert_eq!(at(-2.000001), (0.0, 1.0));

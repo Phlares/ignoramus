@@ -1,4 +1,4 @@
-use evidence::claim::{Bound, Statistic, e_value, holds, observation, order};
+use evidence::claim::{Bound, Statistic, e_value, e_values, holds, observation, order};
 use evidence::rng::Rng;
 use evidence::sim::Estimate;
 use evidence::{Error, Tail};
@@ -158,6 +158,25 @@ fn e_value_follows_the_table() {
     close(reversed, 1.0);
     // No observation: no evidence.
     close(e_value(&mean, &below(0.5), &[]).unwrap(), 1.0);
+}
+
+#[test]
+fn e_values_give_the_last_and_the_largest() {
+    let mean = Statistic::Mean { lo: 0.0, hi: 1.0 };
+    // Scores -1, -1, 1 below 0.5: 1, 1.5, then a bet of 2/3 on the wrong side gives 0.5.
+    let (last, peak) = e_values(&mean, &below(0.5), &[0.0, 0.0, 1.0]).unwrap();
+    close(last, 0.5);
+    close(peak, 1.5);
+    // The start counts: a process that never bets peaks at 1.
+    let (last, peak) = e_values(&mean, &below(0.5), &[1.0, 1.0, 1.0]).unwrap();
+    close(last, 1.0);
+    close(peak, 1.0);
+    // An observation the test refuses makes both 0.
+    assert_eq!(e_values(&mean, &below(0.5), &[0.0, 2.0]), Ok((0.0, 0.0)));
+    assert_eq!(
+        e_values(&mean, &below(0.5), &[0.0, 0.0]).unwrap().0,
+        e_value(&mean, &below(0.5), &[0.0, 0.0]).unwrap()
+    );
 }
 
 #[test]

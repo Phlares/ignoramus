@@ -5736,7 +5736,7 @@ fn a_resize_study_with_ample_reserve_passes_the_gate() {
     };
     let seed = ignorarium::seed::seed(&[0; 32], "power/H1");
     let whole = staged(&plan, 4000, seed).unwrap();
-    assert_eq!(whole, 0.939);
+    assert_eq!(whole, 0.938);
     assert_eq!(
         rules::power(&spec, &c),
         [Power {

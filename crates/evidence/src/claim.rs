@@ -95,11 +95,17 @@ pub fn observation(stat: &Statistic, bound: &Bound, units: &[f64]) -> Result<f64
 /// The e-value of `bound` over `obs`, one per cluster, in the order given. An observation the
 /// e-process refuses (outside the declared range, or not finite) makes it 0.
 pub fn e_value(stat: &Statistic, bound: &Bound, obs: &[f64]) -> Result<f64, Error> {
+    Ok(e_values(stat, bound, obs)?.0)
+}
+
+/// [`e_value`] after the last observation, and the largest value the e-process held at any
+/// point, the start's 1 included. An observation it refuses makes both 0.
+pub fn e_values(stat: &Statistic, bound: &Bound, obs: &[f64]) -> Result<(f64, f64), Error> {
     let (mut p, _, _) = test(stat, bound)?;
     if obs.iter().any(|&x| p.observe(x).is_err()) {
-        return Ok(0.0);
+        return Ok((0.0, 0.0));
     }
-    Ok(p.value())
+    Ok((p.value(), p.peak()))
 }
 
 /// The point estimate of the same test: the mean of `obs` lies on the side its e-process bets

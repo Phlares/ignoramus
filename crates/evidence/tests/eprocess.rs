@@ -24,6 +24,7 @@ fn sign_upper_matches_hand_values() {
         close(*a, b);
     }
     close(p.p_value(), 1.0 / 1.5);
+    close(p.peak(), 1.5);
     assert_eq!(p.observed(), 4);
     assert_eq!(MAX_BET, 0.75);
 }

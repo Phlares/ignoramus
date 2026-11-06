@@ -123,6 +123,11 @@ impl EProcess {
         self.observed
     }
 
+    /// The largest value the process held, the start's 1 included.
+    pub fn peak(&self) -> f64 {
+        self.peak_log.exp()
+    }
+
     /// `min(1, 1 / peak value)`. Valid at any stopping time (Ville's inequality).
     pub fn p_value(&self) -> f64 {
         (-self.peak_log).exp().min(1.0)
