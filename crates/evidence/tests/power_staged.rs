@@ -237,6 +237,18 @@ fn draws_by_the_unit_model_match_staged_detail() {
 }
 
 #[test]
+fn draws_by_a_closure_are_for_a_mean_only() {
+    let d = Staged {
+        stat: Statistic::Quantile(0.5),
+        ..design(vec![stratum(5, 5)])
+    };
+    assert_eq!(
+        staged_detail_by(&d, 10, SEED, |_| 0.0),
+        Err(Error::Parameter("stat"))
+    );
+}
+
+#[test]
 fn draws_replace_the_data_and_not_the_table() {
     // With sd 0 the table's top value is 4 s0 = 4 x 0.5 (the_table_ends_at_four_times_s0).
     // Every cluster just past -2 gives s past it: every replicate stops. At -1 every one
@@ -251,11 +263,10 @@ fn draws_replace_the_data_and_not_the_table() {
         }])
     };
     let at = |x: f64| staged_detail_by(&d, 200, SEED, |_| x).unwrap();
-    assert_eq!((at(-2.000001).pass, at(-2.000001).stop), (0.0, 1.0));
-    assert_eq!(
-        (at(-1.0).pass, at(-1.0).stop, at(-1.0).crossed),
-        (1.0, 0.0, 1.0)
-    );
+    let past = at(-2.000001);
+    assert_eq!((past.pass, past.stop), (0.0, 1.0));
+    let inside = at(-1.0);
+    assert_eq!((inside.pass, inside.stop, inside.crossed), (1.0, 0.0, 1.0));
 }
 
 #[test]

@@ -349,7 +349,8 @@ pub struct Shares {
     /// The re-size stops.
     pub stop: f64,
     /// Every bound in every stratum reaches 1 / level after some observation. Under the null
-    /// Ville's inequality bounds this share by the level too.
+    /// Ville's inequality bounds this share by the level too. A replicate that stops is
+    /// neither passed nor crossed.
     pub crossed: f64,
 }
 
@@ -370,15 +371,20 @@ pub fn staged_detail(plan: &Staged, reps: u32, seed: [u8; 32]) -> Result<Shares,
     staged_run(plan, reps, seed, &unit_model)
 }
 
-/// [`staged_detail`] with each replicate's clusters drawn by `draw`, one value per cluster, in
-/// place of the unit model; the re-size table still assumes the unit model. For null
-/// simulations of shapes the unit model cannot give.
+/// [`staged_detail`] with each replicate's cluster means drawn by `draw`, one value per
+/// cluster, in place of the unit model; the re-size table still assumes the unit model. Every
+/// stratum draws from the same `draw`. For null simulations of shapes the unit model cannot
+/// give. A mean claim only: a quantile needs every unit, so it is refused with
+/// `Error::Parameter("stat")`.
 pub fn staged_detail_by(
     plan: &Staged,
     reps: u32,
     seed: [u8; 32],
     draw: impl Fn(&mut Rng) -> f64,
 ) -> Result<Shares, Error> {
+    if !matches!(plan.stat, Statistic::Mean { .. }) {
+        return Err(Error::Parameter("stat"));
+    }
     staged_run(plan, reps, seed, &|_, _, _, rng, out| {
         out.clear();
         out.push(draw(rng));

@@ -59,7 +59,12 @@ fn seed(text: &str) -> [u8; 32] {
 #[derive(Clone, Copy)]
 enum Shape {
     Normal,
-    TwoPoint { low: f64, high: f64 },
+    /// `high` with chance `p`, else `low`.
+    TwoPoint {
+        low: f64,
+        high: f64,
+        p: f64,
+    },
 }
 
 struct Scenario {
@@ -95,15 +100,11 @@ fn design(s: &Scenario) -> Staged {
     }
 }
 
-/// The chance of `high` that gives a two-point null on `low` and `high` the mean MARGIN.
-fn chance_of_high(low: f64, high: f64) -> f64 {
-    (MARGIN - low) / (high - low)
-}
-
-/// A two-point null on `low` and `high`. The scenario declares the two points' sd, with an icc
-/// of 1, so the re-size table centres on the spread the data have.
+/// A two-point null on `low` and `high`, with the chance of `high` that gives it the mean
+/// MARGIN. The scenario declares the two points' sd, with an icc of 1, so the re-size table
+/// centres on the spread the data have.
 fn two_point(name: &str, low: f64, high: f64, level: f64) -> Scenario {
-    let p = chance_of_high(low, high);
+    let p = (MARGIN - low) / (high - low);
     Scenario {
         name: format!("level {level}, {name}"),
         reserve: 2_500,
@@ -111,7 +112,7 @@ fn two_point(name: &str, low: f64, high: f64, level: f64) -> Scenario {
         icc: 1.0,
         unit_mean: MARGIN,
         level,
-        shape: Shape::TwoPoint { low, high },
+        shape: Shape::TwoPoint { low, high, p },
     }
 }
 
@@ -124,8 +125,7 @@ fn counts(test: &str, s: &Scenario) -> ([u32; 3], f64) {
         let seed = seed(&format!("{test}/{}/{b}", s.name));
         let shares = match s.shape {
             Shape::Normal => staged_detail(&d, BATCH, seed),
-            Shape::TwoPoint { low, high } => {
-                let p = chance_of_high(low, high);
+            Shape::TwoPoint { low, high, p } => {
                 staged_detail_by(
                     &d,
                     BATCH,

@@ -181,7 +181,7 @@ fn the_quantile_simulation_matches_a_direct_one_at_icc_0_and_1() {
             .filter(|_| {
                 let shares: Vec<f64> = (0..n).map(|_| share()).collect();
                 let e = evidence::claim::e_value(&p.stat, &p.bounds[0], &shares).unwrap();
-                e >= 1.0 / p.level
+                rejects(e, p.level)
             })
             .count();
         let direct = passed as f64 / f64::from(REPS);

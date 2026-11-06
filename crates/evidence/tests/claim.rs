@@ -1,7 +1,8 @@
 use evidence::claim::{Bound, Statistic, e_value, e_values, holds, observation, order};
+use evidence::eprocess::{EProcess, Score};
 use evidence::rng::Rng;
 use evidence::sim::Estimate;
-use evidence::{Error, Tail};
+use evidence::{Error, Tail, rejects};
 
 /// The level a box study runs at, and a looser one.
 const LEVELS: [f64; 2] = [0.05, 0.005];
@@ -32,13 +33,48 @@ fn rng(family: u8) -> Rng {
     Rng::from_seed(s)
 }
 
+/// The e-process the claim test runs for `bound`, built here so a check can read its value
+/// after each observation. `path` checks it against `e_values`.
+fn process(stat: Statistic, bound: Bound) -> EProcess {
+    let (lo, hi, mean, tail) = match stat {
+        Statistic::Mean { lo, hi } => (lo, hi, bound.margin, bound.tail),
+        Statistic::Quantile(q) if bound.tail == Tail::Lower => (0.0, 1.0, q, Tail::Upper),
+        Statistic::Quantile(q) => (0.0, 1.0, 1.0 - q, Tail::Upper),
+    };
+    EProcess::new(Score::Bounded { lo, hi, mean }, tail, f64::INFINITY).unwrap()
+}
+
+/// The test's value before any observation, then after each one.
+fn path(stat: Statistic, bound: Bound, obs: &[f64]) -> Vec<f64> {
+    let mut p = process(stat, bound);
+    let mut out = vec![p.value()];
+    for &x in obs {
+        p.observe(x).unwrap();
+        out.push(p.value());
+    }
+    let peak = out.iter().copied().fold(0.0, f64::max);
+    assert_eq!(e_values(&stat, &bound, obs), Ok((out[obs.len()], peak)));
+    out
+}
+
+/// The mean of `xs` and its standard error.
+fn mean_se(xs: &[f64]) -> (f64, f64) {
+    let n = xs.len() as f64;
+    let mean = xs.iter().sum::<f64>() / n;
+    let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
+    (mean, (var / n).sqrt())
+}
+
 /// Checks the test of `bound` on a null at its margin, over `REPS` replicates of `n`
 /// observations from `draw`. First, `n` copies of `best`, the observation that argues most
-/// for the claim, reach 1 / 0.005, so the null can reject at either level. Then the share of
-/// replicates that reach 1 / level has a Wilson upper end at most the level, at each level;
-/// and the last factor, e over n observations divided by e over the first n - 1, has a mean
-/// within 4 standard errors of 1, as a martingale step at the margin does. The factor lies in
-/// [1 - cap, 1 + cap]. The e-value itself has too heavy a tail for its sample mean to test.
+/// for the claim, reach 1 / 0.005, so the null can reject at either level. Then:
+/// - the share of replicates that reach 1 / level has a Wilson upper end at most the level, at
+///   each level;
+/// - the mean e-value is at most 1 + 4 standard errors. At the margin it is 1. A heavy right
+///   tail pulls a sample mean below 1, not above, so only this side is tested;
+/// - each factor e_k / e_(k-1), pooled over every step and replicate, has a mean within 4
+///   standard errors of 1, as the steps of a martingale do. Factors lie in [1 - cap, 1 + cap],
+///   so their tails are light, and a bet that sees its own observation moves their mean.
 fn holds_at_the_margin(
     stat: Statistic,
     bound: Bound,
@@ -49,24 +85,27 @@ fn holds_at_the_margin(
 ) {
     let strongest = e_value(&stat, &bound, &vec![best; n]).unwrap();
     assert!(strongest >= 1.0 / 0.005, "{bound:?}: at most {strongest}");
-    let (es, steps): (Vec<f64>, Vec<f64>) = (0..REPS)
+    let paths: Vec<Vec<f64>> = (0..REPS)
         .map(|_| {
             let obs: Vec<f64> = (0..n).map(|_| draw(rng)).collect();
-            let e = e_value(&stat, &bound, &obs).unwrap();
-            (e, e / e_value(&stat, &bound, &obs[..n - 1]).unwrap())
+            path(stat, bound, &obs)
         })
-        .unzip();
+        .collect();
+    let es: Vec<f64> = paths.iter().map(|p| p[n]).collect();
     for level in LEVELS {
-        let hits = es.iter().filter(|&&e| e >= 1.0 / level).count();
+        let hits = es.iter().filter(|&&e| rejects(e, level)).count();
         let rate = Estimate::of(hits as f64, REPS);
         assert!(rate.holds(level), "{bound:?} at {level}: {rate:?}");
     }
-    let mean = steps.iter().sum::<f64>() / REPS as f64;
-    let var = steps.iter().map(|f| (f - mean).powi(2)).sum::<f64>() / (REPS - 1) as f64;
-    let se = (var / REPS as f64).sqrt();
+    let (mean, se) = mean_se(&es);
+    assert!(mean - 1.0 <= 4.0 * se, "{bound:?}: mean e {mean}, se {se}");
+    let factors: Vec<f64> = (paths.iter())
+        .flat_map(|p| p.windows(2).map(|w| w[1] / w[0]))
+        .collect();
+    let (mean, se) = mean_se(&factors);
     assert!(
         (mean - 1.0).abs() <= 4.0 * se,
-        "{bound:?}: mean last factor {mean}, se {se}"
+        "{bound:?}: mean factor {mean}, se {se}"
     );
 }
 
