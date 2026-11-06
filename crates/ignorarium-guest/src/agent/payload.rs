@@ -29,7 +29,7 @@ pub fn run_as(job: &Job, user: Option<(u32, u32)>, cwd: &Path) -> io::Result<Ran
     run_watched(job, user, cwd, exited)
 }
 
-/// `run_as` with the exit check passed in, so a test can make it fail.
+/// `run_as` with the exit check passed in, so a test can make it fail or hold it back.
 fn run_watched(
     job: &Job,
     user: Option<(u32, u32)>,
@@ -112,12 +112,34 @@ pub(crate) fn exited(pid: Pid) -> io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::run_watched;
-    use crate::proto::Job;
+    use super::{exited, run_watched};
+    use crate::proto::{End, Job};
+    use rustix::process::{Pid, Signal, kill_process_group};
     use std::fs;
     use std::io;
+    use std::path::Path;
     use std::thread::sleep;
     use std::time::{Duration, Instant};
+
+    fn job(argv: [&str; 3], out: &Path, timeout_ms: u64) -> Job {
+        Job {
+            seed_hex: "00".repeat(32),
+            unix_nanos: 0,
+            argv: argv.map(String::from).to_vec(),
+            env: vec![("OUT".into(), out.to_str().unwrap().into())],
+            timeout_ms,
+            data_limit: None,
+        }
+    }
+
+    /// Waits up to 5 s for `path` to hold a whole line.
+    fn wait_line(path: &Path, what: &str) {
+        let t = Instant::now();
+        while !fs::read_to_string(path).is_ok_and(|s| s.ends_with('\n')) {
+            assert!(t.elapsed() < Duration::from_secs(5), "{what}");
+            sleep(Duration::from_millis(5));
+        }
+    }
 
     /// True once the process is gone or a zombie, waiting up to 2 s for the kill to land.
     fn dies(pid: &str) -> bool {
@@ -142,25 +164,13 @@ mod tests {
     fn a_failed_exit_check_still_kills_the_payload() {
         let d = tempfile::tempdir().unwrap();
         let bg = d.path().join("bg");
-        let job = Job {
-            seed_hex: "00".repeat(32),
-            unix_nanos: 0,
-            argv: ["/bin/sh", "-c", "sleep 30 & echo $! > \"$OUT/bg\"; wait"]
-                .map(String::from)
-                .to_vec(),
-            env: vec![("OUT".into(), d.path().to_str().unwrap().into())],
-            timeout_ms: 30_000,
-            data_limit: None,
-        };
+        let script = "sleep 30 & echo $! > \"$OUT/bg\"; wait";
+        let job = job(["/bin/sh", "-c", script], d.path(), 30_000);
         let mut leader = None;
-        let err = run_watched(&job, None, std::path::Path::new("/"), |pid| {
+        let err = run_watched(&job, None, Path::new("/"), |pid| {
             leader = Some(pid);
             // Fail once the background child exists, so the group kill has a member to reach.
-            let t = Instant::now();
-            while !fs::read_to_string(&bg).is_ok_and(|s| s.ends_with('\n')) {
-                assert!(t.elapsed() < Duration::from_secs(5), "no background child");
-                sleep(Duration::from_millis(5));
-            }
+            wait_line(&bg, "no background child");
             Err(io::Error::other("wait failed"))
         })
         .err()
@@ -170,5 +180,33 @@ mod tests {
         assert!(dies(bg_pid.trim()), "the payload's group survived");
         let leader = leader.unwrap().as_raw_nonzero().to_string();
         assert!(dies(&leader), "the leader survived");
+    }
+
+    #[test]
+    fn a_leader_that_leaves_its_group_cannot_hang_the_timeout() {
+        let d = tempfile::tempdir().unwrap();
+        let pg = d.path().join("pg");
+        // The leader starts slower than the deadline. Then it puts its child in a new group
+        // and joins that group, so a kill of its first group reaches neither of them.
+        let script = r#"select(undef, undef, undef, 0.5);
+            $c = fork // die; if (!$c) { sleep 5; exit }
+            setpgrp($c, $c) or die; setpgrp(0, $c) or die;
+            open my $f, '>', "$ENV{OUT}/pg" or die; print $f "$c\n"; close $f; sleep 5"#;
+        let job = job(["/usr/bin/perl", "-e", script], d.path(), 300);
+        let mut left = None;
+        // The deadline is checked only after the leader has left its group.
+        let ran = run_watched(&job, None, Path::new("/"), |pid| {
+            if left.is_none() {
+                wait_line(&pg, "the leader never left its group");
+                left = Some(Instant::now());
+            }
+            exited(pid)
+        })
+        .unwrap();
+        let since_left = left.unwrap().elapsed();
+        let pg: i32 = fs::read_to_string(&pg).unwrap().trim().parse().unwrap();
+        let _ = kill_process_group(Pid::from_raw(pg).unwrap(), Signal::KILL);
+        assert_eq!(ran.end, End::Timeout);
+        assert!(since_left < Duration::from_secs(2), "{since_left:?}");
     }
 }
