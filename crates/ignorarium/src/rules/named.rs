@@ -54,6 +54,9 @@ pub struct CheckCtx {
     /// One entry per element of the spec's `family.members`, as `family::load` read it;
     /// empty for a spec without `[family]`.
     pub members: Vec<Result<MemberSpec, String>>,
+    /// The study ids of the family this spec is checked under, as `family::check` sets them
+    /// for a member: its root and every member. Empty for any other check.
+    pub family_ids: Vec<String>,
 }
 
 impl CheckCtx {
@@ -72,6 +75,7 @@ impl CheckCtx {
             gates: Gates::default(),
             payload: OnceCell::new(),
             members: vec![],
+            family_ids: vec![],
         }
     }
 
@@ -392,23 +396,53 @@ fn follow_on_shares(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
         fam::data(value, &hashes, &["confirmation", "reserve"])
     };
     let mine = held(spec);
-    let members: Vec<_> = (nodes(spec, "family.members[*]").into_iter())
-        .filter_map(|(_, m)| input_path(&ctx.root, m.as_str()?))
-        .collect();
+    let id = |v: &Value| {
+        v.pointer("/study/id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    // The ids of this study's family: its own `[family]`, the root's family a member check
+    // passes in, or the registered lock. `None` when the records cannot be read.
+    let family = OnceCell::new();
+    let ids = || -> Option<&Vec<String>> {
+        family
+            .get_or_init(|| {
+                let own: Vec<String> = id(spec).into_iter().collect();
+                if spec.get("family").is_some() {
+                    let members = ctx.members.iter().flatten();
+                    return Some(
+                        [own, members.filter_map(|m| id(&m.raw.value)).collect()].concat(),
+                    );
+                }
+                if !ctx.family_ids.is_empty() {
+                    return Some(ctx.family_ids.clone());
+                }
+                let found = own.first().map(|i| ctx.records.family_of(i));
+                match found {
+                    Some(Err(_)) => None,
+                    Some(Ok(Some(f))) => {
+                        let members = f.lock.members.iter().map(|m| m.id.clone());
+                        Some(std::iter::once(f.root.clone()).chain(members).collect())
+                    }
+                    _ => Some(own),
+                }
+            })
+            .as_ref()
+    };
     let mut out = vec![];
     for (path, first) in nodes(spec, pat) {
         let mut seen: Vec<PathBuf> = vec![];
         let mut todo: Vec<String> = first.as_str().map(str::to_string).into_iter().collect();
         let mut found = vec![];
         while let Some(rel) = todo.pop() {
-            let Some(file) = input_path(&ctx.root, &rel).filter(|f| f.is_file()) else {
+            let Some(file) = input_path(&ctx.root, &rel) else {
                 continue;
             };
             if seen.contains(&file) {
                 continue;
             }
             seen.push(file.clone());
-            let Some(next) = (std::fs::read(&file).ok()).and_then(|b| crate::spec::parse(&b).ok())
+            let Some(next) = inputs::read_regular(&file).and_then(|b| crate::spec::parse(&b).ok())
             else {
                 continue;
             };
@@ -418,10 +452,11 @@ fn follow_on_shares(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
             let same = crate::spec::hash_bytes(&next.hash) == Some(ctx.spec_hash);
             let confirmatory =
                 next.value.pointer("/study/mode") == Some(&Value::from("confirmatory"));
-            if same || !confirmatory || members.contains(&file) {
+            if same || !confirmatory || fam::shared(&held(&next.value), &mine).is_empty() {
                 continue;
             }
-            if !fam::shared(&held(&next.value), &mine).is_empty() {
+            // A family member shares data by design; unreadable records only silence the warning.
+            if ids().is_some_and(|ids| id(&next.value).is_none_or(|i| !ids.contains(&i))) {
                 found.push(rel);
             }
         }

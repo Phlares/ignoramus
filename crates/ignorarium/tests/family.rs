@@ -1167,3 +1167,64 @@ fn a_follow_on_cycle_terminates() {
         "{v}"
     );
 }
+
+/// Root `fam` with members `spec/b.toml` and `spec/c.toml`; `b` routes to `c`, and both hold
+/// the root's confirmation data. Returns the root spec and `b`'s.
+fn routed_family(lab: &Lab) -> (PathBuf, PathBuf) {
+    let root = family_root(lab);
+    let b = pinned(&root, &following(study("b"), &["spec/c.toml"]));
+    let b = put(&root, "spec/b.toml", &b);
+    put(&root, "spec/c.toml", &pinned(&root, &study("c")));
+    let spec = root_spec(
+        &root,
+        &pinned(&root, &study("fam")),
+        &["spec/b.toml", "spec/c.toml"],
+    );
+    (spec, b)
+}
+
+fn no_w_fam_002(v: &Value) {
+    let d = v["diagnostics"].as_array().unwrap();
+    assert!(d.iter().all(|d| d["code"] != "W-FAM-002"), "{v}");
+}
+
+#[test]
+fn a_route_between_members_does_not_warn_at_the_root() {
+    let lab = lab();
+    let (spec, _) = routed_family(&lab);
+    no_w_fam_002(&check_json(&lab, &spec).1);
+}
+
+#[test]
+fn a_route_between_members_does_not_warn_at_a_registered_member() {
+    let lab = lab();
+    let (spec, b) = routed_family(&lab);
+    register(&lab, &spec);
+    no_w_fam_002(&check_json(&lab, &b).1);
+}
+
+#[test]
+fn a_route_to_another_familys_member_still_warns() {
+    let lab = lab();
+    let (spec, b) = routed_family(&lab);
+    register(&lab, &spec);
+    let root = b.parent().unwrap().parent().unwrap();
+    // `d` is outside the family and holds the same data.
+    put(root, "spec/d.toml", &pinned(root, &study("d")));
+    let text = std::fs::read_to_string(&b)
+        .unwrap()
+        .replace("spec/c.toml", "spec/d.toml");
+    let v = check_json(
+        &lab,
+        &put(
+            root,
+            "spec/e.toml",
+            &text.replace("id = \"b\"", "id = \"e\""),
+        ),
+    )
+    .1;
+    assert!(
+        has(&v, "W-FAM-002", "scope.end_of_run.follow_on[0].spec"),
+        "{v}"
+    );
+}

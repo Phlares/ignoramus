@@ -287,15 +287,20 @@ pub fn shared<'a>(
 
 /// Every rule on each member in `ctx.members` that declares no family of its own, with the
 /// root's prior use, records, store and machine, then, as a standalone check does, the typed
-/// model and the schedule when no rule failed; diagnostics as `report` gives them.
-pub fn check(ctx: &mut CheckCtx) -> Vec<Diagnostic> {
+/// model and the schedule when no rule failed, each told the family of root `root_id`; diagnostics as `report` gives them.
+pub fn check(ctx: &mut CheckCtx, root_id: &str) -> Vec<Diagnostic> {
     let members = std::mem::take(&mut ctx.members);
+    let ids = (members.iter().flatten())
+        .filter_map(|m| m.raw.value.pointer("/study/id")?.as_str())
+        .chain([root_id]);
+    let family_ids = ids.map(str::to_string).collect();
     // The member checks borrow the root's prior use and records, so every check reads each
     // log once; they go back to the root at the end.
     let mut each = CheckCtx {
         prior: std::mem::replace(&mut ctx.prior, Box::new(NoPriorUse)),
         records: std::mem::replace(&mut ctx.records, Box::new(NoRecords)),
         machine_max_level: ctx.machine_max_level,
+        family_ids,
         store: Store {
             root: ctx.store.root.clone(),
         },

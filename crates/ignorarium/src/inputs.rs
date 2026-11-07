@@ -51,7 +51,7 @@ pub fn input_path(root: &Path, rel: &str) -> Option<PathBuf> {
 }
 
 /// The bytes of a regular file; never opens a pipe or device.
-fn read_regular(path: &Path) -> Option<Vec<u8>> {
+pub fn read_regular(path: &Path) -> Option<Vec<u8>> {
     path.metadata()
         .ok()
         .filter(std::fs::Metadata::is_file)

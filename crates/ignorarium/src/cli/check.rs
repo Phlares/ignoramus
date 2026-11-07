@@ -393,9 +393,15 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
             .ok_or_else(|| CliError::usage(format!("{shown}: the spec hash is malformed")))?,
         gates: Default::default(),
         payload: Default::default(),
+        family_ids: vec![],
     };
     let (value, filled, mut diags) = rules::check_all(&raw.value, rules::builtin(), &cc);
-    diags.extend(family::check(&mut cc));
+    let root_id = raw
+        .value
+        .pointer("/study/id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    diags.extend(family::check(&mut cc, root_id));
     let stream = rules::granted(&value, &cc).ok().flatten();
     let mut a = Assessed {
         root: cc.root.clone(),
