@@ -6,7 +6,10 @@ use crate::backend::{
 use crate::budget::{Alerts, Cost, CostMeter, Decision, HostMeter, decide, dimension_name};
 use crate::cli::check::HomeRecords;
 use crate::control::{self, ControlError, ControlFile, RunLock, Signal, State};
-use crate::derived::{CONTINUE, INPUTS, Inputs, REGISTER, RESIZE, Register, SELECTION, Selection};
+use crate::derived::{
+    CONTINUE, INPUTS, Inputs, REGISTER, RESIZE, Register, SELECTION, SPAWN_STOP, Selection,
+    SpawnStop, TRIGGER,
+};
 use crate::diag::printable;
 use crate::environ::{Builder, Built, Recipe};
 use crate::estimate::{apply_defaults, estimate};
@@ -29,7 +32,7 @@ use crate::spec::model::{Mode, Param, Role, SELECTED, Spec, param_path};
 use crate::store::Store;
 use crate::stream::{LogName, StreamError};
 use crate::view::{self, ViewError};
-use crate::{analysis, canon, keys, resize, spec, sys, units, values};
+use crate::{analysis, canon, keys, resize, spawn, spec, sys, units, values};
 use ed25519_dalek::SigningKey;
 use ignorarium_guest::image;
 use serde_json::{Value, json};
@@ -773,11 +776,17 @@ pub fn progress(
     let machine = machine::load(&home.root).map_err(io)?;
     let register = all.iter().find_map(Register::of);
     // The rows that run: a re-size study's record leaves out the reserve rows it never admits.
-    // Its reserve inputs hold no data twice (E-CNF-004), so every one is a cluster.
+    // Its reserve inputs hold no data twice (E-CNF-004), so every one is a cluster. Only the
+    // children the trigger records admit run, and a stopped child's rows count as far as they ran.
     let clusters = units::clusters(&spec, &spec_hash);
     let ran = resize::ran(&spec, &clusters, resize::recorded(all)?.as_ref());
+    let spawned: BTreeSet<String> = spawn::admitted(&spec, all)?.into_keys().collect();
+    let rowed: BTreeSet<u64> = (all.iter())
+        .filter(|r| r.kind == "row")
+        .filter_map(|r| r.row)
+        .collect();
     let rows: Vec<Row> = (expand_rows(&spec, &spec_hash, register.as_ref())?.into_iter())
-        .filter(|r| resize::runs(r, &ran))
+        .filter(|r| resize::runs(r, &ran) && spawn::runs(r, &spawned) || rowed.contains(&r.index))
         .collect();
     let tally = Tally::of(all);
     let mut conditions: BTreeMap<String, (u64, u64)> = BTreeMap::new();
@@ -979,7 +988,10 @@ fn no_links(base: &Path, parts: &[&str]) -> Result<(), RunError> {
 /// mismatch (`recheck_stop`), ends with the stop trace before any row.
 /// A row a dead box left running is killed first. In a study that declares a re-size, the
 /// first reserve row waits for the `resize` record (`resized`), and a reserve row of a cluster
-/// it does not admit never runs. At each row boundary the control file is
+/// it does not admit never runs. In a study with declared triggers, the first row past the
+/// selection stage waits for the trigger records (`triggers`), and a child row runs only when
+/// one admits its child; a budget pause on a child row signs a `spawn-stop` record of the
+/// children not finished and the run finishes without their rows. At each row boundary the control file is
 /// read: a stop ends the run with the stop trace, a pause ends it at that boundary. Then the
 /// gate runs before each attempt, retries included: the run pauses instead of starting it
 /// when a cap is reached or the attempt would reach one, or when the payload or an input
@@ -1064,14 +1076,30 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
     let mut books = Books::open(plan, &all, &machine);
     let mut pick = None;
     let mut admitted = None;
+    let triggered = plan.spec.mutations.declared().next().is_some();
+    // Each admitted child by schedule id, with the hash of the trigger record that admits it.
+    let mut spawned: Option<BTreeMap<String, String>> = None;
     for row in plan
         .schedule
         .rows
         .iter()
         .filter(|r| !done.contains(&r.index))
     {
-        // No trigger admits a child yet, so no child row runs.
-        if row.stage == SPAWN_STAGE {
+        // In a study with triggers, the trigger records come at the selection boundary, after
+        // the pick when the study has a stage, and no later row runs before them.
+        if triggered && row.stage != SELECTION_STAGE && spawned.is_none() {
+            if plan.spec.design.selection.is_some() && pick.is_none() {
+                match selection(plan, &log)? {
+                    Ok(p) => pick = Some(p),
+                    Err(why) => return halt(plan, &dir, lock, Halt::Pause(why), None),
+                }
+            }
+            spawned = Some(triggers(plan, &log)?);
+        }
+        // A child row runs only once a trigger record admits its child.
+        let child = row.stage == SPAWN_STAGE;
+        let trigger = (spawned.as_ref().filter(|_| child)).and_then(|s| s.get(&row.condition));
+        if child && trigger.is_none() {
             continue;
         }
         // In a re-size study no reserve row runs before the `resize` record, and only the
@@ -1088,7 +1116,20 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
         if let Some(h) = at_boundary(&control) {
             return halt(plan, &dir, lock, h, None);
         }
-        if let Some(h) = gate(plan, &dir, &mut books)? {
+        // A budget pause on a child row stops the children, never the parent: the run skips
+        // the remaining child rows and finishes.
+        let budget = books.check(plan, &dir)?;
+        if budget.is_some() && trigger.is_some() {
+            let all = records::read_all(&log, &plan.key.verifying_key())?;
+            let children = spawn::unfinished(&plan.spec, &plan.schedule.rows, &all)?;
+            let stop = SpawnStop {
+                children,
+                reason: spawn::BUDGET.into(),
+            };
+            analysis::append(plan, &log, SPAWN_STOP, &stop)?;
+            break;
+        }
+        if let Some(h) = budget.or_else(|| unready(plan, &dir)) {
             return halt(plan, &dir, lock, h, None);
         }
         // The pick comes at the stage boundary: no confirmation or reserve row runs before its
@@ -1102,8 +1143,8 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
                 Err(why) => return halt(plan, &dir, lock, Halt::Pause(why), None),
             }
         }
-        let picked = pick.as_ref().filter(|_| row.condition == SELECTED);
-        let h = run_row(plan, row, picked, &dir, &log, &mut books, &watch)?;
+        let job = Job::of(plan, row, pick.as_ref(), trigger.map(String::as_str))?;
+        let h = run_row(plan, row, &job, &dir, &log, &mut books, &watch)?;
         // A failed event write is a failed internal check: the run pauses after the row.
         let failed = watch.failed.take();
         if let Some(h) = h.or_else(|| failed.is_some().then(|| Halt::Pause(EVENT_LOG.into()))) {
@@ -1121,10 +1162,14 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
 /// that lands during the re-hash still counts.
 fn gate(plan: &RunPlan, dir: &Path, books: &mut Books) -> Result<Option<Halt>, RunError> {
     let budget = books.check(plan, dir)?;
-    Ok(budget
-        .or_else(|| stale(plan, dir).map(Halt::Pause))
+    Ok(budget.or_else(|| unready(plan, dir)))
+}
+
+/// The gate past the budget (`gate`).
+fn unready(plan: &RunPlan, dir: &Path) -> Option<Halt> {
+    (stale(plan, dir).map(Halt::Pause))
         .or_else(|| blind_to_exits().map(Halt::Pause))
-        .or_else(|| sys::interrupted().then(|| Halt::Pause(INTERRUPTED.into()))))
+        .or_else(|| sys::interrupted().then(|| Halt::Pause(INTERRUPTED.into())))
 }
 
 /// Why the box cannot see a row end, when it cannot. The library reads the SIGCHLD action and
@@ -1482,6 +1527,64 @@ fn selection(plan: &RunPlan, log: &Path) -> Result<Result<Pick, String>, RunErro
     }))
 }
 
+/// The trigger records at the selection boundary: each declared trigger's record the log
+/// holds, and one signed now for each it lacks (`spawn::evaluate`). Then each admitted child
+/// by schedule id, with the hash of the first record that admits it (`spawn::admitted`).
+fn triggers(plan: &RunPlan, log: &Path) -> Result<BTreeMap<String, String>, RunError> {
+    let all = records::read_all(log, &plan.key.verifying_key())?;
+    let have = spawn::recorded(&all)?.unwrap_or_default();
+    for t in spawn::evaluate(plan, &all)? {
+        if !have.iter().any(|h| h.id == t.id) {
+            analysis::append(plan, log, TRIGGER, &t)?;
+        }
+    }
+    let all = records::read_all(log, &plan.key.verifying_key())?;
+    spawn::admitted(&plan.spec, &all)
+}
+
+/// What a row runs, past its schedule entry: the condition id the payload gets, its params as
+/// canonical JSON, and the records that chose them. A `selected` row runs the pick. A child
+/// row runs its child (`spawn::job`), and names the trigger record that admitted it, and the
+/// selection record when its parent is `selected`.
+struct Job<'a> {
+    condition: String,
+    params: String,
+    pick: Option<&'a Pick>,
+    trigger: Option<&'a str>,
+}
+
+impl<'a> Job<'a> {
+    fn of(
+        plan: &RunPlan,
+        row: &Row,
+        pick: Option<&'a Pick>,
+        trigger: Option<&'a str>,
+    ) -> Result<Job<'a>, RunError> {
+        let child = trigger.and_then(|_| spawn::child_of(&plan.spec, &row.condition));
+        let empty = Value::Object(Default::default());
+        let (pick, condition, params) = match child {
+            Some(c) => {
+                let pick = pick.filter(|_| c.parent == SELECTED);
+                let (id, params) = spawn::job(&plan.params, &c, pick.map(|p| p.id.as_str()));
+                (pick, id, params)
+            }
+            None => {
+                let pick = pick.filter(|_| row.condition == SELECTED);
+                let id = pick.map_or(&row.condition, |p| &p.id).clone();
+                let params = plan.params.get(&id).unwrap_or(&empty).clone();
+                (pick, id, params)
+            }
+        };
+        let params = String::from_utf8(canon::canonical_of(&params).map_err(io)?).map_err(io)?;
+        Ok(Job {
+            condition,
+            params,
+            pick,
+            trigger,
+        })
+    }
+}
+
 /// The paths of the reserve clusters that run in a re-size study, from its `resize` record:
 /// the one its records hold, or else one made now from the first batch (`resize::or_stop`) and
 /// signed; `None` when it stops. A resume reads the record and never makes it again.
@@ -1502,11 +1605,10 @@ fn resized(plan: &RunPlan, log: &Path) -> Result<Option<BTreeSet<String>>, RunEr
 }
 
 /// One row in its own span: `row.start`, the attempts, `row.end`. `Some` ends the run.
-/// `pick` is the selection for a `selected` row.
 fn run_row(
     plan: &RunPlan,
     row: &Row,
-    pick: Option<&Pick>,
+    job: &Job,
     dir: &Path,
     log: &Path,
     books: &mut Books,
@@ -1516,7 +1618,7 @@ fn run_row(
     watch.begin(row.index, &span);
     let start = json!({ "row": row.index });
     log_event(plan, dir, Some(&span), "row.start", "info", start)?;
-    let (exit, halt) = attempt_row(plan, row, pick, dir, log, books, watch)?;
+    let (exit, halt) = attempt_row(plan, row, job, dir, log, books, watch)?;
     let end = json!({ "row": row.index, "exit": exit });
     watch.keep(log_event(plan, dir, Some(&span), "row.end", "info", end));
     Ok(halt)
@@ -1530,13 +1632,12 @@ fn run_row(
 fn attempt_row(
     plan: &RunPlan,
     row: &Row,
-    pick: Option<&Pick>,
+    job: &Job,
     dir: &Path,
     log: &Path,
     books: &mut Books,
     watch: &RunWatch,
 ) -> Result<(String, Option<Halt>), RunError> {
-    let condition = pick.map_or(&row.condition, |p| &p.id);
     let mut attempts = 0u32;
     let mut unknown = false;
     let mut bound;
@@ -1547,11 +1648,11 @@ fn attempt_row(
     let noted = |o: &RowOutcome| attempt_events(plan, dir, &span, row.index, o);
     let mut outcome = loop {
         attempts += 1;
-        let job = job_for(plan, row, condition, dir)?;
-        out_dir.clone_from(&job.output_dir);
+        let attempt = job_for(plan, row, job, dir)?;
+        out_dir.clone_from(&attempt.output_dir);
         let mut o = plan
             .backend
-            .run_row(&job, watch)
+            .run_row(&attempt, watch)
             .unwrap_or_else(|e| RowOutcome::failed(Exit::Infra(e.to_string()), 0.0));
         // Every backend text reaches the records from here.
         redacted(&plan.redact, &mut o);
@@ -1676,9 +1777,12 @@ fn attempt_row(
     if let Some(why) = reason {
         body["reason"] = json!(why);
     }
-    if let Some(p) = pick {
+    if let Some(p) = job.pick {
         body["picked"] = json!(p.id);
         body["selection"] = json!(p.record);
+    }
+    if let Some(t) = job.trigger {
+        body["trigger"] = json!(t);
     }
     if let Some(v) = values {
         body["values"] = json!(v);
@@ -1957,17 +2061,10 @@ fn box_cpu(body: &mut Value, o: &RowOutcome) {
     }
 }
 
-/// The canonical JSON of the params of `condition`; `{}` when it has none.
-fn params_json(plan: &RunPlan, condition: &str) -> Result<String, RunError> {
-    let empty = Value::Object(Default::default());
-    let params = plan.params.get(condition).unwrap_or(&empty);
-    String::from_utf8(canon::canonical_of(params).map_err(io)?).map_err(io)
-}
-
-/// The job for one attempt of `row`, running `condition`, with a fresh output dir. An old one
-/// is renamed, never deleted. A recheck copy gets its original's job: the copy holds the
+/// The backend job for one attempt of `row`, running `job`, with a fresh output dir. An old
+/// one is renamed, never deleted. A recheck copy gets its original's job: the copy holds the
 /// original's seed, unit and repeat, and here its row index.
-fn job_for(plan: &RunPlan, row: &Row, condition: &str, dir: &Path) -> Result<RowJob, RunError> {
+fn job_for(plan: &RunPlan, row: &Row, job: &Job, dir: &Path) -> Result<RowJob, RunError> {
     let index = row.index.to_string();
     no_links(dir, &["run", "rows", &index])?;
     let row_dir = std::path::absolute(dir.join("run").join("rows").join(&index)).map_err(io)?;
@@ -1988,7 +2085,7 @@ fn job_for(plan: &RunPlan, row: &Row, condition: &str, dir: &Path) -> Result<Row
         argv: vec![
             text(&plan.payload),
             "--condition".into(),
-            condition.into(),
+            job.condition.clone(),
             "--unit".into(),
             row.unit.clone(),
             "--repeat".into(),
@@ -2001,7 +2098,7 @@ fn job_for(plan: &RunPlan, row: &Row, condition: &str, dir: &Path) -> Result<Row
                 "IGNORARIUM_ROW".into(),
                 row.recheck_of.unwrap_or(row.index).to_string(),
             ),
-            ("IGNORARIUM_PARAMS".into(), params_json(plan, condition)?),
+            ("IGNORARIUM_PARAMS".into(), job.params.clone()),
         ],
         input_dir: plan.view.clone(),
         output_dir: out,

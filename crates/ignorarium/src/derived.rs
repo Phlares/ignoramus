@@ -18,6 +18,8 @@ pub const OPENED: &str = "opened";
 pub const REGISTER: &str = "register";
 pub const RESIZE: &str = "resize";
 pub const SELECTION: &str = "selection";
+pub const SPAWN_STOP: &str = "spawn-stop";
+pub const TRIGGER: &str = "trigger";
 pub const VERDICT: &str = "verdict";
 
 /// The body of `r` when it is a record of `kind`; `None` for another kind, or a body that
@@ -226,6 +228,55 @@ impl Resize {
                     .map(|c| c.path.as_str())
             })
             .collect()
+    }
+}
+
+/// A trigger's bet on the selection data, made once at the selection boundary: its stopped
+/// e-value, whether that reached the threshold, and the children it admitted and skipped, each
+/// by the id it runs as (`selected` replaced by the pick).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Trigger {
+    pub id: String,
+    pub e_value: f64,
+    pub threshold: f64,
+    pub fired: bool,
+    /// Why the bet could not be read, such as an incomplete selection unit; then `e_value` is
+    /// 0. Written as `null`.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub reason: Option<String>,
+    pub admitted: Vec<String>,
+    pub skipped: Vec<Skipped>,
+}
+
+/// A child a trigger did not admit, and why: `not-fired`, `same-as-parent` or `budget`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Skipped {
+    pub child: String,
+    pub reason: String,
+}
+
+impl Trigger {
+    /// `None` for another kind of record, or a body that does not parse.
+    pub fn of(r: &Record) -> Option<Trigger> {
+        body_of(r, TRIGGER)
+    }
+}
+
+/// The children whose remaining rows a run skipped when the budget ran out during child rows,
+/// by the id they run as.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpawnStop {
+    pub children: Vec<String>,
+    pub reason: String,
+}
+
+impl SpawnStop {
+    /// `None` for another kind of record, or a body that does not parse.
+    pub fn of(r: &Record) -> Option<SpawnStop> {
+        body_of(r, SPAWN_STOP)
     }
 }
 

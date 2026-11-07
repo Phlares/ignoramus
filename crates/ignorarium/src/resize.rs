@@ -6,7 +6,7 @@ use crate::derived::{CONTINUE, GroupSd, RESIZE, Register, Resize, ResizeStratum,
 use crate::records::Record;
 use crate::rules::REPS;
 use crate::runner::RunError;
-use crate::schedule::{RESERVE_STAGE, Row, SPAWN_STAGE, reserve_order};
+use crate::schedule::{RESERVE_STAGE, Row, reserve_order};
 use crate::seed::seed;
 use crate::spec::model::{Role, Spec};
 use crate::units::Cluster;
@@ -145,10 +145,9 @@ pub fn ran<'a>(
     }
 }
 
-/// `row` runs: it is no reserve row, or its cluster is one that `ran` holds. No child row
-/// runs: no trigger admits a child yet.
+/// `row` runs: it is no reserve row, or its cluster is one that `ran` holds.
 pub fn runs(row: &Row, ran: &BTreeSet<&str>) -> bool {
-    row.stage != SPAWN_STAGE && (row.stage != RESERVE_STAGE || ran.contains(row.cluster.as_str()))
+    row.stage != RESERVE_STAGE || ran.contains(row.cluster.as_str())
 }
 
 /// What a study that re-sized shows of its spread once it is over: for each hypothesis with

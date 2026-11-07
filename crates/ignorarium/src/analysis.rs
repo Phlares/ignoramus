@@ -9,7 +9,6 @@ use crate::inputs::InputHashes;
 use crate::planlog::store::{PlanLog, RELEASE};
 use crate::prior::Seen;
 use crate::records::{self, Record, RecordDraft};
-use crate::resize;
 use crate::runner::{RunError, RunPlan, own_label, stored_spec, typed};
 use crate::schedule::{self, Row, SELECTION_STAGE};
 use crate::seed::seed;
@@ -19,6 +18,7 @@ use crate::spec::model::{
 };
 use crate::stream::{Log, LogName};
 use crate::units::{self, Cluster};
+use crate::{resize, spawn};
 use evidence::rng::Rng;
 use evidence::{Tail, claim, tree};
 use serde::{Deserialize, Serialize};
@@ -727,11 +727,15 @@ fn finite(e: f64) -> f64 {
     if e >= 0.0 { e.min(f64::MAX) } else { 0.0 }
 }
 
-/// The strata a claim of `h` is held in: each it lists, once, in order; `""`, the pooled
-/// group, when it lists none.
+/// The strata a claim of `h` is held in (`strata_of`).
 pub(crate) fn claim_strata(h: &Hypothesis) -> Vec<&str> {
+    strata_of(&h.strata)
+}
+
+/// Each stratum of `listed`, once, in order; `""`, the pooled group, when it lists none.
+pub(crate) fn strata_of(listed: &[String]) -> Vec<&str> {
     let mut strata: Vec<&str> = Vec::new();
-    for s in &h.strata {
+    for s in listed {
         if !strata.contains(&s.as_str()) {
             strata.push(s);
         }
@@ -812,7 +816,8 @@ fn recheck(spec: &Spec, records: &[Record], carried_from: Option<String>) -> Opt
 /// study that re-sized releases the reserve data it never measured (`release`). A reserve
 /// row runs when the `resize` record admits its cluster, and every one runs in a study with no
 /// such record; the analysis reads the reserve clusters that ran, in the order they are
-/// appended. A study the record stops fails its claims (`verdicts`). A call after a crash adds
+/// appended. A child row runs when a `trigger` record admits its child and no `spawn-stop`
+/// record names it (`spawn::admitted`). A study the record stops fails its claims (`verdicts`). A call after a crash adds
 /// only what is missing; a complete study gets nothing. A log whose analysis record another
 /// box version wrote is refused when it lacks an estimate or a verdict. The close takes its
 /// e-value from the signed records alone, so it is added whatever box wrote them.
@@ -827,7 +832,8 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
         .filter(|r| r.kind == "row")
         .filter_map(|r| r.row)
         .collect();
-    let runs = |r: &&Row| resize::runs(r, &ran);
+    let spawned: BTreeSet<String> = spawn::admitted(&plan.spec, &all)?.into_keys().collect();
+    let runs = |r: &&Row| resize::runs(r, &ran) && spawn::runs(r, &spawned);
     if (plan.schedule.rows.iter().filter(runs)).any(|r| !rowed.contains(&r.index)) {
         return Ok(());
     }
