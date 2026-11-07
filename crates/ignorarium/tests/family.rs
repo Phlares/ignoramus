@@ -20,6 +20,12 @@ fn bin(lab: &Lab) -> Command {
     c
 }
 
+/// What `ignorarium <command> <spec>` prints.
+fn printed(lab: &Lab, command: &str, spec: &Path) -> String {
+    let a = bin(lab).arg(command).arg(spec).assert();
+    String::from_utf8(a.get_output().stdout.clone()).unwrap()
+}
+
 fn check_json(lab: &Lab, spec: &Path) -> (i32, Value) {
     let a = bin(lab).arg("check").arg(spec).arg("--json").assert();
     let out = a.get_output();
@@ -43,6 +49,10 @@ fn found(v: &Value) -> Vec<(String, String)> {
 
 fn has(v: &Value, code: &str, path: &str) -> bool {
     found(v).iter().any(|(c, p)| c == code && p == path)
+}
+
+fn lacks(v: &Value, code: &str) -> bool {
+    found(v).iter().all(|(c, _)| c != code)
 }
 
 fn problem_at(v: &Value, code: &str, path: &str) -> String {
@@ -118,11 +128,15 @@ fn put(root: &Path, rel: &str, text: &str) -> PathBuf {
     file
 }
 
-/// The root spec `spec.toml`: `text` with `[family] members = <members>`.
-fn root_spec(root: &Path, text: &str, members: &[&str]) -> PathBuf {
+/// `text` with `[family] members = <members>`.
+fn with_family(text: &str, members: &[&str]) -> String {
     let list: Vec<String> = members.iter().map(|m| format!("\"{m}\"")).collect();
-    let text = format!("{text}\n[family]\nmembers = [{}]\n", list.join(", "));
-    put(root, "spec.toml", &text)
+    format!("{text}\n[family]\nmembers = [{}]\n", list.join(", "))
+}
+
+/// The root spec `spec.toml`: `with_family` of `text` and `members`.
+fn root_spec(root: &Path, text: &str, members: &[&str]) -> PathBuf {
+    put(root, "spec.toml", &with_family(text, members))
 }
 
 /// A root `fam` whose one member is `spec/b.toml`, the pinned `edit` of study `b`.
@@ -166,14 +180,13 @@ fn members_are_checked_with_the_full_rules() {
 fn a_member_waiting_on_a_pilot_is_a_warning_not_pending() {
     let lab = lab();
     let (code, v) = with_member(&lab, |t| t.replace("my-pilot", "later-pilot"));
-    let at = "family.members[0]:spec/b.toml";
-    assert!(has(&v, "W-FAM-001", at), "{v}");
-    let p = problem_at(&v, "W-FAM-001", at);
+    assert!(has(&v, "W-FAM-001", B), "{v}");
+    let p = problem_at(&v, "W-FAM-001", B);
     assert!(
         p.contains("At question.hypotheses[0].estimates: ") && p.contains("later-pilot"),
         "{p}"
     );
-    assert!(found(&v).iter().all(|(c, _)| c != "W-REF-001"), "{v}");
+    assert!(lacks(&v, "W-REF-001"), "{v}");
     assert_eq!(v["pending"], serde_json::json!([]));
     assert_eq!(code, 0, "{v}");
 }
@@ -192,7 +205,7 @@ fn an_exploratory_member_is_refused() {
 #[test]
 fn a_member_on_the_test_log_is_refused() {
     let lab = lab();
-    let (_, v) = with_member(&lab, |t| t.replace("test_log = false", "test_log = true"));
+    let (_, v) = with_member(&lab, on_test_log);
     assert!(has(&v, "E-FAM-001", "family.members[0]"), "{v}");
 }
 
@@ -282,19 +295,19 @@ fn an_unpinned_or_absent_member_input_is_refused() {
         sha256_hex(b"never written")
     );
     let b = pinned(&root, &study("b"));
-    let unpinned = b.replacen("[pins]", &format!("{model}[pins]"), 1);
-    put(&root, "spec/b.toml", &unpinned);
+    put(&root, "spec/b.toml", &adding(b, model));
     put(
         &root,
         "spec/c.toml",
-        &pinned(&root, &study("c")).replacen("[pins]", &format!("{ghost}[pins]"), 1),
+        &adding(pinned(&root, &study("c")), &ghost),
     );
     let spec = root_spec(&root, &study("fam"), &["spec/b.toml", "spec/c.toml"]);
     let (_, v) = check_json(&lab, &spec);
     assert!(has(&v, "E-FAM-003", "family.members[0]"), "{v}");
     assert!(has(&v, "E-FAM-003", "family.members[1]"), "{v}");
     let p = problem_at(&v, "E-FAM-003", "family.members[1]");
-    assert!(p.contains("inputs[16]"), "{p}");
+    let k = input_index(&root, "spec/c.toml", "data/ghost.txt");
+    assert!(p.contains(&format!("inputs[{k}]")), "{p}");
 }
 
 /// An unpinned input of 3 units in stratum fiction, as spec text.
@@ -593,7 +606,7 @@ fn an_outsider_may_select_on_member_data() {
         adding(t, &input("data/pick.txt", "selection"))
     });
     let (_, v) = check_json(&lab, &spec);
-    assert!(found(&v).iter().all(|(c, _)| c != "E-CNF-005"), "{v}");
+    assert!(lacks(&v, "E-CNF-005"), "{v}");
 }
 
 /// `flat("99")` of the run tests: 100 for the reference, 99 for `arm-a`.
@@ -601,8 +614,6 @@ const FLAT_99: &str = "#!/bin/sh\ncase \"$2\" in exact) v=100;; *) v=99;; esac\n
 
 #[test]
 fn a_root_release_does_not_free_member_data() {
-    use ignorarium::backend::level0::Level0;
-    use ignorarium::runner::{RunStatus, prepare_with, run};
     const RESERVE: usize = 32;
     let lab = lab();
     common::resize_pilot(&lab.home);
@@ -617,8 +628,7 @@ fn a_root_release_does_not_free_member_data() {
     put(&root, "spec/b.toml", &pinned(&root, &resizing("b")));
     let spec = root_spec(&root, &resizing("fam"), &["spec/b.toml"]);
     register(&lab, &spec);
-    let plan = prepare_with(&lab.home, "fam", &root, vec![Box::new(Level0)]).unwrap();
-    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    run_to_end(&lab, "fam", &root);
     let release = (plan_leaves(&lab).into_iter())
         .find(|l| l.kind == "release")
         .expect("the root releases the reserve data it did not use");
@@ -636,7 +646,7 @@ fn a_root_release_does_not_free_member_data() {
 fn a_study_in_another_family_cannot_join() {
     let lab = lab();
     let root = registered_family(&lab);
-    let text = format!("{}\n[family]\nmembers = [\"spec/b.toml\"]\n", study("fam2"));
+    let text = with_family(&study("fam2"), &["spec/b.toml"]);
     let (_, v) = check_json(&lab, &put(&root, "spec2.toml", &text));
     let p = problem_at(&v, "E-FAM-002", "family.members[0]");
     assert!(
@@ -713,16 +723,13 @@ fn check_shows_slots_left_and_reserved() {
     let spec = outsider(&lab, "fresh data\n", |t| t);
     let (_, v) = check_json(&lab, &spec);
     assert_eq!(v["plan_stream"], json!({ "slots_left": 9, "reserved": 2 }));
-    let a = bin(&lab).arg("check").arg(&spec).assert();
-    let out = String::from_utf8(a.get_output().stdout.clone()).unwrap();
+    let out = printed(&lab, "check", &spec);
     assert!(
         out.contains("\nstream: slot 2, level 0.005\nplan stream: slots left 9, reserved 2\n"),
         "{out}"
     );
     // The test stream reserves nothing.
-    let spec = outsider(&lab, "fresh data\n", |t| {
-        t.replace("test_log = false", "test_log = true")
-    });
+    let spec = outsider(&lab, "fresh data\n", on_test_log);
     let (_, v) = check_json(&lab, &spec);
     assert_eq!(v["plan_stream"], Value::Null);
     assert!(v["stream"].is_object(), "{v}");
@@ -731,7 +738,7 @@ fn check_shows_slots_left_and_reserved() {
 #[test]
 fn a_family_on_the_test_log_reserves_no_plan_slot() {
     let lab = lab();
-    registered_family_with(&lab, |t| t.replace("test_log = false", "test_log = true"));
+    registered_family_with(&lab, on_test_log);
     // Slot 10 leaves no slot after it: two reserved members would refuse it.
     take_slots(&lab, 9);
     let (code, v) = check_json(&lab, &outsider(&lab, "fresh data\n", |t| t));
@@ -743,8 +750,8 @@ fn a_family_on_the_test_log_reserves_no_plan_slot() {
 #[test]
 fn a_study_locked_by_a_test_log_family_cannot_join_a_plan_log_family() {
     let lab = lab();
-    let root = registered_family_with(&lab, |t| t.replace("test_log = false", "test_log = true"));
-    let text = format!("{}\n[family]\nmembers = [\"spec/b.toml\"]\n", study("fam2"));
+    let root = registered_family_with(&lab, on_test_log);
+    let text = with_family(&study("fam2"), &["spec/b.toml"]);
     let (_, v) = check_json(&lab, &put(&root, "spec2.toml", &text));
     let p = problem_at(&v, "E-FAM-002", "family.members[0]");
     assert!(
@@ -870,16 +877,14 @@ fn check_names_the_family() {
     let (_, v) = check_json(&lab, &spec);
     let line = "family: 2 members; plan stream slots left 10, reserved 0";
     assert_eq!(v["family"], line, "{v}");
-    let a = bin(&lab).arg("check").arg(&spec).assert();
-    let out = String::from_utf8(a.get_output().stdout.clone()).unwrap();
+    let out = printed(&lab, "check", &spec);
     assert!(out.contains(&format!("\n{line}\n")), "{out}");
     register(&lab, &spec);
     // Before the root has run.
     let b = root.join("spec/b.toml");
     let (_, v) = check_json(&lab, &b);
     assert_eq!(v["family"], "member of family fam; slot reserved", "{v}");
-    let a = bin(&lab).arg("check").arg(&b).assert();
-    let out = String::from_utf8(a.get_output().stdout.clone()).unwrap();
+    let out = printed(&lab, "check", &b);
     assert!(
         out.contains("\nmember of family fam; slot reserved\n"),
         "{out}"
@@ -905,7 +910,7 @@ fn plant_root(lab: &Lab, log: &str, leaf: u64, lock: Option<&family::Lock>) {
         "alpha": null,
     });
     common::plant(&lab.home, "fam", &[("register", body)]);
-    assert!(Register::of(&common::kind_of(lab, "fam", "register")[0]).is_some());
+    register_of(lab, "fam");
 }
 
 /// Append a leaf of `kind` with `label`, `commitment` and `data` to the box's log `log`.
@@ -1017,7 +1022,7 @@ fn a_family_leaf_without_a_commitment_fails_closed() {
 #[test]
 fn a_plan_log_check_does_not_apply_test_log_leaf_indexes() {
     let lab = lab();
-    let (root, b) = lone_member(&lab, |t| t.replace("test_log = false", "test_log = true"));
+    let (root, b) = lone_member(&lab, on_test_log);
     let data = confirmation_data(&root);
     // Root fam's family lives in the test log: plan leaf 0, family leaf 1.
     let lock = lock_of_b(&b);
@@ -1046,14 +1051,13 @@ fn a_locked_member_registers_only_as_locked_in_any_mode() {
     let b = root.join("spec/b.toml");
     let locked = std::fs::read_to_string(&b).unwrap();
     // An exploratory plan takes no estimates, so it declares no deviation.
-    let exploratory = ["[[pins.deviations]]", "from = ", "reason = ", "timing = "]
+    let undeviated = ["[[pins.deviations]]", "from = ", "reason = ", "timing = "]
         .iter()
         .fold(locked, |t, k| {
             t.replace(&format!("\n{k}"), &format!("\n# {k}"))
-        })
-        .replace("mode = \"confirmatory\"", "mode = \"exploratory\"")
-        .replace("label = \"confirmed\"", "label = \"signal\"");
-    std::fs::write(&b, exploratory).unwrap();
+        });
+    let text = exploratory(undeviated).replace("label = \"confirmed\"", "label = \"signal\"");
+    std::fs::write(&b, text).unwrap();
     // `check` passes it: E-FAM-006 checks confirmatory plans.
     let (code, v) = check_json(&lab, &b);
     assert_eq!((code, errors(&v)), (0, vec![]), "{v}");
@@ -1093,6 +1097,10 @@ fn following(text: String, specs: &[&str]) -> String {
         "follow_on = []",
         &format!("follow_on = [{}]", list.join(", ")),
     )
+}
+
+fn on_test_log(text: String) -> String {
+    text.replace("test_log = false", "test_log = true")
 }
 
 fn exploratory(text: String) -> String {
@@ -1136,14 +1144,14 @@ fn a_follow_on_sharing_data_outside_the_family_warns() {
 fn a_member_follow_on_does_not_warn() {
     let lab = lab();
     let v = follow_case(&lab, &["spec/b.toml"], &["spec/b.toml"], |t| t);
-    assert!(found(&v).iter().all(|(c, _)| c != "W-FAM-002"), "{v}");
+    assert!(lacks(&v, "W-FAM-002"), "{v}");
 }
 
 #[test]
 fn an_exploratory_follow_on_does_not_warn() {
     let lab = lab();
     let v = follow_case(&lab, &[], &["spec/b.toml"], exploratory);
-    assert!(found(&v).iter().all(|(c, _)| c != "W-FAM-002"), "{v}");
+    assert!(lacks(&v, "W-FAM-002"), "{v}");
 }
 
 #[test]
@@ -1183,16 +1191,12 @@ fn routed_family(lab: &Lab) -> (PathBuf, PathBuf) {
     (spec, b)
 }
 
-fn no_w_fam_002(v: &Value) {
-    let d = v["diagnostics"].as_array().unwrap();
-    assert!(d.iter().all(|d| d["code"] != "W-FAM-002"), "{v}");
-}
-
 #[test]
 fn a_route_between_members_does_not_warn_at_the_root() {
     let lab = lab();
     let (spec, _) = routed_family(&lab);
-    no_w_fam_002(&check_json(&lab, &spec).1);
+    let (_, v) = check_json(&lab, &spec);
+    assert!(lacks(&v, "W-FAM-002"), "{v}");
 }
 
 #[test]
@@ -1200,7 +1204,8 @@ fn a_route_between_members_does_not_warn_at_a_registered_member() {
     let lab = lab();
     let (spec, b) = routed_family(&lab);
     register(&lab, &spec);
-    no_w_fam_002(&check_json(&lab, &b).1);
+    let (_, v) = check_json(&lab, &b);
+    assert!(lacks(&v, "W-FAM-002"), "{v}");
 }
 
 #[test]
@@ -1229,11 +1234,6 @@ fn a_route_to_another_familys_member_still_warns() {
     );
 }
 
-fn review_page(lab: &Lab, spec: &Path) -> String {
-    let a = bin(lab).arg("review").arg(spec).assert();
-    String::from_utf8(a.get_output().stdout.clone()).unwrap()
-}
-
 #[test]
 fn review_shows_the_family() {
     let lab = lab();
@@ -1241,7 +1241,7 @@ fn review_shows_the_family() {
     put(&root, "spec/b.toml", &pinned(&root, &study("b")));
     put(&root, "spec/c.toml", &pinned(&root, &study("c")));
     let spec = root_spec(&root, &study("fam"), &["spec/b.toml", "spec/c.toml"]);
-    let out = review_page(&lab, &spec);
+    let out = printed(&lab, "review", &spec);
     let section = out.split("## Family\n").nth(1).expect(&out);
     let section = section.split("\n## ").next().unwrap();
     let share = "may share confirmation and reserve data";
@@ -1253,14 +1253,14 @@ fn review_shows_the_family() {
         2
     );
     register(&lab, &spec);
-    let out = review_page(&lab, &root.join("spec/b.toml"));
+    let out = printed(&lab, "review", &root.join("spec/b.toml"));
     let section = out.split("## Family\n").nth(1).expect(&out);
     assert!(
         section.contains("- member of family fam; slot reserved\n"),
         "{section}"
     );
     // A study outside every family has no section.
-    let out = review_page(&lab, &outsider(&lab, "fresh data\n", |t| t));
+    let out = printed(&lab, "review", &outsider(&lab, "fresh data\n", |t| t));
     assert!(!out.contains("## Family"), "{out}");
 }
 
