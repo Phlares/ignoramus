@@ -2215,3 +2215,20 @@ fn the_fill_step_explains_the_family_table() {
     let does = fill.unwrap()["does"].as_str().unwrap();
     assert!(does.contains("[family]") && does.contains("stream slot"));
 }
+
+#[test]
+fn the_check_run_and_status_steps_explain_triggers_and_children() {
+    let dir = TempDir::new().unwrap();
+    let a = bin(dir.path()).args(["guide", "--json"]).assert().success();
+    let steps = json_out(&a);
+    let does = |id: &str| {
+        let s = steps.as_array().unwrap().iter().find(|s| s["id"] == id);
+        s.unwrap()["does"].as_str().unwrap().to_string()
+    };
+    let check = does("check");
+    assert!(check.contains("trigger") && check.contains("exploratory"));
+    let run = does("run");
+    assert!(run.contains("trigger") && run.contains("child"));
+    let status = does("status");
+    assert!(status.contains("trigger") && status.contains("child"));
+}
