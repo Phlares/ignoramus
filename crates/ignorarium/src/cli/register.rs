@@ -507,7 +507,9 @@ fn hold_inputs<'a>(
 /// The slot opens under the stream's lock, or nothing is written to the stream and the folder
 /// goes back to staging, so the id stays free. A fault in a later append leaves a folder
 /// without a record. The log appends are not atomic with the earlier-use lookup in `check`;
-/// v0 accepts that. `check_tails` runs before `append` takes its lock. Returns the leaf and
+/// v0 accepts that. The slots to keep free are read before the stream's lock, so an outsider
+/// that registers between a root's slot opening and its register record landing can take a
+/// slot a member needs; v0 accepts that too. `check_tails` runs before `append` takes its lock. Returns the leaf and
 /// the slot.
 fn store(
     spec_path: &Path,
@@ -531,9 +533,9 @@ fn store(
     let plan_log = PlanLog::open(&home.root.join(log))
         .and_then(|l| l.check_tails().map(|()| l))
         .map_err(|e| io(log, e))?;
-    let keep = match checked {
-        Some(_) => keep_for(home, key, id, frozen.family.as_ref())?,
-        None => 0,
+    let keep = match (checked, name) {
+        (Some(_), LogName::Plan) => keep_for(home, key, id, frozen.family.as_ref())?,
+        _ => 0,
     };
     let dir = home.study_dir(id);
     let (staged, salt) = stage(&dir, a, &bytes, &canon, frozen)?;

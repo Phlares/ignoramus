@@ -175,9 +175,16 @@ impl BoxRecords for HomeRecords {
         }
     }
 
+    /// Only a root that holds a plan slot reserves: the test stream never runs out.
     fn unopened(&self) -> Result<Vec<String>, String> {
         let registers = self.registers()?;
+        let plan = |r: &Register| {
+            r.alpha
+                .as_ref()
+                .is_some_and(|a| a.log == LogName::Plan.as_str())
+        };
         let locked = (registers.iter())
+            .filter(|(_, r)| plan(r))
             .filter_map(|(_, r)| r.family.as_ref())
             .flat_map(|lock| &lock.members);
         Ok(locked

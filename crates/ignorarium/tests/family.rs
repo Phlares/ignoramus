@@ -439,12 +439,17 @@ const EXTRA: &str = "member data\n";
 /// Root `fam` with members `spec/b.toml` and `spec/c.toml`, registered. Member `b` has one
 /// more confirmation input, `data/b-extra.txt`, which holds `EXTRA`. Returns the study root.
 fn registered_family(lab: &Lab) -> PathBuf {
+    registered_family_with(lab, |t| t)
+}
+
+/// `registered_family` with `edit` applied to the root and to each member.
+fn registered_family_with(lab: &Lab, edit: impl Fn(String) -> String) -> PathBuf {
     let root = family_root(lab);
     put(&root, "data/b-extra.txt", EXTRA);
     let b = adding(study("b"), &input("data/b-extra.txt", "confirmation"));
-    put(&root, "spec/b.toml", &pinned(&root, &b));
-    put(&root, "spec/c.toml", &pinned(&root, &study("c")));
-    let spec = root_spec(&root, &study("fam"), &["spec/b.toml", "spec/c.toml"]);
+    put(&root, "spec/b.toml", &pinned(&root, &edit(b)));
+    put(&root, "spec/c.toml", &pinned(&root, &edit(study("c"))));
+    let spec = root_spec(&root, &edit(study("fam")), &["spec/b.toml", "spec/c.toml"]);
     register(lab, &spec);
     root
 }
@@ -712,4 +717,16 @@ fn check_shows_slots_left_and_reserved() {
     let (_, v) = check_json(&lab, &spec);
     assert_eq!(v["plan_stream"], Value::Null);
     assert!(v["stream"].is_object(), "{v}");
+}
+
+#[test]
+fn a_family_on_the_test_log_reserves_no_plan_slot() {
+    let lab = lab();
+    registered_family_with(&lab, |t| t.replace("test_log = false", "test_log = true"));
+    // Slot 10 leaves no slot after it: two reserved members would refuse it.
+    take_slots(&lab, 9);
+    let (code, v) = check_json(&lab, &outsider(&lab, "fresh data\n", |t| t));
+    assert_eq!(v["plan_stream"], json!({ "slots_left": 1, "reserved": 0 }));
+    assert!(!has(&v, "E-STR-001", "study.mode"), "{v}");
+    assert_eq!(code, 0, "{v}");
 }

@@ -25,8 +25,8 @@ pub trait BoxRecords {
     fn stream_next(&self, log: &str) -> Result<Next, String>;
     /// True when slot `slot` of the stream of `log` was opened by study `study` and is closed.
     fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String>;
-    /// The id of each member that a registered root's lock lists and that holds no register
-    /// record: the members whose plan slots are reserved.
+    /// The id of each member that the lock of a root registered in the plan log lists and that
+    /// holds no register record: the members whose plan slots are reserved.
     fn unopened(&self) -> Result<Vec<String>, String>;
 }
 
