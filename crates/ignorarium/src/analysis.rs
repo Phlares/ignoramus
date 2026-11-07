@@ -832,10 +832,7 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
     let clusters = distinct_clusters(units::clusters(&plan.spec, &plan.spec_hash), &plan.inputs);
     let resize = resize::recorded(&all)?;
     let ran = resize::ran(&plan.spec, &clusters, resize.as_ref());
-    let rowed: BTreeSet<u64> = (all.iter())
-        .filter(|r| r.kind == "row")
-        .filter_map(|r| r.row)
-        .collect();
+    let rowed = records::row_indices(&all);
     let spawned: BTreeSet<String> = spawn::admitted(&plan.spec, &all)?.into_keys().collect();
     let runs = |r: &&Row| resize::runs(r, &ran) && spawn::runs(r, &spawned);
     if (plan.schedule.rows.iter().filter(runs)).any(|r| !rowed.contains(&r.index)) {

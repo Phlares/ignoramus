@@ -314,10 +314,7 @@ pub fn estimates(
 pub fn unfinished(spec: &Spec, rows: &[Row], records: &[Record]) -> Result<Vec<String>, RunError> {
     let admitted = admitted(spec, records)?;
     let pick = picked(records);
-    let done: BTreeSet<u64> = (records.iter())
-        .filter(|r| r.kind == "row")
-        .filter_map(|r| r.row)
-        .collect();
+    let done = records::row_indices(records);
     let open: BTreeSet<&str> = (rows.iter())
         .filter(|r| r.stage == SPAWN_STAGE && !done.contains(&r.index))
         .map(|r| r.condition.as_str())

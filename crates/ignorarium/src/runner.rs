@@ -783,10 +783,7 @@ pub fn progress(
     let clusters = units::clusters(&spec, &spec_hash);
     let ran = resize::ran(&spec, &clusters, resize::recorded(all)?.as_ref());
     let spawned: BTreeSet<String> = spawn::admitted(&spec, all)?.into_keys().collect();
-    let rowed: BTreeSet<u64> = (all.iter())
-        .filter(|r| r.kind == "row")
-        .filter_map(|r| r.row)
-        .collect();
+    let rowed = records::row_indices(all);
     let rows: Vec<Row> = (expand_rows(&spec, &spec_hash, register.as_ref())?.into_iter())
         .filter(|r| (resize::runs(r, &ran) && spawn::runs(r, &spawned)) || rowed.contains(&r.index))
         .collect();
@@ -1070,11 +1067,7 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
         ended: RefCell::new(None),
         failed: RefCell::new(None),
     };
-    let done: BTreeSet<u64> = all
-        .iter()
-        .filter(|r| r.kind == "row")
-        .filter_map(|r| r.row)
-        .collect();
+    let done = records::row_indices(&all);
     let mut books = Books::open(plan, &all, &machine);
     let mut pick = None;
     let mut admitted = None;
@@ -1519,10 +1512,7 @@ fn selection(plan: &RunPlan, log: &Path) -> Result<Result<Pick, String>, RunErro
     let record = match all.iter().find(|r| r.kind == SELECTION) {
         Some(r) => r.clone(),
         None => {
-            let done: BTreeSet<u64> = (all.iter())
-                .filter(|r| r.kind == "row")
-                .filter_map(|r| r.row)
-                .collect();
+            let done = records::row_indices(&all);
             let missing = (plan.schedule.rows.iter())
                 .find(|r| r.stage == SELECTION_STAGE && !done.contains(&r.index));
             if let Some(r) = missing {
