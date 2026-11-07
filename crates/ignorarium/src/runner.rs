@@ -1541,7 +1541,7 @@ fn selection(plan: &RunPlan, log: &Path) -> Result<Result<Pick, String>, RunErro
 /// by schedule id, with the hash of the first record that admits it (`spawn::admitted`).
 fn triggers(plan: &RunPlan, log: &Path) -> Result<BTreeMap<String, String>, RunError> {
     let all = records::read_all(log, &plan.key.verifying_key())?;
-    let have = spawn::recorded(&all)?.unwrap_or_default();
+    let have = spawn::recorded(&all)?;
     for t in spawn::evaluate(plan, &all)? {
         if !have.iter().any(|h| h.id == t.id) {
             analysis::append(plan, log, TRIGGER, &t)?;

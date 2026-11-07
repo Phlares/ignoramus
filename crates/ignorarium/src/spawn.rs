@@ -17,9 +17,6 @@ use evidence::rng::Rng;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// What the boundary decides for one trigger: the body of its `trigger` record.
-pub type Fired = Trigger;
-
 pub const NOT_FIRED: &str = "not-fired";
 pub const SAME_AS_PARENT: &str = "same-as-parent";
 pub const BUDGET: &str = "budget";
@@ -38,9 +35,9 @@ pub const NO_PICK: &str = "no-pick";
 /// its parent holds (`same-as-parent`), or the spec estimate of the rows that are no child
 /// rows, the rows of the children admitted before it and its own does not stay within the
 /// budget (`budget`). A child an earlier trigger admitted is admitted again at no cost.
-pub fn evaluate(plan: &RunPlan, records: &[Record]) -> Result<Vec<Fired>, RunError> {
+pub fn evaluate(plan: &RunPlan, records: &[Record]) -> Result<Vec<Trigger>, RunError> {
     let spec = &plan.spec;
-    let have = recorded(records)?.unwrap_or_default();
+    let have = recorded(records)?;
     let pick = picked(records);
     let pick = pick.as_deref();
     let machine = machine::load(&plan.home.root).map_err(|e| RunError::Io(e.to_string()))?;
@@ -126,9 +123,9 @@ fn bet(
         *contrast.entry(c.into()).or_default() += w;
     }
     let stat = t.statistic.to_evidence();
+    let repeats = plan.spec.design.repeats;
     let mut least = f64::INFINITY;
     for stratum in strata_of(&t.strata) {
-        let repeats = plan.spec.design.repeats;
         let (samples, incomplete) = group(
             clusters,
             Role::Selection,
@@ -212,13 +209,11 @@ pub fn child_of(spec: &Spec, id: &str) -> Option<Child> {
     schedule::children(spec).into_iter().find(|c| c.id == id)
 }
 
-/// The study's `trigger` records, in log order; `None` when it holds none. `Err` when one does
-/// not parse.
-pub fn recorded(records: &[Record]) -> Result<Option<Vec<Fired>>, RunError> {
-    let all = (records.iter().filter(|r| r.kind == TRIGGER))
+/// The study's `trigger` records, in log order. `Err` when one does not parse.
+pub fn recorded(records: &[Record]) -> Result<Vec<Trigger>, RunError> {
+    (records.iter().filter(|r| r.kind == TRIGGER))
         .map(|r| Trigger::of(r).ok_or_else(|| unparsed(TRIGGER)))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((!all.is_empty()).then_some(all))
+        .collect()
 }
 
 /// The ids the `spawn-stop` records of `records` name. `Err` when one does not parse.

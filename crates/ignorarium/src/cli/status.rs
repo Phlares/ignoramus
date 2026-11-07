@@ -3,7 +3,7 @@
 use super::{CliError, Ctx, Done, Run, out, registered, stopped_why};
 use crate::canon::sha256_hex;
 use crate::control::{ControlFile, Signal, State, run_is_live};
-use crate::derived::{SpawnStop, Trigger as Fired};
+use crate::derived::{self, SpawnStop};
 use crate::records::Record;
 use crate::runner::RunError;
 use crate::runner::progress;
@@ -101,13 +101,13 @@ fn triggers(
     all: &[Record],
     shown: &[(String, String)],
 ) -> Result<Vec<Value>, RunError> {
-    let recorded = spawn::recorded(all)?.unwrap_or_default();
+    let recorded = spawn::recorded(all)?;
     let label = |ids: &[String]| ids.iter().map(|i| relabelled(shown, i)).collect::<Vec<_>>();
-    let skipped = |t: &Fired| {
-        let each = |k: &crate::derived::Skipped| json!({ "child": relabelled(shown, &k.child), "reason": k.reason });
+    let skipped = |t: &derived::Trigger| {
+        let each = |k: &derived::Skipped| json!({ "child": relabelled(shown, &k.child), "reason": k.reason });
         t.skipped.iter().map(each).collect::<Vec<_>>()
     };
-    let entry = |id: &str, state: &str, threshold: f64, t: Option<&Fired>| {
+    let entry = |id: &str, state: &str, threshold: f64, t: Option<&derived::Trigger>| {
         json!({
             "id": id, "state": state, "e_value": t.map(|t| t.e_value), "threshold": threshold,
             "reason": t.and_then(|t| t.reason.clone()),
