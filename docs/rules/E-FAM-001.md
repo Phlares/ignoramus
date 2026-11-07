@@ -4,7 +4,7 @@ Severity: error
 
 ## Problem
 
-An exploratory study declares a family, or a family member is not confirmatory or uses another log than this study.
+An exploratory study declares a family, or a family member is not confirmatory or uses a different log from this study.
 
 ## Fix
 

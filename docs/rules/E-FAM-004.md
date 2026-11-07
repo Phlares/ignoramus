@@ -8,7 +8,7 @@ A family member's confirmation or reserve data is selection data of this study o
 
 ## Fix
 
-Give the member confirmation and reserve data that no selection input in the family holds: not the same bytes, and not the same text in other case or spacing. Or remove the member from the family and run it as exploratory on this data (no claim).
+Give the member confirmation and reserve data that no selection input in the family holds: not the same bytes, and not the same content in other case or spacing. Or remove the member from the family and run it as exploratory on this data (no claim).
 
 ## Why
 

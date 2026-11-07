@@ -11,7 +11,7 @@ use crate::planlog::store::{PlanLog, PlanLogOnce};
 use crate::prior::{PriorError, PriorUse};
 use crate::records;
 use crate::rules::{self, BoxRecords, CheckCtx, ReadOnce};
-use crate::schedule;
+use crate::schedule::{self, Row};
 use crate::spec::{self, LoadError, model::Spec};
 use crate::store::Store;
 use crate::stream::{self, Log, LogName, Next, StreamError};
@@ -320,13 +320,8 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         ctx: cc,
     };
     if !a.has_errors() {
-        let rows = Spec::from_value(&a.value).ok().and_then(|s| {
-            let hash = spec::hash_bytes(&a.hash)?;
-            let rechecks = s.pins.deterministic && a.carried.is_none();
-            Some((schedule::rows(&s, &hash, rechecks).ok()?, s))
-        });
-        match rows {
-            Some((rows, s)) => {
+        match scheduled(&a.value, &a.hash, a.carried.is_some()) {
+            Some((s, rows)) => {
                 let copies = rows.iter().filter(|r| r.recheck_of.is_some()).count();
                 a.rechecks = s.pins.deterministic.then_some(copies);
                 a.estimate = Some(estimate(&s, &machine, &rows));
@@ -335,6 +330,17 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         }
     }
     Ok(a)
+}
+
+/// The typed spec and its schedule for the defaulted `value` with spec hash `hash`; `None`
+/// when a value that passes every rule still does not fit the typed model or build a
+/// schedule, which `rules::schema_fault` reports. `carried`: the plan takes its determinism
+/// check from another study, so its schedule holds no recheck rows.
+pub fn scheduled(value: &Value, hash: &str, carried: bool) -> Option<(Spec, Vec<Row>)> {
+    let s = Spec::from_value(value).ok()?;
+    let hash = spec::hash_bytes(hash)?;
+    let rows = schedule::rows(&s, &hash, s.pins.deterministic && !carried).ok()?;
+    Some((s, rows))
 }
 
 /// `determinism: carried from <study>`, or `determinism: <n> recheck rows`.

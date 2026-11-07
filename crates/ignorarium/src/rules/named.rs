@@ -360,11 +360,25 @@ fn data_fresh(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
 
 // ---- families ----
 
-/// Each member `pat` (`family.members[*]`) selects that `ctx.members` loaded and that is not
-/// nested, with its path.
+/// A member's path, its `family.members` entry, and what `family::load` read for it.
+type Entry<'s, 'a> = (String, &'s Value, &'a Result<MemberSpec, String>);
+
+/// The members `pat` (`family.members[*]`) selects, each with what `ctx.members` read for
+/// it; `None` when `ctx.members` does not hold one entry per member, as in a context built
+/// without `family::load`. E-FAM-002 then fails closed at each member.
+fn read<'a, 's>(spec: &'s Value, ctx: &'a CheckCtx, pat: &str) -> Option<Vec<Entry<'s, 'a>>> {
+    let all = nodes(spec, pat);
+    (all.len() == ctx.members.len()).then(|| {
+        (all.into_iter().zip(&ctx.members))
+            .map(|((path, entry), m)| (path, entry, m))
+            .collect()
+    })
+}
+
+/// Each member `pat` selects that `ctx.members` loaded and that is not nested, with its path.
 fn loaded<'a>(spec: &Value, ctx: &'a CheckCtx, pat: &str) -> Vec<(String, &'a MemberSpec)> {
-    (nodes(spec, pat).into_iter().zip(&ctx.members))
-        .filter_map(|((path, _), m)| Some((path, m.as_ref().ok().filter(|m| !m.nested())?)))
+    (read(spec, ctx, pat).unwrap_or_default().into_iter())
+        .filter_map(|(path, _, m)| Some((path, m.as_ref().ok().filter(|m| !m.nested())?)))
         .collect()
 }
 
@@ -376,11 +390,13 @@ fn at(path: &str, detail: String) -> Hit {
 }
 
 /// E-FAM-001. At `family`: the study is not confirmatory. At `family.members[*]`, in a
-/// confirmatory study: a member is not confirmatory, or uses another log.
+/// confirmatory study: a member is not confirmatory, or uses a different log.
 fn family_confirmatory(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     let mode = text(spec, "study.mode");
     if pat == "family" {
-        return flag(spec, pat, |_| mode.is_some_and(|m| m != "confirmatory"));
+        return flag(spec, pat, |v| {
+            v.is_object() && mode.is_some_and(|m| m != "confirmatory")
+        });
     }
     if mode != Some("confirmatory") {
         return vec![];
@@ -407,17 +423,25 @@ fn family_confirmatory(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
 
 /// E-FAM-002: a member that cannot be read, has the id of this study or of an earlier member,
 /// is registered, declares its own family, or lies under another study root. A box whose
-/// records cannot be read fails closed.
+/// records cannot be read, and a context that did not read the members, fail closed.
 fn family_members(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    // A member path that is mistyped or unsafe is the generic rules' to report.
+    let safe = |entry: &Value| entry.as_str().and_then(|rel| input_path(&ctx.root, rel));
+    let Some(members) = read(spec, ctx, pat) else {
+        let unread = "This check did not read the member specs.";
+        return (nodes(spec, pat).into_iter())
+            .filter(|(_, entry)| safe(entry).is_some())
+            .map(|(path, _)| at(&path, unread.into()))
+            .collect();
+    };
     let own = text(spec, "study.id");
     let mut ids: Vec<(String, &str)> = vec![];
     let mut out = vec![];
-    for ((path, entry), m) in nodes(spec, pat).into_iter().zip(&ctx.members) {
+    for (path, entry, m) in members {
         let m = match m {
             Ok(m) => m,
             Err(why) => {
-                let safe = entry.as_str().and_then(|rel| input_path(&ctx.root, rel));
-                out.extend(safe.map(|_| at(&path, why.clone())));
+                out.extend(safe(entry).map(|_| at(&path, why.clone())));
                 continue;
             }
         };

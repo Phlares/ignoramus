@@ -376,7 +376,8 @@ fn faults() -> Vec<Fault> {
             vec![("E-LBL-001", "study.label")],
         ),
         // A family on an exploratory study; in a confirmatory one the member checks read the
-        // members the context loaded, here none (tests/family.rs loads them).
+        // members the context loaded, here none, so E-FAM-002 fails closed (tests/family.rs
+        // loads them).
         f(
             vec![
                 ("/study/mode", j(json!("exploratory"))),
@@ -388,7 +389,7 @@ fn faults() -> Vec<Fault> {
         ),
         f(
             vec![("/family", j(json!({ "members": ["spec/b.toml"] })))],
-            vec![],
+            vec![("E-FAM-002", "family.members[0]")],
         ),
         // power_at lies strictly on the claimed side, inside the mean range; a mistyped one is
         // the type rule's.
@@ -2508,7 +2509,7 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
     .collect();
     assert_eq!(in_file, want);
     // E-CNF-005 and E-HSH-001 read files and E-STR-001 the stream; their tests are below.
-    // E-SEC-001 is in tests/scan.rs. E-FAM-002 to E-FAM-004 read member specs: tests/family.rs.
+    // E-SEC-001 is in tests/scan.rs. E-FAM-003 and E-FAM-004 read member specs: tests/family.rs.
     let in_rows: BTreeSet<String> = faults()
         .iter()
         .flat_map(|r| r.want.iter().map(|w| w.0.to_string()))
@@ -2518,13 +2519,7 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
         .filter(|c| {
             !matches!(
                 c.as_str(),
-                "E-CNF-005"
-                    | "E-HSH-001"
-                    | "E-SEC-001"
-                    | "E-STR-001"
-                    | "E-FAM-002"
-                    | "E-FAM-003"
-                    | "E-FAM-004"
+                "E-CNF-005" | "E-HSH-001" | "E-SEC-001" | "E-STR-001" | "E-FAM-003" | "E-FAM-004"
             )
         })
         .collect();

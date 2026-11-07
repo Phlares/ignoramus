@@ -1,8 +1,8 @@
 //! Families: confirmatory studies declared together in the first one's `[family]` table, which
 //! may share confirmation and reserve data. This module reads the member specs a root lists
 //! and checks each with every rule.
-use crate::cli::check::{PENDING, input_hashes, study_root};
-use crate::diag::{Diagnostic, printable};
+use crate::cli::check::{PENDING, input_hashes, scheduled, study_root};
+use crate::diag::{Diagnostic, Severity, printable};
 use crate::inputs::{input_path, regular_file};
 use crate::prior::{NoPriorUse, same_data};
 use crate::rules::{self, CheckCtx, NoRecords};
@@ -100,7 +100,8 @@ pub fn shared<'a>(
 }
 
 /// Every rule on each member in `ctx.members` that declares no family of its own, with the
-/// root's prior use, records, store and machine, as `report` gives the diagnostics.
+/// root's prior use, records, store and machine, then, as a standalone check does, the typed
+/// model and the schedule when no rule failed; diagnostics as `report` gives them.
 pub fn check(ctx: &mut CheckCtx) -> Vec<Diagnostic> {
     let members = std::mem::take(&mut ctx.members);
     // The member checks borrow the root's prior use and records, so every check reads each
@@ -121,7 +122,12 @@ pub fn check(ctx: &mut CheckCtx) -> Vec<Diagnostic> {
         each.spec_hash = spec::hash_bytes(&m.raw.hash).unwrap_or_default();
         each.gates = Default::default();
         each.payload = Default::default();
-        let (_, _, diags) = rules::check_all(&m.raw.value, rules::builtin(), &each);
+        let (value, _, mut diags) = rules::check_all(&m.raw.value, rules::builtin(), &each);
+        let clean = diags.iter().all(|d| d.severity != Severity::Error);
+        let carried = rules::carried(&value, &each).is_some();
+        if clean && scheduled(&value, &m.raw.hash, carried).is_none() {
+            diags.push(rules::schema_fault());
+        }
         out.extend(report(m, diags));
     }
     ctx.prior = each.prior;

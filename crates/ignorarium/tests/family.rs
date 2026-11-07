@@ -352,3 +352,63 @@ fn member_data_used_by_an_outside_plan_is_refused() {
     );
     assert_eq!(code, 1);
 }
+
+#[test]
+fn a_member_that_does_not_fit_the_typed_model_is_refused() {
+    let lab = lab();
+    // Every rule accepts this operator, and the typed model does not.
+    let bad = "operators = [{ name = \"k\", type = \"int\", range = [true], acts_on = \"x\" }]";
+    let (code, v) = with_member(&lab, |t| t.replace("operators = []", bad));
+    assert!(has(&v, "E-TYP-001", B), "{v}");
+    assert!(
+        problem_at(&v, "E-TYP-001", B).starts_with("At spec: "),
+        "{v}"
+    );
+    assert_eq!(code, 1);
+}
+
+#[test]
+fn a_mistyped_family_on_an_exploratory_root_is_the_type_rule_alone() {
+    let lab = lab();
+    let root = family_root(&lab);
+    let spec = put(
+        &root,
+        "spec.toml",
+        &format!("family = 3\n{}", template("fam")),
+    );
+    let (_, v) = check_json(&lab, &spec);
+    assert!(has(&v, "E-TYP-001", "family"), "{v}");
+    assert!(!has(&v, "E-FAM-001", "family"), "{v}");
+}
+
+#[test]
+fn members_the_context_did_not_read_fail_closed() {
+    use ignorarium::rules::{self, CheckCtx};
+    let dir = tempfile::tempdir().unwrap();
+    let text = format!("{}\n[family]\nmembers = [\"spec/b.toml\"]\n", study("fam"));
+    let value = ignorarium::spec::parse(text.as_bytes()).unwrap().value;
+    let fam = |d: &[ignorarium::diag::Diagnostic]| -> Vec<(String, String)> {
+        (d.iter())
+            .filter(|d| d.code.starts_with("E-FAM"))
+            .map(|d| (d.code.clone(), d.path.clone()))
+            .collect()
+    };
+    let want = [("E-FAM-002".to_string(), "family.members[0]".to_string())];
+    // A context built without `family::load`, and one that read another number of members.
+    let none = CheckCtx::empty(dir.path());
+    assert_eq!(
+        fam(&rules::check_named(&value, rules::builtin(), &none)),
+        want
+    );
+    let two = CheckCtx {
+        members: vec![Err("a".into()), Err("b".into())],
+        ..CheckCtx::empty(dir.path())
+    };
+    let d = rules::check_named(&value, rules::builtin(), &two);
+    assert_eq!(fam(&d), want);
+    let p = &d.iter().find(|d| d.code == "E-FAM-002").unwrap().problem;
+    assert!(
+        p.ends_with("This check did not read the member specs."),
+        "{p}"
+    );
+}
