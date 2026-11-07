@@ -704,8 +704,8 @@ target = [
 [[rule]]
 code = "E-SEL-001"
 severity = "error"
-problem = "A stage is not well formed: a selection stage with no selection input, or a selection input with no stage; fewer than two candidates; a stage condition that is the reference or not in design.conditions; a metric that is not an outcome; selected with no selection stage; or a condition named selected."
-instruction = "Give design.selection two or more candidates from design.conditions other than the reference, a metric that is an outcome id, and at least one selection input; or remove the stage and the selection inputs. List conditions from design.conditions in design.confirmation.conditions, and selected only with a selection stage. Name no condition selected."
+problem = "A stage is not well formed: a selection stage with no selection input, or a selection input with no stage and no declared trigger; fewer than two candidates; a stage condition that is the reference or not in design.conditions; a metric that is not an outcome; selected with no selection stage; or a condition named selected."
+instruction = "Give design.selection two or more candidates from design.conditions other than the reference, a metric that is an outcome id, and at least one selection input; or remove the stage and the selection inputs. A declared trigger may read selection inputs without a stage. List conditions from design.conditions in design.confirmation.conditions, and selected only with a selection stage. Name no condition selected."
 why = "The selection stage picks one candidate on the selection inputs by a rule fixed before the data come in, and the confirmation stage then tests the pick on other data. Only a declared rule over declared candidates shows that the confirmation data did not shape the choice. The rule best-mean takes only the selection units that have a paired metric value for every candidate, and each mean is over those units. The best mean in the metric outcome's direction wins, and a tie goes to the candidate listed first. With no such unit the run pauses before any confirmation row. The reference runs in every stage."
 sources = ["https://www.fda.gov/media/78495/download"]
 target = [
@@ -870,9 +870,9 @@ target = [
 [[rule]]
 code = "E-MUT-001"
 severity = "error"
-problem = "The spawn depth cap is above 2."
-instruction = "Set mutations.depth_cap to 2 or less."
-why = "Each spawn level multiplies the number of runs and the chances of a chance finding. The cap is 2."
+problem = "The spawn depth cap is above 2, or below 1 in a plan with a declared trigger."
+instruction = "Set mutations.depth_cap to 2 or less, and to 1 or more when the plan declares a trigger."
+why = "Each spawn level multiplies the number of runs and the chances of a chance finding. The cap is 2. A declared trigger spawns children at level 1, so a cap of 0 would contradict the plan."
 sources = []
 target = [
   { path = "mutations.depth_cap", check = "named:depth-cap" },
@@ -950,7 +950,7 @@ code = "E-MUT-008"
 severity = "error"
 problem = "A confirmatory plan has triggers."
 instruction = "Run the study as exploratory, or remove the triggers."
-why = "Children chosen after a look at the data inflate the error rate of a confirmatory claim, and the simulation that would show the size of that inflation is not built. An exploratory study tests no claim, so its children cost nothing in level."
+why = "Children chosen by a trigger may inflate the error rate of a confirmatory claim. This holds until the box simulates the declared spawn policy and evaluates the trigger decision blind. An exploratory study tests no claim, so its children cost nothing in level."
 sources = ["https://www.fda.gov/media/78495/download"]
 when = { mode = "confirmatory" }
 target = [

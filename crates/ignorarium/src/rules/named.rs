@@ -2272,7 +2272,7 @@ fn row_cap(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
 
 /// The stages, at each target (`condition-declared` checks the names the stages list):
 /// - `design.selection`: a stage, and no selection input.
-/// - `inputs[*].role`: a selection input, and no stage and no trigger. A trigger reads the
+/// - `inputs[*].role`: a selection input, and no stage and no declared trigger. A declared trigger reads the
 ///   selection inputs without a stage.
 /// - `design.selection.conditions`: fewer than two candidates.
 /// - `design.selection.metric`: no outcome id.
@@ -2281,7 +2281,7 @@ fn row_cap(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
 /// A mistyped stage counts as present.
 fn selection_stage(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
     let staged = val(spec, "design.selection").is_some();
-    let triggered = list(spec, "mutations.triggers").is_some_and(|t| !t.is_empty());
+    let triggered = has_declared_triggers(spec);
     let has_input = |inputs: &Vec<Value>| inputs.iter().any(|i| role(i) == Some("selection"));
     match pat {
         "design.selection" => match list(spec, "inputs") {
@@ -2741,8 +2741,12 @@ fn isolation_reachable(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
 
 // ---- mutations ----
 
+/// E-MUT-001: a cap above 2, or below 1 when a declared trigger can spawn children.
 fn depth_cap(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
-    flag(spec, pat, |v| v.as_f64().is_some_and(|x| x > 2.0))
+    let spawns = has_declared_triggers(spec);
+    flag(spec, pat, |v| {
+        v.as_f64().is_some_and(|x| x > 2.0 || (spawns && x < 1.0))
+    })
 }
 
 fn seed_sets_disjoint(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {

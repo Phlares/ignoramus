@@ -678,10 +678,13 @@ fn faults() -> Vec<Fault> {
         ),
         // A trigger reads selection data with no stage; either trigger shape counts.
         f(unstaged(triggered(vec![])), vec![]),
-        // The old shape is refused by E-MUT-003, whatever the stage.
+        // The old shape is refused by E-MUT-003, and it does not excuse the missing stage.
         f(
             unstaged(triggered(vec![legacy()])),
-            vec![("E-MUT-003", "mutations.triggers[0]")],
+            vec![
+                ("E-SEL-001", "inputs[1].role"),
+                ("E-MUT-003", "mutations.triggers[0]"),
+            ],
         ),
         // Two or more candidates, each a declared condition other than the reference.
         f(
@@ -2921,6 +2924,26 @@ fn boundaries_hold_on_both_sides() {
 }
 
 #[test]
+fn declared_triggers_need_a_depth_cap_of_at_least_one() {
+    let dir = study_dir();
+    let codes = |edits: Vec<Edit>| -> Vec<String> {
+        (named(&edited(&edits), dir.path()).into_iter())
+            .map(|d| format!("{} {}", d.code, d.path))
+            .collect()
+    };
+    let cap = |n: u8| ("/mutations/depth_cap", j(json!(n)));
+    assert_eq!(
+        codes(triggered(vec![cap(0)])),
+        ["E-MUT-001 mutations.depth_cap"]
+    );
+    assert!(codes(triggered(vec![cap(1)])).is_empty());
+    assert!(codes(vec![cap(0)]).is_empty());
+    // An inert legacy trigger spawns nothing.
+    let old = codes(triggered(vec![legacy(), cap(0)]));
+    assert!(!old.iter().any(|c| c.starts_with("E-MUT-001")), "{old:?}");
+}
+
+#[test]
 fn power_gate_problem_states_both_numbers() {
     let dir = study_dir();
     let d = named(&edited(&and(near(), power_edits(5, 9))), dir.path());
@@ -4525,10 +4548,15 @@ fn selection_inputs_without_a_stage_pass_when_triggers_exist() {
         at(triggered(vec![("/mutations/triggers", j(json!([])))])),
         pair("E-SEL-001", "inputs[1].role")
     );
-    // A legacy trigger is refused by its own rule, not by the stage rule.
+    // A legacy trigger is inert: it is refused by its own rule, and the stage rule still holds.
+    let mut got = at(triggered(vec![legacy()]));
+    got.sort();
     assert_eq!(
-        at(triggered(vec![legacy()])),
-        pair("E-MUT-003", "mutations.triggers[0]")
+        got,
+        [
+            ("E-MUT-003".to_string(), "mutations.triggers[0]".to_string()),
+            ("E-SEL-001".to_string(), "inputs[1].role".to_string()),
+        ]
     );
 }
 

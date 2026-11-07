@@ -4,11 +4,11 @@ Severity: error
 
 ## Problem
 
-A stage is not well formed: a selection stage with no selection input, or a selection input with no stage; fewer than two candidates; a stage condition that is the reference or not in design.conditions; a metric that is not an outcome; selected with no selection stage; or a condition named selected.
+A stage is not well formed: a selection stage with no selection input, or a selection input with no stage and no declared trigger; fewer than two candidates; a stage condition that is the reference or not in design.conditions; a metric that is not an outcome; selected with no selection stage; or a condition named selected.
 
 ## Fix
 
-Give design.selection two or more candidates from design.conditions other than the reference, a metric that is an outcome id, and at least one selection input; or remove the stage and the selection inputs. List conditions from design.conditions in design.confirmation.conditions, and selected only with a selection stage. Name no condition selected.
+Give design.selection two or more candidates from design.conditions other than the reference, a metric that is an outcome id, and at least one selection input; or remove the stage and the selection inputs. A declared trigger may read selection inputs without a stage. List conditions from design.conditions in design.confirmation.conditions, and selected only with a selection stage. Name no condition selected.
 
 ## Why
 

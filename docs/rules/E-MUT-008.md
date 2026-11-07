@@ -12,7 +12,7 @@ Run the study as exploratory, or remove the triggers.
 
 ## Why
 
-Children chosen after a look at the data inflate the error rate of a confirmatory claim, and the simulation that would show the size of that inflation is not built. An exploratory study tests no claim, so its children cost nothing in level.
+Children chosen by a trigger may inflate the error rate of a confirmatory claim. This holds until the box simulates the declared spawn policy and evaluates the trigger decision blind. An exploratory study tests no claim, so its children cost nothing in level.
 
 ## Sources
 
