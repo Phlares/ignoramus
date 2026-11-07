@@ -1715,20 +1715,22 @@ fn a_run_study_reports_its_recorded_verdict() {
     assert_eq!(h["verdict"], v.verdict);
     assert_eq!(h["basis"], v.basis);
     let analysis = Analysis::of(&kind_of(&lab, "told", "analysis")[0]).unwrap();
-    let clipped: Vec<Value> = (analysis.clipped.iter())
+    let promised: Vec<_> = (analysis.clipped.iter())
         .filter(|c| c.hypothesis == v.hypothesis)
-        .map(|c| serde_json::json!({ "stratum": c.stratum, "below": c.below, "above": c.above, "units": c.units }))
         .collect();
-    let expected = if clipped.is_empty() {
-        Value::Null
-    } else {
-        Value::Array(clipped)
-    };
-    assert_eq!(h["clipped"], expected);
+    assert!(!promised.is_empty());
+    let shown = h["clipped"].as_array().unwrap();
+    assert_eq!(shown.len(), promised.len());
+    for (got, want) in shown.iter().zip(&promised) {
+        assert_eq!(got["stratum"], want.stratum.as_str());
+        assert_eq!(got["below"], want.below);
+        assert_eq!(got["above"], want.above);
+        assert_eq!(got["units"], want.units);
+    }
     let close_ts = close_record_of(&lab, "told").ts;
     let verdict_ts = kind_of(&lab, "told", "verdict")[0].ts.clone();
     assert_eq!(r["finished_at"], close_ts.as_str());
-    assert!(close_ts > verdict_ts, "{close_ts} {verdict_ts}");
+    assert!(close_ts >= verdict_ts, "{close_ts} {verdict_ts}");
     let log = lab.home.study_dir("told").join("records.jsonl");
     let before = std::fs::read(&log).unwrap();
     let estimates = kind_of(&lab, "told", "estimate");
@@ -1739,6 +1741,42 @@ fn a_run_study_reports_its_recorded_verdict() {
         "opened"
     );
     assert_eq!(kind_of(&lab, "told", "estimate"), estimates);
+}
+
+#[test]
+fn a_broken_stream_log_refuses_the_report() {
+    use ignorarium::runner::{RunStatus, run};
+    let lab = lab();
+    common::resize_pilot(&lab.home);
+    let plan = resize_study(&lab, "told", &flat("99"));
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let alpha = register_of(&lab, "told").alpha.unwrap();
+    let path = ignorarium::stream::Log::of(
+        &lab.home,
+        ignorarium::stream::LogName::parse(&alpha.log).unwrap(),
+    )
+    .path()
+    .to_path_buf();
+    let mut bytes = std::fs::read(&path).unwrap();
+    let close = bytes
+        .windows(14)
+        .rposition(|w| w == b"\"stream.close\"")
+        .unwrap();
+    let digit = close
+        + bytes[close..]
+            .iter()
+            .position(|b| b.is_ascii_digit())
+            .unwrap();
+    bytes[digit] = if bytes[digit] == b'7' { b'8' } else { b'7' };
+    std::fs::write(&path, &bytes).unwrap();
+    let log = lab.home.study_dir("told").join("records.jsonl");
+    let before = std::fs::read(&log).unwrap();
+    bin(&lab)
+        .args(["report", "told"])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::starts_with("error: cannot report "));
+    assert_eq!(std::fs::read(&log).unwrap(), before);
 }
 
 #[test]

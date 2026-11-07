@@ -10,10 +10,10 @@ Decision:
   - every estimate and verdict record the analysis promises;
   - for a study that holds a stream slot, the close of that slot.
 
-  The finish time is the later of the last estimate or verdict record and the close record. A study whose results are complete reports even if a stop record follows them. A stopped study that never finished refuses and gives its stop reason.
-- **Every read is recorded.** `report` verifies the log (hashes, signatures, chain) under the log's lock, with the code `verify` uses. A broken log is refused, and the message names the record or line. The report then appends one signed `opened` record with body `{}`, and prints only after that append. A refused report appends nothing. The log holds each read, and the chain fixes the last record the read saw.
-- **Contents.** Per hypothesis: the verdict, its basis, the e-value and level of a test, and the reason when the log holds one. Per mean claim and group: the units below `lo`, above `hi`, and in all. The count is descriptive and never changes a verdict. A quantile claim, or an analysis record written before the counts existed, prints no count.
-- **Planned, not built.** A study in a family will name the family, the members not yet finished, and each member that finished before it, with its finish time and first `opened` time.
+  The finish time is the later of the last counted estimate or verdict record and the close record. A repeat of an estimate or verdict is not counted. With neither, it is the time of the analysis record. A study whose results are complete reports even if a stop record follows them. A stopped study that never finished refuses and gives its stop reason.
+- **Every read is recorded.** `report` verifies the log (hashes, signatures, chain) under the log's lock, with the code `verify` uses. A broken log, in the study or in its stream, is refused, and the message names the record or line. The report then appends one signed `opened` record with body `{}`, and prints only after that append. A refused report appends nothing. The log holds each read, and the chain fixes the last record the read saw.
+- **Contents.** Per hypothesis: the verdict, its basis, the e-value and level of a test, and the reason when the log holds one. Per mean claim and group: the units below `lo`, above `hi`, and in all. The count is descriptive and never changes a verdict. The text report prints each number in full, as JSON does. A quantile claim, or an analysis record written before the counts existed, prints no count.
+- **Planned, not built.** A study in a family will name the family. It will list the members not yet finished. It will list each member that finished before it, with its finish time and first `opened` time.
 
 Why:
 
@@ -22,14 +22,14 @@ Why:
 - A log of each read shows when the results were opened (FDA 2019; ICH E9).
 - In physics blind analysis, the result is accepted after unblinding without changing any step (Junk and Lyons). An analysis blind in psychology shows the outcome only after the plan is settled (Flexible yet fair).
 - Endpoints and analyses are fixed in advance and not changed after unmasking (FDA 2022).
-- In a family of studies, each study reports alone, cites earlier members, and lists the pending ones (PCI RR). Results from different stages are hard to read when interim results may have leaked; EMA 2007 asks for the access log with them.
+- In a family of studies, each study reports alone, cites earlier members, and lists the pending ones (PCI RR). Results from different stages are hard to read when interim results may have leaked. EMA 2007 asks for the access log with them.
 - A report reuses the verification that `verify` runs. One code path decides what a sound log is.
 
 Case against:
 
 - The finish time says when results became visible through the box. It does not say when anyone looked.
 - The record log is plain JSON. The `opened` record logs reads through the box only. A person who reads the file directly leaves no trace. The blind rests on good faith, as in physics blind analysis (Junk and Lyons).
-- In a family on shared data, an early member's means hint at later members' effects (Żebrowska et al.). No member can change after the first one registers. e-LOND is the stream's rule for giving each study its level and counting discoveries. It controls the false discovery rate under any dependence, shared data included (Xu and Ramdas). Credibility rests on the planned family line.
+- In a family on shared data, an early member's means hint at later members' effects (Żebrowska et al.). No member can change after the first one registers. e-LOND is the stream's rule for giving each study its level and counting discoveries. It controls the false discovery rate under any dependence (Xu and Ramdas). That includes shared data. Credibility rests on the planned family line.
 - The `opened` record is signed before the print. A failed print still leaves the record. The record marks the box releasing the results, not a reader seeing them.
 
 Sources:

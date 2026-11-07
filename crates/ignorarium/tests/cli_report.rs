@@ -93,8 +93,8 @@ fn text_and_json_carry_the_same_facts() {
     let a = bin(&lab).args(["report", "s1"]).assert().success();
     let t = text(&a);
     for line in [
-        "h1: pass (test), e-value 312.40, level 0.0050\n",
-        "h2: fail (test), e-value 0.00, level 0.0050: incomplete units in scope: 2\n",
+        "h1: pass (test), e-value 312.4, level 0.005\n",
+        "h2: fail (test), e-value 0, level 0.005: incomplete units in scope: 2\n",
         "h3: none (none)\n",
         &format!(
             "study s1: finished {}, {} records verified\n",
@@ -113,6 +113,29 @@ fn ts_of(lab: &Lab) -> String {
         .find(|x| x.kind == "verdict")
         .map(|x| x.ts.clone())
         .unwrap()
+}
+
+#[test]
+fn small_numbers_print_exactly() {
+    let lab = lab();
+    let small = verdict(
+        "h1",
+        "pass",
+        "test",
+        json!(0.004),
+        json!(0.000025),
+        Value::Null,
+    );
+    plant(&lab.home, "s1", &finished_study(&[small], &[]));
+    let a = bin(&lab).args(["report", "s1"]).assert().success();
+    let t = text(&a);
+    assert!(
+        t.contains(
+            "h1: pass (test), e-value 0.004, level 0.000025
+"
+        ),
+        "{t}"
+    );
 }
 
 #[test]
@@ -310,14 +333,45 @@ fn a_second_verdict_for_a_hypothesis_is_not_printed() {
         Value::Null,
     );
     let second = verdict("h1", "fail", "test", json!(0.0), json!(0.005), Value::Null);
-    let mut bodies = finished_study(&[first], &[]);
-    bodies.push(("verdict", second));
+    let bodies = finished_study(&[first], &[]);
     plant(&lab.home, "s1", &bodies);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    plant(&lab.home, "s1", &[("verdict", second)]);
     let r = report_json(&lab, "s1");
     let shown = r["hypotheses"].as_array().unwrap();
     assert_eq!(shown.len(), 1);
     assert_eq!(shown[0]["verdict"], "pass");
     assert_eq!(shown[0]["e_value"], 312.4);
+    let kept = records_of(&lab, "s1")
+        .into_iter()
+        .filter(|r| r.kind == "verdict")
+        .map(|r| r.ts)
+        .next()
+        .unwrap();
+    let last = records_of(&lab, "s1")
+        .into_iter()
+        .rfind(|r| r.kind == "verdict")
+        .unwrap()
+        .ts;
+    assert!(kept < last, "{kept} {last}");
+    assert_eq!(r["finished_at"], kept.as_str());
+}
+
+#[test]
+fn an_analysis_that_promises_nothing_finishes_at_its_own_record() {
+    let lab = lab();
+    let mut bodies = finished_with(instrument(), None, vec![]);
+    let analysis = bodies.iter_mut().find(|(k, _)| *k == "analysis").unwrap();
+    analysis.1["estimates"] = json!(0);
+    analysis.1["verdicts"] = json!(0);
+    analysis.1["slot"] = Value::Null;
+    plant(&lab.home, "s1", &bodies);
+    let at = records_of(&lab, "s1")
+        .into_iter()
+        .find(|r| r.kind == "analysis")
+        .unwrap()
+        .ts;
+    assert_eq!(report_json(&lab, "s1")["finished_at"], at.as_str());
 }
 
 #[test]
