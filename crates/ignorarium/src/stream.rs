@@ -101,6 +101,9 @@ pub enum StreamError {
         slot: u64,
         level: f64,
     },
+    /// Plan slot `slot` leaves fewer than `keep` slots after it, the slots reserved for
+    /// family members not yet registered.
+    Reserved { slot: u64, keep: u64 },
 }
 
 impl std::fmt::Display for StreamError {
@@ -130,6 +133,11 @@ impl std::fmt::Display for StreamError {
                 "the stream lacks slot {slot} of study {study} at level {}",
                 shown(*level)
             ),
+            StreamError::Reserved { slot, keep } => write!(
+                f,
+                "slot {slot} {} reserved for family members not yet registered",
+                shortfall(*slot, *keep)
+            ),
         }
     }
 }
@@ -145,6 +153,27 @@ impl From<RecordError> for StreamError {
 impl From<VerifyError> for StreamError {
     fn from(e: VerifyError) -> Self {
         StreamError::Records(RecordError::Log(e))
+    }
+}
+
+/// True when plan slot `slot` leaves at least `keep` of the M slots after it.
+pub fn leaves_room(slot: u64, keep: u64) -> bool {
+    M.saturating_sub(slot) >= keep
+}
+
+/// How plan slot `slot` falls short of `keep` slots after it, for a slot that does not
+/// leave room: `leaves <n> slots after it, fewer than the <keep> slots`.
+pub fn shortfall(slot: u64, keep: u64) -> String {
+    let left = slots(M.saturating_sub(slot));
+    format!("leaves {left} after it, fewer than the {}", slots(keep))
+}
+
+/// `1 slot`, `<n> slots`.
+fn slots(n: u64) -> String {
+    if n == 1 {
+        "1 slot".into()
+    } else {
+        format!("{n} slots")
     }
 }
 
@@ -355,8 +384,15 @@ impl Log {
 
     /// Open the next slot for `study`, under the log's lock: the config first when the log
     /// is empty, then the slot with its level. Refused, with nothing written, when the level
-    /// is 0 or below `at_least`.
-    pub fn open(&self, key: &SigningKey, study: &str, at_least: f64) -> Result<Next, StreamError> {
+    /// is 0 or below `at_least`, or when a plan slot leaves fewer than `keep` slots after it.
+    /// The test stream never runs out, so it ignores `keep`.
+    pub fn open(
+        &self,
+        key: &SigningKey,
+        study: &str,
+        at_least: f64,
+        keep: u64,
+    ) -> Result<Next, StreamError> {
         let mut opened = None;
         records::append_with(&self.path, key, |all| -> Result<_, StreamError> {
             let mut r = replay(self.log, all)?;
@@ -368,6 +404,9 @@ impl Log {
                     level,
                     at_least,
                 });
+            }
+            if self.log == LogName::Plan && !leaves_room(index, keep) {
+                return Err(StreamError::Reserved { slot: index, keep });
             }
             let mut drafts = Vec::new();
             if all.is_empty() {

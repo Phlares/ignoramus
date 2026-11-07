@@ -3,6 +3,7 @@ use super::{CliError, Ctx, Done, Run, out};
 use crate::derived::{Alpha, Carried, Register};
 use crate::diag::{Diagnostic, Severity, render_human};
 use crate::estimate::{Estimate, defaults_json, estimate};
+use crate::family;
 use crate::home::Home;
 use crate::inputs;
 use crate::keys;
@@ -11,12 +12,12 @@ use crate::prior::{PriorError, PriorUse};
 use crate::records;
 use crate::rules::{self, BoxRecords, CheckCtx, ReadOnce};
 use crate::schedule;
-use crate::spec::{self, LoadError, model::Spec};
+use crate::spec::{self, LoadError};
 use crate::store::Store;
 use crate::stream::{self, Log, LogName, Next, StreamError};
-use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde_json::{Value, json};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 /// Everything a check finds about one spec file.
 pub struct Assessed {
@@ -32,11 +33,16 @@ pub struct Assessed {
     pub estimate: Option<Estimate>,
     /// `(path, (exact, normalized) SHA-256)` of each input, read once here; `None`
     /// when the file is absent or its path is unsafe. `register` stores these.
-    pub input_hashes: Vec<(String, Option<(String, String)>)>,
+    pub input_hashes: inputs::InputHashes,
     /// What the rules read, the box's records among them; `register` resolves from it.
     pub ctx: CheckCtx,
     /// For a confirmatory plan, the slot and level the stream would give it now.
     pub stream: Option<Alpha>,
+    /// For a confirmatory plan in the plan log, the plan stream's slots left and reserved.
+    pub room: Option<Room>,
+    /// For a root, its members and the plan stream's room; for a member of a registered family,
+    /// its root and whether its slot is reserved.
+    pub family_line: Option<String>,
     /// The passed determinism check the plan takes from a study that ran its code; `register`
     /// freezes it.
     pub carried: Option<Carried>,
@@ -45,8 +51,28 @@ pub struct Assessed {
     pub rechecks: Option<usize>,
 }
 
-/// The code of a value that waits on a study that has not finished.
-pub const PENDING: &str = "W-REF-001";
+/// The plan stream as `check` shows it: the slots no study has opened, and the slots reserved
+/// for family members not yet registered.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct Room {
+    pub slots_left: u64,
+    pub reserved: u64,
+}
+
+impl Room {
+    /// The room of the plan stream that gives `stream` to study `id`; `None` for the test
+    /// stream, which never runs out, and when the box records cannot be read, which E-STR-001
+    /// reports. A member's own slot is not reserved against it.
+    fn of(stream: &Alpha, records: &dyn BoxRecords, id: &str) -> Option<Room> {
+        if stream.log != LogName::Plan.as_str() {
+            return None;
+        }
+        Some(Room {
+            slots_left: (stream::M + 1).saturating_sub(stream.slot),
+            reserved: family::keep(&records.unopened().ok()?, id, 0),
+        })
+    }
+}
 
 impl Assessed {
     pub fn has_errors(&self) -> bool {
@@ -57,7 +83,7 @@ impl Assessed {
     pub fn pending(&self) -> Vec<&str> {
         self.diags
             .iter()
-            .filter(|d| d.code == PENDING)
+            .filter(|d| d.code == rules::PENDING)
             .map(|d| d.path.as_str())
             .collect()
     }
@@ -78,16 +104,23 @@ impl Assessed {
 struct Unreadable(String);
 
 impl PriorUse for Unreadable {
-    fn used(&self, _: &str, _: &str) -> Result<Option<String>, PriorError> {
+    fn used_where(
+        &self,
+        _: &str,
+        _: &str,
+        _: &dyn Fn(u64) -> bool,
+    ) -> Result<Option<String>, PriorError> {
         Err(PriorError(self.0.clone()))
     }
 }
 
 /// The records of the box in `home`. `key` is the box key, or why it cannot be read.
 /// A study with no log needs no key; a log that no key can verify cannot be trusted.
+/// The register records are read once, so every answer of one reader agrees.
 pub struct HomeRecords {
     pub home: Home,
     pub key: Result<Option<VerifyingKey>, String>,
+    registers: std::cell::OnceCell<Result<Vec<(String, Register)>, String>>,
 }
 
 impl BoxRecords for HomeRecords {
@@ -149,12 +182,81 @@ impl BoxRecords for HomeRecords {
             Some(key) => stream.closed(key, study, slot).map_err(|e| e.to_string()),
         }
     }
+
+    fn locked_members(&self) -> Result<Vec<String>, String> {
+        let registers = self.registers()?;
+        Ok(members(registers.iter().map(|(_, r)| r))
+            .map(|m| m.id.clone())
+            .collect())
+    }
+
+    /// Only a root that holds a plan slot reserves: the test stream never runs out.
+    fn unopened(&self) -> Result<Vec<String>, String> {
+        let registers = self.registers()?;
+        let plan = |r: &&Register| {
+            r.alpha
+                .as_ref()
+                .is_some_and(|a| a.log == LogName::Plan.as_str())
+        };
+        Ok(members(registers.iter().map(|(_, r)| r).filter(plan))
+            .filter(|m| registers.iter().all(|(id, _)| *id != m.id))
+            .map(|m| m.id.clone())
+            .collect())
+    }
+
+    /// The register records first, then the leaves of each log: a root writes its family leaf
+    /// before its record, so the leaves read after a root's record hold its family leaf.
+    fn family_of(&self, study: &str) -> Result<Option<family::Found>, String> {
+        let registers = self.registers()?;
+        let mut logs = vec![];
+        for name in [LogName::Plan, LogName::Test] {
+            let dir = self.home.root.join(name.as_str());
+            let leaves = match dir.symlink_metadata() {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+                Err(e) => return Err(format!("{}: {e}", name.as_str())),
+                Ok(_) => PlanLog::open(&dir)
+                    .and_then(|log| log.leaves())
+                    .map_err(|e| format!("{}: {e}", name.as_str()))?,
+            };
+            logs.push((name.as_str(), leaves));
+        }
+        family::find(registers, &logs, study)
+    }
+}
+
+/// Every member the locks of `registers` list.
+fn members<'a>(
+    registers: impl Iterator<Item = &'a Register>,
+) -> impl Iterator<Item = &'a crate::family::Member> {
+    registers
+        .filter_map(|r| r.family.as_ref())
+        .flat_map(|lock| &lock.members)
 }
 
 impl HomeRecords {
-    /// The stream slot each study of the box holds, by study, from the `register` record that
-    /// opens its log. Only that first line is read and checked.
-    fn held(&self) -> Result<Vec<(String, Alpha)>, String> {
+    /// The records of the box in `home`; `key` is its key, or why it cannot be read.
+    pub fn new(home: Home, key: Result<Option<VerifyingKey>, String>) -> HomeRecords {
+        HomeRecords {
+            home,
+            key,
+            registers: Default::default(),
+        }
+    }
+
+    /// The records of the box in `home`, whose key is `key`.
+    pub fn signed(home: &Home, key: &SigningKey) -> HomeRecords {
+        HomeRecords::new(home.clone(), Ok(Some(key.verifying_key())))
+    }
+
+    /// `read_registers`, read the first time it is asked for.
+    fn registers(&self) -> Result<&[(String, Register)], String> {
+        let read = self.registers.get_or_init(|| self.read_registers());
+        read.as_deref().map_err(Clone::clone)
+    }
+
+    /// The `register` record that opens each study's log, by study. Only that first line is
+    /// read and checked.
+    fn read_registers(&self) -> Result<Vec<(String, Register)>, String> {
         let mut out = Vec::new();
         for (id, log) in records::logs(&self.home).map_err(|e| e.to_string())? {
             let fault = |e: String| format!("study {id}: {e}");
@@ -162,12 +264,21 @@ impl HomeRecords {
                 continue;
             };
             let first = records::first(&log, key).map_err(|e| fault(e.to_string()))?;
-            let alpha = first.as_ref().and_then(Register::of).and_then(|r| r.alpha);
-            if let (Some(r), Some(alpha)) = (first, alpha) {
-                out.push((r.study, alpha));
+            if let Some(r) = first
+                && let Some(reg) = Register::of(&r)
+            {
+                out.push((r.study, reg));
             }
         }
         Ok(out)
+    }
+
+    /// The stream slot each study of the box holds, by study.
+    fn held(&self) -> Result<Vec<(String, Alpha)>, String> {
+        let registers = self.registers()?.iter();
+        Ok(registers
+            .filter_map(|(id, r)| Some((id.clone(), r.alpha.clone()?)))
+            .collect())
     }
 
     /// The key that verifies the log at `path`; `None` when there is no log. Only a log that
@@ -184,87 +295,6 @@ impl HomeRecords {
             Ok(Some(key)) => Ok(Some(key)),
         }
     }
-}
-
-/// Hash every input the spec lists, from the store when the pin names a stored object.
-/// This is the one read `register` relies on.
-pub fn input_hashes(
-    store: &Store,
-    root: &Path,
-    spec: &Value,
-) -> Vec<(String, Option<(String, String)>)> {
-    let list = spec["inputs"].as_array().map_or(&[][..], Vec::as_slice);
-    list.iter()
-        .filter_map(|i| Some((i["path"].as_str()?, i["sha256"].as_str().unwrap_or(""))))
-        .map(|(p, sha)| {
-            let found = inputs::resolve(store, root, p, sha);
-            (p.to_string(), inputs::hashes(&found))
-        })
-        .collect()
-}
-
-/// The file whose presence marks a study root.
-pub const ROOT_MARKER: &str = "ignorarium.toml";
-
-/// The folder every study path is relative to: the nearest folder at or above the spec's
-/// own folder that holds a regular `ignorarium.toml` (a link or folder of that name does
-/// not count; the content is not read). The walk checks the first folder that holds a
-/// `.git` entry and goes no further. It never uses a marker in the user's home folder or
-/// the filesystem root. Without a marker, the spec's folder.
-pub fn study_root(spec_path: &Path) -> PathBuf {
-    study_root_in(spec_path, std::env::home_dir().as_deref())
-}
-
-/// `study_root` for a given home folder.
-pub fn study_root_in(spec_path: &Path, home: Option<&Path>) -> PathBuf {
-    let spec = std::path::absolute(spec_path).unwrap_or_else(|_| spec_path.to_path_buf());
-    let spec = fold_dots(&spec);
-    let folder = spec
-        .parent()
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    root_at(&folder, home)
-}
-
-/// The study root a `run` or `resume` reads late inputs from: `study_root`'s walk from the
-/// current folder, which is the root itself when no marker is found.
-pub fn current_root() -> std::io::Result<PathBuf> {
-    Ok(root_at(
-        &std::env::current_dir()?,
-        std::env::home_dir().as_deref(),
-    ))
-}
-
-/// The walk of `study_root` from the absolute folder `folder`.
-fn root_at(folder: &Path, home: Option<&Path>) -> PathBuf {
-    for dir in folder.ancestors() {
-        if dir.parent().is_none() || Some(dir) == home {
-            break;
-        }
-        let has = |name: &str| dir.join(name).symlink_metadata();
-        if has(ROOT_MARKER).is_ok_and(|m| m.is_file()) {
-            return dir.to_path_buf();
-        }
-        if has(".git").is_ok() {
-            break;
-        }
-    }
-    folder.to_path_buf()
-}
-
-/// Drop `.` and fold `..` against the segment before it, without touching the disk, so the
-/// walk climbs real parents only.
-fn fold_dots(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for c in path.components() {
-        match c {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other),
-        }
-    }
-    out
 }
 
 pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
@@ -286,43 +316,45 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
     let store = Store {
         root: home.root.join("store"),
     };
-    let cc = CheckCtx {
-        root: study_root(spec_path),
+    let root = inputs::study_root(spec_path);
+    let mut cc = CheckCtx {
+        members: family::load(&root, &raw.value, &store),
+        root,
         prior,
         machine_max_level: machine.max_level,
         spec_text: raw.text,
-        records: Box::new(ReadOnce::new(HomeRecords {
-            home: home.clone(),
-            key,
-        })),
+        records: Box::new(ReadOnce::new(HomeRecords::new(home.clone(), key))),
         store,
         spec_hash: spec::hash_bytes(&raw.hash)
             .ok_or_else(|| CliError::usage(format!("{shown}: the spec hash is malformed")))?,
         gates: Default::default(),
         payload: Default::default(),
+        family_ids: vec![],
     };
-    let (value, filled, diags) = rules::check_all(&raw.value, rules::builtin(), &cc);
+    let (value, filled, mut diags) = rules::check_all(&raw.value, rules::builtin(), &cc);
+    let root_id = raw.value.pointer("/study/id").and_then(Value::as_str);
+    let root_id = root_id.unwrap_or_default();
+    diags.extend(family::check(&mut cc, root_id));
+    let stream = rules::granted(&value, &cc).ok().flatten();
     let mut a = Assessed {
         root: cc.root.clone(),
         hash: raw.hash,
-        input_hashes: input_hashes(&cc.store, &cc.root, &value),
+        input_hashes: inputs::spec_hashes(&cc.store, &cc.root, &value),
         filled,
         diags,
         estimate: None,
-        stream: rules::granted(&value, &cc).ok().flatten(),
+        room: (stream.as_ref()).and_then(|s| Room::of(s, cc.records.as_ref(), root_id)),
+        family_line: None,
+        stream,
         carried: rules::carried(&value, &cc),
         rechecks: None,
         value,
         ctx: cc,
     };
+    a.family_line = family_line(&a.value, a.room.as_ref(), a.ctx.records.as_ref());
     if !a.has_errors() {
-        let rows = Spec::from_value(&a.value).ok().and_then(|s| {
-            let hash = spec::hash_bytes(&a.hash)?;
-            let rechecks = s.pins.deterministic && a.carried.is_none();
-            Some((schedule::rows(&s, &hash, rechecks).ok()?, s))
-        });
-        match rows {
-            Some((rows, s)) => {
+        match schedule::of_value(&a.value, &a.hash, a.carried.is_some()) {
+            Some((s, rows)) => {
                 let copies = rows.iter().filter(|r| r.recheck_of.is_some()).count();
                 a.rechecks = s.pins.deterministic.then_some(copies);
                 a.estimate = Some(estimate(&s, &machine, &rows));
@@ -331,6 +363,31 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         }
     }
     Ok(a)
+}
+
+/// For a root, `family: <n> members; plan stream slots left <s>, reserved <k>`, with `room`
+/// when it is known; for a study that a registered root's lock lists, `member of family
+/// <root>; slot reserved`, the slot named while it is reserved. `None` for any other study,
+/// and when the box records cannot be read: the rules report that.
+fn family_line(value: &Value, room: Option<&Room>, records: &dyn BoxRecords) -> Option<String> {
+    if let Some(members) = value.pointer("/family/members").and_then(Value::as_array) {
+        let n = members.len();
+        let room = room.map_or(String::new(), |r| {
+            format!(
+                "; plan stream slots left {}, reserved {}",
+                r.slots_left, r.reserved
+            )
+        });
+        return Some(format!(
+            "family: {n} member{}{room}",
+            if n == 1 { "" } else { "s" }
+        ));
+    }
+    let id = value.pointer("/study/id")?.as_str()?;
+    let found = records.locked_family(id).ok()??;
+    let reserved = records.unopened().ok()?.iter().any(|m| m == id);
+    let slot = if reserved { "; slot reserved" } else { "" };
+    Some(format!("member of family {}{slot}", found.root))
 }
 
 /// `determinism: carried from <study>`, or `determinism: <n> recheck rows`.
@@ -394,6 +451,15 @@ fn render(a: &Assessed) -> String {
     if let Some(granted) = &a.stream {
         s.push_str(&format!("{}\n", stream_line(granted)));
     }
+    if let Some(r) = &a.room {
+        let (left, reserved) = (r.slots_left, r.reserved);
+        s.push_str(&format!(
+            "plan stream: slots left {left}, reserved {reserved}\n"
+        ));
+    }
+    if let Some(line) = &a.family_line {
+        s.push_str(&format!("{line}\n"));
+    }
     s.push_str(&format!("spec: {}\n", a.hash));
     s
 }
@@ -443,6 +509,8 @@ fn render_json(a: &Assessed) -> Result<String, CliError> {
         "pending": a.pending(),
         "power": power,
         "stream": a.stream,
+        "plan_stream": a.room,
+        "family": a.family_line,
         "recheck": recheck,
         "estimate": estimate,
         "defaults": defaults_json(&a.filled),

@@ -41,6 +41,8 @@ money_usd = 0.0
 [scope.end_of_run]
 route = "report"                # report | follow-on | share
 follow_on = []                  # [{ when = "done", spec = "follow/next.toml" }]; when: done | <id>.pass | <id>.fail, for a hypothesis with a claim
+# [family]                      # optional
+# members = ["spec/<id>.toml"]  # confirmatory studies locked with this one; they may share its confirmation and reserve data
 
 [design]
 unit = "window"

@@ -185,6 +185,9 @@ target = [
   { path = "design.confirmation.conditions[*]", check = "type", kind = "string" },
   { path = "design.resize", check = "type", kind = "table" },
   { path = "design.resize.rule", check = "type", kind = "string" },
+  { path = "family", check = "type", kind = "table" },
+  { path = "family.members", check = "type", kind = "array" },
+  { path = "family.members[*]", check = "type", kind = "string" },
   { path = "inputs", check = "type", kind = "array" },
   { path = "inputs[*]", check = "type", kind = "table" },
   { path = "inputs[*].path", check = "type", kind = "string" },
@@ -485,8 +488,8 @@ target = [
 code = "E-STR-001"
 severity = "error"
 problem = "The stream gives this confirmatory study no level."
-instruction = "Run the plan as an exploratory study, or set study.test_log = true to try it against the test stream, which never counts and never runs out. The plan stream gives levels to its first 10 confirmatory studies only. A stream log that cannot be read, or that lacks a slot a register record names, must be restored from a copy that holds every slot before any confirmatory study registers."
-why = "A confirmatory study takes its level from the stream of the log it registers in, never from the plan: e-LOND with alpha 0.05 split evenly over 10 slots. A slot's level is 0.005 times one more than the discoveries closed before it opened, and a slot is a discovery when the study's e-value reaches 1 / level, which happens exactly when one of its claims passes. When each study's e-value has expected value at most 1 under its null hypothesis, as the box's fixed-size tests give, the false discovery rate over the studies the stream counts as discoveries stays at or below 0.05, whatever the dependence between the studies. The slots go in the order studies register, which is fixed before any result. The plan stream never resets and refuses a study beyond its 10th slot, so results never stretch the budget to more studies. The test stream starts a new epoch, a fresh stream of 10 slots, each time its slots are used up, because its studies never count. Each slot records its level, its e-value and the decision. Every slot a register record names must be in the stream, so a stream log that was cut or rolled back is refused, not read as a fresh budget. register opens the slot and refuses when the level has dropped below the one check showed."
+instruction = "Run the plan as an exploratory study, or set study.test_log = true to try it against the test stream, which never counts and never runs out. The plan stream gives levels to its first 10 confirmatory studies only, and keeps one slot free for each member of a registered family that has not registered yet. A stream log that cannot be read, or that lacks a slot a register record names, must be restored from a copy that holds every slot before any confirmatory study registers."
+why = "A confirmatory study takes its level from the stream of the log it registers in, never from the plan: e-LOND with alpha 0.05 split evenly over 10 slots. A slot's level is 0.005 times one more than the discoveries closed before it opened, and a slot is a discovery when the study's e-value reaches 1 / level, which happens exactly when one of its claims passes. When each study's e-value has expected value at most 1 under its null hypothesis, as the box's fixed-size tests give, the false discovery rate over the studies the stream counts as discoveries stays at or below 0.05, whatever the dependence between the studies. The slots go in the order studies register, which is fixed before any result. The plan stream never resets and refuses a study beyond its 10th slot, so results never stretch the budget to more studies. The test stream starts a new epoch, a fresh stream of 10 slots, each time its slots are used up, because its studies never count. Each slot records its level, its e-value and the decision. Every slot a register record names must be in the stream, so a stream log that was cut or rolled back is refused, not read as a fresh budget. register opens the slot and refuses when the level has dropped below the one check showed. A registered family reserves a plan slot for each member not yet registered, so a study outside it may take a slot only when the slots after it still cover those members; a member's own slot is among them."
 sources = ["https://arxiv.org/abs/2311.06412", "https://arxiv.org/abs/2208.11418", "https://doi.org/10.1038/s41562-017-0189-z"]
 when = { mode = "confirmatory" }
 target = [
@@ -521,13 +524,107 @@ target = [
 [[rule]]
 code = "E-CNF-005"
 severity = "error"
-problem = "Selection, confirmation or reserve data was used by an earlier study."
-instruction = "Use data no earlier plan used for selection, confirmation or reserve, or change the role of this input."
-why = "Reused data has already shaped a decision. A test on it is not independent. A reserve input is confirmation data held back, so it must be fresh too."
-sources = ["https://doi.org/10.1038/s41562-016-0021"]
+problem = "Confirmation or reserve data was used by an earlier study."
+instruction = "Choose one: if the earlier study is not registered yet, add this study to its family (every member is then locked, and each takes a stream slot); run this study as exploratory on the same data (no claim); or give it fresh data. A member of the earlier study's family needs nothing."
+why = "Reused data has already shaped a decision. A test on it is not independent. A reserve input is confirmation data held back, so it must be fresh too. Data that shaped a decision cannot also be its evidence. Studies locked together before any data is scored may share data: each keeps its own stream slot, and the stream controls the false discovery rate under any dependence."
+sources = ["https://doi.org/10.1038/s41562-016-0021", "https://arxiv.org/abs/2311.06412", "https://arxiv.org/abs/2407.15733"]
 when = { mode = "confirmatory" }
 target = [
   { path = "inputs[*].path", check = "named:data-fresh" },
+]
+
+[[rule]]
+code = "E-FAM-001"
+severity = "error"
+problem = "An exploratory study declares a family, or a family member is not confirmatory or uses a different log from this study."
+instruction = "Make this study and every member confirmatory, with the same study.test_log. An exploratory study needs no family to reuse data: remove the `[family]` table, or remove the member from it and run it as exploratory on the same data (no claim)."
+why = "Members may share data because each takes its own slot in one stream, and the stream keeps the false discovery rate at or below 0.05 over its studies whatever the dependence between them, shared data included. A study in another stream, or with no slot, falls outside that bound. An exploratory study makes no claim, so it needs no family."
+sources = ["https://arxiv.org/abs/2311.06412"]
+target = [
+  { path = "family", check = "named:family-confirmatory" },
+  { path = "family.members[*]", check = "named:family-confirmatory" },
+]
+
+[[rule]]
+code = "E-FAM-002"
+severity = "error"
+problem = "A family member cannot be read, is this study or another member again, is already registered, is already locked in a registered family, declares its own family, or lies under another study root."
+instruction = "List each member once, by the path of a readable spec under this study root, and not this study itself. Only this study holds a `[family]` table. A registered study cannot join, and a study locked in another family cannot join a second one: give it fresh data, or run it as exploratory on the same data (no claim)."
+why = "A family is fixed before any member runs: registering this study locks every member. A registered study may already have seen the data, so a later lock cannot cover it. A study in two families would hold two locks and two reserved slots, and each family's data rules would assume it belongs to that family alone. One table in the first study keeps each family in one place, and one study root lets one payload folder and one data folder serve every member."
+sources = ["https://arxiv.org/abs/2407.15733"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "family.members[*]", check = "named:family-members" },
+]
+
+[[rule]]
+code = "E-FAM-003"
+severity = "error"
+problem = "An input of a family member is not pinned by sha256, or its data is neither at the study root nor in the store; or a selection input of this study has no data at the study root or in the store."
+instruction = "Set sha256 on every input of every member, of every role, and put each file at the study root or in the store before this study registers. Put this study's own selection files there too. Member specs are final then: nothing about a member can change after the lock."
+why = "Registering this study locks every member, inputs included. The lock needs the bytes: the box compares member data with earlier uses and with selection data by content, and an absent file has no content to compare. A member may not confirm on this study's selection data, so that data must be present too when the family is checked."
+sources = ["https://arxiv.org/abs/2407.15733"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "family", check = "named:family-pinned" },
+  { path = "family.members[*]", check = "named:family-pinned" },
+]
+
+[[rule]]
+code = "E-FAM-004"
+severity = "error"
+problem = "A family member's confirmation or reserve data is selection data of this study or of another member."
+instruction = "Give the member confirmation and reserve data that no selection input in the family holds: not the same bytes, and not the same content in other case or spacing. Or remove the member from the family and run it as exploratory on this data (no claim)."
+why = "A condition picked on some data looks better on that same data. A member may test a condition that a selection stage in the family picked, so its evidence must come from other data. The content decides, not the file name."
+sources = ["https://www.fda.gov/media/78495/download"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "family.members[*]", check = "named:family-selection" },
+]
+
+[[rule]]
+code = "E-FAM-005"
+severity = "error"
+problem = "The plan stream has no free slot for every member of this family."
+instruction = "Choose one: list fewer members; put this study and every member on the test stream (study.test_log = true), which never runs out and never counts; or run them as exploratory studies (no claim). The plan stream gives levels to 10 confirmatory studies, and a slot reserved for a member of a registered family stays reserved."
+why = "Registering this study locks every member and reserves a plan stream slot for each, so no later study can take the slot a member needs. A member locked with no slot could never make its claim, and the data locked for it would be spent for nothing. The check counts the slot this study opens, one slot per member, and the slots already reserved for members of other families that have not registered yet."
+sources = ["https://arxiv.org/abs/2311.06412"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "family", check = "named:family-room" },
+]
+
+[[rule]]
+code = "E-FAM-006"
+severity = "error"
+problem = "This study is a member of a registered family and differs from what the family locked."
+instruction = "Choose one: restore the spec, payload or input the family locked, byte for byte; or register the changed study under a new study id, as a study outside the family. Outside the family the freshness rule applies in full: it needs confirmation and reserve data no earlier study used, or it runs as exploratory on the same data (no claim)."
+why = "Members may share data because every member was fixed before any of them ran. A member changed after the lock may have been shaped by what the root or another member found, so a test of it on the shared data is no longer an independent test. The lock holds each member's spec hash, payload hash and input pins, so any change shows. `check` reports this rule for confirmatory plans; `register` refuses a changed member in any mode, so no change of mode frees a locked id or its reserved slot."
+sources = ["https://doi.org/10.1038/s41562-016-0021", "https://journalofcognition.org/about/registered-reports"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "study.id", check = "named:family-lock" },
+]
+
+[[rule]]
+code = "W-FAM-001"
+severity = "warning"
+problem = "A family member's value waits on a study that has not finished."
+instruction = "Nothing to do now: the member reads the value when it registers, after that study ends. If the member then fails a gate, it is refused and its reserved stream slot stays unused, so size its reserve inputs generously."
+why = "A member's values may come from a study that runs first, such as a pilot or an earlier member. They are read at the member's own registration and cannot change after it. This study's check cannot run the member's gates on values that do not exist yet, so it lists each such value and the study it waits on."
+sources = []
+check = "documented"
+
+[[rule]]
+code = "W-FAM-002"
+severity = "warning"
+problem = "A confirmatory spec reachable through follow-on routes shares confirmation or reserve data with this study and is not in its family."
+instruction = "To keep both claims, list that spec in this study's `[family]` before this study registers. Cost: every member is locked and takes a plan stream slot at register. Otherwise give one of the two studies fresh data, or run one as exploratory (no claim)."
+why = "The later study cannot confirm on data this study used, unless both belong to one family. Once this study registers, the family option is closed. The warning shows it while it can still be taken."
+sources = ["https://arxiv.org/abs/2311.06412"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "scope.end_of_run.follow_on[*].spec", check = "named:follow-on-shares" },
 ]
 
 [[rule]]
@@ -541,6 +638,18 @@ when = { mode = "confirmatory" }
 target = [
   { path = "question.hypotheses", check = "non-empty" },
   { path = "question.hypotheses[*].claim", check = "named:claim-required" },
+]
+
+[[rule]]
+code = "E-CNF-007"
+severity = "error"
+problem = "A confirmation or reserve input holds the selection data of a study that a param takes its condition from."
+instruction = "Give this study confirmation and reserve data that the selection inputs of that study did not hold: not the same bytes, and not the same content in other case or spacing. Or run this study as exploratory on the same data (no claim)."
+why = "A param { from = \"<study id>\" } takes the condition that study picked on its selection data. A condition picked on some data looks better on that same data, so a test of it there is not an honest test. Its evidence must come from other data. This holds for every confirmatory study, family members included: a member locked before the pick still takes the pick. The box reads the selection data from the inputs the study froze at its first run, and compares content, not file names. A study that has not finished is checked when this study registers, since register waits for it. An input absent at registration is compared when the run first freezes its inputs."
+sources = ["https://www.fda.gov/media/78495/download"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "design.conditions[*].params.*", check = "named:from-selection" },
 ]
 
 [[rule]]
@@ -782,6 +891,7 @@ target = [
   { path = "inputs[*].path", check = "named:input-path-safe" },
   { path = "inputs[*].path", check = "named:input-path-nested" },
   { path = "scope.end_of_run.follow_on[*].spec", check = "named:input-path-safe" },
+  { path = "family.members[*]", check = "named:input-path-safe" },
 ]
 
 [[rule]]

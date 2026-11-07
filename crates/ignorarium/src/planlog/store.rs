@@ -21,7 +21,10 @@ pub struct Leaf {
     /// `plan`, `legacy` or `release`.
     pub kind: String,
     pub commitment: Option<String>,
-    pub family: Option<String>,
+    /// Fingerprint of the plan: payload pin, outcomes and hypotheses.
+    /// Logs on disk keep the older key `family`.
+    #[serde(rename = "family")]
+    pub shape: Option<String>,
     pub mode: Option<String>,
     /// `(exact sha256, normalized sha256)` per data file.
     pub data_hashes: Vec<(String, String)>,
@@ -276,7 +279,7 @@ impl PlanLog {
             Leaf {
                 kind: "legacy".into(),
                 commitment: None,
-                family: None,
+                shape: None,
                 mode: None,
                 data_hashes,
                 label: label.into(),
@@ -299,7 +302,7 @@ impl PlanLog {
             Leaf {
                 kind: RELEASE.into(),
                 commitment: Some(commitment.into()),
-                family: None,
+                shape: None,
                 mode: None,
                 data_hashes,
                 label: label.into(),
@@ -398,21 +401,32 @@ fn prior_error(e: LogError) -> PriorError {
     PriorError(e.to_string())
 }
 
-/// The first leaf that used the data, as `leaf <index> (<kind>)`.
-fn first_use(hits: Vec<(usize, Leaf)>) -> Option<String> {
-    (hits.first()).map(|(i, leaf)| format!("leaf {i} ({})", leaf.kind))
+/// The first leaf in `hits` whose index `counts` accepts, as `leaf <index> (<kind>)`.
+fn first_use(hits: Vec<(usize, Leaf)>, counts: &dyn Fn(u64) -> bool) -> Option<String> {
+    (hits.into_iter())
+        .find(|(i, _)| counts(*i as u64))
+        .map(|(i, leaf)| format!("leaf {i} ({})", leaf.kind))
 }
 
 impl PriorUse for PlanLog {
-    fn used(&self, exact: &str, normalized: &str) -> Result<Option<String>, PriorError> {
-        self.uses(exact, normalized)
-            .map(first_use)
-            .map_err(prior_error)
+    fn used_where(
+        &self,
+        exact: &str,
+        normalized: &str,
+        counts: &dyn Fn(u64) -> bool,
+    ) -> Result<Option<String>, PriorError> {
+        let hits = self.uses(exact, normalized).map_err(prior_error)?;
+        Ok(first_use(hits, counts))
     }
 }
 
 impl PriorUse for PlanLogOnce {
-    fn used(&self, exact: &str, normalized: &str) -> Result<Option<String>, PriorError> {
-        self.uses(exact, normalized).map(first_use)
+    fn used_where(
+        &self,
+        exact: &str,
+        normalized: &str,
+        counts: &dyn Fn(u64) -> bool,
+    ) -> Result<Option<String>, PriorError> {
+        Ok(first_use(self.uses(exact, normalized)?, counts))
     }
 }

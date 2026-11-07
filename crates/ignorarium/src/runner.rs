@@ -4,20 +4,23 @@ use crate::backend::{
     self, Backend, Exit, PINNED_LEVEL, Probe, RowJob, RowOutcome, Watch, level2, rootfs,
 };
 use crate::budget::{Alerts, Cost, CostMeter, Decision, HostMeter, decide, dimension_name};
+use crate::cli::check::HomeRecords;
 use crate::control::{self, ControlError, ControlFile, RunLock, Signal, State};
 use crate::derived::{CONTINUE, INPUTS, Inputs, REGISTER, RESIZE, Register, SELECTION, Selection};
 use crate::diag::printable;
 use crate::environ::{Builder, Built, Recipe};
 use crate::estimate::{apply_defaults, estimate};
 use crate::events::{self, Event};
+use crate::family;
 use crate::home::Home;
-use crate::inputs::{self, Found};
+use crate::inputs::{self, Found, InputHashes};
 use crate::machine::{self, Machine};
 use crate::payload::{self, PayloadError};
 use crate::planlog::store::{Leaf, LogError, PlanLog};
 use crate::prior::same_data;
 use crate::records::{self, RecordDraft, RecordError, VerifyError};
 use crate::redact::Redact;
+use crate::rules::BoxRecords;
 use crate::schedule::{
     self, CONFIRMATION_STAGE, RESERVE_STAGE, Row, SELECTION_STAGE, Schedule, ScheduleError,
 };
@@ -94,10 +97,6 @@ pub struct RunPlan {
     pub redact: Redact,
 }
 
-/// Each input path with its `(exact, normalized)` hashes, in spec order; `None` while the
-/// input is absent.
-pub type InputHashes = Vec<(String, Option<(String, String)>)>;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunStatus {
     Done,
@@ -152,6 +151,10 @@ pub enum RunError {
         path: String,
         label: String,
     },
+    /// In a confirmatory plan, a confirmation or reserve input holds the selection data of a
+    /// study a param takes its condition from, or that data cannot be read; the sentence says
+    /// which.
+    DataPicked(String),
     /// In a confirmatory plan, a confirmation or reserve input holds the same data as a
     /// selection or calibration input; one of them was absent when `check` compared them.
     DataShared {
@@ -223,6 +226,9 @@ impl fmt::Display for RunError {
                 f,
                 "E-CNF-005: input {path} was used by an earlier study ({label}). See docs/rules/E-CNF-005.md"
             ),
+            RunError::DataPicked(why) => {
+                write!(f, "E-CNF-007: {why} See docs/rules/E-CNF-007.md")
+            }
             RunError::DataShared {
                 path,
                 path_role,
@@ -323,7 +329,7 @@ pub fn up_to(backends: Vec<Box<dyn Backend>>, max: u8) -> Vec<Box<dyn Backend>> 
 /// The first prepare that gets this far signs an `inputs` record of every input's digest,
 /// or its absence; a later one whose inputs differ is refused before anything changes, so
 /// every row of a study runs on the same bytes. `root` is the study root found where the
-/// run started (`check::current_root`); only an input absent at registration is read from
+/// run started (`inputs::current_root`); only an input absent at registration is read from
 /// it, and only when its identity is the register record's.
 pub fn prepare_with(
     home: &Home,
@@ -435,6 +441,9 @@ pub fn prepare_with(
         for (folder, what) in folders {
             image::check_source(folder).map_err(|e| RunError::Disk(format!("{what}: {e}")))?;
         }
+    }
+    if frozen.is_none() {
+        gate_picked_data(home, &store, &key, &spec, &inputs)?;
     }
     gate_late_data(home, &spec, log, leaf, &key, &inputs)?;
     let rows = expand_rows(&spec, &spec_hash, Some(&register))?;
@@ -799,8 +808,10 @@ pub fn progress(
 /// a selection or calibration input (E-CNF-004): `check` cannot compare a file that was absent
 /// at registration, and a late copy of a registered file has a registered hash. Then a
 /// selection, confirmation or reserve input that the registered plan leaf did not hold is
-/// late: refuse it if another study used it, else record it under this study's id once. The
-/// study's own leaves, its plan leaf and its late-data leaves, are no earlier use. `all` are
+/// late: refuse a confirmation or reserve input that another study used; a selection input may
+/// reuse data. Else record new data under this study's id once. The
+/// study's own leaves, its plan leaf and its late-data leaves, are no earlier use, and for a
+/// member of a registered family neither are the leaves `family::exempt` names. `all` are
 /// the inputs' hashes in spec order.
 /// Every lookup finishes before the append takes its lock.
 fn gate_late_data(
@@ -838,12 +849,32 @@ fn gate_late_data(
     let late = of(&[Role::Selection, Role::Confirmation, Role::Reserve])
         .filter(|(_, _, h)| !registered.contains(h));
     let own = own_label(id);
+    // Read on the first use that could refuse, so family records that cannot be read refuse
+    // only such data.
+    let mut member: Option<Option<family::Found>> = None;
     let mut new = Vec::new();
-    for (path, _, hashes) in late {
+    for (path, role, hashes) in late {
         let uses = log.uses(&hashes.0, &hashes.1)?;
+        if uses.is_empty() {
+            new.push((*hashes).clone());
+            continue;
+        }
         let earlier =
             |(i, l): &&(usize, Leaf)| u64::try_from(*i) != Ok(leaf_index) && !is_own(l, &own);
-        if let Some((i, leaf)) = uses.iter().find(earlier) {
+        if *role == Role::Selection || !uses.iter().any(|u| earlier(&u)) {
+            continue;
+        }
+        let found = match &member {
+            Some(found) => found,
+            None => {
+                let records = HomeRecords::signed(home, key);
+                member.insert(records.locked_family(id).map_err(RunError::Records)?)
+            }
+        };
+        let counts = |(i, _): &&(usize, Leaf)| {
+            (found.as_ref()).is_none_or(|f| f.log != log_name || !family::exempt(f, *i as u64))
+        };
+        if let Some((i, leaf)) = uses.iter().filter(earlier).find(counts) {
             let label = match (leaf.kind.as_str(), leaf.label.strip_prefix(OWN_PREFIX)) {
                 ("legacy", Some(study)) => format!("study {study}"),
                 ("legacy", None) => format!("phase {}", leaf.label),
@@ -854,12 +885,60 @@ fn gate_late_data(
                 label,
             });
         }
-        if uses.is_empty() {
-            new.push((*hashes).clone());
-        }
     }
     if !new.is_empty() {
         log.append_legacy(&own, new, key)?;
+    }
+    Ok(())
+}
+
+/// In a confirmatory plan, refuse a confirmation or reserve input that holds the selection
+/// data of a study a param takes its condition from (E-CNF-007). `check` skips an input that
+/// is absent, so `prepare` compares again when it first freezes the inputs. `all` are the
+/// inputs' hashes in spec order. A study whose selection data cannot be read refuses.
+fn gate_picked_data(
+    home: &Home,
+    store: &Store,
+    key: &SigningKey,
+    spec: &Spec,
+    all: &InputHashes,
+) -> Result<(), RunError> {
+    if spec.study.mode != Mode::Confirmatory {
+        return Ok(());
+    }
+    let held: Vec<(String, (String, String))> = (spec.inputs.iter().zip(all))
+        .filter(|(i, _)| matches!(i.role, Role::Confirmation | Role::Reserve))
+        .filter_map(|(i, (_, h))| Some((i.path.clone(), h.clone()?)))
+        .collect();
+    if held.is_empty() {
+        return Ok(());
+    }
+    let mut from: Vec<&str> = (spec.design.conditions.iter())
+        .flat_map(|c| c.params.values())
+        .filter_map(|p| match p {
+            Param::Ref(r) => Some(r.from.as_str()),
+            Param::Value(_) => None,
+        })
+        .collect();
+    from.sort_unstable();
+    from.dedup();
+    let records = HomeRecords::signed(home, key);
+    for study in from {
+        let picked = match crate::rules::selection_data(&records, store, study) {
+            Ok(Some(picked)) => picked,
+            Ok(None) => {
+                return Err(RunError::DataPicked(format!(
+                    "Study {study} has not finished, so its selection data is unknown."
+                )));
+            }
+            Err(why) => return Err(RunError::DataPicked(why)),
+        };
+        if let Some((path, selection)) = family::shared(&held, &picked).first() {
+            let path = printable(path);
+            return Err(RunError::DataPicked(format!(
+                "input {path} holds the data of selection input {selection} of study {study}, which picked the condition this study takes."
+            )));
+        }
     }
     Ok(())
 }

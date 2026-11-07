@@ -356,6 +356,7 @@ fn fat_templates() -> Vec<Value> {
             s["pins"]["deterministic"] = json!(true);
             s["design"]["row_memory_mib"] = json!(1024);
             s["design"]["resize"] = json!({ "rule": "blinded-once" });
+            s["family"] = json!({ "members": ["spec/b.toml", "spec/c.toml"] });
             s["pins"]["deviations"] = json!([
                 { "from": "pilot", "reason": "r", "timing": "before-collection" },
                 { "from": "early", "reason": "r", "timing": "after-results" },
@@ -1293,14 +1294,15 @@ check = \"required\"",
 }
 
 #[test]
-fn the_documented_codes_are_exactly_the_register_refusals() {
+fn the_documented_codes_are_exactly_those_the_cli_raises() {
     let mut codes: Vec<&str> = rules::builtin()
         .iter()
         .filter(|r| matches!(r.check, Check::Documented))
         .map(|r| r.code.as_str())
         .collect();
     codes.sort_unstable();
-    assert_eq!(codes, ["E-REG-001", "E-REG-002", "E-REG-003"]);
+    // The register refusals, and a family member's wait as its root's check reports it.
+    assert_eq!(codes, ["E-REG-001", "E-REG-002", "E-REG-003", "W-FAM-001"]);
 }
 
 #[test]
@@ -1542,5 +1544,41 @@ fn a_planted_record_hash_is_not_a_study_id() {
     assert_eq!(
         hypothesis_with("estimates", json!({ "from": planted })),
         at_hypothesis("E-FMT-001", "estimates.from")
+    );
+}
+
+fn with_family(family: Value) -> Value {
+    let mut s = template();
+    s["family"] = family;
+    s
+}
+
+fn errors_of(s: &Value) -> Vec<(String, String)> {
+    let d = rules::check_generic(s, &v0());
+    (d.iter())
+        .filter(|x| x.severity == Severity::Error)
+        .map(|x| (x.code.clone(), x.path.clone()))
+        .collect()
+}
+
+#[test]
+fn a_family_table_parses() {
+    let s = with_family(json!({ "members": ["spec/b.toml"] }));
+    let spec = ignorarium::spec::model::Spec::from_value(&s).unwrap();
+    assert_eq!(spec.family.unwrap().members, ["spec/b.toml"]);
+}
+
+#[test]
+fn a_spec_without_family_has_none() {
+    let spec = ignorarium::spec::model::Spec::from_value(&template()).unwrap();
+    assert!(spec.family.is_none());
+}
+
+#[test]
+fn an_unknown_family_key_is_refused() {
+    let s = with_family(json!({ "member": ["spec/b.toml"] }));
+    assert_eq!(
+        errors_of(&s),
+        [("E-KEY-001".to_string(), "family.member".to_string())]
     );
 }

@@ -1341,6 +1341,105 @@ fn late_confirmation_data_used_before_is_refused() {
     assert!(!a.join("schedule.json").exists());
 }
 
+/// Root `fam`, registered by hand in `log` after the studies already there: its plan leaf,
+/// `between` plan leaves of other studies, then its family leaf locking `member`, each holding
+/// the data `text`. Returns the index of the root's plan leaf.
+fn plant_family(lab: &Lab, log: &str, member: &str, text: &[u8], between: usize) -> u64 {
+    use ignorarium::family::{self, Lock, Member};
+    use ignorarium::planlog::store::Leaf;
+    let lock = Lock {
+        members: vec![Member {
+            id: member.into(),
+            spec: "spec.toml".into(),
+            spec_hash: spec::load(&common::work(lab, member).join("spec.toml"))
+                .unwrap()
+                .hash,
+            payload: "0".repeat(64),
+            inputs: vec![],
+        }],
+    };
+    let key = keys::load_or_create(&lab.home).unwrap();
+    let plan_log = PlanLog::open(&lab.home.root.join(log)).unwrap();
+    let append = |kind: &str, label: String, commitment: String| {
+        let leaf = Leaf {
+            kind: kind.into(),
+            commitment: Some(commitment),
+            shape: None,
+            mode: None,
+            data_hashes: vec![file_hashes(text)],
+            label,
+            ts: "2026-11-06T00:00:00Z".into(),
+        };
+        plan_log.append(leaf, &key).unwrap().0
+    };
+    let r = append("plan", String::new(), "sha256:root".into());
+    for i in 0..between {
+        append("plan", String::new(), format!("sha256:other-{i}"));
+    }
+    append(family::LEAF_KIND, family::leaf_label("fam"), lock.hash());
+    let zeros = "0".repeat(64);
+    let body = serde_json::json!({
+        "spec_hash": format!("sha256:{zeros}"), "leaf": r, "log": log, "defaults": {},
+        "root_id": zeros, "payload": zeros, "inputs": [], "resolved": [], "family": lock,
+        "alpha": null,
+    });
+    common::plant(&lab.home, "fam", &[("register", body)]);
+    r
+}
+
+/// The refusal of `id`'s run: its late input `data/conf.txt` is data `label` used.
+fn reused_at(lab: &Lab, id: &str, label: &str) {
+    match err_of(lab, id) {
+        RunError::DataReused { path, label: l } => {
+            assert_eq!(path, "data/conf.txt");
+            assert_eq!(l, label);
+        }
+        e => panic!("{e}"),
+    }
+}
+
+/// Write `data/conf.txt` holding `late file` at the root of each study in `ids`.
+fn late_conf(lab: &Lab, ids: &[&str]) {
+    for id in ids {
+        std::fs::write(common::work(lab, id).join("data/conf.txt"), "late file").unwrap();
+    }
+}
+
+#[test]
+fn a_member_run_does_not_count_root_data_as_reused() {
+    let lab = lab();
+    // Member `mem` and outsider `other` register with data/conf.txt absent.
+    register_study(&lab, "mem", conf_input, &[], PAYLOAD);
+    register_study(&lab, "other", conf_input, &[], PAYLOAD);
+    let r = plant_family(&lab, "planlog", "mem", b"late file", 0);
+    late_conf(&lab, &["mem", "other"]);
+    // The member runs on its family's data; the outsider may not.
+    plan_of(&lab, "mem");
+    reused_at(&lab, "other", &format!("registered plan, leaf {r}"));
+}
+
+#[test]
+fn a_leaf_between_the_root_and_its_family_leaf_counts_for_a_member() {
+    let lab = lab();
+    register_study(&lab, "mem", conf_input, &[], PAYLOAD);
+    // Another study's plan leaf lands between the root's plan leaf and its family leaf.
+    let r = plant_family(&lab, "planlog", "mem", b"late file", 1);
+    late_conf(&lab, &["mem"]);
+    reused_at(&lab, "mem", &format!("registered plan, leaf {}", r + 1));
+}
+
+#[test]
+fn a_test_log_member_run_is_exempt_in_the_test_log() {
+    let lab = lab();
+    let test_log = |t: String| conf_input(t).replace("test_log = false", "test_log = true");
+    register_study(&lab, "mem", test_log, &[], PAYLOAD);
+    register_study(&lab, "other", test_log, &[], PAYLOAD);
+    let r = plant_family(&lab, "testlog", "mem", b"late file", 0);
+    late_conf(&lab, &["mem", "other"]);
+    plan_of(&lab, "mem");
+    reused_at(&lab, "other", &format!("registered plan, leaf {r}"));
+}
+
 /// The template with an unpinned reserve input `data/res.txt` in `fiction`. The plan is
 /// exploratory, so no rule asks for a pin or a re-size.
 fn with_reserve(t: String) -> String {
@@ -1579,16 +1678,48 @@ fn a_late_near_copy_of_the_studys_own_data_is_not_an_earlier_use() {
             .iter()
             .any(|(p, h)| p == sel && h.as_ref() == Some(&late))
     );
-    // Another study's use of the same text is still refused.
+    // Another study's use of the same text is still refused for a confirmation input.
     register_study(&lab, "other", staged, &[], PAYLOAD);
-    std::fs::write(common::work(&lab, "other").join(sel), "OWN text").unwrap();
+    std::fs::write(common::work(&lab, "other").join(conf), "OWN text").unwrap();
     match err_of(&lab, "other") {
         RunError::DataReused { path, label } => {
-            assert_eq!(path, sel);
+            assert_eq!(path, conf);
             assert_eq!(label, "registered plan, leaf 0");
         }
         e => panic!("{e}"),
     }
+}
+
+#[test]
+fn a_late_reused_selection_input_runs_and_is_recorded() {
+    let lab = lab();
+    let sel = "data/select.txt";
+    register_study(&lab, "first", staged, &[], PAYLOAD);
+    std::fs::write(common::work(&lab, "first").join(sel), "shared pool").unwrap();
+    plan_of(&lab, "first");
+    // A second study selects on the same data: no refusal, and no second leaf.
+    register_study(&lab, "second", staged, &[], PAYLOAD);
+    std::fs::write(common::work(&lab, "second").join(sel), "shared pool").unwrap();
+    plan_of(&lab, "second");
+    let (exact, norm) = file_hashes(b"shared pool");
+    let log = PlanLog::open(&lab.home.root.join("planlog")).unwrap();
+    assert_eq!(log.uses(&exact, &norm).unwrap().len(), 1);
+    // Data never seen before gets one legacy leaf.
+    register_study(&lab, "fourth", staged, &[], PAYLOAD);
+    std::fs::write(common::work(&lab, "fourth").join(sel), "fresh pool").unwrap();
+    plan_of(&lab, "fourth");
+    let (exact, norm) = file_hashes(b"fresh pool");
+    let uses = log.uses(&exact, &norm).unwrap();
+    assert_eq!(uses.len(), 1);
+    assert_eq!(uses[0].1.label, "study:fourth");
+    // A later confirmation of the same data is an earlier use.
+    register_study(&lab, "third", staged, &[], PAYLOAD);
+    std::fs::write(
+        common::work(&lab, "third").join("data/confirm.txt"),
+        "fresh pool",
+    )
+    .unwrap();
+    assert!(matches!(err_of(&lab, "third"), RunError::DataReused { .. }));
 }
 
 #[test]

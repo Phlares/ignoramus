@@ -375,6 +375,23 @@ fn faults() -> Vec<Fault> {
             ],
             vec![("E-LBL-001", "study.label")],
         ),
+        // A family on an exploratory study; in a confirmatory one the member checks read the
+        // members the context loaded, here none, so E-FAM-002 fails closed (tests/family.rs
+        // loads them). The base study's selection input has no file here, so E-FAM-003 refuses
+        // the family at its root.
+        f(
+            vec![
+                ("/study/mode", j(json!("exploratory"))),
+                UNDECLARED,
+                ("/study/label", j(json!("signal"))),
+                ("/family", j(json!({ "members": ["spec/b.toml"] }))),
+            ],
+            vec![("E-FAM-001", "family")],
+        ),
+        f(
+            vec![("/family", j(json!({ "members": ["spec/b.toml"] })))],
+            vec![("E-FAM-002", "family.members[0]"), ("E-FAM-003", "family")],
+        ),
         // power_at lies strictly on the claimed side, inside the mean range; a mistyped one is
         // the type rule's.
         f(
@@ -1049,6 +1066,10 @@ fn faults() -> Vec<Fault> {
             route(one("H1.pass", "../next.toml")),
             vec![("E-PTH-001", "scope.end_of_run.follow_on[0].spec")],
         ),
+        f(
+            vec![("/family", j(json!({ "members": ["../b.toml"] })))],
+            vec![("E-FAM-003", "family"), ("E-PTH-001", "family.members[0]")],
+        ),
         // An unsafe path is never read: no hash or freshness check follows it.
         f(
             vec![
@@ -1522,6 +1543,18 @@ impl BoxRecords for Planned {
 
     fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String> {
         self.studies.stream_closed(log, study, slot)
+    }
+
+    fn locked_members(&self) -> Result<Vec<String>, String> {
+        self.studies.locked_members()
+    }
+
+    fn unopened(&self) -> Result<Vec<String>, String> {
+        self.studies.unopened()
+    }
+
+    fn family_of(&self, study: &str) -> Result<Option<ignorarium::family::Found>, String> {
+        self.studies.family_of(study)
     }
 }
 
@@ -2454,6 +2487,14 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
         "E-CNF-004",
         "E-CNF-005",
         "E-CNF-006",
+        "E-CNF-007",
+        "E-FAM-001",
+        "E-FAM-002",
+        "E-FAM-003",
+        "E-FAM-004",
+        "E-FAM-005",
+        "E-FAM-006",
+        "W-FAM-002",
         "E-REF-001",
         "E-BUD-001",
         "E-END-001",
@@ -2485,7 +2526,10 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
     .collect();
     assert_eq!(in_file, want);
     // E-CNF-005 and E-HSH-001 read files and E-STR-001 the stream; their tests are below.
-    // E-SEC-001 is in tests/scan.rs.
+    // E-SEC-001 is in tests/scan.rs. E-FAM-003 and E-FAM-004 read member specs, E-FAM-005
+    // the stream and the box records, E-FAM-006 the box records and the plan log, and
+    // W-FAM-002 the follow-on specs, and E-CNF-007 the box records and the store:
+    // tests/family.rs.
     let in_rows: BTreeSet<String> = faults()
         .iter()
         .flat_map(|r| r.want.iter().map(|w| w.0.to_string()))
@@ -2495,7 +2539,16 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
         .filter(|c| {
             !matches!(
                 c.as_str(),
-                "E-CNF-005" | "E-HSH-001" | "E-SEC-001" | "E-STR-001"
+                "E-CNF-005"
+                    | "E-CNF-007"
+                    | "E-HSH-001"
+                    | "E-SEC-001"
+                    | "E-STR-001"
+                    | "E-FAM-003"
+                    | "E-FAM-004"
+                    | "E-FAM-005"
+                    | "E-FAM-006"
+                    | "W-FAM-002"
             )
         })
         .collect();
@@ -2751,6 +2804,18 @@ impl BoxRecords for Torn {
     fn stream_closed(&self, _: &str, _: &str, _: u64) -> Result<bool, String> {
         Ok(false)
     }
+
+    fn locked_members(&self) -> Result<Vec<String>, String> {
+        self.studies.locked_members()
+    }
+
+    fn unopened(&self) -> Result<Vec<String>, String> {
+        self.studies.unopened()
+    }
+
+    fn family_of(&self, study: &str) -> Result<Option<ignorarium::family::Found>, String> {
+        self.studies.family_of(study)
+    }
 }
 
 /// A box that counts the reads of a study's records.
@@ -2775,6 +2840,18 @@ impl BoxRecords for Counted {
 
     fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String> {
         self.studies.stream_closed(log, study, slot)
+    }
+
+    fn locked_members(&self) -> Result<Vec<String>, String> {
+        self.studies.locked_members()
+    }
+
+    fn unopened(&self) -> Result<Vec<String>, String> {
+        self.studies.unopened()
+    }
+
+    fn family_of(&self, study: &str) -> Result<Option<ignorarium::family::Found>, String> {
+        self.studies.family_of(study)
     }
 }
 
@@ -2857,6 +2934,18 @@ impl BoxRecords for Slots {
     fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String> {
         assert_eq!((log, study, slot), ("planlog", "pilot", 3));
         self.0.clone()
+    }
+
+    fn locked_members(&self) -> Result<Vec<String>, String> {
+        Ok(vec![])
+    }
+
+    fn unopened(&self) -> Result<Vec<String>, String> {
+        Ok(vec![])
+    }
+
+    fn family_of(&self, _: &str) -> Result<Option<ignorarium::family::Found>, String> {
+        Ok(None)
     }
 }
 
@@ -3136,7 +3225,12 @@ struct Fake {
 }
 
 impl PriorUse for Fake {
-    fn used(&self, exact: &str, normalized: &str) -> Result<Option<String>, PriorError> {
+    fn used_where(
+        &self,
+        exact: &str,
+        normalized: &str,
+        _: &dyn Fn(u64) -> bool,
+    ) -> Result<Option<String>, PriorError> {
         self.seen
             .borrow_mut()
             .push((exact.into(), normalized.into()));
@@ -3153,7 +3247,12 @@ impl PriorUse for Fake {
 struct Broken;
 
 impl PriorUse for Broken {
-    fn used(&self, _: &str, _: &str) -> Result<Option<String>, PriorError> {
+    fn used_where(
+        &self,
+        _: &str,
+        _: &str,
+        _: &dyn Fn(u64) -> bool,
+    ) -> Result<Option<String>, PriorError> {
         Err(PriorError("leaf 3 is not a leaf".into()))
     }
 }
@@ -3191,22 +3290,20 @@ fn fresh(spec: &Value, dir: &Path, prior: Box<dyn PriorUse>) -> Vec<Diagnostic> 
 }
 
 #[test]
-fn reused_selection_or_confirmation_data_is_refused_naming_the_entry() {
+fn reused_confirmation_data_is_refused_naming_the_entry() {
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "d.txt", b"abc");
-    for role in ["selection", "confirmation"] {
-        let (prior, seen) = fake(Some(ABC), None);
-        let d = fresh(&with_input("d.txt", "", role), dir.path(), prior);
-        assert_eq!(codes_paths(&d), [("E-CNF-005", "inputs[0].path")], "{role}");
-        assert!(
-            d[0].problem.ends_with("The earlier entry is entry-exact."),
-            "{}",
-            d[0].problem
-        );
-        assert_eq!(seen.borrow().len(), 1);
-    }
+    let (prior, seen) = fake(Some(ABC), None);
+    let d = fresh(&with_input("d.txt", "", "confirmation"), dir.path(), prior);
+    assert_eq!(codes_paths(&d), [("E-CNF-005", "inputs[0].path")]);
+    assert!(
+        d[0].problem.ends_with("The earlier entry is entry-exact."),
+        "{}",
+        d[0].problem
+    );
+    assert_eq!(seen.borrow().len(), 1);
     // Other roles are not asked.
-    for role in ["calibration", "model"] {
+    for role in ["selection", "calibration", "model"] {
         let (prior, seen) = fake(Some(ABC), None);
         assert!(fresh(&with_input("d.txt", "", role), dir.path(), prior).is_empty());
         assert!(seen.borrow().is_empty(), "{role}");
@@ -3214,6 +3311,23 @@ fn reused_selection_or_confirmation_data_is_refused_naming_the_entry() {
     // Unknown data passes.
     let (prior, _) = fake(Some("nope"), Some("nope"));
     assert!(fresh(&with_input("d.txt", "", "confirmation"), dir.path(), prior).is_empty());
+}
+
+#[test]
+fn selection_data_used_earlier_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "d.txt", b"abc");
+    let (prior, _) = fake(Some(ABC), Some(&normalized_sha256("abc")));
+    assert!(fresh(&with_input("d.txt", "", "selection"), dir.path(), prior).is_empty());
+}
+
+#[test]
+fn confirmation_data_used_earlier_still_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "d.txt", b"abc");
+    let (prior, _) = fake(Some(ABC), None);
+    let d = fresh(&with_input("d.txt", "", "confirmation"), dir.path(), prior);
+    assert_eq!(codes_paths(&d), [("E-CNF-005", "inputs[0].path")]);
 }
 
 #[test]
@@ -3236,7 +3350,7 @@ fn non_utf8_data_passes_an_empty_normalized_hash() {
     let bytes = [0xff_u8, 0xfe, 0x00];
     write(dir.path(), "d.bin", &bytes);
     let (prior, seen) = fake(None, None);
-    assert!(fresh(&with_input("d.bin", "", "selection"), dir.path(), prior).is_empty());
+    assert!(fresh(&with_input("d.bin", "", "confirmation"), dir.path(), prior).is_empty());
     assert_eq!(*seen.borrow(), [(sha256_hex(&bytes), String::new())]);
 }
 
@@ -3796,7 +3910,7 @@ fn a_stored_input_passes_without_its_file() {
     write(dir.path(), "data/a.txt", b"other bytes");
     assert!(named(&spec, dir.path()).is_empty());
     let store = ignorarium::store::Store::open(dir.path()).unwrap();
-    let got = ignorarium::cli::check::input_hashes(&store, dir.path(), &spec);
+    let got = ignorarium::inputs::spec_hashes(&store, dir.path(), &spec);
     assert_eq!(
         got[0],
         (
@@ -3893,7 +4007,7 @@ fn a_stored_input_whose_blob_is_gone_or_changed_is_not_held() {
     std::fs::write(&blob, b"abc").unwrap();
     assert_eq!(codes_paths(&named(&spec, dir.path())), hsh);
     assert_eq!(
-        ignorarium::cli::check::input_hashes(&store, dir.path(), &spec)[0].1,
+        ignorarium::inputs::spec_hashes(&store, dir.path(), &spec)[0].1,
         None
     );
     std::fs::remove_file(&blob).unwrap();

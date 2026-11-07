@@ -19,3 +19,4 @@ The checker reads only files inside the study root. It never follows links, so a
 - `inputs[*].path` (named:input-path-safe)
 - `inputs[*].path` (named:input-path-nested)
 - `scope.end_of_run.follow_on[*].spec` (named:input-path-safe)
+- `family.members[*]` (named:input-path-safe)

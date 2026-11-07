@@ -7,9 +7,11 @@ use super::{BoxRecords, Check, NoRecords, Rule, has_format, is_study_id};
 use crate::analysis::Source;
 use crate::backend::PINNED_LEVEL;
 use crate::derived::{
-    ANALYSIS, Alpha, Analysis, Carried, Estimate, Instrument, Selection, StudyState, contrast_key,
+    ANALYSIS, Alpha, Analysis, Carried, Estimate, Inputs, Instrument, Selection, StudyState,
+    contrast_key,
 };
 use crate::diag::{Diagnostic, printable};
+use crate::family::{self as fam, MemberSpec};
 use crate::inputs::{self, Found, input_path};
 use crate::payload::{self, PayloadError};
 use crate::power::{required_clusters, z};
@@ -50,6 +52,12 @@ pub struct CheckCtx {
     pub gates: Gates,
     /// The payload folder's tree hash, once read: see `payload_hash`.
     pub payload: OnceCell<Result<String, PayloadError>>,
+    /// One entry per element of the spec's `family.members`, as `family::load` read it;
+    /// empty for a spec without `[family]`.
+    pub members: Vec<Result<MemberSpec, String>>,
+    /// The study ids of the family this spec is checked under, as `family::check` sets them
+    /// for a member: its root and every member. Empty for any other check.
+    pub family_ids: Vec<String>,
 }
 
 impl CheckCtx {
@@ -67,6 +75,8 @@ impl CheckCtx {
             spec_hash: [0; 32],
             gates: Gates::default(),
             payload: OnceCell::new(),
+            members: vec![],
+            family_ids: vec![],
         }
     }
 
@@ -107,6 +117,13 @@ const NAMED: &[(&str, NamedFn)] = &[
     ("deviation-borrowed", deviation_borrowed),
     ("confirmation-disjoint", confirmation_disjoint),
     ("data-fresh", data_fresh),
+    ("from-selection", from_selection),
+    ("family-confirmatory", family_confirmatory),
+    ("family-members", family_members),
+    ("family-pinned", family_pinned),
+    ("family-selection", family_selection),
+    ("family-room", family_room),
+    ("family-lock", family_lock),
     ("units-declared", units_declared),
     ("row-cap", row_cap),
     ("selection-stage", selection_stage),
@@ -123,6 +140,7 @@ const NAMED: &[(&str, NamedFn)] = &[
     ("budget-present", budget_present),
     ("route-valid", route_valid),
     ("follow-on-exists", follow_on_exists),
+    ("follow-on-shares", follow_on_shares),
     ("depth-cap", depth_cap),
     ("seed-sets-disjoint", seed_sets_disjoint),
     ("trigger-declared", trigger_declared),
@@ -259,9 +277,7 @@ fn is_reserve(input: &Value) -> bool {
 /// The input's `(exact, normalized)` hashes, from the store first; `None` when there is no
 /// file to read or its path is unsafe.
 fn input_hashes(ctx: &CheckCtx, input: &Value) -> Option<(String, String)> {
-    let path = input.get("path")?.as_str()?;
-    let sha = input.get("sha256").and_then(Value::as_str).unwrap_or("");
-    inputs::hashes(&inputs::resolve(&ctx.store, &ctx.root, path, sha))
+    inputs::hashes_of(&ctx.store, &ctx.root, input)
 }
 
 fn input_path_safe(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
@@ -327,19 +343,41 @@ fn follow_on_exists(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     })
 }
 
+/// E-CNF-005: a confirmation or reserve input whose data an earlier plan-log entry used. For a
+/// member of a registered family, `family::exempt` uses do not count. The family is read only
+/// for data some entry used, so family records that cannot be read refuse only such data.
 fn data_fresh(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let id = text(spec, "study.id").unwrap_or_default();
+    let family = OnceCell::new();
+    let earlier = |exact: &str, normalized: &str| -> Result<Option<String>, String> {
+        let unread = |e: crate::prior::PriorError| format!("The plan log cannot be read: {e}.");
+        let first = ctx.prior.used(exact, normalized).map_err(unread)?;
+        if first.is_none() {
+            return Ok(None);
+        }
+        let found = family.get_or_init(|| ctx.records.locked_family(id));
+        let found =
+            (found.as_ref()).map_err(|e| format!("The family records cannot be read: {e}."))?;
+        // The plan log's leaf indexes say nothing about a family in another log.
+        match found.as_ref().filter(|f| f.log == LogName::Plan.as_str()) {
+            None => Ok(first),
+            Some(f) => (ctx.prior)
+                .used_where(exact, normalized, &|i| !fam::exempt(f, i))
+                .map_err(unread),
+        }
+    };
     let mut out = vec![];
     for (path, input, _) in with_parent(spec, pat) {
-        if !is_cluster(input) {
+        if !matches!(role(input), Some("confirmation" | "reserve")) {
             continue;
         }
         let Some((exact, normalized)) = input_hashes(ctx, input) else {
             continue;
         };
-        let detail = match ctx.prior.used(&exact, &normalized) {
+        let detail = match earlier(&exact, &normalized) {
             Ok(None) => continue,
             Ok(Some(id)) => format!("The earlier entry is {id}."),
-            Err(e) => format!("The plan log cannot be read: {e}."),
+            Err(why) => why,
         };
         out.push(Hit {
             path,
@@ -347,6 +385,497 @@ fn data_fresh(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
         });
     }
     out
+}
+
+/// E-CNF-007 at each param that takes its condition from another study: a confirmation or
+/// reserve input of this study holds the data of a selection input of that study, by exact or
+/// normalized hash. A study that has not finished is W-REF-001's, and `register` waits for it.
+fn from_selection(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let held: Vec<(String, (String, String))> = (nodes(spec, "inputs[*]").into_iter())
+        .filter(|(_, i)| matches!(role(i), Some("confirmation" | "reserve")))
+        .filter_map(|(p, i)| Some((p, input_hashes(ctx, i)?)))
+        .collect();
+    if held.is_empty() {
+        return vec![];
+    }
+    (references(spec, pat).into_iter())
+        .filter_map(|(path, from)| {
+            let detail = match selection_data(ctx.records.as_ref(), &ctx.store, from) {
+                Ok(None) => return None,
+                Ok(Some(picked)) => {
+                    let (input, selection) = *fam::shared(&held, &picked).first()?;
+                    format!(
+                        "Its input {input} holds the data of selection input {selection} of study {from}."
+                    )
+                }
+                Err(why) => why,
+            };
+            Some(at(&path, detail))
+        })
+        .collect()
+}
+
+/// The data of each selection input of study `from` once it has finished, by its path in the
+/// plan the box stored: the store's hashes of the digest its `inputs` record froze at its first
+/// run. An input absent then holds no data. `None` while the study has not finished. Records,
+/// a plan or a store copy that cannot be read are an error. `check` reads it through
+/// E-CNF-007, and `run` for data that was absent at registration.
+pub fn selection_data(
+    records: &dyn BoxRecords,
+    store: &Store,
+    from: &str,
+) -> Result<Option<fam::NamedData>, String> {
+    let unread = |e: String| format!("The box cannot read the records of study {from}: {e}.");
+    let all = records.study(from).map_err(unread)?;
+    let closed = |log: &str, slot| records.stream_closed(log, from, slot);
+    if !matches!(
+        StudyState::of(all.clone(), closed).map_err(unread)?,
+        StudyState::Finished(_)
+    ) {
+        return Ok(None);
+    }
+    let frozen = (all.iter().flatten().find_map(Inputs::of))
+        .ok_or_else(|| format!("Study {from} recorded no inputs."))?;
+    let plan = (records.spec(from).map_err(unread)?)
+        .ok_or_else(|| format!("The box holds no plan of study {from}."))?;
+    let plan = crate::spec::parse(&plan)
+        .map_err(|e| format!("The plan of study {from} cannot be read: {e}."))?;
+    let mut out = vec![];
+    for (at, input) in nodes(&plan.value, "inputs[*]") {
+        if role(input) != Some("selection") {
+            continue;
+        }
+        let path = input.get("path").and_then(Value::as_str);
+        let digest = (frozen.inputs.iter())
+            .find(|(p, _)| Some(p.as_str()) == path)
+            .ok_or_else(|| format!("The inputs record of study {from} lacks its {at}."))?;
+        let Some(digest) = &digest.1 else {
+            continue;
+        };
+        match inputs::stored(store, digest) {
+            Some(Found::Stored { digest, meta }) => {
+                out.push((at, (digest, meta.normalized_sha256)));
+            }
+            _ => {
+                return Err(format!(
+                    "The store holds no readable copy of the {at} of study {from}."
+                ));
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
+/// W-FAM-002 at each `follow_on[*].spec` of a confirmatory study: a confirmatory spec reachable
+/// from it through `follow_on` routes, at any depth, holds confirmation or reserve data this
+/// study holds, and is not one of this study's family members. Unreadable and unsafe specs are
+/// E-END-002's and E-PTH-001's. Each spec is read once per route, so a cycle ends.
+fn follow_on_shares(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let held = |value: &Value| {
+        let hashes = inputs::spec_hashes(&ctx.store, &ctx.root, value);
+        fam::data(value, &hashes, &["confirmation", "reserve"])
+    };
+    let mine = held(spec);
+    let id = |v: &Value| {
+        v.pointer("/study/id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    // The ids of this study's family: its own `[family]`, the root's family a member check
+    // passes in, or the registered lock. `None` when the records cannot be read.
+    let family = OnceCell::new();
+    let ids = || -> Option<&Vec<String>> {
+        family
+            .get_or_init(|| {
+                let own: Vec<String> = id(spec).into_iter().collect();
+                if spec.get("family").is_some() {
+                    let members = ctx.members.iter().flatten();
+                    return Some(
+                        [
+                            own,
+                            members.filter_map(|m| Some(m.id()?.to_string())).collect(),
+                        ]
+                        .concat(),
+                    );
+                }
+                if !ctx.family_ids.is_empty() {
+                    return Some(ctx.family_ids.clone());
+                }
+                let found = own.first().map(|i| ctx.records.locked_family(i));
+                match found {
+                    Some(Err(_)) => None,
+                    Some(Ok(Some(f))) => {
+                        let members = f.lock.members.iter().map(|m| m.id.clone());
+                        Some(std::iter::once(f.root.clone()).chain(members).collect())
+                    }
+                    _ => Some(own),
+                }
+            })
+            .as_ref()
+    };
+    let mut out = vec![];
+    for (path, first) in nodes(spec, pat) {
+        let mut seen: Vec<PathBuf> = vec![];
+        let mut todo: Vec<String> = first.as_str().map(str::to_string).into_iter().collect();
+        let mut found = vec![];
+        while let Some(rel) = todo.pop() {
+            let Some(file) = input_path(&ctx.root, &rel) else {
+                continue;
+            };
+            if seen.contains(&file) {
+                continue;
+            }
+            seen.push(file.clone());
+            let Some(next) = inputs::read_regular(&file).and_then(|b| crate::spec::parse(&b).ok())
+            else {
+                continue;
+            };
+            let routes = (nodes(&next.value, "scope.end_of_run.follow_on[*].spec").into_iter())
+                .filter_map(|(_, v)| v.as_str().map(str::to_string));
+            todo.extend(routes);
+            let same = crate::spec::hash_bytes(&next.hash) == Some(ctx.spec_hash);
+            let confirmatory =
+                next.value.pointer("/study/mode") == Some(&Value::from("confirmatory"));
+            if same || !confirmatory || fam::shared(&held(&next.value), &mine).is_empty() {
+                continue;
+            }
+            // A family member shares data by design; unreadable records only silence the warning.
+            if ids().is_some_and(|ids| id(&next.value).is_none_or(|i| !ids.contains(&i))) {
+                found.push(rel);
+            }
+        }
+        if !found.is_empty() {
+            found.sort();
+            out.push(at(
+                &path,
+                format!(
+                    "Reachable from here, {} holds confirmation or reserve data this study holds. To keep both claims, list it in this study's [family] before this study registers: that locks every member and takes a plan stream slot for each now.",
+                    printable(&found.join(", ")),
+                ),
+            ));
+        }
+    }
+    out
+}
+
+// ---- families ----
+
+/// A member's path, its `family.members` entry, and what `family::load` read for it.
+type Entry<'s, 'a> = (String, &'s Value, &'a Result<MemberSpec, String>);
+
+/// The members `pat` (`family.members[*]`) selects, each with what `ctx.members` read for
+/// it; `None` when `ctx.members` does not hold one entry per member, as in a context built
+/// without `family::load`. E-FAM-002 then fails closed at each member.
+fn read<'a, 's>(spec: &'s Value, ctx: &'a CheckCtx, pat: &str) -> Option<Vec<Entry<'s, 'a>>> {
+    let all = nodes(spec, pat);
+    (all.len() == ctx.members.len()).then(|| {
+        (all.into_iter().zip(&ctx.members))
+            .map(|((path, entry), m)| (path, entry, m))
+            .collect()
+    })
+}
+
+/// Each member `pat` selects that `ctx.members` loaded and that is not nested, with its path.
+fn loaded<'a>(spec: &Value, ctx: &'a CheckCtx, pat: &str) -> Vec<(String, &'a MemberSpec)> {
+    (read(spec, ctx, pat).unwrap_or_default().into_iter())
+        .filter_map(|(path, _, m)| Some((path, m.as_ref().ok().filter(|m| !m.nested())?)))
+        .collect()
+}
+
+fn at(path: &str, detail: String) -> Hit {
+    Hit {
+        path: path.to_string(),
+        detail: Some(detail),
+    }
+}
+
+/// E-FAM-001. At `family`: the study is not confirmatory. At `family.members[*]`, in a
+/// confirmatory study: a member is not confirmatory, or uses a different log.
+fn family_confirmatory(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let mode = text(spec, "study.mode");
+    if pat == "family" {
+        return flag(spec, pat, |v| {
+            v.is_object() && mode.is_some_and(|m| m != "confirmatory")
+        });
+    }
+    if mode != Some("confirmatory") {
+        return vec![];
+    }
+    let log = val(spec, "study.test_log").and_then(Value::as_bool);
+    (loaded(spec, ctx, pat).into_iter())
+        .filter_map(|(path, m)| {
+            let study = &m.raw.value["study"];
+            let why = if study["mode"].as_str().is_some_and(|m| m != "confirmatory") {
+                "It is not confirmatory."
+            } else if study["test_log"]
+                .as_bool()
+                .zip(log)
+                .is_some_and(|(a, b)| a != b)
+            {
+                "Its study.test_log is not this study's."
+            } else {
+                return None;
+            };
+            Some(at(&path, why.into()))
+        })
+        .collect()
+}
+
+/// E-FAM-002: a member that cannot be read, has the id of this study or of an earlier member,
+/// is registered, is locked in a registered family, declares its own family, or lies under
+/// another study root. A box whose records cannot be read, and a context that did not read the
+/// members, fail closed.
+fn family_members(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    // A member path that is mistyped or unsafe is the generic rules' to report.
+    let safe = |entry: &Value| entry.as_str().and_then(|rel| input_path(&ctx.root, rel));
+    let Some(members) = read(spec, ctx, pat) else {
+        let unread = "This check did not read the member specs.";
+        return (nodes(spec, pat).into_iter())
+            .filter(|(_, entry)| safe(entry).is_some())
+            .map(|(path, _)| at(&path, unread.into()))
+            .collect();
+    };
+    let own = text(spec, "study.id");
+    let unread = |e: &String| format!("The box records cannot be read: {e}.");
+    let mut ids: Vec<(String, &str)> = vec![];
+    let mut out = vec![];
+    for (path, entry, m) in members {
+        let m = match m {
+            Ok(m) => m,
+            Err(why) => {
+                out.extend(safe(entry).map(|_| at(&path, why.clone())));
+                continue;
+            }
+        };
+        let v = &m.raw.value;
+        let mut why = vec![];
+        if let Some(id) = v["study"]["id"].as_str() {
+            if Some(id) == own {
+                why.push("It is this study.".to_string());
+            } else if let Some((first, _)) = ids.iter().find(|(_, x)| *x == id) {
+                why.push(format!("It has the study id of {first}."));
+            } else {
+                let registered = ctx.records.study(id).map(|r| r.is_some());
+                match (registered, ctx.records.locked_members()) {
+                    (Err(e), _) => why.push(unread(&e)),
+                    (Ok(true), _) => why.push("It is already registered.".into()),
+                    (Ok(false), Err(e)) => why.push(unread(&e)),
+                    (Ok(false), Ok(l)) if l.iter().any(|u| u == id) => {
+                        why.push("It is already locked in a registered family.".into())
+                    }
+                    (Ok(false), Ok(_)) => {}
+                }
+            }
+            ids.push((path.clone(), id));
+        }
+        if m.nested() {
+            why.push("It declares a family of its own.".into());
+        }
+        if m.root != ctx.root {
+            why.push("It lies under another study root.".into());
+        }
+        out.extend(why.into_iter().map(|w| at(&path, w)));
+    }
+    out
+}
+
+/// E-FAM-003. At `family`: a selection input of this study has no data at the study root or
+/// in the store. At `family.members[*]`: an input of a member has no `sha256`, or its data is
+/// neither at the study root nor in the store. A `sha256` of another type, and an unsafe path,
+/// are other rules' to report.
+fn family_pinned(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    if pat == "family" {
+        let absent: Vec<String> = (nodes(spec, "inputs[*]").into_iter())
+            .filter(|(_, i)| role(i) == Some("selection"))
+            .filter(|(_, i)| {
+                let path = i.get("path").and_then(Value::as_str);
+                path.is_some_and(|rel| input_path(&ctx.root, rel).is_some())
+                    && input_hashes(ctx, i).is_none()
+            })
+            .map(|(p, _)| p)
+            .collect();
+        if absent.is_empty() {
+            return vec![];
+        }
+        let detail = format!(
+            "These selection inputs of this study are neither at the study root nor in the store: {}.",
+            absent.join(", ")
+        );
+        return (nodes(spec, pat).into_iter())
+            .filter(|(_, v)| v.is_object())
+            .map(|(path, _)| at(&path, detail.clone()))
+            .collect();
+    }
+    let mut out = vec![];
+    for (path, m) in loaded(spec, ctx, pat) {
+        let (mut unpinned, mut absent) = (vec![], vec![]);
+        for (input, i, h) in fam::inputs(&m.raw.value, &m.input_hashes) {
+            match (i.get("sha256"), h) {
+                (None, _) => unpinned.push(input),
+                (Some(Value::String(s)), _) if s.is_empty() => unpinned.push(input),
+                (Some(Value::String(_)), None) => absent.push(input),
+                _ => {}
+            }
+        }
+        let found = [
+            (unpinned, "have no sha256"),
+            (absent, "are neither at the study root nor in the store"),
+        ];
+        for (list, why) in found.into_iter().filter(|(l, _)| !l.is_empty()) {
+            out.push(at(
+                &path,
+                format!("These inputs {why}: {}.", list.join(", ")),
+            ));
+        }
+    }
+    out
+}
+
+/// E-FAM-004: a member's confirmation or reserve input holds the data of a selection input of
+/// this study or of another member. A member's own selection data is E-CNF-004's.
+fn family_selection(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let members = loaded(spec, ctx, pat);
+    let own: Vec<(String, (String, String))> = nodes(spec, "inputs[*]")
+        .into_iter()
+        .filter(|(_, i)| role(i) == Some("selection"))
+        .filter_map(|(p, i)| Some((format!("{p} of this study"), input_hashes(ctx, i)?)))
+        .collect();
+    let picked: Vec<Vec<(String, (String, String))>> = (members.iter())
+        .map(|(path, m)| {
+            (fam::data(&m.raw.value, &m.input_hashes, &["selection"]).into_iter())
+                .map(|(input, h)| (format!("{input} of {path}"), h))
+                .collect()
+        })
+        .collect();
+    let mut out = vec![];
+    for (n, (path, m)) in members.iter().enumerate() {
+        let others: Vec<_> = (own.iter().cloned())
+            .chain(
+                (picked.iter().enumerate())
+                    .filter(|(k, _)| *k != n)
+                    .flat_map(|(_, p)| p.clone()),
+            )
+            .collect();
+        let held = fam::data(&m.raw.value, &m.input_hashes, &["confirmation", "reserve"]);
+        for (input, selection) in fam::shared(&held, &others) {
+            out.push(at(
+                path,
+                format!("Its input {input} holds the data of selection input {selection}."),
+            ));
+        }
+    }
+    out
+}
+
+/// The plan slots that must stay free after the one this plan would open, `members` more for
+/// the family it declares: `family::keep` of the box's members not yet registered.
+fn kept(spec: &Value, ctx: &CheckCtx, members: usize) -> Result<u64, String> {
+    let own = text(spec, "study.id").unwrap_or_default();
+    Ok(fam::keep(&ctx.records.unopened()?, own, members))
+}
+
+/// E-FAM-005 at `family` of a confirmatory plan in the plan log: the slot it would open leaves
+/// fewer slots after it than its members and the slots already reserved need. A stream that
+/// gives no level or cannot be read is E-STR-001's; box records that cannot be read fail
+/// closed.
+fn family_room(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let Some(members) = list(spec, "family.members").map(Vec::len) else {
+        return vec![];
+    };
+    let Ok(Some(a)) = granted(spec, ctx) else {
+        return vec![];
+    };
+    if a.log != LogName::Plan.as_str() || a.level <= 0.0 {
+        return vec![];
+    }
+    let detail = match kept(spec, ctx, members) {
+        Ok(keep) if stream::leaves_room(a.slot, keep) => return vec![],
+        Ok(keep) => format!(
+            "Slot {} {} needed: {members} for this family's members and {} already reserved.",
+            a.slot,
+            stream::shortfall(a.slot, keep),
+            keep - members as u64
+        ),
+        Err(e) => format!("The box records cannot be read: {e}."),
+    };
+    (nodes(spec, pat).into_iter())
+        .map(|(path, _)| at(&path, detail.clone()))
+        .collect()
+}
+
+/// E-FAM-006 at `study.id`: `differs_from_lock`.
+fn family_lock(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    (nodes(spec, pat).into_iter())
+        .filter(|(_, v)| v.is_string())
+        .filter_map(|(path, _)| Some(at(&path, differs_from_lock(spec, ctx)?)))
+        .collect()
+}
+
+/// For a study a registered root's lock lists, the first way its inputs, spec hash and payload
+/// hash differ from the lock, and both ways forward; `None` when they match, for any other
+/// study, and for a spec without a string `study.id`. Box records that cannot be read fail
+/// closed. `check` runs it as E-FAM-006 on confirmatory plans, `register` on every plan.
+pub fn differs_from_lock(spec: &Value, ctx: &CheckCtx) -> Option<String> {
+    let id = text(spec, "study.id")?;
+    match ctx.records.locked_family(id) {
+        Err(e) => Some(format!("The box records cannot be read: {e}.")),
+        Ok(found) => (found.iter())
+            .flat_map(|f| f.lock.members.iter().filter(|m| m.id == id))
+            .find_map(|m| unlike(spec, ctx, m))
+            .map(|(what, d)| {
+                format!(
+                    "{d} Restore the locked {what}, or register the changed study under a new id as a non-member, where the freshness rule applies in full."
+                )
+            }),
+    }
+}
+
+/// The first way `spec` differs from its lock entry `m`, as what to restore and a sentence:
+/// an input's role, path or pin, then the spec hash, then the payload hash.
+fn unlike(spec: &Value, ctx: &CheckCtx, m: &fam::Member) -> Option<(&'static str, String)> {
+    let listed = list(spec, "inputs").map_or(&[][..], Vec::as_slice);
+    for k in 0..listed.len().max(m.inputs.len()) {
+        let differs = |d: String| Some(("input", d));
+        let (now, locked) = match (listed.get(k), m.inputs.get(k)) {
+            (Some(now), Some(locked)) => (now, locked),
+            (Some(_), None) => return differs(format!("Its inputs[{k}] is not in the lock.")),
+            (None, _) => return differs(format!("The lock holds inputs[{k}], which it lacks.")),
+        };
+        let role = json!(locked.role);
+        let fields = [
+            ("role", role.as_str().unwrap_or_default()),
+            ("path", &locked.path),
+            ("sha256", &locked.sha256),
+        ];
+        for (field, was) in fields {
+            let is = now.get(field).and_then(Value::as_str).unwrap_or_default();
+            if is != was {
+                let (is, was) = (printable(is), printable(was));
+                return differs(format!(
+                    "Its inputs[{k}].{field} is {is}; the lock holds {was}."
+                ));
+            }
+        }
+    }
+    if crate::spec::hash_bytes(&m.spec_hash) != Some(ctx.spec_hash) {
+        let hash = hex::encode(ctx.spec_hash);
+        let d = format!(
+            "Its spec hash is sha256:{hash}; the lock holds {}.",
+            printable(&m.spec_hash)
+        );
+        return Some(("spec", d));
+    }
+    match ctx.payload_hash() {
+        Ok(h) if *h == m.payload => None,
+        Ok(h) => Some((
+            "payload",
+            format!("Its payload hash is {h}; the lock holds {}.", m.payload),
+        )),
+        Err(e) => Some((
+            "payload",
+            format!("Its payload folder cannot be read: {e}."),
+        )),
+    }
 }
 
 // ---- design ----
@@ -554,11 +1083,22 @@ pub fn granted(spec: &Value, ctx: &CheckCtx) -> Result<Option<Alpha>, String> {
 }
 
 /// E-STR-001 at `study.mode` of a confirmatory plan: the stream of its log gives level 0 (a
-/// slot beyond the plan stream's last), or cannot be read or trusted.
+/// slot beyond the plan stream's last), or cannot be read or trusted, or a plan slot leaves
+/// fewer slots after it than family members not yet registered need, the plan's own slot
+/// apart when it is one of them. Box records that cannot be read fail closed.
 fn stream_level(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     let detail = match granted(spec, ctx) {
         Ok(None) => return vec![],
-        Ok(Some(a)) if a.level > 0.0 => return vec![],
+        Ok(Some(a)) if a.level > 0.0 && a.log != LogName::Plan.as_str() => return vec![],
+        Ok(Some(a)) if a.level > 0.0 => match kept(spec, ctx, 0) {
+            Ok(keep) if stream::leaves_room(a.slot, keep) => return vec![],
+            Ok(keep) => format!(
+                "Slot {} {} reserved for family members not yet registered.",
+                a.slot,
+                stream::shortfall(a.slot, keep)
+            ),
+            Err(e) => format!("The box records cannot be read: {e}."),
+        },
         Ok(Some(a)) => format!(
             "Slot {} is beyond the {} slots of the {} stream.",
             a.slot,

@@ -11,7 +11,7 @@ mod named;
 pub use generic::{check_generic, safe_key};
 pub use named::{
     Borrowed, CAP, CheckCtx, Gates, Lookup, Power, REPS, StratumInput, Taken, borrowed, carried,
-    check_named, estimate_inputs, granted, power, selected_by,
+    check_named, differs_from_lock, estimate_inputs, granted, power, selected_by, selection_data,
 };
 
 /// The records of a box, by study. An `Err` is a log that cannot be read or trusted.
@@ -25,6 +25,23 @@ pub trait BoxRecords {
     fn stream_next(&self, log: &str) -> Result<Next, String>;
     /// True when slot `slot` of the stream of `log` was opened by study `study` and is closed.
     fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String>;
+    /// The id of each member that a registered root's lock lists, whatever log the root
+    /// registered in: the studies that may join no other family.
+    fn locked_members(&self) -> Result<Vec<String>, String>;
+    /// The id of each member that the lock of a root registered in the plan log lists and that
+    /// holds no register record: the members whose plan slots are reserved.
+    fn unopened(&self) -> Result<Vec<String>, String>;
+    /// The registered family whose lock lists `study`, as `family::find` gives it from the
+    /// box's register records and log leaves.
+    fn family_of(&self, study: &str) -> Result<Option<crate::family::Found>, String>;
+    /// `family_of` for a study that `locked_members` lists; `None` for any other study, which
+    /// reads no family, so a family leaf without its root refuses no other study.
+    fn locked_family(&self, study: &str) -> Result<Option<crate::family::Found>, String> {
+        if !self.locked_members()?.iter().any(|m| m == study) {
+            return Ok(None);
+        }
+        self.family_of(study)
+    }
 }
 
 /// An empty box.
@@ -48,20 +65,41 @@ impl BoxRecords for NoRecords {
     fn stream_closed(&self, _: &str, _: &str, _: u64) -> Result<bool, String> {
         Ok(false)
     }
+
+    fn locked_members(&self) -> Result<Vec<String>, String> {
+        Ok(vec![])
+    }
+
+    fn unopened(&self) -> Result<Vec<String>, String> {
+        Ok(vec![])
+    }
+
+    fn family_of(&self, _: &str) -> Result<Option<crate::family::Found>, String> {
+        Ok(None)
+    }
 }
 
-/// `B`, with each stream read once and the answer kept, so every rule of one check sees one
-/// slot and level, or one error.
+/// `B`, with each stream, the locked members, the unopened members and each study's family
+/// read once and the answer kept, so every rule of one check sees one slot and level, one
+/// membership, one reservation and one family, or one error.
 pub struct ReadOnce<B> {
     inner: B,
     streams: std::cell::RefCell<std::collections::BTreeMap<String, Result<Next, String>>>,
+    locked: std::cell::OnceCell<Result<Vec<String>, String>>,
+    unopened: std::cell::OnceCell<Result<Vec<String>, String>>,
+    families: std::cell::RefCell<std::collections::BTreeMap<String, Family>>,
 }
+
+type Family = Result<Option<crate::family::Found>, String>;
 
 impl<B> ReadOnce<B> {
     pub fn new(inner: B) -> ReadOnce<B> {
         ReadOnce {
             inner,
             streams: Default::default(),
+            locked: Default::default(),
+            unopened: Default::default(),
+            families: Default::default(),
         }
     }
 }
@@ -86,7 +124,28 @@ impl<B: BoxRecords> BoxRecords for ReadOnce<B> {
     fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String> {
         self.inner.stream_closed(log, study, slot)
     }
+
+    fn locked_members(&self) -> Result<Vec<String>, String> {
+        self.locked
+            .get_or_init(|| self.inner.locked_members())
+            .clone()
+    }
+
+    fn unopened(&self) -> Result<Vec<String>, String> {
+        self.unopened.get_or_init(|| self.inner.unopened()).clone()
+    }
+
+    fn family_of(&self, study: &str) -> Family {
+        let mut families = self.families.borrow_mut();
+        let read = families
+            .entry(study.to_string())
+            .or_insert_with(|| self.inner.family_of(study));
+        read.clone()
+    }
 }
+
+/// The code of a value that waits on a study that has not finished.
+pub const PENDING: &str = "W-REF-001";
 
 /// True when `id` has the form E-FMT-001 gives `study.id` in the built-in rules.
 pub fn is_study_id(id: &str) -> bool {
@@ -405,11 +464,21 @@ fn parse_interval(s: &str) -> Result<(Bound, Bound), String> {
 /// The E-TYP-001 diagnostic for a spec that passes every rule and still does not fit the typed
 /// model. It sits at `spec` and carries no parser text, which could echo a value.
 pub fn schema_fault() -> crate::diag::Diagnostic {
+    raised("E-TYP-001", "spec".into(), None)
+}
+
+/// The diagnostic of built-in rule `code` at `path`, `detail` ending its problem sentence, for
+/// a code the CLI raises itself.
+pub fn raised(code: &str, path: String, detail: Option<&str>) -> crate::diag::Diagnostic {
     let rule = builtin()
         .iter()
-        .find(|r| r.code == "E-TYP-001")
-        .expect("E-TYP-001 is in the rule file");
-    generic::diagnostic(rule, "spec".into(), rule.problem.clone())
+        .find(|r| r.code == code)
+        .unwrap_or_else(|| panic!("{code} is in the rule file"));
+    let problem = match detail {
+        Some(d) => format!("{} {d}", rule.problem),
+        None => rule.problem.clone(),
+    };
+    generic::diagnostic(rule, path, problem)
 }
 
 /// Defaults, then generic, then named checks. Returns the defaulted spec, the

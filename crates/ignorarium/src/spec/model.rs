@@ -21,6 +21,16 @@ pub struct Spec {
     pub mutations: Mutations,
     pub access: Access,
     pub report: Report,
+    /// Confirmatory studies locked together with this one; `None` when there is none.
+    #[serde(default)]
+    pub family: Option<Family>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Family {
+    /// Spec paths, written as `scope.end_of_run.follow_on[*].spec` is.
+    pub members: Vec<String>,
 }
 
 impl Spec {

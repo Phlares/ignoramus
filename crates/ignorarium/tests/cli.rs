@@ -1,8 +1,9 @@
 mod common;
 
 use assert_cmd::Command;
-use ignorarium::cli::check::{self, HomeRecords};
+use ignorarium::cli::check::HomeRecords;
 use ignorarium::home::Home;
+use ignorarium::inputs;
 use ignorarium::keys;
 use ignorarium::rules::BoxRecords;
 use ignorarium::stream::{self, LogName};
@@ -603,7 +604,7 @@ fn mark(dir: &Path) {
 fn no_marker_keeps_the_spec_folder() {
     let dir = repo();
     let spec = dir.path().join("a/b/s.toml");
-    assert_eq!(check::study_root(&spec), dir.path().join("a/b"));
+    assert_eq!(inputs::study_root(&spec), dir.path().join("a/b"));
 }
 
 #[test]
@@ -633,11 +634,11 @@ fn the_nearest_marker_above_the_spec_wins() {
     std::fs::create_dir_all(inner.join("deep")).unwrap();
     mark(&dir.path().join("outer"));
     let spec = inner.join("deep/s.toml");
-    assert_eq!(check::study_root(&spec), dir.path().join("outer"));
+    assert_eq!(inputs::study_root(&spec), dir.path().join("outer"));
     mark(&inner);
-    assert_eq!(check::study_root(&spec), inner);
+    assert_eq!(inputs::study_root(&spec), inner);
     mark(&inner.join("deep"));
-    assert_eq!(check::study_root(&spec), inner.join("deep"));
+    assert_eq!(inputs::study_root(&spec), inner.join("deep"));
 }
 
 #[test]
@@ -646,7 +647,7 @@ fn a_marker_that_is_a_folder_or_a_link_is_not_a_marker() {
     let folder = dir.path().join("f");
     std::fs::create_dir_all(folder.join("spec/ignorarium.toml")).unwrap();
     assert_eq!(
-        check::study_root(&folder.join("spec/s.toml")),
+        inputs::study_root(&folder.join("spec/s.toml")),
         folder.join("spec")
     );
     #[cfg(unix)]
@@ -657,7 +658,7 @@ fn a_marker_that_is_a_folder_or_a_link_is_not_a_marker() {
         std::os::unix::fs::symlink(linked.join("real.toml"), linked.join("ignorarium.toml"))
             .unwrap();
         assert_eq!(
-            check::study_root(&linked.join("spec/s.toml")),
+            inputs::study_root(&linked.join("spec/s.toml")),
             linked.join("spec")
         );
     }
@@ -672,10 +673,10 @@ fn the_search_stops_at_the_repo_root_but_checks_it() {
     std::fs::create_dir_all(repo.join("sub/spec")).unwrap();
     let spec = repo.join("sub/spec/s.toml");
     // The marker above the repo is out of reach.
-    assert_eq!(check::study_root(&spec), repo.join("sub/spec"));
+    assert_eq!(inputs::study_root(&spec), repo.join("sub/spec"));
     // A marker in the repo root itself counts.
     mark(&repo);
-    assert_eq!(check::study_root(&spec), repo);
+    assert_eq!(inputs::study_root(&spec), repo);
 }
 
 #[test]
@@ -684,8 +685,11 @@ fn the_search_never_uses_a_marker_in_the_home_folder() {
     let home = dir.path().join("home");
     mark(&home);
     let spec = home.join("study/s.toml");
-    assert_eq!(check::study_root_in(&spec, Some(&home)), home.join("study"));
-    assert_eq!(check::study_root_in(&spec, None), home);
+    assert_eq!(
+        inputs::study_root_in(&spec, Some(&home)),
+        home.join("study")
+    );
+    assert_eq!(inputs::study_root_in(&spec, None), home);
 }
 
 #[test]
@@ -694,7 +698,7 @@ fn dotdot_in_the_spec_argument_is_folded_before_the_walk() {
     mark(&dir.path().join("a"));
     std::fs::create_dir_all(dir.path().join("b")).unwrap();
     let spec = dir.path().join("a/../b/s.toml");
-    assert_eq!(check::study_root(&spec), dir.path().join("b"));
+    assert_eq!(inputs::study_root(&spec), dir.path().join("b"));
 }
 
 #[test]
@@ -846,7 +850,7 @@ fn reuse_spec(dir: &Path, bytes: &[u8]) -> PathBuf {
             "sha256 = \"\"",
             &format!("sha256 = \"{}\"", ignorarium::canon::sha256_hex(bytes)),
         )
-        .replace("role = \"calibration\"", "role = \"selection\"");
+        .replace("role = \"calibration\"", "role = \"confirmation\"");
     let spec = dir.join("spec.toml");
     std::fs::write(&spec, text).unwrap();
     spec
@@ -1529,7 +1533,9 @@ fn check_shows_the_slot_and_level_the_stream_would_give() {
     common::pilot(&box_home, vec![common::arm_a()]);
     let out = check_out(&home, &spec, 0);
     assert!(
-        out.contains("\nstream: slot 1, level 0.005\nspec: "),
+        out.contains(
+            "\nstream: slot 1, level 0.005\nplan stream: slots left 10, reserved 0\nspec: "
+        ),
         "{out}"
     );
     let v = check_json(&home, &spec, 0);
@@ -1542,7 +1548,7 @@ fn check_shows_the_slot_and_level_the_stream_would_give() {
     // Once a study holds slot 1, the next is slot 2; the review page shows it too.
     let key = keys::load_or_create(&box_home).unwrap();
     stream::Log::of(&box_home, LogName::Plan)
-        .open(&key, "other", 0.0)
+        .open(&key, "other", 0.0, 0)
         .unwrap();
     assert!(check_out(&home, &spec, 0).contains("\nstream: slot 2, level 0.005\n"));
     let page = stdout(&bin(&home).arg("review").arg(&spec).assert().code(0));
@@ -1645,7 +1651,7 @@ fn check_refuses_a_plan_beyond_the_tenth_slot() {
     let key = keys::load_or_create(&box_home).unwrap();
     let log = stream::Log::of(&box_home, LogName::Plan);
     for i in 1..=10 {
-        log.open(&key, &format!("s{i:02}"), 0.0).unwrap();
+        log.open(&key, &format!("s{i:02}"), 0.0, 0).unwrap();
     }
     let v = check_json(&home, &spec, 1);
     let errors: Vec<&Value> = (v["diagnostics"].as_array().unwrap().iter())
@@ -1693,19 +1699,13 @@ fn a_study_reference_never_names_a_path() {
     ] {
         std::fs::create_dir_all(home.join(folder)).unwrap();
         std::fs::write(home.join(folder).join("records.jsonl"), "{}\n").unwrap();
-        let records = HomeRecords {
-            home: box_home.clone(),
-            key: Ok(None),
-        };
+        let records = HomeRecords::new(box_home.clone(), Ok(None));
         assert_eq!(records.study(id), Ok(None), "{id}");
     }
     // The same reader does read a study id's log.
     std::fs::create_dir_all(home.join("studies/my-pilot")).unwrap();
     std::fs::write(home.join("studies/my-pilot/records.jsonl"), "{}\n").unwrap();
-    let records = HomeRecords {
-        home: box_home,
-        key: Ok(None),
-    };
+    let records = HomeRecords::new(box_home, Ok(None));
     assert_eq!(
         records.study("my-pilot"),
         Err("the box key is missing".to_string())
@@ -1728,11 +1728,7 @@ fn a_study_folder_that_cannot_be_read_is_an_error() {
         return;
     }
     let key = keys::load(&box_home).unwrap().map(|k| k.verifying_key());
-    let got = HomeRecords {
-        home: box_home,
-        key: Ok(key),
-    }
-    .study("my-pilot");
+    let got = HomeRecords::new(box_home, Ok(key)).study("my-pilot");
     mode(0o755);
     // Not "not registered": the box cannot tell.
     let e = got.unwrap_err();
@@ -1752,10 +1748,7 @@ fn a_log_that_holds_another_studys_records_is_an_error() {
     )
     .unwrap();
     let key = keys::load(&box_home).unwrap().map(|k| k.verifying_key());
-    let records = HomeRecords {
-        home: box_home,
-        key: Ok(key),
-    };
+    let records = HomeRecords::new(box_home, Ok(key));
     assert_eq!(
         records.study("my-pilot"),
         Err("record 0 belongs to study first".to_string())
@@ -1768,10 +1761,7 @@ fn the_box_reads_the_plan_a_study_stored() {
     let (_d, home, _) = setup(|t| t);
     let box_home = Home::open_at(&home).unwrap();
     common::pilot(&box_home, vec![common::arm_a()]);
-    let records = HomeRecords {
-        home: box_home,
-        key: Ok(None),
-    };
+    let records = HomeRecords::new(box_home, Ok(None));
     let stored = common::source_spec(&["fiction".into()]).into_bytes();
     assert_eq!(records.spec("my-pilot"), Ok(Some(stored)));
     // No plan, and an id that is not a study id, whatever its path holds.
@@ -2128,4 +2118,14 @@ fn a_resize_shortfall_states_no_needed_count() {
         !out.contains(">16384") && !out.contains("16384 per stratum"),
         "{out}"
     );
+}
+
+#[test]
+fn the_fill_step_explains_the_family_table() {
+    let dir = TempDir::new().unwrap();
+    let a = bin(dir.path()).args(["guide", "--json"]).assert().success();
+    let steps = json_out(&a);
+    let fill = steps.as_array().unwrap().iter().find(|s| s["id"] == "fill");
+    let does = fill.unwrap()["does"].as_str().unwrap();
+    assert!(does.contains("[family]") && does.contains("stream slot"));
 }

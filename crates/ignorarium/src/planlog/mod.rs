@@ -20,7 +20,7 @@ pub fn commitment(salt: &[u8; 32], spec_canonical: &[u8]) -> String {
 /// The first 16 hex chars of SHA-256 over the payload pin, the outcome
 /// ids and units, and the hypothesis ids. Both lists are sorted, so
 /// their order in the spec does not matter.
-pub fn family(spec: &Spec) -> String {
+pub fn shape(spec: &Spec) -> String {
     let mut outcomes: Vec<[&str; 2]> = spec
         .outcomes
         .iter()

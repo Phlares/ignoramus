@@ -1973,7 +1973,7 @@ fn unused_reserve_data_is_released_and_fresh_again() {
     assert_eq!(released.len(), 1);
     let r = &released[0];
     assert_eq!(
-        (r.label.as_str(), &r.commitment, &r.family, &r.mode),
+        (r.label.as_str(), &r.commitment, &r.shape, &r.mode),
         ("study:grows", &leaf.commitment, &None, &None)
     );
     assert!(leaf.commitment.is_some());

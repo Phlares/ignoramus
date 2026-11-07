@@ -5,11 +5,12 @@ use crate::derived::{
     ANALYSIS, Analysis, BoundResult, CONTINUE, Candidate, ESTIMATE, Estimate, GroupClip, Inputs,
     Instrument, Recheck, Register, Selection, VERDICT, Verdict, contrast_key,
 };
+use crate::inputs::InputHashes;
 use crate::planlog::store::{PlanLog, RELEASE};
 use crate::prior::Seen;
 use crate::records::{self, Record, RecordDraft};
 use crate::resize;
-use crate::runner::{InputHashes, RunError, RunPlan, own_label, stored_spec, typed};
+use crate::runner::{RunError, RunPlan, own_label, stored_spec, typed};
 use crate::schedule::{self, Row, SELECTION_STAGE};
 use crate::seed::seed;
 use crate::spec;

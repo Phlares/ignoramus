@@ -556,6 +556,7 @@ pub fn finished_with(
         resolved: vec![],
         deviations: vec![],
         carries: None,
+        family: None,
         alpha: None,
         timestamp: None,
     };
@@ -647,6 +648,19 @@ impl BoxRecords for Studies {
     fn stream_closed(&self, _: &str, _: &str, _: u64) -> Result<bool, String> {
         Ok(false)
     }
+
+    /// No study is locked in a family.
+    fn locked_members(&self) -> Result<Vec<String>, String> {
+        Ok(vec![])
+    }
+
+    fn unopened(&self) -> Result<Vec<String>, String> {
+        Ok(vec![])
+    }
+
+    fn family_of(&self, _: &str) -> Result<Option<ignorarium::family::Found>, String> {
+        Ok(None)
+    }
 }
 
 /// `Studies` whose stream of `log` gives `next`; another log cannot be read.
@@ -675,6 +689,18 @@ impl BoxRecords for Streamed {
 
     fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String> {
         self.studies.stream_closed(log, study, slot)
+    }
+
+    fn locked_members(&self) -> Result<Vec<String>, String> {
+        self.studies.locked_members()
+    }
+
+    fn unopened(&self) -> Result<Vec<String>, String> {
+        self.studies.unopened()
+    }
+
+    fn family_of(&self, study: &str) -> Result<Option<ignorarium::family::Found>, String> {
+        self.studies.family_of(study)
     }
 }
 

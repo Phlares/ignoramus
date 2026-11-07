@@ -96,10 +96,7 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
             .into());
         }
         let register = (all.iter().find_map(Register::of)).ok_or_else(|| not_registered(id))?;
-        let box_records = HomeRecords {
-            home: home.clone(),
-            key: Ok(Some(verifying)),
-        };
+        let box_records = HomeRecords::signed(home, &key);
         let state = StudyState::of(Some(all.to_vec()), |log, slot| {
             box_records.stream_closed(log, id, slot)
         })

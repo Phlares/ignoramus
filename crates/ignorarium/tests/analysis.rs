@@ -1401,7 +1401,7 @@ fn a_study_whose_claims_all_fail_is_no_stream_discovery() {
     let home = Home::open_at(dir.path()).unwrap();
     let key = keys::load_or_create(&home).unwrap();
     let log = Log::of(&home, LogName::Plan);
-    let slot = log.open(&key, "s", 0.0).unwrap();
+    let slot = log.open(&key, "s", 0.0, 0).unwrap();
     let (vs, study) = decided(&spec, &p, &clusters, Some(slot.level));
     let (e1, e2) = (strong(12), strong(11));
     assert!(vs.iter().all(|v| v.verdict == "fail"), "{vs:?}");
@@ -1488,7 +1488,7 @@ fn an_e_value_too_large_for_a_float_is_kept_finite() {
     let home = Home::open_at(dir.path()).unwrap();
     let key = keys::load_or_create(&home).unwrap();
     let log = Log::of(&home, LogName::Plan);
-    let slot = log.open(&key, "s", 0.0).unwrap().slot;
+    let slot = log.open(&key, "s", 0.0, 0).unwrap().slot;
     // A discovery at the slot's level.
     assert!(log.close(&key, "s", slot, study.unwrap()).unwrap());
 }
