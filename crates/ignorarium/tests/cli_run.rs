@@ -2,7 +2,9 @@
 //! so rows run in bubblewrap.
 mod common;
 use assert_cmd::Command;
-use common::{Lab, kind_of, lab, no_level1, plain, register_study, with_payload};
+use common::{
+    Lab, bin, kind_of, lab, no_level1, plain, register_study, status, text, with_payload,
+};
 use ignorarium::backend::level2::Level2;
 use ignorarium::backend::{Backend, Probe};
 use ignorarium::canon::sha256_hex;
@@ -16,12 +18,6 @@ use serde_json::Value;
 use std::path::Path;
 use std::time::Duration;
 
-fn bin(lab: &Lab) -> Command {
-    let mut c = Command::cargo_bin("ignorarium").unwrap();
-    c.env("IGNORARIUM_HOME", &lab.home.root);
-    c
-}
-
 /// `bin` in the root of study `id`, where `run` and `resume` read a late input from.
 fn bin_at(lab: &Lab, id: &str) -> Command {
     let mut c = bin(lab);
@@ -29,17 +25,8 @@ fn bin_at(lab: &Lab, id: &str) -> Command {
     c
 }
 
-fn text(a: &assert_cmd::assert::Assert) -> String {
-    String::from_utf8_lossy(&a.get_output().stdout).into_owned()
-}
-
 fn err(a: &assert_cmd::assert::Assert) -> String {
     String::from_utf8_lossy(&a.get_output().stderr).into_owned()
-}
-
-fn status(lab: &Lab, id: &str) -> Value {
-    let a = bin(lab).args(["status", id, "--json"]).assert().success();
-    serde_json::from_str(&text(&a)).unwrap()
 }
 
 #[test]

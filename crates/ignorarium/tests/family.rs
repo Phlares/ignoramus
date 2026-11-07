@@ -1,8 +1,7 @@
 //! Families: `check` on a root checks each member with the full rules and the family rules;
 //! `register` on a root locks its members and reserves their stream slots.
 mod common;
-use assert_cmd::Command;
-use common::{Lab, lab};
+use common::{Lab, bin, lab};
 use ignorarium::canon::sha256_hex;
 use ignorarium::cli::register;
 use ignorarium::derived::Register;
@@ -13,12 +12,6 @@ use ignorarium::stream::{Log, LogName};
 use ignorarium::{inputs, keys};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
-
-fn bin(lab: &Lab) -> Command {
-    let mut c = Command::cargo_bin("ignorarium").unwrap();
-    c.env("IGNORARIUM_HOME", &lab.home.root);
-    c
-}
 
 /// What `ignorarium <command> <spec>` prints.
 fn printed(lab: &Lab, command: &str, spec: &Path) -> String {

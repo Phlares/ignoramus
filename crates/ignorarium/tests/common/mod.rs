@@ -10,6 +10,24 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
+/// The box binary, with its home in `lab`.
+pub fn bin(lab: &Lab) -> assert_cmd::Command {
+    let mut c = assert_cmd::Command::cargo_bin("ignorarium").unwrap();
+    c.env("IGNORARIUM_HOME", &lab.home.root);
+    c
+}
+
+/// What the command of `a` printed.
+pub fn text(a: &assert_cmd::assert::Assert) -> String {
+    String::from_utf8_lossy(&a.get_output().stdout).into_owned()
+}
+
+/// `status <id> --json`, parsed.
+pub fn status(lab: &Lab, id: &str) -> serde_json::Value {
+    let a = bin(lab).args(["status", id, "--json"]).assert().success();
+    serde_json::from_str(&text(&a)).unwrap()
+}
+
 /// The shell line that writes the template's one measure.
 pub const VALUES: &str = "printf '{\"ppl\": 1.5}' > \"$IGNORARIUM_OUT/values.json\"";
 

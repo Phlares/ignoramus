@@ -4993,20 +4993,8 @@ fn child_estimates_do_not_change_the_finished_rule() {
     assert!(matches!(state, StudyState::Finished(_)));
 }
 
-fn bin(lab: &Lab) -> assert_cmd::Command {
-    let mut c = assert_cmd::Command::cargo_bin("ignorarium").unwrap();
-    c.env("IGNORARIUM_HOME", &lab.home.root);
-    c
-}
-
-fn status_json(lab: &Lab, id: &str) -> serde_json::Value {
-    let a = bin(lab).args(["status", id, "--json"]).assert().success();
-    serde_json::from_slice(&a.get_output().stdout).unwrap()
-}
-
 fn status_text(lab: &Lab, id: &str) -> String {
-    let a = bin(lab).args(["status", id]).assert().success();
-    String::from_utf8_lossy(&a.get_output().stdout).into_owned()
+    common::text(&common::bin(lab).args(["status", id]).assert().success())
 }
 
 #[test]
@@ -5021,7 +5009,7 @@ fn status_lists_each_trigger_fired_value_admitted_skipped() {
     register_study(&lab, "list", spec, &[], STAGED);
     assert_eq!(run(&plan_of(&lab, "list")).unwrap(), RunStatus::Done);
     let e = fired_e_value();
-    let s = status_json(&lab, "list");
+    let s = common::status(&lab, "list");
     assert_eq!(
         s["triggers"],
         serde_json::json!([{
@@ -5043,12 +5031,12 @@ fn status_says_a_trigger_did_not_fire_and_one_is_not_yet_decided() {
     let lab = lab();
     register_study(&lab, "wait", spawning, &[], STAGED);
     // Before any run no trigger record exists.
-    let s = status_json(&lab, "wait");
+    let s = common::status(&lab, "wait");
     assert_eq!(s["triggers"][0]["state"], "pending");
     assert_eq!(s["triggers"][0]["admitted"], serde_json::json!([]));
     assert!(status_text(&lab, "wait").contains("T1: pending\n"));
     assert_eq!(run(&plan_of(&lab, "wait")).unwrap(), RunStatus::Done);
-    let s = status_json(&lab, "wait");
+    let s = common::status(&lab, "wait");
     assert_eq!(s["triggers"][0]["state"], "not fired");
     assert_eq!(s["triggers"][0]["e_value"], 1.0);
     let t = status_text(&lab, "wait");
@@ -5064,7 +5052,7 @@ fn status_shows_a_legacy_trigger_as_inert() {
     let text = std::fs::read_to_string(&file).unwrap();
     let old = r#"triggers = [{ id = "T1", metric = "ppl-ratio", threshold_e = 2.0 }]"#;
     std::fs::write(&file, text.replacen("triggers = []", old, 1)).unwrap();
-    let s = status_json(&lab, "legacy");
+    let s = common::status(&lab, "legacy");
     assert_eq!(
         s["triggers"],
         serde_json::json!([{
@@ -5081,7 +5069,7 @@ fn status_shows_children_by_the_blind_label_of_their_condition() {
     let spec = |t: String| firing(t).replace("blind = false", "blind = true");
     register_study(&lab, "blind-kids", spec, &[], STAGED);
     assert_eq!(run(&plan_of(&lab, "blind-kids")).unwrap(), RunStatus::Done);
-    let s = status_json(&lab, "blind-kids");
+    let s = common::status(&lab, "blind-kids");
     let shown = s["triggers"][0]["admitted"].to_string();
     assert!(!shown.contains("arm-a"), "{shown}");
     let label = (s["conditions"].as_array().unwrap().iter())
@@ -5161,7 +5149,7 @@ fn a_blind_status_shows_skipped_and_stopped_children_by_label() {
         "blind-stop",
         &[("trigger", trigger), ("spawn-stop", stop)],
     );
-    let s = status_json(&lab, "blind-stop");
+    let s = common::status(&lab, "blind-stop");
     let shown = s["triggers"][0].to_string() + &s["spawn_stopped"].to_string();
     assert!(!shown.contains("arm-a"), "{shown}");
     let label = (s["conditions"].as_array().unwrap().iter())

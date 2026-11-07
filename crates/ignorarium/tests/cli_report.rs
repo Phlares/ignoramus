@@ -1,18 +1,9 @@
 //! `report`: the verdicts of a finished study, through the real binary.
 mod common;
-use assert_cmd::Command;
-use common::{Lab, edited, finished_with, instrument, lab, plain, plant, records_of, source_spec};
+use common::{
+    Lab, bin, edited, finished_with, instrument, lab, plain, plant, records_of, source_spec, text,
+};
 use serde_json::{Value, json};
-
-fn bin(lab: &Lab) -> Command {
-    let mut c = Command::cargo_bin("ignorarium").unwrap();
-    c.env("IGNORARIUM_HOME", &lab.home.root);
-    c
-}
-
-fn text(a: &assert_cmd::assert::Assert) -> String {
-    String::from_utf8_lossy(&a.get_output().stdout).into_owned()
-}
 
 fn verdict(h: &str, v: &str, basis: &str, e: Value, level: Value, reason: Value) -> Value {
     json!({
