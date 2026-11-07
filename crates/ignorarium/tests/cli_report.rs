@@ -325,3 +325,15 @@ fn a_second_verdict_for_a_hypothesis_is_not_printed() {
     assert_eq!(shown[0]["verdict"], "pass");
     assert_eq!(shown[0]["e_value"], 312.4);
 }
+
+#[test]
+fn a_finished_study_with_a_later_stop_record_still_reports() {
+    let lab = lab();
+    let mut bodies = finished_study(&three(), &[]);
+    bodies.push(("stop", json!({ "why": "budget" })));
+    plant(&lab.home, "s1", &bodies);
+    let r = report_json(&lab, "s1");
+    assert_eq!(r["hypotheses"].as_array().unwrap().len(), 3);
+    assert_eq!(r["hypotheses"][0]["verdict"], "pass");
+    assert_eq!(records_of(&lab, "s1").pop().unwrap().kind, "opened");
+}

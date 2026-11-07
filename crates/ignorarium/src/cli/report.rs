@@ -86,12 +86,6 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
             ))
             .into());
         }
-        if let Some(why) = stopped_why(all) {
-            return Err(CliError::refuse(format!(
-                "study {id} is stopped: {why}; it has no report"
-            ))
-            .into());
-        }
         let register = (all.iter().find_map(Register::of)).ok_or_else(|| not_registered(id))?;
         let box_records = HomeRecords {
             home: home.clone(),
@@ -102,10 +96,11 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
         })
         .map_err(|e| CliError::usage(format!("cannot report {id}: {e}")))?;
         let StudyState::Finished(after) = state else {
-            return Err(CliError::refuse(format!(
-                "study {id} is not finished; status shows its progress"
-            ))
-            .into());
+            let said = match stopped_why(all) {
+                Some(why) => format!("study {id} is stopped: {why}; it has no report"),
+                None => format!("study {id} is not finished; status shows its progress"),
+            };
+            return Err(CliError::refuse(said).into());
         };
         let analysis = (all.iter().find_map(Analysis::of)).ok_or_else(|| not_registered(id))?;
         let mut seen = BTreeSet::new();
