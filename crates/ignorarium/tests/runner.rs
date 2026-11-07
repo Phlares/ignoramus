@@ -1341,6 +1341,64 @@ fn late_confirmation_data_used_before_is_refused() {
     assert!(!a.join("schedule.json").exists());
 }
 
+#[test]
+fn a_member_run_does_not_count_root_data_as_reused() {
+    use ignorarium::family::{self, Lock, Member};
+    use ignorarium::planlog::store::Leaf;
+    let lab = lab();
+    // Member `mem` and outsider `other` register with data/conf.txt absent.
+    register_study(&lab, "mem", conf_input, &[], PAYLOAD);
+    register_study(&lab, "other", conf_input, &[], PAYLOAD);
+    // Root `fam` then registers by hand: its plan leaf and its family leaf hold the data.
+    let data = vec![file_hashes(b"late file")];
+    let lock = Lock {
+        members: vec![Member {
+            id: "mem".into(),
+            spec: "spec.toml".into(),
+            spec_hash: spec::load(&common::work(&lab, "mem").join("spec.toml"))
+                .unwrap()
+                .hash,
+            payload: "0".repeat(64),
+            inputs: vec![],
+        }],
+    };
+    let key = keys::load_or_create(&lab.home).unwrap();
+    let log = PlanLog::open(&lab.home.root.join("planlog")).unwrap();
+    let leaf = |kind: &str, label: String, commitment: String| Leaf {
+        kind: kind.into(),
+        commitment: Some(commitment),
+        shape: None,
+        mode: None,
+        data_hashes: data.clone(),
+        label,
+        ts: "2026-11-06T00:00:00Z".into(),
+    };
+    let (r, _) = log
+        .append(leaf("plan", String::new(), "sha256:plan".into()), &key)
+        .unwrap();
+    let family_leaf = leaf(family::LEAF_KIND, family::leaf_label("fam"), lock.hash());
+    log.append(family_leaf, &key).unwrap();
+    let zeros = "0".repeat(64);
+    let body = serde_json::json!({
+        "spec_hash": format!("sha256:{zeros}"), "leaf": r, "log": "planlog", "defaults": {},
+        "root_id": zeros, "payload": zeros, "inputs": [], "resolved": [], "family": lock,
+        "alpha": null,
+    });
+    common::plant(&lab.home, "fam", &[("register", body)]);
+    for id in ["mem", "other"] {
+        std::fs::write(common::work(&lab, id).join("data/conf.txt"), "late file").unwrap();
+    }
+    // The member runs on its family's data; the outsider may not.
+    plan_of(&lab, "mem");
+    match err_of(&lab, "other") {
+        RunError::DataReused { path, label } => {
+            assert_eq!(path, "data/conf.txt");
+            assert_eq!(label, format!("registered plan, leaf {r}"));
+        }
+        e => panic!("{e}"),
+    }
+}
+
 /// The template with an unpinned reserve input `data/res.txt` in `fiction`. The plan is
 /// exploratory, so no rule asks for a pin or a re-size.
 fn with_reserve(t: String) -> String {

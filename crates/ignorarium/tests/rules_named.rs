@@ -1551,6 +1551,10 @@ impl BoxRecords for Planned {
     fn unopened(&self) -> Result<Vec<String>, String> {
         self.studies.unopened()
     }
+
+    fn family_of(&self, study: &str) -> Result<Option<ignorarium::family::Found>, String> {
+        self.studies.family_of(study)
+    }
 }
 
 /// The plan of a measured `pilot`: the template, with H1 on `arm-a` in stratum fiction by
@@ -2487,6 +2491,7 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
         "E-FAM-003",
         "E-FAM-004",
         "E-FAM-005",
+        "E-FAM-006",
         "E-REF-001",
         "E-BUD-001",
         "E-END-001",
@@ -2518,8 +2523,9 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
     .collect();
     assert_eq!(in_file, want);
     // E-CNF-005 and E-HSH-001 read files and E-STR-001 the stream; their tests are below.
-    // E-SEC-001 is in tests/scan.rs. E-FAM-003 and E-FAM-004 read member specs, and E-FAM-005
-    // the stream and the box records: tests/family.rs.
+    // E-SEC-001 is in tests/scan.rs. E-FAM-003 and E-FAM-004 read member specs, E-FAM-005
+    // the stream and the box records, and E-FAM-006 the box records and the plan log:
+    // tests/family.rs.
     let in_rows: BTreeSet<String> = faults()
         .iter()
         .flat_map(|r| r.want.iter().map(|w| w.0.to_string()))
@@ -2536,6 +2542,7 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
                     | "E-FAM-003"
                     | "E-FAM-004"
                     | "E-FAM-005"
+                    | "E-FAM-006"
             )
         })
         .collect();
@@ -2799,6 +2806,10 @@ impl BoxRecords for Torn {
     fn unopened(&self) -> Result<Vec<String>, String> {
         self.studies.unopened()
     }
+
+    fn family_of(&self, study: &str) -> Result<Option<ignorarium::family::Found>, String> {
+        self.studies.family_of(study)
+    }
 }
 
 /// A box that counts the reads of a study's records.
@@ -2831,6 +2842,10 @@ impl BoxRecords for Counted {
 
     fn unopened(&self) -> Result<Vec<String>, String> {
         self.studies.unopened()
+    }
+
+    fn family_of(&self, study: &str) -> Result<Option<ignorarium::family::Found>, String> {
+        self.studies.family_of(study)
     }
 }
 
@@ -2921,6 +2936,10 @@ impl BoxRecords for Slots {
 
     fn unopened(&self) -> Result<Vec<String>, String> {
         Ok(vec![])
+    }
+
+    fn family_of(&self, _: &str) -> Result<Option<ignorarium::family::Found>, String> {
+        Ok(None)
     }
 }
 
@@ -3200,7 +3219,12 @@ struct Fake {
 }
 
 impl PriorUse for Fake {
-    fn used(&self, exact: &str, normalized: &str) -> Result<Option<String>, PriorError> {
+    fn used_where(
+        &self,
+        exact: &str,
+        normalized: &str,
+        _: &dyn Fn(u64) -> bool,
+    ) -> Result<Option<String>, PriorError> {
         self.seen
             .borrow_mut()
             .push((exact.into(), normalized.into()));
@@ -3217,7 +3241,12 @@ impl PriorUse for Fake {
 struct Broken;
 
 impl PriorUse for Broken {
-    fn used(&self, _: &str, _: &str) -> Result<Option<String>, PriorError> {
+    fn used_where(
+        &self,
+        _: &str,
+        _: &str,
+        _: &dyn Fn(u64) -> bool,
+    ) -> Result<Option<String>, PriorError> {
         Err(PriorError("leaf 3 is not a leaf".into()))
     }
 }

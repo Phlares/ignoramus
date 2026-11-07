@@ -117,6 +117,7 @@ const NAMED: &[(&str, NamedFn)] = &[
     ("family-pinned", family_pinned),
     ("family-selection", family_selection),
     ("family-room", family_room),
+    ("family-lock", family_lock),
     ("units-declared", units_declared),
     ("row-cap", row_cap),
     ("selection-stage", selection_stage),
@@ -337,7 +338,28 @@ fn follow_on_exists(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     })
 }
 
+/// E-CNF-005: a confirmation or reserve input whose data an earlier plan-log entry used. For a
+/// member of a registered family, `family::exempt` uses do not count. The family is read only
+/// for data some entry used, so family records that cannot be read refuse only such data.
 fn data_fresh(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let id = text(spec, "study.id").unwrap_or_default();
+    let family = OnceCell::new();
+    let earlier = |exact: &str, normalized: &str| -> Result<Option<String>, String> {
+        let unread = |e: crate::prior::PriorError| format!("The plan log cannot be read: {e}.");
+        let first = ctx.prior.used(exact, normalized).map_err(unread)?;
+        if first.is_none() {
+            return Ok(None);
+        }
+        let found = (family.get_or_init(|| ctx.records.family_of(id)).as_ref())
+            .map_err(|e| format!("The family records cannot be read: {e}."))?;
+        // The plan log's leaf indexes say nothing about a family in another log.
+        match found.as_ref().filter(|f| f.log == LogName::Plan.as_str()) {
+            None => Ok(first),
+            Some(f) => (ctx.prior)
+                .used_where(exact, normalized, &|i| !fam::exempt(f, i))
+                .map_err(unread),
+        }
+    };
     let mut out = vec![];
     for (path, input, _) in with_parent(spec, pat) {
         if !is_cluster(input) || role(input) == Some("selection") {
@@ -346,10 +368,10 @@ fn data_fresh(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
         let Some((exact, normalized)) = input_hashes(ctx, input) else {
             continue;
         };
-        let detail = match ctx.prior.used(&exact, &normalized) {
+        let detail = match earlier(&exact, &normalized) {
             Ok(None) => continue,
             Ok(Some(id)) => format!("The earlier entry is {id}."),
-            Err(e) => format!("The plan log cannot be read: {e}."),
+            Err(why) => why,
         };
         out.push(Hit {
             path,
@@ -579,6 +601,81 @@ fn family_room(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     (nodes(spec, pat).into_iter())
         .map(|(path, _)| at(&path, detail.clone()))
         .collect()
+}
+
+/// E-FAM-006 at `study.id` of a study a registered root's lock lists: its inputs, spec hash and
+/// payload hash must equal the lock. Box records that cannot be read fail closed. Only a
+/// locked study reads its family, so a family leaf without its root refuses no other study.
+fn family_lock(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let Some((path, id)) = (nodes(spec, pat).into_iter()).find_map(|(p, v)| Some((p, v.as_str()?)))
+    else {
+        return vec![];
+    };
+    let unread = |e: String| Some(format!("The box records cannot be read: {e}."));
+    let detail = match ctx.records.locked_members() {
+        Err(e) => unread(e),
+        Ok(locked) if !locked.iter().any(|m| m == id) => None,
+        Ok(_) => match ctx.records.family_of(id) {
+            Err(e) => unread(e),
+            Ok(found) => (found.iter())
+                .flat_map(|f| f.lock.members.iter().filter(|m| m.id == id))
+                .find_map(|m| unlike(spec, ctx, m))
+                .map(|(what, d)| {
+                    format!(
+                        "{d} Restore the locked {what}, or register the changed study under a new id as a non-member, where the freshness rule applies in full."
+                    )
+                }),
+        },
+    };
+    detail.map(|d| at(&path, d)).into_iter().collect()
+}
+
+/// The first way `spec` differs from its lock entry `m`, as what to restore and a sentence:
+/// an input's role, path or pin, then the spec hash, then the payload hash.
+fn unlike(spec: &Value, ctx: &CheckCtx, m: &fam::Member) -> Option<(&'static str, String)> {
+    let listed = list(spec, "inputs").map_or(&[][..], Vec::as_slice);
+    for k in 0..listed.len().max(m.inputs.len()) {
+        let differs = |d: String| Some(("input", d));
+        let (now, locked) = match (listed.get(k), m.inputs.get(k)) {
+            (Some(now), Some(locked)) => (now, locked),
+            (Some(_), None) => return differs(format!("Its inputs[{k}] is not in the lock.")),
+            (None, _) => return differs(format!("The lock holds inputs[{k}], which it lacks.")),
+        };
+        let role = json!(locked.role);
+        let fields = [
+            ("role", role.as_str().unwrap_or_default()),
+            ("path", &locked.path),
+            ("sha256", &locked.sha256),
+        ];
+        for (field, was) in fields {
+            let is = now.get(field).and_then(Value::as_str).unwrap_or_default();
+            if is != was {
+                let (is, was) = (printable(is), printable(was));
+                return differs(format!(
+                    "Its inputs[{k}].{field} is {is}; the lock holds {was}."
+                ));
+            }
+        }
+    }
+    if crate::spec::hash_bytes(&m.spec_hash) != Some(ctx.spec_hash) {
+        let hash = hex::encode(ctx.spec_hash);
+        let d = format!(
+            "Its spec hash is sha256:{hash}; the lock holds {}.",
+            printable(&m.spec_hash)
+        );
+        return Some(("spec", d));
+    }
+    match ctx.payload_hash() {
+        Ok(h) if *h == m.payload => None,
+        Ok(h) => Some((
+            "payload",
+            format!("Its payload hash is {h}; the lock holds {}.", m.payload),
+        )),
+        Err(e) => Some((
+            "payload",
+            format!("Its payload folder cannot be read: {e}."),
+        )),
+    }
 }
 
 // ---- design ----

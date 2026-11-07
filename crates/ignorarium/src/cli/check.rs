@@ -40,6 +40,9 @@ pub struct Assessed {
     pub stream: Option<Alpha>,
     /// For a confirmatory plan in the plan log, the plan stream's slots left and reserved.
     pub room: Option<Room>,
+    /// For a root, its members and the plan stream's room; for a member of a registered family,
+    /// its root and whether its slot is reserved.
+    pub family_line: Option<String>,
     /// The passed determinism check the plan takes from a study that ran its code; `register`
     /// freezes it.
     pub carried: Option<Carried>,
@@ -103,7 +106,12 @@ impl Assessed {
 struct Unreadable(String);
 
 impl PriorUse for Unreadable {
-    fn used(&self, _: &str, _: &str) -> Result<Option<String>, PriorError> {
+    fn used_where(
+        &self,
+        _: &str,
+        _: &str,
+        _: &dyn Fn(u64) -> bool,
+    ) -> Result<Option<String>, PriorError> {
         Err(PriorError(self.0.clone()))
     }
 }
@@ -194,6 +202,25 @@ impl BoxRecords for HomeRecords {
             .filter(|m| registers.iter().all(|(id, _)| *id != m.id))
             .map(|m| m.id.clone())
             .collect())
+    }
+
+    /// The register records first, then the leaves of each log: a root writes its family leaf
+    /// before its record, so a leaf read after the records may lack its root; that fails closed.
+    fn family_of(&self, study: &str) -> Result<Option<family::Found>, String> {
+        let registers = self.registers()?;
+        let mut logs = vec![];
+        for name in [LogName::Plan, LogName::Test] {
+            let dir = self.home.root.join(name.as_str());
+            let leaves = match dir.symlink_metadata() {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+                Err(e) => return Err(format!("{}: {e}", name.as_str())),
+                Ok(_) => PlanLog::open(&dir)
+                    .and_then(|log| log.leaves())
+                    .map_err(|e| format!("{}: {e}", name.as_str()))?,
+            };
+            logs.push((name.as_str(), leaves));
+        }
+        family::find(&registers, &logs, study)
     }
 }
 
@@ -378,12 +405,14 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         diags,
         estimate: None,
         room: (stream.as_ref()).and_then(|s| Room::of(s, cc.records.as_ref())),
+        family_line: None,
         stream,
         carried: rules::carried(&value, &cc),
         rechecks: None,
         value,
         ctx: cc,
     };
+    a.family_line = family_line(&a.value, a.room.as_ref(), a.ctx.records.as_ref());
     if !a.has_errors() {
         match scheduled(&a.value, &a.hash, a.carried.is_some()) {
             Some((s, rows)) => {
@@ -406,6 +435,34 @@ pub fn scheduled(value: &Value, hash: &str, carried: bool) -> Option<(Spec, Vec<
     let hash = spec::hash_bytes(hash)?;
     let rows = schedule::rows(&s, &hash, s.pins.deterministic && !carried).ok()?;
     Some((s, rows))
+}
+
+/// For a root, `family: <n> members; plan stream slots left <s>, reserved <k>`, with `room`
+/// when it is known; for a study that a registered root's lock lists, `member of family
+/// <root>; slot reserved`, the slot named while it is reserved. `None` for any other study,
+/// and when the box records cannot be read: the rules report that.
+fn family_line(value: &Value, room: Option<&Room>, records: &dyn BoxRecords) -> Option<String> {
+    if let Some(members) = value.pointer("/family/members").and_then(Value::as_array) {
+        let n = members.len();
+        let room = room.map_or(String::new(), |r| {
+            format!(
+                "; plan stream slots left {}, reserved {}",
+                r.slots_left, r.reserved
+            )
+        });
+        return Some(format!(
+            "family: {n} member{}{room}",
+            if n == 1 { "" } else { "s" }
+        ));
+    }
+    let id = value.pointer("/study/id")?.as_str()?;
+    if !records.locked_members().ok()?.iter().any(|m| m == id) {
+        return None;
+    }
+    let found = records.family_of(id).ok()??;
+    let reserved = records.unopened().ok()?.iter().any(|m| m == id);
+    let slot = if reserved { "; slot reserved" } else { "" };
+    Some(format!("member of family {}{slot}", found.root))
 }
 
 /// `determinism: carried from <study>`, or `determinism: <n> recheck rows`.
@@ -475,6 +532,9 @@ fn render(a: &Assessed) -> String {
             "plan stream: slots left {left}, reserved {reserved}\n"
         ));
     }
+    if let Some(line) = &a.family_line {
+        s.push_str(&format!("{line}\n"));
+    }
     s.push_str(&format!("spec: {}\n", a.hash));
     s
 }
@@ -525,6 +585,7 @@ fn render_json(a: &Assessed) -> Result<String, CliError> {
         "power": power,
         "stream": a.stream,
         "plan_stream": a.room,
+        "family": a.family_line,
         "recheck": recheck,
         "estimate": estimate,
         "defaults": defaults_json(&a.filled),

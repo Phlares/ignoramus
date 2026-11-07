@@ -1,10 +1,13 @@
 //! Families: confirmatory studies declared together in the first one's `[family]` table, which
 //! may share confirmation and reserve data. This module reads the member specs a root lists,
-//! checks each with every rule, and builds the lock the root's `register` signs.
+//! checks each with every rule, builds the lock the root's `register` signs, and finds the
+//! registered family of a member.
 use crate::canon::{canonical_of, sha256_hex};
 use crate::cli::check::{PENDING, input_hashes, scheduled, study_root};
+use crate::derived::Register;
 use crate::diag::{Diagnostic, Severity, printable};
 use crate::inputs::{input_path, regular_file};
+use crate::planlog::store::Leaf;
 use crate::prior::{NoPriorUse, same_data};
 use crate::rules::{self, CheckCtx, NoRecords};
 use crate::runner::InputHashes;
@@ -83,6 +86,86 @@ impl Lock {
         let members = members.iter().map(member).collect::<Result<_, String>>()?;
         Ok(Lock { members })
     }
+}
+
+/// The registered family a member belongs to, as `find` gives it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Found {
+    /// The root's study id: the family's name.
+    pub root: String,
+    /// The index of the root's plan leaf in `log`.
+    pub root_leaf: u64,
+    /// The index of the family leaf in `log`.
+    pub family_leaf: u64,
+    pub lock: Lock,
+    /// The log the root registered in, which holds both leaves.
+    pub log: String,
+}
+
+/// True when a use at leaf `leaf` of `found.log` does not count against a member of `found`:
+/// the root's plan leaf, and every leaf from the family leaf on. A leaf between the two came
+/// from another study, so it still counts.
+pub fn exempt(found: &Found, leaf: u64) -> bool {
+    leaf == found.root_leaf || leaf >= found.family_leaf
+}
+
+/// The family whose lock lists `study`, from the register record of each study (`registers`,
+/// by study id) and the leaves of each log (`logs`, by log name). Each family leaf must name a
+/// root that registered in its log, whose plan leaf comes before it and whose record holds a
+/// lock with the leaf's commitment; and a lock that lists `study` must have its family leaf.
+/// Anything else is an error, never "not a member".
+pub fn find(
+    registers: &[(String, Register)],
+    logs: &[(&str, Vec<Leaf>)],
+    study: &str,
+) -> Result<Option<Found>, String> {
+    let mut leaves: Vec<(&str, &str, u64)> = vec![];
+    for (log, all) in logs {
+        for (i, leaf) in (all.iter().enumerate()).filter(|(_, l)| l.kind == LEAF_KIND) {
+            let i = i as u64;
+            let shown = printable(&leaf.label);
+            let root = (registers.iter())
+                .find(|(id, r)| {
+                    leaf.label == leaf_label(id)
+                        && r.log == *log
+                        && r.leaf < i
+                        && r.family.as_ref().map(Lock::hash) == leaf.commitment
+                })
+                .map(|(id, _)| id.as_str())
+                .ok_or_else(|| {
+                    format!("{log} leaf {i} ({shown}) names no root whose record holds its lock")
+                })?;
+            if leaves.iter().any(|(l, r, _)| l == log && *r == root) {
+                return Err(format!(
+                    "{log} holds a second family leaf of {root}, leaf {i}"
+                ));
+            }
+            leaves.push((log, root, i));
+        }
+    }
+    let listing: Vec<&(String, Register)> = (registers.iter())
+        .filter(|(_, r)| (r.family.iter()).any(|l| l.members.iter().any(|m| m.id == study)))
+        .collect();
+    let (root, reg) = match listing[..] {
+        [] => return Ok(None),
+        [(root, reg)] => (root, reg),
+        _ => return Err(format!("more than one lock lists {study}")),
+    };
+    let (_, _, family_leaf) = (leaves.iter())
+        .find(|(log, r, _)| *log == reg.log && r == root)
+        .ok_or_else(|| {
+            format!(
+                "the lock of {root} lists {study}, and {} holds no family leaf for it",
+                reg.log
+            )
+        })?;
+    Ok(Some(Found {
+        root: root.clone(),
+        root_leaf: reg.leaf,
+        family_leaf: *family_leaf,
+        lock: reg.family.clone().expect("a listing register holds a lock"),
+        log: reg.log.clone(),
+    }))
 }
 
 /// The confirmation and reserve data of every member in `members` that was read, once each:

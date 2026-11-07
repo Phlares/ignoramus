@@ -794,6 +794,7 @@ mod tests {
             ctx: rules::CheckCtx::empty(root),
             stream: None,
             room: None,
+            family_line: None,
             carried: None,
             rechecks: None,
         }

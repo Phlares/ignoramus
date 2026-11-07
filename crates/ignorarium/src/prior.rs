@@ -19,20 +19,35 @@ impl std::fmt::Display for PriorError {
 impl std::error::Error for PriorError {}
 
 pub trait PriorUse {
-    /// The id of the earlier log entry that used this data, if any.
-    /// `normalized_sha256` is empty when the file is not UTF-8 text.
+    /// The id of the first earlier log entry that used this data and whose leaf index
+    /// `counts` accepts, if any. `normalized_sha256` is empty when the file is not UTF-8 text.
+    fn used_where(
+        &self,
+        exact_sha256: &str,
+        normalized_sha256: &str,
+        counts: &dyn Fn(u64) -> bool,
+    ) -> Result<Option<String>, PriorError>;
+
+    /// `used_where`, counting every entry.
     fn used(
         &self,
         exact_sha256: &str,
         normalized_sha256: &str,
-    ) -> Result<Option<String>, PriorError>;
+    ) -> Result<Option<String>, PriorError> {
+        self.used_where(exact_sha256, normalized_sha256, &|_| true)
+    }
 }
 
 /// A log with no entries.
 pub struct NoPriorUse;
 
 impl PriorUse for NoPriorUse {
-    fn used(&self, _: &str, _: &str) -> Result<Option<String>, PriorError> {
+    fn used_where(
+        &self,
+        _: &str,
+        _: &str,
+        _: &dyn Fn(u64) -> bool,
+    ) -> Result<Option<String>, PriorError> {
         Ok(None)
     }
 }

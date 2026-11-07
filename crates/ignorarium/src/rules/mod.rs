@@ -31,6 +31,9 @@ pub trait BoxRecords {
     /// The id of each member that the lock of a root registered in the plan log lists and that
     /// holds no register record: the members whose plan slots are reserved.
     fn unopened(&self) -> Result<Vec<String>, String>;
+    /// The registered family whose lock lists `study`, as `family::find` gives it from the
+    /// box's register records and log leaves.
+    fn family_of(&self, study: &str) -> Result<Option<crate::family::Found>, String>;
 }
 
 /// An empty box.
@@ -62,17 +65,24 @@ impl BoxRecords for NoRecords {
     fn unopened(&self) -> Result<Vec<String>, String> {
         Ok(vec![])
     }
+
+    fn family_of(&self, _: &str) -> Result<Option<crate::family::Found>, String> {
+        Ok(None)
+    }
 }
 
-/// `B`, with each stream, the locked members and the unopened members read once and the answer
-/// kept, so every rule of one check sees one slot and level, one membership and one
-/// reservation, or one error.
+/// `B`, with each stream, the locked members, the unopened members and each study's family
+/// read once and the answer kept, so every rule of one check sees one slot and level, one
+/// membership, one reservation and one family, or one error.
 pub struct ReadOnce<B> {
     inner: B,
     streams: std::cell::RefCell<std::collections::BTreeMap<String, Result<Next, String>>>,
     locked: std::cell::OnceCell<Result<Vec<String>, String>>,
     unopened: std::cell::OnceCell<Result<Vec<String>, String>>,
+    families: std::cell::RefCell<std::collections::BTreeMap<String, Family>>,
 }
+
+type Family = Result<Option<crate::family::Found>, String>;
 
 impl<B> ReadOnce<B> {
     pub fn new(inner: B) -> ReadOnce<B> {
@@ -81,6 +91,7 @@ impl<B> ReadOnce<B> {
             streams: Default::default(),
             locked: Default::default(),
             unopened: Default::default(),
+            families: Default::default(),
         }
     }
 }
@@ -114,6 +125,14 @@ impl<B: BoxRecords> BoxRecords for ReadOnce<B> {
 
     fn unopened(&self) -> Result<Vec<String>, String> {
         self.unopened.get_or_init(|| self.inner.unopened()).clone()
+    }
+
+    fn family_of(&self, study: &str) -> Family {
+        let mut families = self.families.borrow_mut();
+        let read = families
+            .entry(study.to_string())
+            .or_insert_with(|| self.inner.family_of(study));
+        read.clone()
     }
 }
 

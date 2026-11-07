@@ -656,6 +656,10 @@ impl BoxRecords for Studies {
     fn unopened(&self) -> Result<Vec<String>, String> {
         Ok(vec![])
     }
+
+    fn family_of(&self, _: &str) -> Result<Option<ignorarium::family::Found>, String> {
+        Ok(None)
+    }
 }
 
 /// `Studies` whose stream of `log` gives `next`; another log cannot be read.
@@ -692,6 +696,10 @@ impl BoxRecords for Streamed {
 
     fn unopened(&self) -> Result<Vec<String>, String> {
         self.studies.unopened()
+    }
+
+    fn family_of(&self, study: &str) -> Result<Option<ignorarium::family::Found>, String> {
+        self.studies.family_of(study)
     }
 }
 

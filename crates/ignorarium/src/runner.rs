@@ -4,12 +4,14 @@ use crate::backend::{
     self, Backend, Exit, PINNED_LEVEL, Probe, RowJob, RowOutcome, Watch, level2, rootfs,
 };
 use crate::budget::{Alerts, Cost, CostMeter, Decision, HostMeter, decide, dimension_name};
+use crate::cli::check::HomeRecords;
 use crate::control::{self, ControlError, ControlFile, RunLock, Signal, State};
 use crate::derived::{CONTINUE, INPUTS, Inputs, REGISTER, RESIZE, Register, SELECTION, Selection};
 use crate::diag::printable;
 use crate::environ::{Builder, Built, Recipe};
 use crate::estimate::{apply_defaults, estimate};
 use crate::events::{self, Event};
+use crate::family;
 use crate::home::Home;
 use crate::inputs::{self, Found};
 use crate::machine::{self, Machine};
@@ -18,6 +20,7 @@ use crate::planlog::store::{Leaf, LogError, PlanLog};
 use crate::prior::same_data;
 use crate::records::{self, RecordDraft, RecordError, VerifyError};
 use crate::redact::Redact;
+use crate::rules::BoxRecords;
 use crate::schedule::{
     self, CONFIRMATION_STAGE, RESERVE_STAGE, Row, SELECTION_STAGE, Schedule, ScheduleError,
 };
@@ -801,7 +804,8 @@ pub fn progress(
 /// selection, confirmation or reserve input that the registered plan leaf did not hold is
 /// late: refuse a confirmation or reserve input that another study used; a selection input may
 /// reuse data. Else record new data under this study's id once. The
-/// study's own leaves, its plan leaf and its late-data leaves, are no earlier use. `all` are
+/// study's own leaves, its plan leaf and its late-data leaves, are no earlier use, and for a
+/// member of a registered family neither are the leaves `family::exempt` names. `all` are
 /// the inputs' hashes in spec order.
 /// Every lookup finishes before the append takes its lock.
 fn gate_late_data(
@@ -839,13 +843,35 @@ fn gate_late_data(
     let late = of(&[Role::Selection, Role::Confirmation, Role::Reserve])
         .filter(|(_, _, h)| !registered.contains(h));
     let own = own_label(id);
+    // Read on the first use that could refuse, so family records that cannot be read refuse
+    // only such data.
+    let mut member: Option<Option<family::Found>> = None;
     let mut new = Vec::new();
     for (path, role, hashes) in late {
         let uses = log.uses(&hashes.0, &hashes.1)?;
+        if uses.is_empty() {
+            new.push((*hashes).clone());
+            continue;
+        }
         let earlier =
             |(i, l): &&(usize, Leaf)| u64::try_from(*i) != Ok(leaf_index) && !is_own(l, &own);
-        let refusable = *role != Role::Selection;
-        if let Some((i, leaf)) = uses.iter().find(earlier).filter(|_| refusable) {
+        if *role == Role::Selection || !uses.iter().any(|u| earlier(&u)) {
+            continue;
+        }
+        let found = match &member {
+            Some(found) => found,
+            None => {
+                let records = HomeRecords {
+                    home: home.clone(),
+                    key: Ok(Some(key.verifying_key())),
+                };
+                member.insert(records.family_of(id).map_err(RunError::Records)?)
+            }
+        };
+        let counts = |(i, _): &&(usize, Leaf)| {
+            (found.as_ref()).is_none_or(|f| f.log != log_name || !family::exempt(f, *i as u64))
+        };
+        if let Some((i, leaf)) = uses.iter().filter(earlier).find(counts) {
             let label = match (leaf.kind.as_str(), leaf.label.strip_prefix(OWN_PREFIX)) {
                 ("legacy", Some(study)) => format!("study {study}"),
                 ("legacy", None) => format!("phase {}", leaf.label),
@@ -855,9 +881,6 @@ fn gate_late_data(
                 path: (*path).into(),
                 label,
             });
-        }
-        if uses.is_empty() {
-            new.push((*hashes).clone());
         }
     }
     if !new.is_empty() {
