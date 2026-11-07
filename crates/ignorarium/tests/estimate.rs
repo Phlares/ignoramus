@@ -221,15 +221,16 @@ fn children_are_admitted_in_order_while_the_estimate_fits_the_budget() {
     assert_eq!(admit(&s, &ids), ["b~w=1", "b~w=2"]);
     // The order given decides which fit.
     assert_eq!(admit(&s, &["b~w=3", "b~w=1", "b~w=2"]), ["b~w=3", "b~w=1"]);
-    // Exactly at a cap fits.
-    assert_eq!(admit(&at(1.5, 9.0, 9.0), &ids), ["b~w=1"]);
+    // A child that reaches a cap exactly is out: the run gate would pause before its last row.
+    assert!(admit(&at(1.5, 9.0, 9.0), &ids).is_empty());
+    assert_eq!(admit(&at(1.51, 9.0, 9.0), &ids), ["b~w=1"]);
     // Each cap binds; a cap of 0 is no cap.
     assert_eq!(admit(&at(9.0, 1.6, 0.0), &ids), ["b~w=1"]);
     assert_eq!(admit(&at(0.0, 9.0, 0.8), &ids), ["b~w=1"]);
     assert_eq!(admit(&at(0.0, 0.0, 9.0), &ids), ids);
     // A child that does not fit adds nothing: a smaller one after it may still fit. Here the
     // rows given hold 10 of b~w=3's 30 rows, 0.1 hours.
-    let s = at(1.6, 9.0, 9.0);
+    let s = at(1.65, 9.0, 9.0);
     let mut kept = 0;
     let part: Vec<Row> = (rows_of(&s).into_iter())
         .filter(|r| {
@@ -247,7 +248,8 @@ fn children_are_admitted_in_order_while_the_estimate_fits_the_budget() {
     // The whole schedule fits, every child in.
     let e = estimate(&s, &machine(1, 0.5), &rows_of(&s));
     assert!(!e.within(&s.scope.budget));
-    assert!(e.within(&at(2.1, 9.0, 9.0).scope.budget));
+    assert!(!e.within(&at(2.1, 9.0, 9.0).scope.budget));
+    assert!(e.within(&at(2.15, 9.0, 9.0).scope.budget));
 }
 
 #[test]

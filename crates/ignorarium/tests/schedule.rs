@@ -693,6 +693,35 @@ fn the_estimate_charges_every_reserve_row() {
         [("exact".to_string(), 4), ("arm-a".to_string(), 4)]
     );
 }
+#[test]
+fn a_text_that_reads_as_a_number_is_its_own_child() {
+    // a holds m = "64", a text. 64 and 64.0 are one number child; "64" is the parent's own
+    // value; "64.0" is a text child, shown quoted so its id differs from the number's.
+    let mut v = template();
+    v["design"]["conditions"] = json!([{ "id": "exact" }, { "id": "a", "params": { "m": "64" } }]);
+    v["mutations"]["operators"] =
+        json!([{ "name": "m", "type": "enum", "range": [64, "64", "64.0"], "acts_on": "a" }]);
+    v["mutations"]["triggers"] = json!([trigger(
+        "T1",
+        json!({ "a": 1.0 }),
+        json!([{ "operator": "m", "values": [64, "64", "64.0", 64.0, "x"] }])
+    )]);
+    let s = Spec::from_value(&v).unwrap();
+    assert_eq!(child_ids(&s), ["a~m=64", "a~m=\"64.0\"", "a~m=x"]);
+    let values: Vec<Scalar> = schedule::children(&s)
+        .into_iter()
+        .map(|c| c.value)
+        .collect();
+    assert_eq!(
+        values,
+        [
+            Scalar::Int(64),
+            Scalar::Text("64.0".into()),
+            Scalar::Text("x".into())
+        ]
+    );
+}
+
 /// The hash of the schedule bytes of `s` from its own clusters.
 fn schedule_hash(s: &Spec, rechecks: bool) -> String {
     let rows = schedule::rows(s, &hash(), rechecks).unwrap();

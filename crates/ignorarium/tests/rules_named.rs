@@ -1253,6 +1253,34 @@ fn faults() -> Vec<Fault> {
             ]),
             vec![],
         ),
+        // A text that reads as a number is a text: "64" is no member of [64], and 64 and "64"
+        // are two children.
+        f(
+            triggered(vec![
+                (
+                    "/mutations/operators",
+                    j(operators("enum", json!([64, 128]))),
+                ),
+                spawn_values(json!(["64", 128, "128.0"])),
+            ]),
+            vec![
+                ("E-MUT-005", "mutations.triggers[0].spawns[0].values[0]"),
+                ("E-MUT-005", "mutations.triggers[0].spawns[0].values[2]"),
+            ],
+        ),
+        f(
+            triggered(vec![
+                (
+                    "/mutations/operators",
+                    j(operators("enum", json!([64, "64", 512]))),
+                ),
+                (
+                    "/mutations/triggers",
+                    j(json!([trigger(), second_trigger(json!(["64", 64]))])),
+                ),
+            ]),
+            vec![("W-MUT-001", "mutations.triggers[1].spawns[0].values[1]")],
+        ),
         // A trigger's contrast, claim, statistic and strata follow the hypothesis rules.
         f(
             triggered(vec![contrast(json!({ "nope": 1.0 }))]),

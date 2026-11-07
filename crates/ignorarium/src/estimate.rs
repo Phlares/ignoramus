@@ -1,4 +1,5 @@
 //! Defaults for absent spec keys, and the cost estimate.
+use crate::budget::SAFETY_MARGIN;
 use crate::machine::Machine;
 use crate::schedule::{Row, SPAWN_STAGE};
 use crate::spec::model::{Budget, Mode, SELECTED, Spec};
@@ -104,7 +105,9 @@ pub fn estimate(spec: &Spec, machine: &Machine, rows: &[Row]) -> Estimate {
 }
 
 impl Estimate {
-    /// Each cap of `budget` above 0 covers this estimate. A cap of 0 is no cap.
+    /// Each cap of `budget` above 0 covers this estimate as the run gate counts it
+    /// (`budget::decide`): the gate pauses when spend times `SAFETY_MARGIN` reaches a cap, so
+    /// an estimate that reaches one is out. A cap of 0 is no cap.
     pub fn within(&self, budget: &Budget) -> bool {
         [
             (self.cpu_hours, budget.cpu_hours),
@@ -112,7 +115,7 @@ impl Estimate {
             (self.money_usd, budget.money_usd),
         ]
         .iter()
-        .all(|&(spent, cap)| cap <= 0.0 || spent <= cap)
+        .all(|&(spent, cap)| cap <= 0.0 || spent * SAFETY_MARGIN < cap)
     }
 }
 

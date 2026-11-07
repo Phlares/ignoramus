@@ -194,12 +194,15 @@ pub struct Child {
 }
 
 /// A spawn value as a child id writes it. Equal numbers show the same: 64 and 64.0 as `64`,
-/// -0.0 as `0`. A float shows as the shortest decimal that reads back to it.
+/// -0.0 as `0`. A float shows as the shortest decimal that reads back to it. A text that reads
+/// as a number shows in quotes, so the text "64" and the number 64 stay two values: the payload
+/// gets each as given.
 pub fn shown(v: &Scalar) -> String {
     match v {
         Scalar::Int(i) => i.to_string(),
         Scalar::Float(f) if *f == 0.0 => "0".into(),
         Scalar::Float(f) => f.to_string(),
+        Scalar::Text(t) if t.parse::<f64>().is_ok() => format!("\"{t}\""),
         Scalar::Text(t) => t.clone(),
     }
 }
@@ -216,6 +219,8 @@ pub fn child_id(parent: &str, operator: &str, value: &Scalar) -> String {
 pub fn children(spec: &Spec) -> Vec<Child> {
     let m = &spec.mutations;
     let mut out: Vec<Child> = Vec::new();
+    // Each id's place in `out`, so a long spawn list costs no more than one pass.
+    let mut at: BTreeMap<String, usize> = BTreeMap::new();
     for t in m.declared() {
         for s in &t.spawns {
             let Some(op) = m.operators.iter().find(|o| o.name == s.operator) else {
@@ -231,16 +236,21 @@ pub fn children(spec: &Spec) -> Vec<Child> {
                     continue;
                 }
                 let id = child_id(&op.acts_on, &op.name, value);
-                match out.iter_mut().find(|c| c.id == id) {
-                    Some(c) if !c.triggers.contains(&t.id) => c.triggers.push(t.id.clone()),
+                match at.get(&id) {
+                    Some(&i) if !out[i].triggers.contains(&t.id) => {
+                        out[i].triggers.push(t.id.clone())
+                    }
                     Some(_) => {}
-                    None => out.push(Child {
-                        id,
-                        parent: op.acts_on.clone(),
-                        operator: op.name.clone(),
-                        value: value.clone(),
-                        triggers: vec![t.id.clone()],
-                    }),
+                    None => {
+                        at.insert(id.clone(), out.len());
+                        out.push(Child {
+                            id,
+                            parent: op.acts_on.clone(),
+                            operator: op.name.clone(),
+                            value: value.clone(),
+                            triggers: vec![t.id.clone()],
+                        });
+                    }
                 }
             }
         }
