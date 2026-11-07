@@ -134,6 +134,7 @@ const NAMED: &[(&str, NamedFn)] = &[
     ("budget-present", budget_present),
     ("route-valid", route_valid),
     ("follow-on-exists", follow_on_exists),
+    ("follow-on-shares", follow_on_shares),
     ("depth-cap", depth_cap),
     ("seed-sets-disjoint", seed_sets_disjoint),
     ("trigger-declared", trigger_declared),
@@ -377,6 +378,63 @@ fn data_fresh(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
             path,
             detail: Some(detail),
         });
+    }
+    out
+}
+
+/// W-FAM-002 at each `follow_on[*].spec` of a confirmatory study: a confirmatory spec reachable
+/// from it through `follow_on` routes, at any depth, holds confirmation or reserve data this
+/// study holds, and is not one of this study's family members. Unreadable and unsafe specs are
+/// E-END-002's and E-PTH-001's. Each spec is read once per route, so a cycle ends.
+fn follow_on_shares(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let held = |value: &Value| {
+        let hashes = crate::cli::check::input_hashes(&ctx.store, &ctx.root, value);
+        fam::data(value, &hashes, &["confirmation", "reserve"])
+    };
+    let mine = held(spec);
+    let members: Vec<_> = (nodes(spec, "family.members[*]").into_iter())
+        .filter_map(|(_, m)| input_path(&ctx.root, m.as_str()?))
+        .collect();
+    let mut out = vec![];
+    for (path, first) in nodes(spec, pat) {
+        let mut seen: Vec<PathBuf> = vec![];
+        let mut todo: Vec<String> = first.as_str().map(str::to_string).into_iter().collect();
+        let mut found = vec![];
+        while let Some(rel) = todo.pop() {
+            let Some(file) = input_path(&ctx.root, &rel).filter(|f| f.is_file()) else {
+                continue;
+            };
+            if seen.contains(&file) {
+                continue;
+            }
+            seen.push(file.clone());
+            let Some(next) = (std::fs::read(&file).ok()).and_then(|b| crate::spec::parse(&b).ok())
+            else {
+                continue;
+            };
+            let routes = (nodes(&next.value, "scope.end_of_run.follow_on[*].spec").into_iter())
+                .filter_map(|(_, v)| v.as_str().map(str::to_string));
+            todo.extend(routes);
+            let same = crate::spec::hash_bytes(&next.hash) == Some(ctx.spec_hash);
+            let confirmatory =
+                next.value.pointer("/study/mode") == Some(&Value::from("confirmatory"));
+            if same || !confirmatory || members.contains(&file) {
+                continue;
+            }
+            if !fam::shared(&held(&next.value), &mine).is_empty() {
+                found.push(rel);
+            }
+        }
+        if !found.is_empty() {
+            found.sort();
+            out.push(at(
+                &path,
+                format!(
+                    "Reachable from here, {} holds confirmation or reserve data this study holds. To keep both claims, list it in this study's [family] before this study registers: that locks every member and takes a plan stream slot for each now.",
+                    printable(&found.join(", ")),
+                ),
+            ));
+        }
     }
     out
 }

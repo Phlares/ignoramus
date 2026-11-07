@@ -2492,6 +2492,7 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
         "E-FAM-004",
         "E-FAM-005",
         "E-FAM-006",
+        "W-FAM-002",
         "E-REF-001",
         "E-BUD-001",
         "E-END-001",
@@ -2525,6 +2526,7 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
     // E-CNF-005 and E-HSH-001 read files and E-STR-001 the stream; their tests are below.
     // E-SEC-001 is in tests/scan.rs. E-FAM-003 and E-FAM-004 read member specs, E-FAM-005
     // the stream and the box records, and E-FAM-006 the box records and the plan log:
+    // W-FAM-002 reads the follow-on specs: tests/family.rs.
     // tests/family.rs.
     let in_rows: BTreeSet<String> = faults()
         .iter()
@@ -2543,6 +2545,7 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
                     | "E-FAM-004"
                     | "E-FAM-005"
                     | "E-FAM-006"
+                    | "W-FAM-002"
             )
         })
         .collect();

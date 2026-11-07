@@ -1082,3 +1082,88 @@ fn an_unreadable_plan_log_fails_a_member_closed() {
     assert!(p.contains("cannot be read"), "{p}");
     assert_eq!(code, 1);
 }
+
+/// `text` with `follow_on` routes to `specs`.
+fn following(text: String, specs: &[&str]) -> String {
+    let list: Vec<String> = specs
+        .iter()
+        .map(|s| format!("{{ when = \"done\", spec = \"{s}\" }}"))
+        .collect();
+    text.replace(
+        "follow_on = []",
+        &format!("follow_on = [{}]", list.join(", ")),
+    )
+}
+
+fn exploratory(text: String) -> String {
+    text.replace("mode = \"confirmatory\"", "mode = \"exploratory\"")
+}
+
+/// The root `spec.toml`, pinned, that follows `a` and lists `members`; `a` is an exploratory
+/// study that follows `b_routes`; `b` is a confirmatory study on the root's data, `edit`ed.
+fn follow_case(
+    lab: &Lab,
+    members: &[&str],
+    b_routes: &[&str],
+    edit: impl Fn(String) -> String,
+) -> Value {
+    let root = family_root(lab);
+    let a = exploratory(following(study("a"), b_routes));
+    put(&root, "spec/a.toml", &a);
+    put(&root, "spec/b.toml", &pinned(&root, &edit(study("b"))));
+    let text = pinned(&root, &following(study("fam"), &["spec/a.toml"]));
+    let spec = if members.is_empty() {
+        put(&root, "spec.toml", &text)
+    } else {
+        root_spec(&root, &text, members)
+    };
+    check_json(lab, &spec).1
+}
+
+#[test]
+fn a_follow_on_sharing_data_outside_the_family_warns() {
+    let lab = lab();
+    let v = follow_case(&lab, &[], &["spec/b.toml"], |t| t);
+    let p = "scope.end_of_run.follow_on[0].spec";
+    assert!(
+        problem_at(&v, "W-FAM-002", p).contains("spec/b.toml"),
+        "{v}"
+    );
+    assert!(!has(&v, "W-FAM-002", "scope.end_of_run.follow_on[1].spec"));
+}
+
+#[test]
+fn a_member_follow_on_does_not_warn() {
+    let lab = lab();
+    let v = follow_case(&lab, &["spec/b.toml"], &["spec/b.toml"], |t| t);
+    assert!(found(&v).iter().all(|(c, _)| c != "W-FAM-002"), "{v}");
+}
+
+#[test]
+fn an_exploratory_follow_on_does_not_warn() {
+    let lab = lab();
+    let v = follow_case(&lab, &[], &["spec/b.toml"], exploratory);
+    assert!(found(&v).iter().all(|(c, _)| c != "W-FAM-002"), "{v}");
+}
+
+#[test]
+fn a_follow_on_cycle_terminates() {
+    let lab = lab();
+    let root = family_root(&lab);
+    put(
+        &root,
+        "spec/a.toml",
+        &exploratory(following(study("a"), &["spec/b.toml"])),
+    );
+    put(
+        &root,
+        "spec/b.toml",
+        &pinned(&root, &following(study("b"), &["spec/a.toml"])),
+    );
+    let text = pinned(&root, &following(study("fam"), &["spec/a.toml"]));
+    let (_, v) = check_json(&lab, &put(&root, "spec.toml", &text));
+    assert!(
+        has(&v, "W-FAM-002", "scope.end_of_run.follow_on[0].spec"),
+        "{v}"
+    );
+}
