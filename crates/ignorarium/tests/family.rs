@@ -760,6 +760,22 @@ fn check_shows_slots_left_and_reserved() {
 }
 
 #[test]
+fn one_box_reader_reads_the_register_records_once() {
+    use ignorarium::cli::check::HomeRecords;
+    use ignorarium::rules::BoxRecords;
+    let lab = lab();
+    let key = keys::load_or_create(&lab.home).unwrap();
+    let records = HomeRecords::signed(&lab.home, &key);
+    assert_eq!(records.unopened(), Ok(vec![]));
+    registered_family(&lab);
+    // Every answer of one reader comes from one reading of the register records.
+    assert_eq!(records.locked_members(), Ok(vec![]));
+    assert_eq!(records.family_of("b"), Ok(None));
+    let fresh = HomeRecords::signed(&lab.home, &key);
+    assert_eq!(fresh.unopened(), Ok(vec!["b".to_string(), "c".to_string()]));
+}
+
+#[test]
 fn a_family_on_the_test_log_reserves_no_plan_slot() {
     let lab = lab();
     registered_family_with(&lab, on_test_log);

@@ -549,53 +549,55 @@ fn alpha(log: &str, slot: u64, level: f64) -> Alpha {
 fn a_stream_that_lacks_a_registered_slot_is_refused() {
     let lab = lab();
     let k = key(&lab);
-    let records = HomeRecords::signed(&lab.home, &k);
+    // One reader per lookup: a reader reads the register records once.
+    let records = || HomeRecords::signed(&lab.home, &k);
     let log = Log::of(&lab.home, LogName::Plan);
     log.open(&k, "first", FIRST, 0).unwrap();
     registered(&lab, "first", alpha("planlog", 1, FIRST));
     let kept = bytes(&lab, "planlog");
     log.open(&k, "second", FIRST, 0).unwrap();
     registered(&lab, "second", alpha("planlog", 2, FIRST));
-    assert_eq!(records.stream_next("planlog").unwrap().slot, 3);
+    assert_eq!(records().stream_next("planlog").unwrap().slot, 3);
     // An older copy of the stream: slot 2 is missing.
     let current = bytes(&lab, "planlog");
     std::fs::write(path(&lab, "planlog"), &kept).unwrap();
     assert_eq!(
-        records.stream_next("planlog"),
+        records().stream_next("planlog"),
         Err("the stream lacks slot 2 of study second at level 0.005".to_string())
     );
     // The stream log moved away: slot 1 is missing too.
     std::fs::rename(path(&lab, "planlog"), lab.root.join("moved.jsonl")).unwrap();
     assert_eq!(
-        records.stream_next("planlog"),
+        records().stream_next("planlog"),
         Err("the stream lacks slot 1 of study first at level 0.005".to_string())
     );
     std::fs::write(path(&lab, "planlog"), &current).unwrap();
     // A register record whose slot the stream gave another study.
     registered(&lab, "third", alpha("planlog", 1, FIRST));
     assert_eq!(
-        records.stream_next("planlog"),
+        records().stream_next("planlog"),
         Err("the stream lacks slot 1 of study third at level 0.005".to_string())
     );
     // A register record at another level than its slot's, in the test stream.
     let lab = common::lab();
     let k = key(&lab);
-    let records = HomeRecords::signed(&lab.home, &k);
+    // One reader per lookup: a reader reads the register records once.
+    let records = || HomeRecords::signed(&lab.home, &k);
     Log::of(&lab.home, LogName::Test)
         .open(&k, "lone", FIRST, 0)
         .unwrap();
     registered(&lab, "lone", alpha("testlog", 1, 0.01));
     assert_eq!(
-        records.stream_next("testlog"),
+        records().stream_next("testlog"),
         Err("the stream lacks slot 1 of study lone at level 0.01".to_string())
     );
     // Each stream answers for its own slots only.
-    assert_eq!(records.stream_next("planlog").unwrap().slot, 1);
+    assert_eq!(records().stream_next("planlog").unwrap().slot, 1);
     // A study log whose first record cannot be verified is an error, not a study to skip.
     std::fs::create_dir_all(lab.home.study_dir("torn")).unwrap();
     std::fs::write(lab.home.study_dir("torn").join("records.jsonl"), "{}\n").unwrap();
     assert_eq!(
-        records.stream_next("planlog"),
+        records().stream_next("planlog"),
         Err("study torn: line 1 is not a whole record".to_string())
     );
 }
@@ -707,10 +709,7 @@ fn a_slot_closes_once_with_a_finite_e_value() {
 #[test]
 fn a_box_reads_its_streams_and_needs_a_key_only_for_a_log_that_exists() {
     let lab = lab();
-    let records = |key| HomeRecords {
-        home: lab.home.clone(),
-        key,
-    };
+    let records = |key| HomeRecords::new(lab.home.clone(), key);
     // No stream log and no key: the stream is empty.
     let first = Next {
         slot: 1,

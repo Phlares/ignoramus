@@ -116,9 +116,11 @@ impl PriorUse for Unreadable {
 
 /// The records of the box in `home`. `key` is the box key, or why it cannot be read.
 /// A study with no log needs no key; a log that no key can verify cannot be trusted.
+/// The register records are read once, so every answer of one reader agrees.
 pub struct HomeRecords {
     pub home: Home,
     pub key: Result<Option<VerifyingKey>, String>,
+    registers: std::cell::OnceCell<Result<Vec<(String, Register)>, String>>,
 }
 
 impl BoxRecords for HomeRecords {
@@ -218,7 +220,7 @@ impl BoxRecords for HomeRecords {
             };
             logs.push((name.as_str(), leaves));
         }
-        family::find(&registers, &logs, study)
+        family::find(registers, &logs, study)
     }
 }
 
@@ -232,17 +234,28 @@ fn members<'a>(
 }
 
 impl HomeRecords {
+    /// The records of the box in `home`; `key` is its key, or why it cannot be read.
+    pub fn new(home: Home, key: Result<Option<VerifyingKey>, String>) -> HomeRecords {
+        HomeRecords {
+            home,
+            key,
+            registers: Default::default(),
+        }
+    }
+
     /// The records of the box in `home`, whose key is `key`.
     pub fn signed(home: &Home, key: &SigningKey) -> HomeRecords {
-        HomeRecords {
-            home: home.clone(),
-            key: Ok(Some(key.verifying_key())),
-        }
+        HomeRecords::new(home.clone(), Ok(Some(key.verifying_key())))
+    }
+
+    /// `read_registers`, read the first time it is asked for.
+    fn registers(&self) -> Result<&[(String, Register)], String> {
+        (self.registers.get_or_init(|| self.read_registers()).as_deref()).map_err(Clone::clone)
     }
 
     /// The `register` record that opens each study's log, by study. Only that first line is
     /// read and checked.
-    fn registers(&self) -> Result<Vec<(String, Register)>, String> {
+    fn read_registers(&self) -> Result<Vec<(String, Register)>, String> {
         let mut out = Vec::new();
         for (id, log) in records::logs(&self.home).map_err(|e| e.to_string())? {
             let fault = |e: String| format!("study {id}: {e}");
@@ -261,9 +274,9 @@ impl HomeRecords {
 
     /// The stream slot each study of the box holds, by study.
     fn held(&self) -> Result<Vec<(String, Alpha)>, String> {
-        let registers = self.registers()?.into_iter();
+        let registers = self.registers()?.iter();
         Ok(registers
-            .filter_map(|(id, r)| Some((id, r.alpha?)))
+            .filter_map(|(id, r)| Some((id.clone(), r.alpha.clone()?)))
             .collect())
     }
 
@@ -309,10 +322,7 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         prior,
         machine_max_level: machine.max_level,
         spec_text: raw.text,
-        records: Box::new(ReadOnce::new(HomeRecords {
-            home: home.clone(),
-            key,
-        })),
+        records: Box::new(ReadOnce::new(HomeRecords::new(home.clone(), key))),
         store,
         spec_hash: spec::hash_bytes(&raw.hash)
             .ok_or_else(|| CliError::usage(format!("{shown}: the spec hash is malformed")))?,

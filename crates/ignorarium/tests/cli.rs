@@ -1699,19 +1699,13 @@ fn a_study_reference_never_names_a_path() {
     ] {
         std::fs::create_dir_all(home.join(folder)).unwrap();
         std::fs::write(home.join(folder).join("records.jsonl"), "{}\n").unwrap();
-        let records = HomeRecords {
-            home: box_home.clone(),
-            key: Ok(None),
-        };
+        let records = HomeRecords::new(box_home.clone(), Ok(None));
         assert_eq!(records.study(id), Ok(None), "{id}");
     }
     // The same reader does read a study id's log.
     std::fs::create_dir_all(home.join("studies/my-pilot")).unwrap();
     std::fs::write(home.join("studies/my-pilot/records.jsonl"), "{}\n").unwrap();
-    let records = HomeRecords {
-        home: box_home,
-        key: Ok(None),
-    };
+    let records = HomeRecords::new(box_home, Ok(None));
     assert_eq!(
         records.study("my-pilot"),
         Err("the box key is missing".to_string())
@@ -1734,10 +1728,7 @@ fn a_study_folder_that_cannot_be_read_is_an_error() {
         return;
     }
     let key = keys::load(&box_home).unwrap().map(|k| k.verifying_key());
-    let got = HomeRecords {
-        home: box_home,
-        key: Ok(key),
-    }
+    let got = HomeRecords::new(box_home, Ok(key))
     .study("my-pilot");
     mode(0o755);
     // Not "not registered": the box cannot tell.
@@ -1758,10 +1749,7 @@ fn a_log_that_holds_another_studys_records_is_an_error() {
     )
     .unwrap();
     let key = keys::load(&box_home).unwrap().map(|k| k.verifying_key());
-    let records = HomeRecords {
-        home: box_home,
-        key: Ok(key),
-    };
+    let records = HomeRecords::new(box_home, Ok(key));
     assert_eq!(
         records.study("my-pilot"),
         Err("record 0 belongs to study first".to_string())
@@ -1774,10 +1762,7 @@ fn the_box_reads_the_plan_a_study_stored() {
     let (_d, home, _) = setup(|t| t);
     let box_home = Home::open_at(&home).unwrap();
     common::pilot(&box_home, vec![common::arm_a()]);
-    let records = HomeRecords {
-        home: box_home,
-        key: Ok(None),
-    };
+    let records = HomeRecords::new(box_home, Ok(None));
     let stored = common::source_spec(&["fiction".into()]).into_bytes();
     assert_eq!(records.spec("my-pilot"), Ok(Some(stored)));
     // No plan, and an id that is not a study id, whatever its path holds.
