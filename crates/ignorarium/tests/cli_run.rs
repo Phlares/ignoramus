@@ -1823,6 +1823,88 @@ fn the_analysis_record_holds_the_resize_sd_and_the_appended_sd_after_the_end() {
     assert_eq!(body["appended_sd"][0]["sd"], Value::Null);
 }
 
+/// A payload that writes 100 for the reference and, for `arm-a`, 97, 103 or 99 by the
+/// checksum of the unit: -3 % lies below the range [-2, 2], +3 % above it, -1 % inside.
+const CLIPPED: &str = "#!/bin/sh\ncase \"$2\" in exact) v=100;; *) h=$(printf '%s' \"$4\" | cksum | cut -d' ' -f1); case $((h % 4)) in 0) v=97;; 1) v=103;; *) v=99;; esac;; esac\nprintf '{\"ppl\": %s}' \"$v\" > \"$IGNORARIUM_OUT/values.json\"\n";
+
+#[test]
+fn the_analysis_record_and_status_count_the_units_the_range_clipped() {
+    use ignorarium::derived::GroupClip;
+    use ignorarium::runner::{RunStatus, run};
+    let lab = lab();
+    common::resize_pilot(&lab.home);
+    let plan = resize_study(&lab, "clip", CLIPPED);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    // The units the test read: the first batch, then the reserve clusters it appended.
+    let x = observed(&plan, &common::records_of(&lab, "clip"));
+    let appended = resize_of(&lab, "clip").strata[0].appended as usize;
+    let read: Vec<f64> = (first_batch(&plan).iter().chain(&by_pin(&plan)[..appended]))
+        .map(|p| x[p])
+        .collect();
+    let count = |f: fn(f64) -> bool| read.iter().filter(|&&v| f(v)).count() as u64;
+    let (below, above) = (count(|v| v < -2.0), count(|v| v > 2.0));
+    assert!(below > 0 && above > 0 && below + above < read.len() as u64);
+    let a = analysis_after_the_end(&lab, "clip");
+    let want = GroupClip {
+        hypothesis: "H1".into(),
+        stratum: String::new(),
+        below,
+        above,
+        units: read.len() as u64,
+    };
+    assert_eq!(a.clipped, [want]);
+    // Status shows them next to the verdict.
+    let verdict = kind_of(&lab, "clip", "verdict")[0].body["verdict"].clone();
+    let s = status(&lab, "clip");
+    assert_eq!(
+        s["verdicts"],
+        serde_json::json!([{
+            "hypothesis": "H1", "verdict": verdict,
+            "clipped": [{ "stratum": "", "below": below, "above": above, "units": read.len() }],
+        }])
+    );
+    let a = bin(&lab).args(["status", "clip"]).assert().success();
+    let want = format!(
+        "verdict H1: {}\nclipped H1 pooled: {below} below, {above} above, of {} units\n",
+        verdict.as_str().unwrap(),
+        read.len()
+    );
+    assert!(text(&a).contains(&want), "{}", text(&a));
+    // The same log, signed again with an analysis record written before the count existed:
+    // it verifies, and status prints the verdict with no count.
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let log = lab.home.study_dir("clip").join("records.jsonl");
+    let all = common::records_of(&lab, "clip");
+    std::fs::rename(&log, log.with_extension("before")).unwrap();
+    for mut r in all {
+        if r.kind == "analysis" {
+            r.body.as_object_mut().unwrap().remove("clipped").unwrap();
+        }
+        let draft = ignorarium::records::RecordDraft {
+            study: r.study,
+            row: r.row,
+            kind: r.kind,
+            body: r.body,
+        };
+        ignorarium::records::append(&log, &key, draft).unwrap();
+    }
+    let s = status(&lab, "clip");
+    assert_eq!(s["verdicts"][0]["verdict"], verdict);
+    assert_eq!(s["verdicts"][0]["clipped"], serde_json::json!([]));
+    let a = bin(&lab).args(["status", "clip"]).assert().success();
+    let want = format!("verdict H1: {}\n", verdict.as_str().unwrap());
+    assert!(text(&a).contains(&want), "{}", text(&a));
+    assert!(!text(&a).contains("clipped"), "{}", text(&a));
+    // A hypothesis with no claim clips nothing, so status prints no count for it.
+    plain(&lab, "none");
+    bin_at(&lab, "none").args(["run", "none"]).assert().code(0);
+    let s = status(&lab, "none");
+    assert_eq!(s["verdicts"][0]["clipped"], serde_json::json!([]));
+    let a = bin(&lab).args(["status", "none"]).assert().success();
+    assert!(text(&a).contains("verdict H1: none\n"), "{}", text(&a));
+    assert!(!text(&a).contains("clipped"), "{}", text(&a));
+}
+
 #[test]
 fn unused_reserve_data_is_released_and_fresh_again() {
     use ignorarium::runner::{RunStatus, run};

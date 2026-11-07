@@ -1,4 +1,4 @@
-use evidence::claim::{Bound, Statistic, e_value, e_values, holds, observation, order};
+use evidence::claim::{Bound, Statistic, clipped, e_value, e_values, holds, observation, order};
 use evidence::eprocess::{EProcess, Score};
 use evidence::rng::Rng;
 use evidence::sim::Estimate;
@@ -351,4 +351,27 @@ fn order_is_the_seeded_forward_shuffle() {
     assert_eq!(sorted, (0..10).collect::<Vec<_>>());
     assert_ne!(got, sorted);
     assert!(order(0, &mut Rng::from_seed(seed)).is_empty());
+}
+
+#[test]
+fn clipped_counts_the_units_below_lo_and_above_hi() {
+    let stat = Statistic::Mean { lo: 0.0, hi: 10.0 };
+    // A unit at an end is inside the range; NaN lies on no side.
+    let units = [-1.0, 0.0, 5.0, 10.0, 11.0, f64::INFINITY, f64::NAN];
+    assert_eq!(clipped(&stat, &units), Some((1, 2)));
+    assert_eq!(clipped(&stat, &[]), Some((0, 0)));
+    let tiny = 0.0_f64.next_down();
+    assert_eq!(clipped(&stat, &[tiny, 10.0_f64.next_up()]), Some((1, 1)));
+    assert_eq!(clipped(&Statistic::Quantile(0.5), &units), None);
+}
+
+#[test]
+fn clipped_counts_the_units_observation_moves() {
+    let stat = Statistic::Mean { lo: 0.0, hi: 10.0 };
+    for x in [-1.0, 0.0, 5.0, 10.0, 11.0] {
+        let moved = observation(&stat, &below(5.0), &[x]).unwrap() != x;
+        let (lo, hi) = clipped(&stat, &[x]).unwrap();
+        assert_eq!(lo + hi == 1, moved, "{x}");
+        assert_eq!(lo == 1, x < 0.0, "{x}");
+    }
 }
