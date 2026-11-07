@@ -1236,7 +1236,7 @@ fn content_faults_that_break_the_model_exit_1_with_a_code() {
         ),
         (
             |t| {
-                t.replace("operators = []", "operators = [{ name = \"k\", type = \"int\", range = [true], acts_on = \"x\" }]")
+                t.replace("operators = []", "operators = [{ name = \"k\", type = \"int\", range = [true], acts_on = \"arm-a\" }]")
             },
             "E-TYP-001",
             "spec",

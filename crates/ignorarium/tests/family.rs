@@ -410,7 +410,7 @@ fn member_data_used_by_an_outside_plan_is_refused() {
 fn a_member_that_does_not_fit_the_typed_model_is_refused() {
     let lab = lab();
     // Every rule accepts this operator, and the typed model does not.
-    let bad = "operators = [{ name = \"k\", type = \"int\", range = [true], acts_on = \"x\" }]";
+    let bad = "operators = [{ name = \"k\", type = \"int\", range = [true], acts_on = \"arm-a\" }]";
     let (code, v) = with_member(&lab, |t| t.replace("operators = []", bad));
     assert!(has(&v, "E-TYP-001", B), "{v}");
     assert!(

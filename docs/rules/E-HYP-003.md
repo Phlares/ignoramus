@@ -4,7 +4,7 @@ Severity: error
 
 ## Problem
 
-A claim or a statistic is not well formed.
+A claim or a statistic, of a hypothesis or of a trigger, is not well formed.
 
 ## Fix
 
@@ -23,3 +23,5 @@ A claim is one or two one-sided bounds, and it holds when every bound holds. wit
 
 - `question.hypotheses[*].claim` (named:hypothesis-shape)
 - `question.hypotheses[*].statistic` (named:hypothesis-shape)
+- `mutations.triggers[*].claim` (named:hypothesis-shape)
+- `mutations.triggers[*].statistic` (named:hypothesis-shape)

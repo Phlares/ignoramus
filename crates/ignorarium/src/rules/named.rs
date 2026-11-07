@@ -144,6 +144,12 @@ const NAMED: &[(&str, NamedFn)] = &[
     ("depth-cap", depth_cap),
     ("seed-sets-disjoint", seed_sets_disjoint),
     ("trigger-declared", trigger_declared),
+    ("spawn-operator-declared", spawn_operator_declared),
+    ("spawn-value-fits", spawn_value_fits),
+    ("acts-on-declared", acts_on_declared),
+    ("triggers-need-selection", triggers_need_selection),
+    ("triggers-declared", triggers_declared),
+    ("child-declared-once", child_declared_once),
     ("isolation-reachable", isolation_reachable),
     ("input-path-safe", input_path_safe),
     ("input-path-nested", input_path_nested),
@@ -2378,6 +2384,7 @@ fn resize_tested(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
 }
 
 const CONTRAST_KEYS: &str = "question.hypotheses[*].contrast.*";
+const TRIGGER_CONTRAST_KEYS: &str = "mutations.triggers[*].contrast.*";
 const SELECTION_LIST: &str = "design.selection.conditions[*]";
 
 /// The condition names a place may use, and the reference, which it may not.
@@ -2393,11 +2400,15 @@ impl Names<'_> {
 }
 
 /// The names the place `pat` may use (see `condition_declared`). `None` when there is nothing
-/// to check against: no confirmation list for a contrast key, no declared condition id for
-/// the others.
+/// to check against: no stage list for a contrast key, no declared condition id for the others.
 fn names_for<'a>(spec: &'a Value, pat: &str) -> Option<Names<'a>> {
     let staged = val(spec, "design.selection").is_some();
-    let usable: Vec<&str> = if pat == CONTRAST_KEYS {
+    let usable: Vec<&str> = if pat == TRIGGER_CONTRAST_KEYS && staged {
+        list(spec, "design.selection.conditions")?;
+        let mut names = texts(spec, SELECTION_LIST);
+        names.push(SELECTED);
+        names
+    } else if pat == CONTRAST_KEYS {
         list(spec, "design.confirmation.conditions")?;
         let runs = texts(spec, "design.confirmation.conditions[*]");
         runs.into_iter()
@@ -2427,6 +2438,9 @@ fn names_for<'a>(spec: &'a Value, pat: &str) -> Option<Names<'a>> {
 /// - `question.hypotheses[*].contrast.*`, each key: a condition the confirmation stage lists,
 ///   `selected` only with a selection stage. Each term needs that stage's paired values. An
 ///   undeclared condition the stage lists is the stage list's fault, reported there.
+/// - `mutations.triggers[*].contrast.*`, each key: the same on selection units. With a
+///   selection stage, a candidate or `selected`. With none, the selection rows run every
+///   declared condition a trigger names, so any declared condition; `selected` has no pick.
 ///
 /// With no declared condition ids, `non-empty` reports that; with no confirmation list, the
 /// generic rules do.
@@ -2434,7 +2448,7 @@ fn condition_declared(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
     let Some(names) = names_for(spec, pat) else {
         return vec![];
     };
-    if pat == CONTRAST_KEYS {
+    if pat == CONTRAST_KEYS || pat == TRIGGER_CONTRAST_KEYS {
         return keys(spec, pat)
             .into_iter()
             .filter(|(_, k)| !names.may_name(k))
@@ -2579,14 +2593,20 @@ fn hypothesis_shape(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
     }
 }
 
-/// A listed stratum that no confirmation input names.
+/// A listed stratum that no input of the role that reads it names: confirmation for a
+/// hypothesis, selection for a trigger.
 fn hypothesis_strata(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
     let Some(inputs) = list(spec, "inputs") else {
         return vec![];
     };
+    let reader = if pat.starts_with("mutations.") {
+        "selection"
+    } else {
+        "confirmation"
+    };
     let held: Vec<&str> = inputs
         .iter()
-        .filter(|i| role(i) == Some("confirmation"))
+        .filter(|i| role(i) == Some(reader))
         .filter_map(|i| i.get("stratum")?.as_str())
         .collect();
     flag(spec, pat, |v| {
@@ -2706,14 +2726,158 @@ fn seed_sets_disjoint(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
     })
 }
 
+/// The old trigger shape names a `metric` and no claim.
+fn is_legacy(trigger: &Value) -> bool {
+    trigger.get("metric").is_some()
+}
+
+/// Some trigger has the declared shape. A legacy trigger is inert, and E-MUT-003 refuses it.
+fn has_declared_triggers(spec: &Value) -> bool {
+    (nodes(spec, "mutations.triggers[*]").iter()).any(|(_, t)| t.is_object() && !is_legacy(t))
+}
+
+/// E-MUT-003. At `mutations.triggers[*]`: a trigger with the old shape. At
+/// `mutations.triggers[*].outcome`: no listed outcome id.
 fn trigger_declared(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
-    if list(spec, "outcomes").is_none() {
+    if pat.ends_with(".outcome") {
+        if list(spec, "outcomes").is_none() {
+            return vec![];
+        }
+        let outcomes = texts(spec, "outcomes[*].id");
+        return flag(spec, pat, |v| {
+            v.as_str().is_some_and(|m| !outcomes.contains(&m))
+        });
+    }
+    (nodes(spec, pat).into_iter())
+        .filter(|(_, t)| is_legacy(t))
+        .map(|(path, _)| Hit {
+            path,
+            detail: Some(
+                "This trigger names a metric. Declare outcome, contrast, claim, statistic and spawns instead."
+                    .into(),
+            ),
+        })
+        .collect()
+}
+
+/// E-MUT-004: a spawn operator no `mutations.operators` entry names. With no operator list,
+/// the type rule reports that.
+fn spawn_operator_declared(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    if list(spec, "mutations.operators").is_none() {
         return vec![];
     }
-    let outcomes = texts(spec, "outcomes[*].id");
+    let names = texts(spec, "mutations.operators[*].name");
     flag(spec, pat, |v| {
-        v.as_str().is_some_and(|m| !outcomes.contains(&m))
+        v.as_str().is_some_and(|o| !names.contains(&o))
     })
+}
+
+/// E-MUT-006: an `acts_on` that is no declared condition, or is `selected` with no selection
+/// stage. With no declared condition id, `non-empty` reports that.
+fn acts_on_declared(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let declared = texts(spec, "design.conditions[*].id");
+    let staged = val(spec, "design.selection").is_some();
+    if declared.is_empty() {
+        return vec![];
+    }
+    flag(spec, pat, |v| {
+        v.as_str()
+            .is_some_and(|c| !(declared.contains(&c) || (staged && c == SELECTED)))
+    })
+}
+
+/// Whether `v` is a value `op` accepts: an enum value is a scalar in its range, an int value a
+/// whole number in `[lo, hi]`, a float value a number in `[lo, hi]`. `None` when the operator is
+/// unreadable: the type and range rules report that.
+fn fits(op: &Value, v: &Value) -> Option<bool> {
+    let range = op.get("range")?.as_array()?;
+    let kind = op.get("type")?.as_str()?;
+    if kind == "enum" {
+        return Some(is_scalar(v) && range.contains(v));
+    }
+    let [lo, hi] = range.as_slice() else {
+        return None;
+    };
+    let span = lo.as_f64()?..=hi.as_f64()?;
+    let typed = match kind {
+        "int" => v.is_i64() || v.is_u64(),
+        "float" => v.is_number(),
+        _ => return None,
+    };
+    Some(typed && v.as_f64().is_some_and(|x| span.contains(&x)))
+}
+
+/// E-MUT-005: a spawn value its operator does not accept (see `fits`). A spawn with no
+/// declared operator is E-MUT-004's.
+fn spawn_value_fits(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let operators = nodes(spec, "mutations.operators[*]");
+    let mut out = vec![];
+    for (spawn_path, spawn) in nodes(spec, pat.strip_suffix(".values[*]").unwrap_or(pat)) {
+        let named = spawn.get("operator").and_then(Value::as_str);
+        let op = (operators.iter())
+            .map(|(_, o)| *o)
+            .find(|o| o.get("name").and_then(Value::as_str) == named);
+        let Some((op, values)) = op.zip(spawn.get("values").and_then(Value::as_array)) else {
+            continue;
+        };
+        out.extend(
+            (values.iter().enumerate())
+                .filter(|(_, v)| fits(op, v) == Some(false))
+                .map(|(i, _)| hit(format!("{spawn_path}.values[{i}]"))),
+        );
+    }
+    out
+}
+
+/// E-MUT-007: triggers, and no selection input. With no input list, the type rule reports that.
+fn triggers_need_selection(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    match list(spec, "inputs") {
+        Some(inputs)
+            if has_declared_triggers(spec)
+                && !inputs.iter().any(|i| role(i) == Some("selection")) =>
+        {
+            flag(spec, pat, Value::is_array)
+        }
+        _ => vec![],
+    }
+}
+
+/// E-MUT-008, under a confirmatory mode: a declared trigger.
+fn triggers_declared(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    if has_declared_triggers(spec) {
+        flag(spec, pat, Value::is_array)
+    } else {
+        vec![]
+    }
+}
+
+/// W-MUT-001: a value a later trigger lists for an operator that an earlier trigger lists it
+/// for. A child's id is its condition, operator and value, and an operator acts on one condition.
+fn child_declared_once(spec: &Value, _: &CheckCtx, _: &str) -> Vec<Hit> {
+    let mut earlier: Vec<(&str, &Value)> = vec![];
+    let mut out = vec![];
+    for (trigger_path, trigger) in nodes(spec, "mutations.triggers[*]") {
+        let mut own = vec![];
+        let spawns = (trigger.get("spawns").and_then(Value::as_array))
+            .into_iter()
+            .flatten();
+        for (j, spawn) in spawns.enumerate() {
+            let Some(operator) = spawn.get("operator").and_then(Value::as_str) else {
+                continue;
+            };
+            let values = (spawn.get("values").and_then(Value::as_array))
+                .into_iter()
+                .flatten();
+            for (k, v) in values.enumerate() {
+                if earlier.contains(&(operator, v)) {
+                    out.push(hit(format!("{trigger_path}.spawns[{j}].values[{k}]")));
+                }
+                own.push((operator, v));
+            }
+        }
+        earlier.extend(own);
+    }
+    out
 }
 
 // ---- secrets ----
