@@ -685,10 +685,9 @@ fn family_room(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     let detail = match kept(spec, ctx, members) {
         Ok(keep) if stream::leaves_room(a.slot, keep) => return vec![],
         Ok(keep) => format!(
-            "Slot {} leaves {} after it, fewer than the {} needed: {members} for this family's members and {} already reserved.",
+            "Slot {} {} needed: {members} for this family's members and {} already reserved.",
             a.slot,
-            stream::slots(stream::M.saturating_sub(a.slot)),
-            stream::slots(keep),
+            stream::shortfall(a.slot, keep),
             keep - members as u64
         ),
         Err(e) => format!("The box records cannot be read: {e}."),
@@ -988,10 +987,9 @@ fn stream_level(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
         Ok(Some(a)) if a.level > 0.0 => match kept(spec, ctx, 0) {
             Ok(keep) if stream::leaves_room(a.slot, keep) => return vec![],
             Ok(keep) => format!(
-                "Slot {} leaves {} after it, fewer than the {} reserved for family members not yet registered.",
+                "Slot {} {} reserved for family members not yet registered.",
                 a.slot,
-                stream::slots(stream::M.saturating_sub(a.slot)),
-                stream::slots(keep)
+                stream::shortfall(a.slot, keep)
             ),
             Err(e) => format!("The box records cannot be read: {e}."),
         },

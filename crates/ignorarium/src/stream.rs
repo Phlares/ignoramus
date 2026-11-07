@@ -135,9 +135,8 @@ impl std::fmt::Display for StreamError {
             ),
             StreamError::Reserved { slot, keep } => write!(
                 f,
-                "slot {slot} leaves {} after it, fewer than the {} reserved for family members not yet registered",
-                slots(M.saturating_sub(*slot)),
-                slots(*keep)
+                "slot {slot} {} reserved for family members not yet registered",
+                shortfall(*slot, *keep)
             ),
         }
     }
@@ -162,8 +161,15 @@ pub fn leaves_room(slot: u64, keep: u64) -> bool {
     M.saturating_sub(slot) >= keep
 }
 
+/// How plan slot `slot` falls short of `keep` slots after it, for a slot that does not
+/// leave room: `leaves <n> slots after it, fewer than the <keep> slots`.
+pub fn shortfall(slot: u64, keep: u64) -> String {
+    let left = slots(M.saturating_sub(slot));
+    format!("leaves {left} after it, fewer than the {}", slots(keep))
+}
+
 /// `1 slot`, `<n> slots`.
-pub fn slots(n: u64) -> String {
+fn slots(n: u64) -> String {
     if n == 1 {
         "1 slot".into()
     } else {
