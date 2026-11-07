@@ -1428,23 +1428,42 @@ fn review_shows_the_family() {
     put(&root, "spec/b.toml", &pinned(&root, &study("b")));
     put(&root, "spec/c.toml", &pinned(&root, &study("c")));
     let spec = root_spec(&root, &study("fam"), &["spec/b.toml", "spec/c.toml"]);
-    let out = printed(&lab, "review", &spec);
-    let section = out.split("## Family\n").nth(1).expect(&out);
-    let section = section.split("\n## ").next().unwrap();
+    let section = |spec: &Path| {
+        let out = printed(&lab, "review", spec);
+        let section = out.split("## Family\n").nth(1).expect(&out).to_string();
+        section.split("\n## ").next().unwrap().to_string()
+    };
+    let hash = |id: &str| {
+        let spec = ignorarium::spec::load(&root.join(format!("spec/{id}.toml"))).unwrap();
+        spec.hash["sha256:".len()..][..12].to_string()
+    };
     let share = "may share confirmation and reserve data";
-    let want = |id: &str| format!("- {id}: `spec/{id}.toml`, {share}\n");
-    assert!(section.contains(&want("b")), "{section}");
-    assert!(section.contains(&want("c")), "{section}");
+    let want = |id: &str, state: &str| format!("- {id}: `spec/{id}.toml`, {state}, {share}\n");
+    let before = section(&spec);
+    for id in ["b", "c"] {
+        let state = format!("spec {}, not locked yet", hash(id));
+        assert!(before.contains(&want(id, &state)), "{before}");
+    }
     assert_eq!(
-        section.matches("- b:").count() + section.matches("- c:").count(),
+        before.matches("- b:").count() + before.matches("- c:").count(),
         2
     );
     register(&lab, &spec);
-    let out = printed(&lab, "review", &root.join("spec/b.toml"));
-    let section = out.split("## Family\n").nth(1).expect(&out);
+    let locked = section(&spec);
+    for id in ["b", "c"] {
+        let state = format!("locked spec {}, slot reserved", hash(id));
+        assert!(locked.contains(&want(id, &state)), "{locked}");
+    }
+    register(&lab, &root.join("spec/b.toml"));
+    let opened = section(&spec);
+    let state = format!("locked spec {}, slot opened", hash("b"));
+    assert!(opened.contains(&want("b", &state)), "{opened}");
+    let state = format!("locked spec {}, slot reserved", hash("c"));
+    assert!(opened.contains(&want("c", &state)), "{opened}");
+    let member = section(&root.join("spec/c.toml"));
     assert!(
-        section.contains("- member of family fam; slot reserved\n"),
-        "{section}"
+        member.contains("- member of family fam; slot reserved\n"),
+        "{member}"
     );
     // A study outside every family has no section.
     let out = printed(&lab, "review", &outsider(&lab, "fresh data\n", |t| t));

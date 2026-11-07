@@ -3,6 +3,7 @@
 use super::check::{self, Assessed};
 use super::{Ctx, Done, Run, out};
 use crate::diag::{Diagnostic, Severity, printable};
+use crate::family::MemberSpec;
 use crate::rules::{self, safe_key};
 use serde_json::Value;
 use std::path::Path;
@@ -134,9 +135,10 @@ fn family_section(a: &Assessed) -> String {
     let members = a.ctx.members.iter().enumerate().map(|(i, m)| match m {
         Ok(m) => {
             format!(
-                "{}: `{}`, may share confirmation and reserve data",
+                "{}: `{}`, {}, may share confirmation and reserve data",
                 shown(m.id().unwrap_or("(no id)")),
-                shown(&m.path)
+                shown(&m.path),
+                lock_state(a, m)
             )
         }
         Err(e) => format!("member {}: {}", i + 1, shown(e)),
@@ -148,6 +150,34 @@ fn family_section(a: &Assessed) -> String {
 {}",
         bullets(std::iter::once(line.clone()).chain(members))
     )
+}
+
+/// The first 12 hex digits of the spec hash `hash`.
+fn short(hash: &str) -> &str {
+    let hex = hash.strip_prefix("sha256:").unwrap_or(hash);
+    hex.get(..12).unwrap_or(hex)
+}
+
+/// Member `m` of the root `a`: the spec hash its lock holds and whether its slot is reserved or
+/// opened; before the root registers, the hash the lock would hold.
+fn lock_state(a: &Assessed, m: &MemberSpec) -> String {
+    let records = a.ctx.records.as_ref();
+    let id = m.id().unwrap_or_default();
+    let root = a.value.pointer("/study/id").and_then(Value::as_str);
+    let found = match records.locked_family(id) {
+        Err(e) => return format!("lock cannot be read: {}", printable(&e)),
+        Ok(found) => found.filter(|f| Some(f.root.as_str()) == root),
+    };
+    let Some(locked) = found.and_then(|f| f.lock.members.into_iter().find(|l| l.id == id)) else {
+        return format!("spec {}, not locked yet", short(&m.raw.hash));
+    };
+    let slot = match (records.study(id), records.unopened()) {
+        (Ok(Some(_)), _) => "slot opened",
+        (Ok(None), Ok(u)) if u.iter().any(|u| u == id) => "slot reserved",
+        (Ok(None), Ok(_)) => "no slot reserved",
+        (Err(_), _) | (_, Err(_)) => "slot state cannot be read",
+    };
+    format!("locked spec {}, {slot}", short(&printable(&locked.spec_hash)))
 }
 
 fn page(a: &Assessed) -> String {
