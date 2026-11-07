@@ -133,10 +133,9 @@ fn family_section(a: &Assessed) -> String {
     let shown = |s: &str| plain(&withheld(&Value::String(printable(s))));
     let members = a.ctx.members.iter().enumerate().map(|(i, m)| match m {
         Ok(m) => {
-            let id = m.raw.value.pointer("/study/id").and_then(Value::as_str);
             format!(
                 "{}: `{}`, may share confirmation and reserve data",
-                shown(id.unwrap_or("(no id)")),
+                shown(m.id().unwrap_or("(no id)")),
                 shown(&m.path)
             )
         }

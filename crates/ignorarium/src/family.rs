@@ -17,6 +17,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+/// The code a member's `PENDING` diagnostic takes in its root's check.
+const WAITS: &str = "W-FAM-001";
+
 /// The kind of the plan-log leaf that a root's `register` appends after its plan leaf.
 pub const LEAF_KIND: &str = "family";
 
@@ -189,9 +192,6 @@ pub fn keep(unopened: &[String], study: &str, members: usize) -> u64 {
     (unopened.iter().filter(|u| *u != study).count() + members) as u64
 }
 
-/// The code a member's `PENDING` diagnostic takes in its root's check.
-pub const WAITS: &str = "W-FAM-001";
-
 /// A member spec a root lists, as the root's check read it.
 #[derive(Debug)]
 pub struct MemberSpec {
@@ -207,6 +207,11 @@ pub struct MemberSpec {
 }
 
 impl MemberSpec {
+    /// The member's `study.id`, when it is a string.
+    pub fn id(&self) -> Option<&str> {
+        self.raw.value.pointer("/study/id")?.as_str()
+    }
+
     /// True when the member declares a family of its own. E-FAM-002 refuses it, and no other
     /// check reads it.
     pub fn nested(&self) -> bool {
@@ -286,11 +291,12 @@ pub fn shared<'a>(
 
 /// Every rule on each member in `ctx.members` that declares no family of its own, with the
 /// root's prior use, records, store and machine, then, as a standalone check does, the typed
-/// model and the schedule when no rule failed, each told the family of root `root_id`; diagnostics as `report` gives them.
+/// model and the schedule when no rule failed, each told the family of root `root_id`;
+/// diagnostics as `report` gives them.
 pub fn check(ctx: &mut CheckCtx, root_id: &str) -> Vec<Diagnostic> {
     let members = std::mem::take(&mut ctx.members);
     let ids = (members.iter().flatten())
-        .filter_map(|m| m.raw.value.pointer("/study/id")?.as_str())
+        .filter_map(MemberSpec::id)
         .chain([root_id]);
     let family_ids = ids.map(str::to_string).collect();
     // The member checks borrow the root's prior use and records, so every check reads each
@@ -329,7 +335,7 @@ pub fn check(ctx: &mut CheckCtx, root_id: &str) -> Vec<Diagnostic> {
 /// Member `m`'s diagnostics as its root reports them: at `family.members[<i>]:<path>`, the
 /// problem led by the member's own field, and a value that waits on an unfinished study as
 /// `WAITS`, so it does not hold the root's check at exit 3.
-pub fn report(m: &MemberSpec, diags: Vec<Diagnostic>) -> Vec<Diagnostic> {
+fn report(m: &MemberSpec, diags: Vec<Diagnostic>) -> Vec<Diagnostic> {
     let at = format!("family.members[{}]:{}", m.index, printable(&m.path));
     let pending = rules::raised(PENDING, String::new(), None).problem;
     (diags.into_iter())

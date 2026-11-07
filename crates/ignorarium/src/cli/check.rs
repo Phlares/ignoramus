@@ -320,11 +320,8 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         family_ids: vec![],
     };
     let (value, filled, mut diags) = rules::check_all(&raw.value, rules::builtin(), &cc);
-    let root_id = raw
-        .value
-        .pointer("/study/id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let root_id = raw.value.pointer("/study/id").and_then(Value::as_str);
+    let root_id = root_id.unwrap_or_default();
     diags.extend(family::check(&mut cc, root_id));
     let stream = rules::granted(&value, &cc).ok().flatten();
     let mut a = Assessed {

@@ -409,7 +409,11 @@ fn follow_on_shares(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
                 if spec.get("family").is_some() {
                     let members = ctx.members.iter().flatten();
                     return Some(
-                        [own, members.filter_map(|m| id(&m.raw.value)).collect()].concat(),
+                        [
+                            own,
+                            members.filter_map(|m| Some(m.id()?.to_string())).collect(),
+                        ]
+                        .concat(),
                     );
                 }
                 if !ctx.family_ids.is_empty() {
