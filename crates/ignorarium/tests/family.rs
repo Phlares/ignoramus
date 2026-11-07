@@ -1545,3 +1545,165 @@ fn the_guide_names_members_in_check_and_register() {
         assert!(text.contains("member"), "{id}: {text}");
     }
 }
+
+// ---- report names the family ----
+
+fn reported(lab: &Lab, id: &str) -> Value {
+    let a = bin(lab).args(["report", id, "--json"]).assert().success();
+    serde_json::from_slice(&a.get_output().stdout).unwrap()
+}
+
+fn reported_text(lab: &Lab, id: &str) -> String {
+    let a = bin(lab).args(["report", id]).assert().success();
+    String::from_utf8_lossy(&a.get_output().stdout).into_owned()
+}
+
+/// A lock that lists members `b` and `c`.
+fn lock_bc() -> family::Lock {
+    let member = |id: &str| family::Member {
+        id: id.into(),
+        spec: format!("spec/{id}.toml"),
+        spec_hash: format!("sha256:{}", "0".repeat(64)),
+        payload: "0".repeat(64),
+        inputs: vec![],
+    };
+    family::Lock {
+        members: vec![member("b"), member("c")],
+    }
+}
+
+/// The plan leaf and the family leaf of root `fam`, which locks `b` and `c`.
+fn plant_family_leaves(lab: &Lab) {
+    append_leaf(lab, "planlog", "plan", "", Some("sha256:plan"), &[]);
+    let label = family::leaf_label("fam");
+    let hash = lock_bc().hash();
+    append_leaf(lab, "planlog", family::LEAF_KIND, &label, Some(&hash), &[]);
+}
+
+/// Study `id` with a register record, and the records of a finished study when `done`. The
+/// root `fam` holds the lock.
+fn plant_study(lab: &Lab, id: &str, done: bool) {
+    let mut bodies = common::finished_with(common::instrument(), None, vec![]);
+    if !done {
+        bodies.truncate(1);
+    }
+    if id == "fam" {
+        bodies[0].1["log"] = json!("planlog");
+        bodies[0].1["family"] = json!(lock_bc());
+    }
+    common::plant(&lab.home, id, &bodies);
+    std::thread::sleep(std::time::Duration::from_millis(5));
+}
+
+fn members_of(r: &Value) -> Vec<(String, String)> {
+    (r["family"]["members"].as_array().unwrap().iter())
+        .map(|m| {
+            let s = |k: &str| m[k].as_str().unwrap().to_string();
+            (s("study"), s("state"))
+        })
+        .collect()
+}
+
+fn opened_ts(lab: &Lab, id: &str) -> String {
+    common::kind_of(lab, id, "opened")[0].ts.clone()
+}
+
+#[test]
+fn a_root_report_names_its_unfinished_members() {
+    let lab = lab();
+    plant_family_leaves(&lab);
+    plant_study(&lab, "fam", true);
+    plant_study(&lab, "b", false);
+    let want = [("b", "not finished"), ("c", "not registered")]
+        .map(|(s, t)| (s.to_string(), t.to_string()));
+    let r = reported(&lab, "fam");
+    assert_eq!(r["family"]["root"], "fam", "{r}");
+    assert_eq!(members_of(&r), want);
+    for m in r["family"]["members"].as_array().unwrap() {
+        for k in ["finished_at", "first_opened", "before"] {
+            assert_eq!(m[k], Value::Null, "{m}");
+        }
+    }
+    let out = reported_text(&lab, "fam");
+    let line = "family fam: b not finished, c not registered\n";
+    assert!(
+        out.lines().nth(1).is_some_and(|l| l == line.trim_end()),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_member_report_names_the_root_and_its_times() {
+    let lab = lab();
+    plant_family_leaves(&lab);
+    plant_study(&lab, "fam", true);
+    reported(&lab, "fam");
+    plant_study(&lab, "b", true);
+    let fam = common::records_of(&lab, "fam");
+    let finished = fam
+        .iter()
+        .rev()
+        .find(|r| r.kind == "estimate" || r.kind == "analysis");
+    let finished = finished.unwrap().ts.clone();
+    let r = reported(&lab, "b");
+    assert_eq!(r["family"]["root"], "fam", "{r}");
+    let want =
+        [("fam", "finished"), ("c", "not registered")].map(|(s, t)| (s.to_string(), t.to_string()));
+    assert_eq!(members_of(&r), want);
+    let root = &r["family"]["members"][0];
+    assert_eq!(root["finished_at"], finished, "{root}");
+    assert_eq!(root["first_opened"], opened_ts(&lab, "fam"), "{root}");
+    assert_eq!(root["before"], true, "{root}");
+    let out = reported_text(&lab, "b");
+    assert!(out.contains("family fam: c not registered\n"), "{out}");
+    let line = format!(
+        "  fam finished {finished}, first opened {}, before this study finished\n",
+        opened_ts(&lab, "fam")
+    );
+    assert!(out.contains(&line), "{out}");
+}
+
+#[test]
+fn a_member_that_finished_later_is_marked_after() {
+    let lab = lab();
+    plant_family_leaves(&lab);
+    plant_study(&lab, "b", true);
+    plant_study(&lab, "fam", true);
+    let r = reported(&lab, "b");
+    let root = &r["family"]["members"][0];
+    assert_eq!(root["state"], "finished", "{root}");
+    assert_eq!(root["before"], false, "{root}");
+    assert_eq!(root["first_opened"], Value::Null, "{root}");
+    let out = reported_text(&lab, "b");
+    assert!(
+        out.contains(", first opened never, after this study finished\n"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_study_in_no_family_has_no_family_block() {
+    let lab = lab();
+    plant_study(&lab, "s1", true);
+    let r = reported(&lab, "s1");
+    assert_eq!(r["family"], Value::Null, "{r}");
+    assert!(!reported_text(&lab, "s1").contains("family"));
+}
+
+#[test]
+fn a_broken_sibling_log_refuses_the_report() {
+    let lab = lab();
+    plant_family_leaves(&lab);
+    plant_study(&lab, "fam", true);
+    plant_study(&lab, "b", true);
+    let sibling = lab.home.study_dir("fam").join("records.jsonl");
+    let mut broken = std::fs::read(&sibling).unwrap();
+    broken.extend_from_slice(b"not a record\n");
+    std::fs::write(&sibling, broken).unwrap();
+    let own = lab.home.study_dir("b").join("records.jsonl");
+    let before = std::fs::read(&own).unwrap();
+    let a = bin(&lab).args(["report", "b"]).assert().failure();
+    let err = String::from_utf8_lossy(&a.get_output().stderr).into_owned();
+    assert!(err.contains("cannot report b: study fam: "), "{err}");
+    assert_eq!(std::fs::read(&own).unwrap(), before);
+}

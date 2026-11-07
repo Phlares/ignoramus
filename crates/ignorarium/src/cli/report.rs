@@ -9,6 +9,7 @@ use crate::derived::{
 use crate::diag::printable;
 use crate::records::{self, Record, RecordDraft, RecordError};
 use crate::runner::stored_spec;
+use crate::rules::BoxRecords;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
@@ -51,6 +52,75 @@ fn finished_at(close: Option<String>, analysed: &str, after: &[Record]) -> Strin
         .unwrap_or_else(|| analysed.to_string())
 }
 
+/// How a finished study finished: its records after the analysis, and when.
+struct Finish<'a> {
+    analysed: &'a Record,
+    after: Vec<Record>,
+    at: String,
+}
+
+/// The finish of study `id`, whose records are `all`; `None` when it is not finished.
+fn standing<'a>(
+    records: &HomeRecords,
+    id: &str,
+    all: &'a [Record],
+) -> Result<Option<Finish<'a>>, String> {
+    let mut close = None;
+    let state = StudyState::of(Some(all.to_vec()), |log, slot| {
+        close = records.stream_closed_at(log, id, slot)?;
+        Ok(close.is_some())
+    })?;
+    let StudyState::Finished(after) = state else {
+        return Ok(None);
+    };
+    let analysed = (all.iter().find(|r| Analysis::of(r).is_some()))
+        .ok_or_else(|| format!("study {id} has no analysis record"))?;
+    let at = finished_at(close, &analysed.ts, &after);
+    Ok(Some(Finish {
+        analysed,
+        after,
+        at,
+    }))
+}
+
+/// The family of study `id`, whose register record holds `own`: its root and every other
+/// member, root first, each with its state. `at` is when `id` finished.
+fn family_block(
+    records: &HomeRecords,
+    id: &str,
+    own: &Register,
+    at: &str,
+) -> Result<Value, String> {
+    let (root, lock) = match (&own.family, records.family_of(id)?) {
+        (Some(lock), _) => (id.to_string(), lock.clone()),
+        (None, Some(found)) => (found.root, found.lock),
+        (None, None) => return Ok(Value::Null),
+    };
+    let others = std::iter::once(root.clone())
+        .chain(lock.members.into_iter().map(|m| m.id))
+        .filter(|m| m != id);
+    let mut members = vec![];
+    for other in others {
+        let fault = |e: String| format!("study {other}: {e}");
+        let mut m = json!({
+            "study": other, "state": "not registered",
+            "finished_at": null, "first_opened": null, "before": null,
+        });
+        if let Some(all) = records.study(&other).map_err(fault)? {
+            m["state"] = json!("not finished");
+            if let Some(f) = standing(records, &other, &all).map_err(fault)? {
+                m["state"] = json!("finished");
+                m["first_opened"] =
+                    json!((all.iter().find(|r| r.kind == OPENED)).map(|r| r.ts.clone()));
+                m["before"] = json!(f.at.as_str() < at);
+                m["finished_at"] = json!(f.at);
+            }
+        }
+        members.push(m);
+    }
+    Ok(json!({ "root": root, "members": members }))
+}
+
 fn clips(analysis: &Analysis, h: &str) -> Value {
     let mine: Vec<Value> = (analysis.clipped.iter())
         .filter(|c| c.hypothesis == h)
@@ -77,23 +147,21 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
             ))
             .into());
         }
-        (all.iter().find_map(Register::of)).ok_or_else(|| not_registered(id))?;
+        let own = (all.iter().find_map(Register::of)).ok_or_else(|| not_registered(id))?;
         let box_records = HomeRecords::signed(home, &key);
-        let mut close = None;
-        let state = StudyState::of(Some(all.to_vec()), |log, slot| {
-            close = box_records.stream_closed_at(log, id, slot)?;
-            Ok(close.is_some())
-        })
-        .map_err(|e| CliError::refuse(format!("cannot report {id}: {e}")))?;
-        let StudyState::Finished(after) = state else {
+        let refuse = |e: String| CliError::refuse(format!("cannot report {id}: {e}"));
+        let Some(Finish {
+            analysed,
+            after,
+            at,
+        }) = standing(&box_records, id, all).map_err(refuse)?
+        else {
             let said = match stopped_why(all) {
                 Some(why) => format!("study {id} is stopped: {why}; it has no report"),
                 None => format!("study {id} is not finished; status shows its progress"),
             };
             return Err(CliError::refuse(said).into());
         };
-        let analysed =
-            (all.iter().find(|r| Analysis::of(r).is_some())).ok_or_else(|| not_registered(id))?;
         let analysis = Analysis::of(analysed).ok_or_else(|| not_registered(id))?;
         let mut seen = BTreeSet::new();
         let hypotheses: Vec<Value> = after
@@ -133,12 +201,14 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
                 })
             })
             .collect();
+        let family = family_block(&box_records, id, &own, &at).map_err(refuse)?;
         value = json!({
             "study": id,
-            "finished_at": finished_at(close, &analysed.ts, &after),
+            "finished_at": at,
             "records": all.len(),
             "hypotheses": hypotheses,
             "children": children,
+            "family": family,
         });
         Ok(vec![RecordDraft::new(id, OPENED, json!({}))])
     })
@@ -161,6 +231,43 @@ fn text(r: &Value) -> String {
         r["finished_at"].as_str().unwrap_or_default(),
         r["records"]
     );
+    if let Some(f) = r["family"].as_object() {
+        let members = f["members"].as_array().into_iter().flatten();
+        let waiting: Vec<String> = (members.clone())
+            .filter(|m| m["state"] != "finished")
+            .map(|m| {
+                format!(
+                    "{} {}",
+                    m["study"].as_str().unwrap_or_default(),
+                    m["state"].as_str().unwrap_or_default()
+                )
+            })
+            .collect();
+        let root = f["root"].as_str().unwrap_or_default();
+        s.push_str(&format!(
+            "family {root}:{}
+",
+            if waiting.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", waiting.join(", "))
+            }
+        ));
+        for m in members.filter(|m| m["state"] == "finished") {
+            s.push_str(&format!(
+                "  {} finished {}, first opened {}, {} this study finished
+",
+                m["study"].as_str().unwrap_or_default(),
+                m["finished_at"].as_str().unwrap_or_default(),
+                m["first_opened"].as_str().unwrap_or("never"),
+                if m["before"] == true {
+                    "before"
+                } else {
+                    "after"
+                }
+            ));
+        }
+    }
     for h in r["hypotheses"].as_array().into_iter().flatten() {
         s.push_str(&format!(
             "{}: {} ({})",
