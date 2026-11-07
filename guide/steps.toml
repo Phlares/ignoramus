@@ -73,6 +73,6 @@ command = "ignorarium status <id>"
 [[step]]
 id = "report"
 title = "Write the report"
-does = "Prints each hypothesis's verdict, its basis, the e-value and level of a test, the reason a claim failed early, and how many units each mean claim's range clipped. It verifies the record log first and refuses a broken one. It waits until the study is finished, blind or not, and records each read in the log."
+does = "Prints each hypothesis's verdict, its basis, the e-value and level of a test, the reason a claim failed early, and how many units each mean claim's range clipped. It verifies the record log first and refuses a broken one. It waits until the study is finished, blind or not, and records each read in the log. A study in a family also lists each other member's state, and when each finished one finished and was first opened."
 produces = "The verdicts as text, or JSON with --json."
 command = "ignorarium report <id>"
