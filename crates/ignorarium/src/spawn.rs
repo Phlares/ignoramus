@@ -73,7 +73,7 @@ pub fn evaluate(plan: &RunPlan, records: &[Record]) -> Result<Vec<Trigger>, RunE
             None if wants_pick(t, &children) => (0.0, Some(NO_PICK.into())),
             _ => bet(plan, t, &clusters, &pairs, pick),
         };
-        let fired = reason.is_none() && e_value >= t.threshold_e;
+        let fired = reason.is_none() && fires(e_value, t.threshold_e);
         let mut f = Trigger {
             id: t.id.clone(),
             e_value,
@@ -108,6 +108,13 @@ pub fn evaluate(plan: &RunPlan, records: &[Record]) -> Result<Vec<Trigger>, RunE
         out.push(f);
     }
     Ok(out)
+}
+
+/// Whether a stopped value fires its trigger: the e-process's own stop test, value at least the
+/// threshold, so a value frozen at the stop fires. `evidence::rejects(e, 1 / t)` would not: for
+/// some t (12.25), 1 / (1 / t) exceeds t. A NaN never fires.
+pub fn fires(e_value: f64, threshold: f64) -> bool {
+    e_value >= threshold
 }
 
 /// The value of trigger `t` and, when the bet cannot be read, why (its value is then 0).

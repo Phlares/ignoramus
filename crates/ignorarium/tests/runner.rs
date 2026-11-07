@@ -5162,3 +5162,15 @@ fn a_blind_status_shows_skipped_and_stopped_children_by_label() {
     );
     assert!(!status_text(&lab, "blind-stop").contains("arm-a"));
 }
+
+// The firing decision uses the e-process's own stop test (value at least the stop), so a value
+// frozen at the threshold fires. 12.25 is a threshold where 1 / (1 / t) is not t.
+#[test]
+fn a_trigger_fires_at_its_stop_and_never_on_nan() {
+    use ignorarium::spawn::fires;
+    assert!(fires(12.25, 12.25));
+    assert!(fires(20.0, 12.25));
+    assert!(!fires(12.0, 12.25));
+    assert!(!fires(f64::NAN, 12.25));
+    assert!(!fires(f64::INFINITY, f64::NAN));
+}
