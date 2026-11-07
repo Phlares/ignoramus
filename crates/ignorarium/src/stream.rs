@@ -378,10 +378,6 @@ impl Log {
         &self.path
     }
 
-    fn replayed(&self, key: &VerifyingKey) -> Result<Replay, StreamError> {
-        replay(self.log, &records::read_all(&self.path, key)?)
-    }
-
     /// Open the next slot for `study`, under the log's lock: the config first when the log
     /// is empty, then the slot with its level. Refused, with nothing written, when the level
     /// is 0 or below `at_least`, or when a plan slot leaves fewer than `keep` slots after it.
@@ -460,8 +456,24 @@ impl Log {
 
     /// True when `study` held slot `slot` and the slot is closed.
     pub fn closed(&self, key: &VerifyingKey, study: &str, slot: u64) -> Result<bool, StreamError> {
-        let r = self.replayed(key)?;
+        self.closed_at(key, study, slot).map(|t| t.is_some())
+    }
+
+    /// The time of the close record of slot `slot`, when `study` held the slot and it is closed.
+    pub fn closed_at(
+        &self,
+        key: &VerifyingKey,
+        study: &str,
+        slot: u64,
+    ) -> Result<Option<String>, StreamError> {
+        let all = records::read_all(&self.path, key)?;
+        let r = replay(self.log, &all)?;
         let held = r.given.get(&slot).is_some_and(|(s, _)| s == study);
-        Ok(held && !r.open.contains_key(&slot))
+        if !held || r.open.contains_key(&slot) {
+            return Ok(None);
+        }
+        Ok((all.iter())
+            .find(|r| r.kind == CLOSE && r.body["study"] == study && r.body["slot"] == slot)
+            .map(|r| r.ts.clone()))
     }
 }
