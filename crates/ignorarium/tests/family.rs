@@ -422,16 +422,18 @@ fn members_the_context_did_not_read_fail_closed() {
 
 // ---- registering a root ----
 
-/// Register the spec at `spec` with `register::run`, approving its hash: the exit code and
-/// the output.
+/// Register the spec at `spec` with `register::run`, approving its hash: the exit code, and
+/// the output followed by the refusal, if any.
 fn try_register(lab: &Lab, spec: &Path) -> (i32, String) {
     let hash = ignorarium::spec::load(spec).unwrap().hash;
     let typed = format!("{}\n", &hash["sha256:".len()..][..8]);
     let mut out = Vec::new();
     let mut answer = std::io::Cursor::new(typed.into_bytes());
-    let done = register::run(spec, &lab.home, &mut answer, &mut out, true)
-        .unwrap_or_else(|e| panic!("{}: {}", e.msg, String::from_utf8_lossy(&out)));
-    (done.code, String::from_utf8_lossy(&out).into_owned())
+    let printed = |out: &[u8]| String::from_utf8_lossy(out).into_owned();
+    match register::run(spec, &lab.home, &mut answer, &mut out, true) {
+        Ok(done) => (done.code, printed(&out)),
+        Err(e) => (e.code, format!("{}\n{}", printed(&out), e.msg)),
+    }
 }
 
 /// `try_register`, which must succeed.
@@ -886,14 +888,14 @@ fn check_names_the_family() {
     assert_eq!(v["family"], Value::Null, "{v}");
 }
 
-/// A register record for root `fam` whose plan leaf is `leaf`, holding `lock`, signed into
-/// the box by hand.
-fn plant_root(lab: &Lab, leaf: u64, lock: Option<&family::Lock>) {
+/// A register record for root `fam` in `log` whose plan leaf is `leaf`, holding `lock`, signed
+/// into the box by hand.
+fn plant_root(lab: &Lab, log: &str, leaf: u64, lock: Option<&family::Lock>) {
     let zeros = "0".repeat(64);
     let body = json!({
         "spec_hash": format!("sha256:{zeros}"),
         "leaf": leaf,
-        "log": "planlog",
+        "log": log,
         "defaults": {},
         "root_id": zeros,
         "payload": zeros,
@@ -906,43 +908,72 @@ fn plant_root(lab: &Lab, leaf: u64, lock: Option<&family::Lock>) {
     assert!(Register::of(&common::kind_of(lab, "fam", "register")[0]).is_some());
 }
 
-/// Append a leaf of `kind` with `label`, `commitment` and `data` to the box's plan log.
-fn append_leaf(lab: &Lab, kind: &str, label: &str, commitment: &str, data: &[(String, String)]) {
+/// Append a leaf of `kind` with `label`, `commitment` and `data` to the box's log `log`.
+fn append_leaf(
+    lab: &Lab,
+    log: &str,
+    kind: &str,
+    label: &str,
+    commitment: Option<&str>,
+    data: &[(String, String)],
+) {
     let key = keys::load_or_create(&lab.home).unwrap();
     let leaf = Leaf {
         kind: kind.into(),
-        commitment: Some(commitment.into()),
+        commitment: commitment.map(str::to_string),
         shape: None,
         mode: None,
         data_hashes: data.to_vec(),
         label: label.into(),
         ts: "2026-11-06T00:00:00Z".into(),
     };
-    let log = PlanLog::open(&lab.home.root.join("planlog")).unwrap();
+    let log = PlanLog::open(&lab.home.root.join(log)).unwrap();
     log.append(leaf, &key).unwrap();
 }
 
-/// A study root with member spec `spec/b.toml`, pinned; returns the spec's path.
-fn lone_member(lab: &Lab) -> PathBuf {
+/// A study root with member spec `spec/b.toml`, the pinned `edit` of study `b`: the study root
+/// and the spec's path.
+fn lone_member(lab: &Lab, edit: impl Fn(String) -> String) -> (PathBuf, PathBuf) {
     let root = family_root(lab);
-    put(&root, "spec/b.toml", &pinned(&root, &study("b")))
+    let b = put(&root, "spec/b.toml", &pinned(&root, &edit(study("b"))));
+    (root, b)
+}
+
+/// The data of each confirmation input of `spec/b.toml` under `root`.
+fn confirmation_data(root: &Path) -> Vec<(String, String)> {
+    (inputs_of(root, "spec/b.toml").iter())
+        .filter(|i| i["role"] == "confirmation")
+        .map(|i| file_hashes(&std::fs::read(root.join(i["path"].as_str().unwrap())).unwrap()))
+        .collect()
+}
+
+/// A lock that lists member `b` at `spec/b.toml`.
+fn lock_of_b(b: &Path) -> family::Lock {
+    family::Lock {
+        members: vec![family::Member {
+            id: "b".into(),
+            spec: "spec/b.toml".into(),
+            spec_hash: ignorarium::spec::load(b).unwrap().hash,
+            payload: "0".repeat(64),
+            inputs: vec![],
+        }],
+    }
+}
+
+/// The problem of b's E-CNF-005 at its input `data/confirm.txt`, which must refuse.
+fn confirm_refused(lab: &Lab, root: &Path, b: &Path) -> String {
+    let (code, v) = check_json(lab, b);
+    let k = input_index(root, "spec/b.toml", "data/confirm.txt");
+    assert_eq!(code, 1, "{v}");
+    problem_at(&v, "E-CNF-005", &format!("inputs[{k}].path"))
 }
 
 #[test]
 fn a_root_without_its_family_leaf_fails_member_checks_closed() {
     // A lock that lists b, and no family leaf.
     let lab = lab();
-    let b = lone_member(&lab);
-    let lock = family::Lock {
-        members: vec![family::Member {
-            id: "b".into(),
-            spec: "spec/b.toml".into(),
-            spec_hash: ignorarium::spec::load(&b).unwrap().hash,
-            payload: "0".repeat(64),
-            inputs: vec![],
-        }],
-    };
-    plant_root(&lab, 0, Some(&lock));
+    let (_, b) = lone_member(&lab, |t| t);
+    plant_root(&lab, "planlog", 0, Some(&lock_of_b(&b)));
     let (code, v) = check_json(&lab, &b);
     let p = problem_at(&v, "E-FAM-006", "study.id");
     assert!(
@@ -952,21 +983,90 @@ fn a_root_without_its_family_leaf_fails_member_checks_closed() {
     assert_eq!(code, 1);
     // A family leaf whose root's record holds no lock.
     let lab = common::lab();
-    let b = lone_member(&lab);
-    let root = family_root(&lab);
-    let data: Vec<(String, String)> = (inputs_of(&root, "spec/b.toml").iter())
-        .filter(|i| i["role"] == "confirmation")
-        .map(|i| file_hashes(&std::fs::read(root.join(i["path"].as_str().unwrap())).unwrap()))
-        .collect();
-    append_leaf(&lab, "plan", "", "sha256:plan", &data);
+    let (root, b) = lone_member(&lab, |t| t);
+    let data = confirmation_data(&root);
+    append_leaf(&lab, "planlog", "plan", "", Some("sha256:plan"), &data);
     let label = family::leaf_label("fam");
-    append_leaf(&lab, family::LEAF_KIND, &label, "sha256:x", &data);
-    plant_root(&lab, 0, None);
-    let (code, v) = check_json(&lab, &b);
-    let k = input_index(&root, "spec/b.toml", "data/confirm.txt");
-    let p = problem_at(&v, "E-CNF-005", &format!("inputs[{k}].path"));
+    append_leaf(
+        &lab,
+        "planlog",
+        family::LEAF_KIND,
+        &label,
+        Some("sha256:x"),
+        &data,
+    );
+    plant_root(&lab, "planlog", 0, None);
+    let p = confirm_refused(&lab, &root, &b);
     assert!(p.contains("The family records cannot be read: "), "{p}");
-    assert_eq!(code, 1);
+}
+
+#[test]
+fn a_family_leaf_without_a_commitment_fails_closed() {
+    // The root's record holds no lock, and the leaf no commitment: they must not match.
+    let lab = lab();
+    let (root, b) = lone_member(&lab, |t| t);
+    let data = confirmation_data(&root);
+    append_leaf(&lab, "planlog", "plan", "", Some("sha256:plan"), &data);
+    let label = family::leaf_label("fam");
+    append_leaf(&lab, "planlog", family::LEAF_KIND, &label, None, &data);
+    plant_root(&lab, "planlog", 0, None);
+    let p = confirm_refused(&lab, &root, &b);
+    assert!(p.contains("The family records cannot be read: "), "{p}");
+}
+
+#[test]
+fn a_plan_log_check_does_not_apply_test_log_leaf_indexes() {
+    let lab = lab();
+    let (root, b) = lone_member(&lab, |t| t.replace("test_log = false", "test_log = true"));
+    let data = confirmation_data(&root);
+    // Root fam's family lives in the test log: plan leaf 0, family leaf 1.
+    let lock = lock_of_b(&b);
+    append_leaf(&lab, "testlog", "plan", "", Some("sha256:plan"), &data);
+    let label = family::leaf_label("fam");
+    append_leaf(
+        &lab,
+        "testlog",
+        family::LEAF_KIND,
+        &label,
+        Some(&lock.hash()),
+        &data,
+    );
+    plant_root(&lab, "testlog", 0, Some(&lock));
+    // An outsider's leaf 0 of the plan log holds b's data. Index 0 of the test log is the
+    // root's plan leaf, which says nothing about the plan log.
+    append_leaf(&lab, "planlog", "plan", "", Some("sha256:out"), &data);
+    let p = confirm_refused(&lab, &root, &b);
+    assert!(p.ends_with("The earlier entry is leaf 0 (plan)."), "{p}");
+}
+
+#[test]
+fn a_locked_member_registers_only_as_locked_in_any_mode() {
+    let lab = lab();
+    let root = registered_family(&lab);
+    let b = root.join("spec/b.toml");
+    let locked = std::fs::read_to_string(&b).unwrap();
+    // An exploratory plan takes no estimates, so it declares no deviation.
+    let exploratory = ["[[pins.deviations]]", "from = ", "reason = ", "timing = "]
+        .iter()
+        .fold(locked, |t, k| {
+            t.replace(&format!("\n{k}"), &format!("\n# {k}"))
+        })
+        .replace("mode = \"confirmatory\"", "mode = \"exploratory\"")
+        .replace("label = \"confirmed\"", "label = \"signal\"");
+    std::fs::write(&b, exploratory).unwrap();
+    // `check` passes it: E-FAM-006 checks confirmatory plans.
+    let (code, v) = check_json(&lab, &b);
+    assert_eq!((code, errors(&v)), (0, vec![]), "{v}");
+    let (code, out) = try_register(&lab, &b);
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("E-FAM-006") && out.contains("Its spec hash is "),
+        "{out}"
+    );
+    assert!(!lab.home.study_dir("b").exists());
+    // b's slot stays reserved.
+    let (_, v) = check_json(&lab, &outsider(&lab, "fresh data\n", |t| t));
+    assert_eq!(v["plan_stream"]["reserved"], 2, "{v}");
 }
 
 #[test]

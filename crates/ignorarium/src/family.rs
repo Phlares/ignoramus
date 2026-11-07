@@ -129,6 +129,7 @@ pub fn find(
                     leaf.label == leaf_label(id)
                         && r.log == *log
                         && r.leaf < i
+                        && leaf.commitment.is_some()
                         && r.family.as_ref().map(Lock::hash) == leaf.commitment
                 })
                 .map(|(id, _)| id.as_str())

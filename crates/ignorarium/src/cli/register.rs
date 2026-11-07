@@ -164,6 +164,10 @@ pub fn run(
     if a.has_errors() {
         return Ok(done(1, None));
     }
+    // `check` compares a confirmatory plan alone; a locked id registers as locked in any mode.
+    if let Some(d) = rules::differs_from_lock(&a.value, &a.ctx) {
+        return Err(refusal("E-FAM-006", d.trim_end_matches('.')));
+    }
     let spec = Spec::from_value(&a.value).map_err(|e| io("spec does not fit the schema", e))?;
     let resolved = resolve(&a, &spec.design.conditions)?;
     let deviations = deviated(&a, &spec.pins.deviations)?;

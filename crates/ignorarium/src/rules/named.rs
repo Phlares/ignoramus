@@ -603,16 +603,23 @@ fn family_room(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
         .collect()
 }
 
-/// E-FAM-006 at `study.id` of a study a registered root's lock lists: its inputs, spec hash and
-/// payload hash must equal the lock. Box records that cannot be read fail closed. Only a
-/// locked study reads its family, so a family leaf without its root refuses no other study.
+/// E-FAM-006 at `study.id`: `differs_from_lock`.
 fn family_lock(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
-    let Some((path, id)) = (nodes(spec, pat).into_iter()).find_map(|(p, v)| Some((p, v.as_str()?)))
-    else {
-        return vec![];
-    };
+    (nodes(spec, pat).into_iter())
+        .filter(|(_, v)| v.is_string())
+        .filter_map(|(path, _)| Some(at(&path, differs_from_lock(spec, ctx)?)))
+        .collect()
+}
+
+/// For a study a registered root's lock lists, the first way its inputs, spec hash and payload
+/// hash differ from the lock, and both ways forward; `None` when they match, for any other
+/// study, and for a spec without a string `study.id`. Box records that cannot be read fail
+/// closed. Only a locked study reads its family, so a family leaf without its root refuses no
+/// other study. `check` runs it as E-FAM-006 on confirmatory plans, `register` on every plan.
+pub fn differs_from_lock(spec: &Value, ctx: &CheckCtx) -> Option<String> {
+    let id = text(spec, "study.id")?;
     let unread = |e: String| Some(format!("The box records cannot be read: {e}."));
-    let detail = match ctx.records.locked_members() {
+    match ctx.records.locked_members() {
         Err(e) => unread(e),
         Ok(locked) if !locked.iter().any(|m| m == id) => None,
         Ok(_) => match ctx.records.family_of(id) {
@@ -626,8 +633,7 @@ fn family_lock(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
                     )
                 }),
         },
-    };
-    detail.map(|d| at(&path, d)).into_iter().collect()
+    }
 }
 
 /// The first way `spec` differs from its lock entry `m`, as what to restore and a sentence:

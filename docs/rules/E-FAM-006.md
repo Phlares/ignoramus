@@ -12,7 +12,7 @@ Choose one: restore the spec, payload or input the family locked, byte for byte;
 
 ## Why
 
-Members may share data because every member was fixed before any of them ran. A member changed after the lock may have been shaped by what the root or another member found, so a test of it on the shared data is no longer an independent test. The lock holds each member's spec hash, payload hash and input pins, so any change shows.
+Members may share data because every member was fixed before any of them ran. A member changed after the lock may have been shaped by what the root or another member found, so a test of it on the shared data is no longer an independent test. The lock holds each member's spec hash, payload hash and input pins, so any change shows. `check` reports this rule for confirmatory plans; `register` refuses a changed member in any mode, so no change of mode frees a locked id or its reserved slot.
 
 ## Sources
 
