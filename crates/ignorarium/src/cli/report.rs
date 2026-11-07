@@ -238,21 +238,15 @@ fn text(r: &Value) -> String {
         let waiting: Vec<String> = (members.clone())
             .filter(|m| m["state"] != "finished")
             .map(|m| {
-                format!(
-                    "{} {}",
-                    m["study"].as_str().unwrap_or_default(),
-                    m["state"].as_str().unwrap_or_default()
-                )
+                let field = |k: &str| m[k].as_str().unwrap_or_default();
+                format!(" {} {}", field("study"), field("state"))
             })
             .collect();
         let root = f["root"].as_str().unwrap_or_default();
         s.push_str(&format!(
-            "family {root}:{}\n",
-            if waiting.is_empty() {
-                String::new()
-            } else {
-                format!(" {}", waiting.join(", "))
-            }
+            "family {root}:{}
+",
+            waiting.join(",")
         ));
         for m in members.filter(|m| m["state"] == "finished") {
             s.push_str(&format!(
