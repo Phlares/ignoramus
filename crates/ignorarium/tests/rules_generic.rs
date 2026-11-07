@@ -1333,8 +1333,18 @@ fn the_documented_codes_are_exactly_those_the_cli_raises() {
         .map(|r| r.code.as_str())
         .collect();
     codes.sort_unstable();
-    // The register refusals, and a family member's wait as its root's check reports it.
-    assert_eq!(codes, ["E-REG-001", "E-REG-002", "E-REG-003", "W-FAM-001"]);
+    // The register refusals, a family member's wait as its root's check reports it, and the
+    // derivative set's cost against the budget, which needs the machine and the schedule.
+    assert_eq!(
+        codes,
+        [
+            "E-REG-001",
+            "E-REG-002",
+            "E-REG-003",
+            "W-FAM-001",
+            "W-MUT-002"
+        ]
+    );
 }
 
 #[test]

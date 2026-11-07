@@ -1,18 +1,19 @@
 //! `check`: load a spec, run every rule, and report. Shared with `review`.
 use super::{CliError, Ctx, Done, Run, out};
 use crate::derived::{Alpha, Carried, Register};
-use crate::diag::{Diagnostic, Severity, render_human};
-use crate::estimate::{Estimate, defaults_json, estimate};
+use crate::diag::{Diagnostic, Severity, printable, render_human};
+use crate::estimate::{self, Estimate, defaults_json, estimate};
 use crate::family;
 use crate::home::Home;
 use crate::inputs;
 use crate::keys;
+use crate::machine::Machine;
 use crate::planlog::store::{PlanLog, PlanLogOnce};
 use crate::prior::{PriorError, PriorUse};
 use crate::records;
 use crate::rules::{self, BoxRecords, CheckCtx, ReadOnce};
-use crate::schedule;
-use crate::spec::{self, LoadError};
+use crate::schedule::{self, Child, Row, SPAWN_STAGE};
+use crate::spec::{self, LoadError, model::Spec};
 use crate::store::Store;
 use crate::stream::{self, Log, LogName, Next, StreamError};
 use ed25519_dalek::{SigningKey, VerifyingKey};
@@ -49,6 +50,59 @@ pub struct Assessed {
     /// For a plan that declares `pins.deterministic` and has an estimate, the recheck copies
     /// its schedule holds.
     pub rechecks: Option<usize>,
+    /// For a plan with an estimate and a declared child, its derivative set.
+    pub derivative: Option<DerivativeSet>,
+}
+
+/// The children a plan's triggers declare, as `check` shows them.
+pub struct DerivativeSet {
+    /// Each child in declared order, with the rows the schedule holds for it.
+    pub children: Vec<(Child, u64)>,
+    /// The estimate of every child row: the most the children can cost.
+    pub cost: Estimate,
+}
+
+impl DerivativeSet {
+    /// `None` when `spec` declares no child; `rows` is its schedule.
+    fn of(spec: &Spec, machine: &Machine, rows: &[Row]) -> Option<DerivativeSet> {
+        let children = schedule::children(spec);
+        if children.is_empty() {
+            return None;
+        }
+        let spawned: Vec<Row> = (rows.iter())
+            .filter(|r| r.stage == SPAWN_STAGE)
+            .cloned()
+            .collect();
+        let with_rows = |c: Child| {
+            let n = spawned.iter().filter(|r| r.condition == c.id).count() as u64;
+            (c, n)
+        };
+        Some(DerivativeSet {
+            children: children.into_iter().map(with_rows).collect(),
+            cost: estimate(spec, machine, &spawned),
+        })
+    }
+
+    /// W-MUT-002 when a run where every trigger fires would skip a child for the budget.
+    fn over_budget(&self, spec: &Spec, machine: &Machine, rows: &[Row]) -> Option<Diagnostic> {
+        let ids: Vec<&str> = self.children.iter().map(|(c, _)| c.id.as_str()).collect();
+        let admitted = estimate::admitted(spec, machine, rows, &ids);
+        let skipped: Vec<&str> = (ids.into_iter())
+            .filter(|id| !admitted.contains(id))
+            .collect();
+        if skipped.is_empty() {
+            return None;
+        }
+        let detail = format!(
+            "A run where every trigger fires skips {}.",
+            printable(&skipped.join(", "))
+        );
+        Some(rules::raised(
+            "W-MUT-002",
+            "mutations.triggers".into(),
+            Some(&detail),
+        ))
+    }
 }
 
 /// The plan stream as `check` shows it: the slots no study has opened, and the slots reserved
@@ -348,6 +402,7 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         stream,
         carried: rules::carried(&value, &cc),
         rechecks: None,
+        derivative: None,
         value,
         ctx: cc,
     };
@@ -358,6 +413,10 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
                 let copies = rows.iter().filter(|r| r.recheck_of.is_some()).count();
                 a.rechecks = s.pins.deterministic.then_some(copies);
                 a.estimate = Some(estimate(&s, &machine, &rows));
+                a.derivative = DerivativeSet::of(&s, &machine, &rows);
+                let warned =
+                    (a.derivative.as_ref()).and_then(|d| d.over_budget(&s, &machine, &rows));
+                a.diags.extend(warned);
             }
             None => a.diags.push(rules::schema_fault()),
         }
@@ -407,6 +466,25 @@ pub fn condition_lines(e: &Estimate) -> Vec<String> {
         .collect()
 }
 
+/// `<id>: <n> rows, from <triggers>`, one per child, then the cost of every child row.
+pub fn derivative_lines(d: &DerivativeSet) -> Vec<String> {
+    let e = &d.cost;
+    let worst = format!(
+        "worst case: {} rows, cpu hours {:.2}, wall hours {:.2}, money ${:.2}",
+        e.rows, e.cpu_hours, e.wall_hours, e.money_usd
+    );
+    (d.children.iter())
+        .map(|(c, n)| {
+            printable(&format!(
+                "{}: {n} rows, from {}",
+                c.id,
+                c.triggers.join(", ")
+            ))
+        })
+        .chain([worst])
+        .collect()
+}
+
 pub fn figure_lines(e: &Estimate) -> Vec<String> {
     vec![
         format!("rows: {}", e.rows),
@@ -441,6 +519,12 @@ fn render(a: &Assessed) -> String {
     }
     if let Some(e) = &a.estimate {
         s.push_str(&format!("conditions:\n{}\n", indented(condition_lines(e))));
+        if let Some(d) = &a.derivative {
+            s.push_str(&format!(
+                "derivative set:\n{}\n",
+                indented(derivative_lines(d))
+            ));
+        }
         s.push_str(&format!("estimate:\n{}\n", indented(figure_lines(e))));
         s.push_str(&format!("label: {}\n\n", e.label_earnable));
         s.push_str(&format!("defaults:\n{}\n", indented(default_lines(a))));
@@ -500,6 +584,23 @@ fn render_json(a: &Assessed) -> Result<String, CliError> {
             })
         })
         .collect();
+    let derivative = a.derivative.as_ref().map(|d| {
+        let children: Vec<Value> = (d.children.iter())
+            .map(|(c, rows)| {
+                json!({
+                    "id": c.id, "parent": c.parent, "operator": c.operator, "value": c.value,
+                    "triggers": c.triggers, "rows": rows,
+                })
+            })
+            .collect();
+        json!({
+            "children": children,
+            "rows": d.cost.rows,
+            "cpu_hours": d.cost.cpu_hours,
+            "wall_hours": d.cost.wall_hours,
+            "money_usd": d.cost.money_usd,
+        })
+    });
     let recheck = a.rechecks.map(|rows| {
         let from = a.carried.as_ref().map(|c| &c.study);
         json!({ "carried_from": from, "rows": rows })
@@ -513,6 +614,7 @@ fn render_json(a: &Assessed) -> Result<String, CliError> {
         "family": a.family_line,
         "recheck": recheck,
         "estimate": estimate,
+        "derivative_set": derivative,
         "defaults": defaults_json(&a.filled),
         "hash": a.hash,
     });

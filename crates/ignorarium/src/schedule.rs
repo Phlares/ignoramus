@@ -4,7 +4,7 @@ use crate::files::{self, WriteOnceError};
 use crate::seed::seed;
 use crate::spec::{
     self,
-    model::{Pick, Role, Spec},
+    model::{Param, Pick, Role, Scalar, Spec},
 };
 use crate::units::{self, Cluster};
 use serde::Serialize;
@@ -18,11 +18,14 @@ pub const SELECTION_STAGE: &str = "selection";
 pub const CONFIRMATION_STAGE: &str = "confirmation";
 /// Reserve clusters run the confirmation stage's conditions, after every confirmation row.
 pub const RESERVE_STAGE: &str = "reserve";
+/// Each declared child on the confirmation clusters, after every reserve row. A child row runs
+/// only when a trigger admits its child.
+pub const SPAWN_STAGE: &str = "spawn";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Row {
     pub index: u64,
-    /// `SELECTION_STAGE`, `CONFIRMATION_STAGE` or `RESERVE_STAGE`.
+    /// `SELECTION_STAGE`, `CONFIRMATION_STAGE`, `RESERVE_STAGE` or `SPAWN_STAGE`.
     pub stage: String,
     pub unit: String,
     pub cluster: String,
@@ -87,24 +90,38 @@ impl std::error::Error for ExpandError {}
 pub const ROW_CAP: u64 = 100_000;
 
 /// The stage a cluster of `role` runs in, and the conditions that stage runs besides the
-/// reference. A selection cluster has a stage only when the spec declares one.
-fn stage(spec: &Spec, role: Role) -> Option<(&'static str, &[String])> {
+/// reference. A selection cluster has a stage when the spec declares one. Without one, a spec
+/// with a declared trigger runs each condition a trigger's contrast names on it, in the order
+/// `design.conditions` lists them.
+fn stage(spec: &Spec, role: Role) -> Option<(&'static str, Vec<&str>)> {
+    fn names(list: &[String]) -> Vec<&str> {
+        list.iter().map(String::as_str).collect()
+    }
+    let d = &spec.design;
     match role {
-        Role::Selection => spec
-            .design
-            .selection
-            .as_ref()
-            .map(|s| (SELECTION_STAGE, &s.conditions[..])),
-        Role::Confirmation => Some((CONFIRMATION_STAGE, &spec.design.confirmation.conditions[..])),
-        Role::Reserve => Some((RESERVE_STAGE, &spec.design.confirmation.conditions[..])),
+        Role::Selection => match &d.selection {
+            Some(s) => Some((SELECTION_STAGE, names(&s.conditions))),
+            None if spec.mutations.declared().next().is_some() => {
+                let watched =
+                    |id: &&str| (spec.mutations.declared()).any(|t| t.contrast.contains_key(*id));
+                let ids = (d.conditions.iter())
+                    .map(|c| c.id.as_str())
+                    .filter(|id| *id != d.reference);
+                Some((SELECTION_STAGE, ids.filter(watched).collect()))
+            }
+            None => None,
+        },
+        Role::Confirmation => Some((CONFIRMATION_STAGE, names(&d.confirmation.conditions))),
+        Role::Reserve => Some((RESERVE_STAGE, names(&d.confirmation.conditions))),
         Role::Calibration | Role::Model => None,
     }
 }
 
 /// Rows in the order stage (selection, confirmation, reserve), stratum, cluster path (a
 /// reserve cluster's input pin instead), then each picked unit, then the reference condition,
-/// then the stage's conditions in the order it lists them, then repeat 0..repeats. The order
-/// of `clusters` does not matter.
+/// then the stage's conditions in the order it lists them, then repeat 0..repeats. Then the
+/// spawn stage: each child `children` lists, on the confirmation clusters in their order,
+/// each picked unit, then repeat. The order of `clusters` does not matter.
 pub fn expand(
     spec: &Spec,
     spec_hash: &[u8; 32],
@@ -114,18 +131,32 @@ pub fn expand(
     if !d.conditions.iter().any(|c| c.id == d.reference) {
         return Err(ExpandError::UnknownReference(d.reference.clone()));
     }
-    let mut staged: Vec<(&str, &[String], &Cluster)> = clusters
+    // (stage, its conditions, cluster), in the order the rows run.
+    let mut blocks: Vec<(&str, Vec<&str>, &Cluster)> = clusters
         .iter()
-        .filter_map(|c| stage(spec, c.role).map(|(name, conds)| (name, conds, c)))
+        .filter_map(|c| {
+            let (name, conds) = stage(spec, c.role)?;
+            Some((name, [vec![d.reference.as_str()], conds].concat(), c))
+        })
         .collect();
     let pins = pins(spec);
-    staged.sort_by_key(|&(_, _, c)| place(&pins, c));
+    blocks.sort_by_key(|(_, _, c)| place(&pins, c));
+    let confirmation: Vec<&Cluster> = (blocks.iter())
+        .filter(|(_, _, c)| c.role == Role::Confirmation)
+        .map(|(_, _, c)| *c)
+        .collect();
+    let children = children(spec);
+    for child in &children {
+        let spawned = confirmation
+            .iter()
+            .map(|c| (SPAWN_STAGE, vec![&child.id[..]], *c));
+        blocks.extend(spawned);
+    }
     let mut rows = Vec::new();
     let mut index: u64 = 0;
-    for (name, conditions, c) in staged {
-        let conditions = std::iter::once(&d.reference).chain(conditions);
+    for (name, conditions, c) in blocks {
         for &i in &c.picked {
-            for cond in conditions.clone() {
+            for cond in &conditions {
                 for repeat in 0..d.repeats {
                     rows.push(Row {
                         index,
@@ -133,7 +164,7 @@ pub fn expand(
                         unit: units::key(&c.path, i),
                         cluster: c.path.clone(),
                         stratum: c.stratum.clone(),
-                        condition: cond.clone(),
+                        condition: cond.to_string(),
                         repeat,
                         shard: 0,
                         seed_hex: hex::encode(seed(spec_hash, &format!("row/{index}"))),
@@ -145,6 +176,76 @@ pub fn expand(
         }
     }
     Ok(rows)
+}
+
+/// A condition a trigger spawns: `parent` with its param `operator` set to `value`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Child {
+    /// `<parent>~<operator>=<value>`, the value as `shown` writes it. The id is the child's
+    /// identity: two declarations with one id are one child.
+    pub id: String,
+    /// The condition the operator acts on, or `selected`, which the pick replaces at run.
+    pub parent: String,
+    pub operator: String,
+    /// As first declared.
+    pub value: Scalar,
+    /// The triggers that declare it, in spec order.
+    pub triggers: Vec<String>,
+}
+
+/// A spawn value as a child id writes it. Equal numbers show the same: 64 and 64.0 as `64`,
+/// -0.0 as `0`. A float shows as the shortest decimal that reads back to it.
+pub fn shown(v: &Scalar) -> String {
+    match v {
+        Scalar::Int(i) => i.to_string(),
+        Scalar::Float(f) if *f == 0.0 => "0".into(),
+        Scalar::Float(f) => f.to_string(),
+        Scalar::Text(t) => t.clone(),
+    }
+}
+
+/// The id of the child of `parent` with `operator` set to `value`.
+pub fn child_id(parent: &str, operator: &str, value: &Scalar) -> String {
+    format!("{parent}~{operator}={}", shown(value))
+}
+
+/// The declared derivative set: each child of each declared trigger, in trigger order, then
+/// spawns order, then values order, once. A spawn whose operator is not declared spawns
+/// nothing, and a value the parent's param holds is no child. A child of `selected` is
+/// compared with the pick's params at run.
+pub fn children(spec: &Spec) -> Vec<Child> {
+    let m = &spec.mutations;
+    let mut out: Vec<Child> = Vec::new();
+    for t in m.declared() {
+        for s in &t.spawns {
+            let Some(op) = m.operators.iter().find(|o| o.name == s.operator) else {
+                continue;
+            };
+            let parent = spec.design.conditions.iter().find(|c| c.id == op.acts_on);
+            let held = match parent.and_then(|c| c.params.get(&op.name)) {
+                Some(Param::Value(v)) => Some(shown(v)),
+                _ => None,
+            };
+            for value in &s.values {
+                if held.as_deref() == Some(&shown(value)[..]) {
+                    continue;
+                }
+                let id = child_id(&op.acts_on, &op.name, value);
+                match out.iter_mut().find(|c| c.id == id) {
+                    Some(c) if !c.triggers.contains(&t.id) => c.triggers.push(t.id.clone()),
+                    Some(_) => {}
+                    None => out.push(Child {
+                        id,
+                        parent: op.acts_on.clone(),
+                        operator: op.name.clone(),
+                        value: value.clone(),
+                        triggers: vec![t.id.clone()],
+                    }),
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Each input's pin by path; the first input with a path names it.

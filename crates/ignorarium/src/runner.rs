@@ -22,7 +22,8 @@ use crate::records::{self, RecordDraft, RecordError, VerifyError};
 use crate::redact::Redact;
 use crate::rules::BoxRecords;
 use crate::schedule::{
-    self, CONFIRMATION_STAGE, RESERVE_STAGE, Row, SELECTION_STAGE, Schedule, ScheduleError,
+    self, CONFIRMATION_STAGE, RESERVE_STAGE, Row, SELECTION_STAGE, SPAWN_STAGE, Schedule,
+    ScheduleError,
 };
 use crate::spec::model::{Mode, Param, Role, SELECTED, Spec, param_path};
 use crate::store::Store;
@@ -804,8 +805,8 @@ pub fn progress(
     })
 }
 
-/// In a confirmatory plan, refuse a confirmation or reserve input that holds the same data as
-/// a selection or calibration input (E-CNF-004): `check` cannot compare a file that was absent
+/// In a confirmatory plan or a plan with a declared trigger, refuse a confirmation or reserve
+/// input that holds the same data as a selection or calibration input (E-CNF-004): `check` cannot compare a file that was absent
 /// at registration, and a late copy of a registered file has a registered hash. Then a
 /// selection, confirmation or reserve input that the registered plan leaf did not hold is
 /// late: refuse a confirmation or reserve input that another study used; a selection input may
@@ -833,7 +834,7 @@ fn gate_late_data(
         .filter_map(|(i, (_, h))| Some((i.path.as_str(), i.role, h.as_ref()?)))
         .collect();
     let of = |roles: &'static [Role]| present.iter().filter(move |(_, r, _)| roles.contains(r));
-    if spec.study.mode == Mode::Confirmatory {
+    if spec.study.mode == Mode::Confirmatory || spec.mutations.declared().next().is_some() {
         for (path, path_role, hashes) in of(&[Role::Confirmation, Role::Reserve]) {
             let mut held = of(&[Role::Selection, Role::Calibration]);
             if let Some((other, role, _)) = held.find(|(_, _, h)| same_data(h, hashes)) {
@@ -1069,6 +1070,10 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
         .iter()
         .filter(|r| !done.contains(&r.index))
     {
+        // No trigger admits a child yet, so no child row runs.
+        if row.stage == SPAWN_STAGE {
+            continue;
+        }
         // In a re-size study no reserve row runs before the `resize` record, and only the
         // rows of the clusters it admits run. A stop runs none: the run leaves the loop.
         if row.stage == RESERVE_STAGE && plan.spec.design.resize.is_some() {

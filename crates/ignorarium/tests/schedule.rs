@@ -1,7 +1,7 @@
 use ignorarium::machine::Machine;
 use ignorarium::schedule::{self, Row, Schedule, ScheduleError, expand};
 use ignorarium::seed::seed;
-use ignorarium::spec::model::{Pick, Role, Spec};
+use ignorarium::spec::model::{Pick, Role, Scalar, Spec};
 use ignorarium::units::{self, Cluster};
 use serde_json::{Value, json};
 use std::path::Path;
@@ -692,4 +692,262 @@ fn the_estimate_charges_every_reserve_row() {
         with.rows_per_condition,
         [("exact".to_string(), 4), ("arm-a".to_string(), 4)]
     );
+}
+/// The hash of the schedule bytes of `s` from its own clusters.
+fn schedule_hash(s: &Spec, rechecks: bool) -> String {
+    let rows = schedule::rows(s, &hash(), rechecks).unwrap();
+    ignorarium::canon::sha256_hex(&Schedule::new(&hash(), rows).to_bytes().unwrap())
+}
+
+#[test]
+fn a_spec_without_triggers_has_an_identical_schedule() {
+    // The hashes are those of the schedules the box wrote before triggers spawned children.
+    let plain = template();
+    let mut staged = template();
+    staged["design"]["units_per_cluster"] = json!(2);
+    staged["design"]["repeats"] = json!(2);
+    staged["design"]["conditions"] = json!([{ "id": "exact" }, { "id": "a" }, { "id": "b" }]);
+    staged["design"]["selection"] =
+        json!({ "metric": "ppl-ratio", "conditions": ["a", "b"], "rule": "best-mean" });
+    staged["design"]["confirmation"] = json!({ "conditions": ["selected"] });
+    staged["inputs"] = json!([
+        input("data/s.txt", "selection", 3),
+        input("data/c.txt", "confirmation", 3),
+    ]);
+    let legacy = json!([{ "id": "T1", "metric": "ppl-ratio", "threshold_e": 2.0 }]);
+    for (v, rechecks, want) in [
+        (
+            plain,
+            false,
+            "2d7ecf159ddf1fd564bc875114b6a58cdf8042f43c86f02ab2bb0d95366625c3",
+        ),
+        (
+            staged,
+            true,
+            "e2bdc05dfe97d7cad9520b16868b9b72d9807257b37db7ef613ba4e4f05d941f",
+        ),
+    ] {
+        let mut with_legacy = v.clone();
+        with_legacy["mutations"]["triggers"] = legacy.clone();
+        // A selection input with no stage and only a legacy trigger runs nothing.
+        let mut unstaged = with_legacy.clone();
+        if unstaged["design"].get("selection").is_none() {
+            let mut inputs = unstaged["inputs"].as_array().unwrap().clone();
+            inputs.push(input("data/s.txt", "selection", 3));
+            unstaged["inputs"] = json!(inputs);
+        }
+        for v in [v, with_legacy, unstaged] {
+            let s = Spec::from_value(&v).unwrap();
+            assert_eq!(schedule_hash(&s, rechecks), want, "{}", v["mutations"]);
+        }
+    }
+}
+
+// ---- triggers: the trigger-only selection stage and the spawn stage ----
+
+/// A declared trigger `id` on `contrast` that spawns `spawns`.
+fn trigger(id: &str, contrast: Value, spawns: Value) -> Value {
+    json!({
+        "id": id, "outcome": "ppl-ratio", "contrast": contrast, "claim": { "below": 0.0 },
+        "statistic": { "quantile": 0.5 }, "threshold_e": 2.0, "spawns": spawns,
+    })
+}
+
+/// The conditions `exact`, `a` (with `w = 128`), `b` and `c`; the confirmation stage runs `a`
+/// `repeats` times. The operators `w` (int, acts on `a`) and `m` (enum, acts on `b`); then
+/// `triggers`.
+fn spawning(triggers: Value, repeats: u32) -> Spec {
+    let mut v = template();
+    v["design"]["repeats"] = json!(repeats);
+    v["design"]["conditions"] = json!([
+        { "id": "exact" }, { "id": "a", "params": { "w": 128 } }, { "id": "b" }, { "id": "c" }
+    ]);
+    v["design"]["confirmation"] = json!({ "conditions": ["a"] });
+    v["mutations"]["operators"] = json!([
+        { "name": "w", "type": "int", "range": [64, 512], "acts_on": "a" },
+        { "name": "m", "type": "enum", "range": ["x", "y", 64], "acts_on": "b" },
+    ]);
+    v["mutations"]["triggers"] = triggers;
+    Spec::from_value(&v).unwrap()
+}
+
+/// One selection cluster `s`, two confirmation clusters and one reserve cluster `r`.
+fn spawn_clusters() -> Vec<Cluster> {
+    vec![
+        cluster_of(Role::Reserve, "r", "a", &[0]),
+        cluster("c2", "a", &[1]),
+        cluster_of(Role::Selection, "s", "z", &[0]),
+        cluster("c1", "a", &[0]),
+    ]
+}
+
+/// The child ids of `s`, in declared order.
+fn child_ids(s: &Spec) -> Vec<String> {
+    schedule::children(s).into_iter().map(|c| c.id).collect()
+}
+
+#[test]
+fn a_trigger_only_stage_runs_the_reference_and_the_contrast_conditions() {
+    // T1 names c, T2 names b and c: the stage runs them in the order design.conditions lists
+    // them, once each, after the reference. No trigger names a, so a runs no selection row.
+    let s = spawning(
+        json!([
+            trigger("T1", json!({ "c": 1.0 }), json!([])),
+            trigger("T2", json!({ "c": 1.0, "b": -1.0 }), json!([])),
+        ]),
+        1,
+    );
+    let rows = expand(&s, &hash(), &spawn_clusters()).unwrap();
+    assert_eq!(
+        stage_rows(&rows[..3]),
+        [
+            ("selection", "s#0", "exact", 0),
+            ("selection", "s#0", "b", 0),
+            ("selection", "s#0", "c", 0),
+        ]
+    );
+    assert!(rows[3..].iter().all(|r| r.stage != "selection"));
+    // A legacy trigger is inert: the selection input runs nothing.
+    let mut v = template();
+    v["mutations"]["triggers"] = json!([{ "id": "T1", "metric": "ppl-ratio", "threshold_e": 2.0 }]);
+    let legacy = Spec::from_value(&v).unwrap();
+    let rows = expand(&legacy, &hash(), &spawn_clusters()).unwrap();
+    assert!(rows.iter().all(|r| r.cluster != "s"), "{rows:?}");
+}
+
+#[test]
+fn spawn_rows_follow_confirmation_and_reserve_rows_in_declared_order() {
+    let s = spawning(
+        json!([
+            trigger(
+                "T1",
+                json!({ "a": 1.0 }),
+                json!([{ "operator": "w", "values": [256, 64] }])
+            ),
+            trigger(
+                "T2",
+                json!({ "b": 1.0 }),
+                json!([{ "operator": "m", "values": ["y"] }, { "operator": "w", "values": [64] }])
+            ),
+        ]),
+        2,
+    );
+    assert_eq!(schedule::SPAWN_STAGE, "spawn");
+    // Trigger order, then spawns order, then values order; T2's a~w=64 is T1's.
+    let children = schedule::children(&s);
+    assert_eq!(child_ids(&s), ["a~w=256", "a~w=64", "b~m=y"]);
+    let triggers: Vec<Vec<String>> = children.iter().map(|c| c.triggers.clone()).collect();
+    assert_eq!(
+        triggers,
+        [
+            vec!["T1".to_string()],
+            vec!["T1".into(), "T2".into()],
+            vec!["T2".into()]
+        ]
+    );
+    let first = &children[0];
+    assert_eq!((&first.parent[..], &first.operator[..]), ("a", "w"));
+    assert_eq!(first.value, Scalar::Int(256));
+    let rows = expand(&s, &hash(), &spawn_clusters()).unwrap();
+    // 1 selection unit x (exact, a, b) x 2, 2 confirmation units x (exact, a) x 2, 1 reserve
+    // unit x (exact, a) x 2, then 3 children x 2 confirmation units x 2.
+    assert_eq!(rows.len(), 6 + 8 + 4 + 12);
+    assert!(rows[14..18].iter().all(|r| r.stage == "reserve"));
+    let mut want = vec![];
+    for child in ["a~w=256", "a~w=64", "b~m=y"] {
+        for unit in ["c1#0", "c2#1"] {
+            for repeat in 0..2 {
+                want.push(("spawn", unit, child, repeat));
+            }
+        }
+    }
+    assert_eq!(stage_rows(&rows[18..]), want);
+    for (i, r) in rows.iter().enumerate() {
+        assert_eq!(r.index, i as u64);
+        assert_eq!(r.seed_hex, hex::encode(seed(&hash(), &format!("row/{i}"))));
+    }
+    assert!(rows[18..].iter().all(|r| r.stratum == "a"));
+}
+
+#[test]
+fn one_child_declared_twice_expands_once() {
+    // 64 and 64.0 are one value, inside one trigger and across two.
+    let s = spawning(
+        json!([
+            trigger(
+                "T1",
+                json!({ "b": 1.0 }),
+                json!([{ "operator": "m", "values": [64, "x", 64.0] }])
+            ),
+            trigger(
+                "T2",
+                json!({ "b": 1.0 }),
+                json!([{ "operator": "m", "values": [64.0, "x"] }])
+            ),
+        ]),
+        1,
+    );
+    assert_eq!(child_ids(&s), ["b~m=64", "b~m=x"]);
+    let children = schedule::children(&s);
+    assert_eq!(children[0].value, Scalar::Int(64));
+    assert_eq!(children[0].triggers, ["T1", "T2"]);
+    let rows = expand(&s, &hash(), &spawn_clusters()).unwrap();
+    let spawned: Vec<&str> = (rows.iter())
+        .filter(|r| r.stage == "spawn")
+        .map(|r| &r.condition[..])
+        .collect();
+    assert_eq!(spawned, ["b~m=64", "b~m=64", "b~m=x", "b~m=x"]);
+    // A float shows as the shortest decimal that reads back to it; -0.0 shows as 0.
+    let mut v = template();
+    v["design"]["conditions"] = json!([{ "id": "exact" }, { "id": "a" }]);
+    v["mutations"]["operators"] =
+        json!([{ "name": "f", "type": "float", "range": [-1.0, 1.0], "acts_on": "a" }]);
+    v["mutations"]["triggers"] = json!([trigger(
+        "T1",
+        json!({ "a": 1.0 }),
+        json!([{ "operator": "f", "values": [0.25, -0.0, 0.0, 1.0, 1] }])
+    )]);
+    let s = Spec::from_value(&v).unwrap();
+    assert_eq!(child_ids(&s), ["a~f=0.25", "a~f=0", "a~f=1"]);
+}
+
+#[test]
+fn a_value_equal_to_the_parents_param_expands_no_child() {
+    // a holds w = 128: 128 and 128.0 expand nothing. b has no m, so every m value expands.
+    let s = spawning(
+        json!([trigger(
+            "T1",
+            json!({ "a": 1.0 }),
+            json!([
+                { "operator": "w", "values": [128, 64, 128.0] },
+                { "operator": "m", "values": ["x"] }
+            ])
+        )]),
+        1,
+    );
+    assert_eq!(child_ids(&s), ["a~w=64", "b~m=x"]);
+    // A child of `selected` waits for the pick: no value is compared yet.
+    let mut v = template();
+    v["design"]["conditions"] = json!([
+        { "id": "exact" }, { "id": "a", "params": { "w": 128 } }, { "id": "b", "params": { "w": 64 } }
+    ]);
+    v["design"]["selection"] =
+        json!({ "metric": "ppl-ratio", "conditions": ["a", "b"], "rule": "best-mean" });
+    v["design"]["confirmation"] = json!({ "conditions": ["selected"] });
+    v["mutations"]["operators"] =
+        json!([{ "name": "w", "type": "int", "range": [64, 512], "acts_on": "selected" }]);
+    v["mutations"]["triggers"] = json!([trigger(
+        "T1",
+        json!({ "selected": 1.0 }),
+        json!([{ "operator": "w", "values": [128, 64] }])
+    )]);
+    let s = Spec::from_value(&v).unwrap();
+    assert_eq!(child_ids(&s), ["selected~w=128", "selected~w=64"]);
+    // With a selection stage, the selection rows are the stage's.
+    let rows = expand(&s, &hash(), &spawn_clusters()).unwrap();
+    let selection: Vec<&str> = (rows.iter())
+        .filter(|r| r.stage == "selection")
+        .map(|r| &r.condition[..])
+        .collect();
+    assert_eq!(selection, ["exact", "a", "b"]);
 }

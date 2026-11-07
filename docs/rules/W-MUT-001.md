@@ -4,15 +4,15 @@ Severity: warning
 
 ## Problem
 
-Two triggers declare the same child.
+A child is declared twice.
 
 ## Fix
 
-List the value under one trigger only, or accept that the child runs once and both triggers can admit it.
+List each value once, under one trigger. Equal numbers, such as 64 and 64.0, are one value. Otherwise accept that the child runs once and the first trigger that fires admits it.
 
 ## Why
 
-A child is its condition with one operator set to one value. Declared twice, it still runs once, so the second declaration adds nothing.
+A child is its condition with one operator set to one value, and its id names the three. Declared twice, it still runs once and its cost counts once, so the second declaration adds nothing.
 
 ## Applies to
 

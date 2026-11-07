@@ -17,9 +17,9 @@ use crate::payload::{self, PayloadError};
 use crate::power::{required_clusters, z};
 use crate::prior::{PriorUse, Seen, same_data};
 use crate::records;
-use crate::schedule::ROW_CAP;
+use crate::schedule::{self, ROW_CAP};
 use crate::seed::seed;
-use crate::spec::model::{Claim, Outcome, SELECTED, StatisticSpec};
+use crate::spec::model::{Claim, Outcome, SELECTED, Scalar, Spec, StatisticSpec};
 use crate::store::{Store, is_digest};
 use crate::stream::{self, LogName};
 use evidence::claim::{Bound, Statistic};
@@ -29,6 +29,7 @@ use evidence::power::{
 };
 use evidence::rng::Rng;
 use evidence::{Error, Tail};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -2132,8 +2133,13 @@ fn reference_not_self(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
 /// holds the data of a selection or calibration input, or a reserve input that of a
 /// confirmation input or of an earlier reserve input: the same exact hash, or the same
 /// normalized hash (text that differs only in case and spacing). An empty normalized hash (not
-/// UTF-8 text) matches nothing. The detail names the first such input in spec order.
+/// UTF-8 text) matches nothing. The detail names the first such input in spec order. Applies
+/// to a confirmatory plan and to any plan with a declared trigger, whose children are tested
+/// on the confirmation data after the trigger decides on the selection data.
 fn confirmation_disjoint(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    if !(confirmatory(spec) || has_declared_triggers(spec)) {
+        return vec![];
+    }
     if !pat.contains('.') {
         return flag(spec, pat, |v| {
             v.as_array()
@@ -2202,27 +2208,48 @@ fn units_declared(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
 }
 
 /// The conditions each unit of a cluster with this role runs: the reference and its stage's
-/// list. `None` when the role has no stage: a calibration or model input, or a selection input
-/// with no selection stage.
+/// list. With no selection stage, a selection input runs each declared condition but the
+/// reference that a trigger's contrast names, as `schedule::expand` does. `None` when the role
+/// has no stage: a calibration or model input, or a selection input with neither a stage nor
+/// a declared trigger.
 fn stage_size(spec: &Value, role: &str) -> Option<u64> {
-    let list = match role {
-        "selection" => list(spec, "design.selection.conditions")?,
-        "confirmation" | "reserve" => list(spec, "design.confirmation.conditions")?,
+    let size = match role {
+        "selection" if val(spec, "design.selection").is_none() => {
+            if !has_declared_triggers(spec) {
+                return None;
+            }
+            let watched: BTreeSet<&str> = (keys(spec, TRIGGER_CONTRAST_KEYS).into_iter())
+                .map(|(_, k)| k)
+                .collect();
+            let reference = text(spec, "design.reference");
+            (texts(spec, "design.conditions[*].id").into_iter())
+                .filter(|id| Some(*id) != reference && watched.contains(id))
+                .count()
+        }
+        "selection" => list(spec, "design.selection.conditions")?.len(),
+        "confirmation" | "reserve" => list(spec, "design.confirmation.conditions")?.len(),
         _ => return None,
     };
-    Some(1 + list.len() as u64)
+    Some(1 + size as u64)
 }
 
 /// The schedule would hold more than `ROW_CAP` rows: each cluster's units, up to the units per
-/// cluster at the target, times the conditions its stage runs, times the repeats. Counted
-/// before anything is built, so a typo cannot exhaust the memory of `check`.
+/// cluster at the target, times the conditions its stage runs and, for a confirmation cluster,
+/// the declared children, times the repeats. Counted before anything is built, so a typo
+/// cannot exhaust the memory of `check`.
 fn row_cap(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
     let Some(repeats) = val(spec, "design.repeats").and_then(Value::as_u64) else {
         return vec![];
     };
+    // A spec that does not parse builds no schedule, so its children add no row here.
+    let children = Spec::from_value(spec).map_or(0, |s| schedule::children(&s).len() as u64);
+    let conditions = |r: &str| {
+        let spawned = if r == "confirmation" { children } else { 0 };
+        Some(stage_size(spec, r)? + spawned)
+    };
     let clusters: Vec<(u64, u64)> = nodes(spec, "inputs[*]")
         .into_iter()
-        .filter_map(|(_, i)| Some((i.get("units")?.as_u64()?, stage_size(spec, role(i)?)?)))
+        .filter_map(|(_, i)| Some((i.get("units")?.as_u64()?, conditions(role(i)?)?)))
         .collect();
     let mut out = vec![];
     for (path, per) in nodes(spec, pat) {
@@ -2786,14 +2813,22 @@ fn acts_on_declared(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
     })
 }
 
-/// Whether `v` is a value `op` accepts: an enum value is a scalar in its range, an int value a
-/// whole number in `[lo, hi]`, a float value a number in `[lo, hi]`. `None` when the operator is
-/// unreadable: the type and range rules report that.
+/// `v` as a spawn value: a number or a text. `None` for anything else.
+fn scalar(v: &Value) -> Option<Scalar> {
+    Scalar::deserialize(v).ok()
+}
+
+/// Whether `v` is a value `op` accepts: an enum value is a scalar that shows as a member of its
+/// range does (`schedule::shown`: 64 and 64.0 are one value), an int value a whole number in
+/// `[lo, hi]`, a float value a number in `[lo, hi]`. `None` when the operator is unreadable:
+/// the type and range rules report that.
 fn fits(op: &Value, v: &Value) -> Option<bool> {
     let range = op.get("range")?.as_array()?;
     let kind = op.get("type")?.as_str()?;
     if kind == "enum" {
-        return Some(is_scalar(v) && range.contains(v));
+        let shown = |v: &Value| scalar(v).map(|x| schedule::shown(&x));
+        let want = shown(v);
+        return Some(want.is_some() && range.iter().any(|r| shown(r) == want));
     }
     let [lo, hi] = range.as_slice() else {
         return None;
@@ -2807,19 +2842,27 @@ fn fits(op: &Value, v: &Value) -> Option<bool> {
     Some(typed && v.as_f64().is_some_and(|x| span.contains(&x)))
 }
 
-/// E-MUT-005: a spawn value its operator does not accept (see `fits`). A spawn with no
-/// declared operator is E-MUT-004's.
-fn spawn_value_fits(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+/// Each spawn under `pat` with its path, its declared operator and its values. A spawn with no
+/// declared operator is E-MUT-004's; one with mistyped values, the type rule's.
+fn spawns<'a>(spec: &'a Value, pat: &str) -> Vec<(String, &'a Value, &'a Vec<Value>)> {
     let operators = nodes(spec, "mutations.operators[*]");
-    let mut out = vec![];
-    for (spawn_path, spawn) in nodes(spec, pat.strip_suffix(".values[*]").unwrap_or(pat)) {
-        let named = spawn.get("operator").and_then(Value::as_str);
-        let op = (operators.iter())
+    let operator = |spawn: &Value| {
+        let named = spawn.get("operator")?.as_str()?;
+        (operators.iter())
             .map(|(_, o)| *o)
-            .find(|o| o.get("name").and_then(Value::as_str) == named);
-        let Some((op, values)) = op.zip(spawn.get("values").and_then(Value::as_array)) else {
-            continue;
-        };
+            .find(|o| o.get("name").and_then(Value::as_str) == Some(named))
+    };
+    (nodes(spec, pat).into_iter())
+        .filter_map(|(path, spawn)| {
+            Some((path, operator(spawn)?, spawn.get("values")?.as_array()?))
+        })
+        .collect()
+}
+
+/// E-MUT-005: a spawn value its operator does not accept (see `fits`).
+fn spawn_value_fits(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let mut out = vec![];
+    for (spawn_path, op, values) in spawns(spec, pat.strip_suffix(".values[*]").unwrap_or(pat)) {
         out.extend(
             (values.iter().enumerate())
                 .filter(|(_, v)| fits(op, v) == Some(false))
@@ -2851,31 +2894,23 @@ fn triggers_declared(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
     }
 }
 
-/// W-MUT-001: a value a later trigger lists for an operator that an earlier trigger lists it
-/// for. A child's id is its condition, operator and value, and an operator acts on one condition.
+/// W-MUT-001: a spawn value whose child an earlier value declares, in the same trigger or an
+/// earlier one. The child id is the identity (`schedule::child_id`): its condition, operator
+/// and value, with equal numbers one value.
 fn child_declared_once(spec: &Value, _: &CheckCtx, _: &str) -> Vec<Hit> {
-    let mut earlier: Vec<(&str, &Value)> = vec![];
+    let mut seen = BTreeSet::new();
     let mut out = vec![];
-    for (trigger_path, trigger) in nodes(spec, "mutations.triggers[*]") {
-        let mut own = vec![];
-        let spawns = (trigger.get("spawns").and_then(Value::as_array))
-            .into_iter()
-            .flatten();
-        for (j, spawn) in spawns.enumerate() {
-            let Some(operator) = spawn.get("operator").and_then(Value::as_str) else {
-                continue;
-            };
-            let values = (spawn.get("values").and_then(Value::as_array))
-                .into_iter()
-                .flatten();
-            for (k, v) in values.enumerate() {
-                if earlier.contains(&(operator, v)) {
-                    out.push(hit(format!("{trigger_path}.spawns[{j}].values[{k}]")));
-                }
-                own.push((operator, v));
+    for (spawn_path, op, values) in spawns(spec, "mutations.triggers[*].spawns[*]") {
+        let text = |key: &str| op.get(key).and_then(Value::as_str);
+        let (Some(name), Some(parent)) = (text("name"), text("acts_on")) else {
+            continue;
+        };
+        for (k, v) in values.iter().enumerate() {
+            let Some(v) = scalar(v) else { continue };
+            if !seen.insert(schedule::child_id(parent, name, &v)) {
+                out.push(hit(format!("{spawn_path}.values[{k}]")));
             }
         }
-        earlier.extend(own);
     }
     out
 }

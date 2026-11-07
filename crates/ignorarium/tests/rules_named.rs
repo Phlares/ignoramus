@@ -1224,6 +1224,35 @@ fn faults() -> Vec<Fault> {
             )]),
             vec![],
         ),
+        // A child's identity is its id: 64 and 64.0 are one value, inside one trigger too.
+        f(
+            triggered(vec![
+                (
+                    "/mutations/operators",
+                    j(operators("enum", json!([64, 300, 512]))),
+                ),
+                (
+                    "/mutations/triggers",
+                    j(json!([trigger(), second_trigger(json!([512.0, 300]))])),
+                ),
+            ]),
+            vec![("W-MUT-001", "mutations.triggers[1].spawns[0].values[0]")],
+        ),
+        f(
+            triggered(vec![spawn_values(json!([64, 512, 64]))]),
+            vec![("W-MUT-001", "mutations.triggers[0].spawns[0].values[2]")],
+        ),
+        // An enum value is in its range when it shows as a member does.
+        f(
+            triggered(vec![
+                (
+                    "/mutations/operators",
+                    j(operators("enum", json!([64, 128.5, "wide"]))),
+                ),
+                spawn_values(json!([64.0, 128.5, "wide"])),
+            ]),
+            vec![],
+        ),
         // A trigger's contrast, claim, statistic and strata follow the hypothesis rules.
         f(
             triggered(vec![contrast(json!({ "nope": 1.0 }))]),
@@ -4411,6 +4440,105 @@ fn a_folder_input_holds_no_data_to_share() {
         [
             ("E-PTH-001", "inputs[1].path"),
             ("E-PTH-001", "inputs[2].path")
+        ]
+    );
+}
+
+#[test]
+fn exploratory_triggers_need_disjoint_selection_and_confirmation_data() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data/s.txt", b"One  Text");
+    write(dir.path(), "data/c.txt", b"one text");
+    write(dir.path(), "data/d.txt", b"another text");
+    let with = |edits: Vec<Edit>, conf: &str| {
+        let mut s = pair("data/s.txt", conf);
+        for (p, v) in triggered(edits) {
+            set(&mut s, p, v);
+        }
+        named(&s, dir.path())
+    };
+    // An exploratory plan with a trigger: the trigger decides on the selection data and the
+    // children are tested on the confirmation data.
+    let d = with(vec![], "data/c.txt");
+    assert_eq!(codes_paths(&d), [("E-CNF-004", "inputs[2].sha256")]);
+    assert!(with(vec![], "data/d.txt").is_empty());
+    // Without a trigger, or with only an inert legacy one, an exploratory plan may share.
+    let none = with(vec![("/mutations/triggers", j(json!([])))], "data/c.txt");
+    assert!(none.is_empty(), "{none:?}");
+    let old = with(vec![legacy()], "data/c.txt");
+    assert_eq!(codes_paths(&old), [("E-MUT-003", "mutations.triggers[0]")]);
+    // The rule needs a confirmation input in any plan with a trigger.
+    let mut s = pair("data/s.txt", "data/c.txt");
+    for (p, v) in triggered(vec![(
+        "/inputs",
+        j(json!([input("data/s.txt", "selection", 5)])),
+    )]) {
+        set(&mut s, p, v);
+    }
+    let found = named(&s, dir.path());
+    assert!(
+        codes_paths(&found).contains(&("E-CNF-004", "inputs")),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn selection_inputs_without_a_stage_pass_when_triggers_exist() {
+    let dir = study_dir();
+    let at = |edits: Vec<Edit>| {
+        let d = named(&edited(&unstaged(edits)), dir.path());
+        (d.iter())
+            .map(|x| (x.code.clone(), x.path.clone()))
+            .collect::<Vec<_>>()
+    };
+    let pair = |c: &str, p: &str| vec![(c.to_string(), p.to_string())];
+    assert!(at(triggered(vec![])).is_empty());
+    assert_eq!(
+        at(triggered(vec![("/mutations/triggers", j(json!([])))])),
+        pair("E-SEL-001", "inputs[1].role")
+    );
+    // A legacy trigger is refused by its own rule, not by the stage rule.
+    assert_eq!(
+        at(triggered(vec![legacy()])),
+        pair("E-MUT-003", "mutations.triggers[0]")
+    );
+}
+
+#[test]
+fn the_row_cap_counts_trigger_only_selection_rows_and_child_rows() {
+    let dir = study_dir();
+    // No stage: the selection rows run the reference and the two conditions the contrast
+    // names, the confirmation rows the reference and arm-a, and the 2 children run on the
+    // confirmation units. 7 rows per unit in all.
+    let at = |units: u64| {
+        edited(&triggered(unstaged(vec![
+            ("/design/units_per_cluster", j(json!(units))),
+            ("/inputs", j(inputs(1, units))),
+            contrast(json!({ "arm-a": 1.0, "arm-b": -1.0 })),
+        ])))
+    };
+    let count = |v: &Value| {
+        let s = ignorarium::spec::model::Spec::from_value(v).unwrap();
+        ignorarium::schedule::rows(&s, &[0; 32], false)
+            .unwrap()
+            .len()
+    };
+    let capped = |v: &Value| {
+        named(v, dir.path())
+            .into_iter()
+            .filter(|d| d.code == "E-UNT-002")
+            .map(|d| d.problem)
+            .collect::<Vec<_>>()
+    };
+    let under = at(14_285);
+    assert_eq!(count(&under), 99_995);
+    assert!(capped(&under).is_empty());
+    let over = at(14_286);
+    assert_eq!(count(&over), 100_002);
+    assert_eq!(
+        capped(&over),
+        [
+            "The schedule has more rows than the box allows. It would hold 100002 rows; the cap is 100000."
         ]
     );
 }

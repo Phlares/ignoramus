@@ -799,6 +799,7 @@ mod tests {
             family_line: None,
             carried: None,
             rechecks: None,
+            derivative: None,
         }
     }
 

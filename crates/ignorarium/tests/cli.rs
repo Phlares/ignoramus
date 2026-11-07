@@ -185,6 +185,76 @@ fn check_json_passing_plan_has_estimate_and_defaults() {
     );
 }
 
+/// `setup` with the planted-spawn template.
+fn planted(edit: impl Fn(String) -> String) -> (TempDir, PathBuf, PathBuf) {
+    let planted = std::fs::read_to_string("../../templates/planted-spawn.toml").unwrap();
+    setup(move |_| edit(planted.clone()))
+}
+
+#[test]
+fn check_lists_the_derivative_set_and_its_worst_case_cost() {
+    let (_d, home, spec) = planted(|t| t);
+    let out = check_out(&home, &spec, 0);
+    // 1 selection unit and 1 confirmation unit run the reference and arm-a; each child runs
+    // on the confirmation unit. 6 rows at 60 s in all.
+    let listed = "derivative set:\n  arm-a~window_tokens=64: 1 rows, from T1\n  arm-a~window_tokens=512: 1 rows, from T1\n  worst case: 2 rows, cpu hours 0.03, wall hours 0.03, money $0.00\n";
+    assert!(out.contains(listed), "{out}");
+    assert!(out.contains("rows: 6\n"), "{out}");
+    assert!(!out.contains("W-MUT-002"), "{out}");
+    let v = check_json(&home, &spec, 0);
+    assert_eq!(v["estimate"]["rows"], 6);
+    let set = &v["derivative_set"];
+    assert_eq!(set["rows"], 2);
+    assert_eq!(
+        set["children"][1],
+        json!({
+            "id": "arm-a~window_tokens=512", "parent": "arm-a", "operator": "window_tokens",
+            "value": 512, "triggers": ["T1"], "rows": 1,
+        })
+    );
+    for key in ["cpu_hours", "wall_hours", "money_usd"] {
+        assert!(set[key].is_number(), "{set}");
+    }
+    // A plan without triggers lists none.
+    let (_d, home, spec) = setup(|t| t);
+    assert!(!check_out(&home, &spec, 0).contains("derivative set:"));
+    assert!(check_json(&home, &spec, 0)["derivative_set"].is_null());
+}
+
+#[test]
+fn a_derivative_set_over_budget_warns() {
+    // 4 rows without children are 0.067 cpu hours; the first child takes it to 0.083, the
+    // second to 0.1, over the cap of 0.09.
+    let tight = |t: String| t.replace("cpu_hours = 1.0", "cpu_hours = 0.09");
+    let (_d, home, spec) = planted(tight);
+    let v = check_json(&home, &spec, 0);
+    let warned = with_code(&v, "W-MUT-002");
+    assert_eq!(warned.len(), 1, "{v}");
+    assert_eq!(warned[0]["severity"], "warning");
+    assert_eq!(warned[0]["path"], "mutations.triggers");
+    assert!(
+        warned[0]["problem"]
+            .as_str()
+            .unwrap()
+            .ends_with(" A run where every trigger fires skips arm-a~window_tokens=512."),
+        "{}",
+        warned[0]["problem"]
+    );
+    let out = check_out(&home, &spec, 0);
+    assert!(out.contains("warning[W-MUT-002]"), "{out}");
+    // Each cap binds: wall time too.
+    let wall = |t: String| t.replace("wall_hours = 1.0", "wall_hours = 0.07");
+    let (_d, home, spec) = planted(wall);
+    let v = check_json(&home, &spec, 0);
+    assert!(
+        with_code(&v, "W-MUT-002")[0]["problem"]
+            .as_str()
+            .unwrap()
+            .ends_with(" skips arm-a~window_tokens=64, arm-a~window_tokens=512."),
+        "{v}"
+    );
+}
+
 #[test]
 fn check_uses_the_machine_level_from_the_box() {
     let (_d, home, spec) = setup(|t| t);

@@ -1,7 +1,7 @@
 //! Defaults for absent spec keys, and the cost estimate.
 use crate::machine::Machine;
-use crate::schedule::Row;
-use crate::spec::model::{Mode, SELECTED, Spec};
+use crate::schedule::{Row, SPAWN_STAGE};
+use crate::spec::model::{Budget, Mode, SELECTED, Spec};
 use serde_json::{Map, Value, json};
 
 /// The only place that holds default values: path, and the value given the spec.
@@ -101,4 +101,45 @@ pub fn estimate(spec: &Spec, machine: &Machine, rows: &[Row]) -> Estimate {
         .into(),
         is_long_job: cpu_seconds > f64::from(machine.long_job_minutes) * 60.0,
     }
+}
+
+impl Estimate {
+    /// Each cap of `budget` above 0 covers this estimate. A cap of 0 is no cap.
+    pub fn within(&self, budget: &Budget) -> bool {
+        [
+            (self.cpu_hours, budget.cpu_hours),
+            (self.wall_hours, budget.wall_hours),
+            (self.money_usd, budget.money_usd),
+        ]
+        .iter()
+        .all(|&(spent, cap)| cap <= 0.0 || spent <= cap)
+    }
+}
+
+/// The children of `candidates` the spec budget admits, in the order given: a child is in when
+/// the estimate of the rows of `rows` that are no child rows, the rows of the children in
+/// before it and its own rows stays `within` `spec.scope.budget`. The spec decides, never a
+/// measured time, so every machine admits the same children.
+pub fn admitted<'a>(
+    spec: &Spec,
+    machine: &Machine,
+    rows: &[Row],
+    candidates: &[&'a str],
+) -> Vec<&'a str> {
+    let mut taken: Vec<Row> = (rows.iter())
+        .filter(|r| r.stage != SPAWN_STAGE)
+        .cloned()
+        .collect();
+    let mut out = vec![];
+    for &child in candidates {
+        let own = (rows.iter()).filter(|r| r.stage == SPAWN_STAGE && r.condition == child);
+        let before = taken.len();
+        taken.extend(own.cloned());
+        if estimate(spec, machine, &taken).within(&spec.scope.budget) {
+            out.push(child);
+        } else {
+            taken.truncate(before);
+        }
+    }
+    out
 }

@@ -1593,6 +1593,65 @@ fn a_late_input_with_the_data_of_the_other_role_is_refused() {
     plan_of(&lab, "loose");
 }
 
+/// `staged` with a trigger on `arm-a` that spawns two values of `window_tokens`.
+fn spawning(t: String) -> String {
+    let operators = r#"operators = [{ name = "window_tokens", type = "int", range = [64, 512], acts_on = "arm-a" }]"#;
+    let triggers = r#"triggers = [{ id = "T1", outcome = "ppl-ratio", contrast = { arm-a = 1.0 }, claim = { below = 0.0 }, statistic = { quantile = 0.5 }, threshold_e = 2.0, spawns = [{ operator = "window_tokens", values = [64, 512] }] }]"#;
+    staged(t)
+        .replacen("operators = []", operators, 1)
+        .replacen("triggers = []", triggers, 1)
+}
+
+#[test]
+fn exploratory_triggers_need_disjoint_data_at_run() {
+    let lab = lab();
+    let (sel, conf) = ("data/select.txt", "data/confirm.txt");
+    let dir = register_study(
+        &lab,
+        "spawn-late",
+        spawning,
+        &[(sel, "same bytes")],
+        PAYLOAD,
+    );
+    std::fs::write(common::work(&lab, "spawn-late").join(conf), "Same  Bytes").unwrap();
+    match err_of(&lab, "spawn-late") {
+        RunError::DataShared {
+            path,
+            path_role,
+            other,
+            role,
+        } => assert_eq!(
+            (path, path_role, other, role),
+            (conf.into(), Role::Confirmation, sel.into(), Role::Selection)
+        ),
+        e => panic!("{e}"),
+    }
+    assert!(!dir.join("schedule.json").exists());
+    // Other data passes.
+    std::fs::write(common::work(&lab, "spawn-late").join(conf), "other text").unwrap();
+    plan_of(&lab, "spawn-late");
+}
+
+#[test]
+fn a_study_with_triggers_runs_no_child_row_until_a_trigger_admits_it() {
+    let lab = lab();
+    register_study(&lab, "spawn-wait", spawning, &[], STAGED);
+    let plan = plan_of(&lab, "spawn-wait");
+    let stages: Vec<_> = plan.schedule.rows.iter().map(|r| &r.stage[..]).collect();
+    assert_eq!(
+        stages,
+        [["selection"; 6], ["confirmation"; 6], ["spawn"; 6]].concat()
+    );
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let ran = indices(&lab, "spawn-wait");
+    assert_eq!(ran, (0..12).collect::<Vec<u64>>());
+    // The study finishes without the child rows, and its progress leaves them out.
+    assert_eq!(kind_of(&lab, "spawn-wait", "analysis").len(), 1);
+    let all = common::records_of(&lab, "spawn-wait");
+    let p = ignorarium::runner::progress(&lab.home, "spawn-wait", &all).unwrap();
+    assert_eq!((p.done, p.total), (12, 12));
+}
+
 #[test]
 fn the_shared_data_refusal_names_the_role_and_escapes_the_paths() {
     let e = RunError::DataShared {
