@@ -3,7 +3,9 @@
 use crate::backend::{
     self, Backend, Exit, PINNED_LEVEL, Probe, RowJob, RowOutcome, Watch, level2, rootfs,
 };
-use crate::budget::{Alerts, Cost, CostMeter, Decision, HostMeter, decide, dimension_name};
+use crate::budget::{
+    Alerts, Cost, CostMeter, Decision, HostMeter, PauseReason, decide, dimension_name,
+};
 use crate::cli::check::HomeRecords;
 use crate::control::{self, ControlError, ControlFile, RunLock, Signal, State};
 use crate::derived::{
@@ -786,7 +788,7 @@ pub fn progress(
         .filter_map(|r| r.row)
         .collect();
     let rows: Vec<Row> = (expand_rows(&spec, &spec_hash, register.as_ref())?.into_iter())
-        .filter(|r| resize::runs(r, &ran) && spawn::runs(r, &spawned) || rowed.contains(&r.index))
+        .filter(|r| (resize::runs(r, &ran) && spawn::runs(r, &spawned)) || rowed.contains(&r.index))
         .collect();
     let tally = Tally::of(all);
     let mut conditions: BTreeMap<String, (u64, u64)> = BTreeMap::new();
@@ -990,9 +992,9 @@ fn no_links(base: &Path, parts: &[&str]) -> Result<(), RunError> {
 /// first reserve row waits for the `resize` record (`resized`), and a reserve row of a cluster
 /// it does not admit never runs. In a study with declared triggers, the first row past the
 /// selection stage waits for the trigger records (`triggers`), and a child row runs only when
-/// one admits its child; a budget pause on a child row signs a `spawn-stop` record of the
-/// children not finished and the run finishes without their rows. At each row boundary the control file is
-/// read: a stop ends the run with the stop trace, a pause ends it at that boundary. Then the
+/// one admits its child; a cap reached on a child row signs a `spawn-stop` record of the
+/// children not finished, and the run finishes without their rows. At each row boundary the
+/// control file is read: a stop ends the run with the stop trace, a pause ends it at that boundary. Then the
 /// gate runs before each attempt, retries included: the run pauses instead of starting it
 /// when a cap is reached or the attempt would reach one, or when the payload or an input
 /// changed. While a row runs, the backend ticks the watch, which emits heartbeats and ends
@@ -1086,9 +1088,11 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
         .filter(|r| !done.contains(&r.index))
     {
         // In a study with triggers, the trigger records come at the selection boundary, after
-        // the pick when the study has a stage, and no later row runs before them.
+        // the pick when a trigger needs it, and no later row runs before them. A trigger that
+        // needs no pick never waits for one, so its children cannot block the parent.
         if triggered && row.stage != SELECTION_STAGE && spawned.is_none() {
-            if plan.spec.design.selection.is_some() && pick.is_none() {
+            let picks = plan.spec.design.selection.is_some() && spawn::needs_pick(&plan.spec);
+            if picks && pick.is_none() {
                 match selection(plan, &log)? {
                     Ok(p) => pick = Some(p),
                     Err(why) => return halt(plan, &dir, lock, Halt::Pause(why), None),
@@ -1116,21 +1120,15 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
         if let Some(h) = at_boundary(&control) {
             return halt(plan, &dir, lock, h, None);
         }
-        // A budget pause on a child row stops the children, never the parent: the run skips
-        // the remaining child rows and finishes.
-        let budget = books.check(plan, &dir)?;
-        if budget.is_some() && trigger.is_some() {
-            let all = records::read_all(&log, &plan.key.verifying_key())?;
-            let children = spawn::unfinished(&plan.spec, &plan.schedule.rows, &all)?;
-            let stop = SpawnStop {
-                children,
-                reason: spawn::BUDGET.into(),
-            };
-            analysis::append(plan, &log, SPAWN_STOP, &stop)?;
-            break;
-        }
-        if let Some(h) = budget.or_else(|| unready(plan, &dir)) {
-            return halt(plan, &dir, lock, h, None);
+        // The budget running out on a child row stops the children, never the parent: the
+        // run skips the remaining child rows and finishes.
+        match gate(plan, &dir, &mut books, trigger.is_some())? {
+            Some(Halt::Children(_)) => {
+                stop_children(plan, &log)?;
+                break;
+            }
+            Some(h) => return halt(plan, &dir, lock, h, None),
+            None => {}
         }
         // The pick comes at the stage boundary: no confirmation or reserve row runs before its
         // record.
@@ -1147,8 +1145,13 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
         let h = run_row(plan, row, &job, &dir, &log, &mut books, &watch)?;
         // A failed event write is a failed internal check: the run pauses after the row.
         let failed = watch.failed.take();
-        if let Some(h) = h.or_else(|| failed.is_some().then(|| Halt::Pause(EVENT_LOG.into()))) {
-            return halt(plan, &dir, lock, h, failed);
+        match h.or_else(|| failed.is_some().then(|| Halt::Pause(EVENT_LOG.into()))) {
+            Some(Halt::Children(_)) if failed.is_none() => {
+                stop_children(plan, &log)?;
+                break;
+            }
+            Some(h) => return halt(plan, &dir, lock, h, failed),
+            None => {}
         }
     }
     analysis::finish(plan)?;
@@ -1160,16 +1163,25 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
 /// `prepare` saw them (see `stale`), the box can see a child end, and no signal arrived.
 /// Otherwise the run pauses and the attempt never starts. The signal comes last, so one
 /// that lands during the re-hash still counts.
-fn gate(plan: &RunPlan, dir: &Path, books: &mut Books) -> Result<Option<Halt>, RunError> {
-    let budget = books.check(plan, dir)?;
-    Ok(budget.or_else(|| unready(plan, dir)))
-}
-
-/// The gate past the budget (`gate`).
-fn unready(plan: &RunPlan, dir: &Path) -> Option<Halt> {
-    (stale(plan, dir).map(Halt::Pause))
+/// On a `child` row, a cap reached or about to be reached stops the children instead
+/// (`Halt::Children`); a meter or number fault still pauses.
+fn gate(
+    plan: &RunPlan,
+    dir: &Path,
+    books: &mut Books,
+    child: bool,
+) -> Result<Option<Halt>, RunError> {
+    let budget = books.check(plan, dir)?.map(|why| {
+        let spent = matches!(why, PauseReason::CapReached(_) | PauseReason::WouldCross(_));
+        match why.to_string() {
+            why if child && spent => Halt::Children(why),
+            why => Halt::Pause(why),
+        }
+    });
+    Ok(budget
+        .or_else(|| stale(plan, dir).map(Halt::Pause))
         .or_else(|| blind_to_exits().map(Halt::Pause))
-        .or_else(|| sys::interrupted().then(|| Halt::Pause(INTERRUPTED.into())))
+        .or_else(|| sys::interrupted().then(|| Halt::Pause(INTERRUPTED.into()))))
 }
 
 /// Why the box cannot see a row end, when it cannot. The library reads the SIGCHLD action and
@@ -1206,9 +1218,9 @@ impl Books {
         }
     }
 
-    /// Read the meter, emit the alerts it crossed, and pause when a cap is reached or the
-    /// next attempt would reach one.
-    fn check(&mut self, plan: &RunPlan, dir: &Path) -> Result<Option<Halt>, RunError> {
+    /// Read the meter, emit the alerts it crossed, and give why the run pauses: a cap is
+    /// reached, the next attempt would reach one, or the meter or a number cannot be trusted.
+    fn check(&mut self, plan: &RunPlan, dir: &Path) -> Result<Option<PauseReason>, RunError> {
         let budget = &plan.spec.scope.budget;
         let sampled = plan.meter.sample();
         let now = sampled.clone().unwrap_or_default();
@@ -1222,7 +1234,7 @@ impl Books {
             .per_row
             .larger(&self.tally.mean(self.rate_usd_per_hour));
         Ok(match decide(&now, &next, budget, sampled.map(|_| ())) {
-            Decision::Pause(why) => Some(Halt::Pause(why.to_string())),
+            Decision::Pause(why) => Some(why),
             Decision::Continue => None,
         })
     }
@@ -1253,6 +1265,9 @@ fn at_boundary(control: &ControlFile) -> Option<Halt> {
 /// Why a run ends before its last row.
 enum Halt {
     Pause(String),
+    /// The budget ran out on a child row (why): the children stop and the study finishes.
+    /// Where the run cannot finish, as after a failed event write, it pauses instead.
+    Children(String),
     /// `in_flight` names the row the stop killed.
     Stop {
         why: String,
@@ -1264,7 +1279,7 @@ impl Halt {
     /// The `row.end` exit of a row this halt ends early.
     fn exit(&self) -> &'static str {
         match self {
-            Halt::Pause(_) => "paused",
+            Halt::Pause(_) | Halt::Children(_) => "paused",
             Halt::Stop { .. } => "stopped",
         }
     }
@@ -1272,7 +1287,7 @@ impl Halt {
     /// The reason a spend record gives for a row this halt ends early.
     fn reason(&self) -> String {
         match self {
-            Halt::Pause(why) => why.clone(),
+            Halt::Pause(why) | Halt::Children(why) => why.clone(),
             Halt::Stop { why, .. } => format!("stopped: {why}"),
         }
     }
@@ -1290,7 +1305,7 @@ fn halt(
     failed: Option<RunError>,
 ) -> Result<RunStatus, RunError> {
     match h {
-        Halt::Pause(why) => {
+        Halt::Pause(why) | Halt::Children(why) => {
             State::Paused(why.clone())
                 .write(&plan.home, &plan.study_id)
                 .map_err(io)?;
@@ -1542,6 +1557,18 @@ fn triggers(plan: &RunPlan, log: &Path) -> Result<BTreeMap<String, String>, RunE
     spawn::admitted(&plan.spec, &all)
 }
 
+/// Sign a `spawn-stop` record of the admitted children whose rows are not all recorded
+/// (`spawn::unfinished`), for the budget.
+fn stop_children(plan: &RunPlan, log: &Path) -> Result<(), RunError> {
+    let all = records::read_all(log, &plan.key.verifying_key())?;
+    let stop = SpawnStop {
+        children: spawn::unfinished(&plan.spec, &plan.schedule.rows, &all)?,
+        reason: spawn::BUDGET.into(),
+    };
+    analysis::append(plan, log, SPAWN_STOP, &stop)?;
+    Ok(())
+}
+
 /// What a row runs, past its schedule entry: the condition id the payload gets, its params as
 /// canonical JSON, and the records that chose them. A `selected` row runs the pick. A child
 /// row runs its child (`spawn::job`), and names the trigger record that admitted it, and the
@@ -1560,7 +1587,15 @@ impl<'a> Job<'a> {
         pick: Option<&'a Pick>,
         trigger: Option<&'a str>,
     ) -> Result<Job<'a>, RunError> {
-        let child = trigger.and_then(|_| spawn::child_of(&plan.spec, &row.condition));
+        let child = match trigger {
+            None => None,
+            Some(_) => Some(spawn::child_of(&plan.spec, &row.condition).ok_or_else(|| {
+                RunError::Spec(format!(
+                    "row {} runs child {}, which the plan does not declare",
+                    row.index, row.condition
+                ))
+            })?),
+        };
         let empty = Value::Object(Default::default());
         let (pick, condition, params) = match child {
             Some(c) => {
@@ -1698,10 +1733,12 @@ fn attempt_row(
                     Some(Halt::Pause(format!("backend unavailable: {why}")))
                 }
                 // The gate fails only on an alert write, held as any failed event write is.
-                Probe::Available => gate(plan, dir, books).unwrap_or_else(|e| {
-                    watch.keep(Err(e));
-                    None
-                }),
+                Probe::Available => {
+                    gate(plan, dir, books, job.trigger.is_some()).unwrap_or_else(|e| {
+                        watch.keep(Err(e));
+                        None
+                    })
+                }
             }
         };
         // No new attempt once the event log fails: the run pauses after the row, for the

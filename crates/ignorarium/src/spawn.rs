@@ -151,7 +151,16 @@ fn bet(
             }
         }
     }
-    (least, None)
+    (analysis::finite(least), None)
+}
+
+/// A declared trigger's contrast names `selected`, or a declared child acts on it.
+pub fn needs_pick(spec: &Spec) -> bool {
+    let watched = (spec.mutations.declared()).any(|t| t.contrast.contains_key(SELECTED));
+    watched
+        || schedule::children(spec)
+            .iter()
+            .any(|c| c.parent == SELECTED)
 }
 
 /// The pick of the study's `selection` record, when it holds one.

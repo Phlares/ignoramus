@@ -1775,11 +1775,12 @@ fn a_firing_trigger_admits_its_children_and_they_run_after_confirmation_rows() {
             "skipped": [],
         })
     );
-    // The selection record, then the trigger record, at the boundary; every row ran.
+    // The trigger record at the boundary; T1 needs no pick, so the selection record follows it,
+    // before the first `selected` row. Every row ran.
     let all = common::records_of(&lab, "fires");
     let at = all.iter().position(|r| r.kind == "trigger").unwrap();
-    assert_eq!(all[at - 1].kind, "selection");
-    assert_eq!((all[at - 2].row, all[at + 1].row), (Some(11), Some(12)));
+    assert_eq!(all[at + 1].kind, "selection");
+    assert_eq!((all[at - 1].row, all[at + 2].row), (Some(11), Some(12)));
     assert_eq!(indices(&lab, "fires"), (0..24).collect::<Vec<u64>>());
     for r in rows_of(&lab, "fires") {
         let row = &plan.schedule.rows[r.row.unwrap() as usize];
@@ -2174,6 +2175,113 @@ fn a_later_trigger_admits_against_what_the_recorded_ones_admit() {
         serde_json::json!(["arm-a~window_tokens=512"])
     );
     assert_eq!(skipped(&lab), serde_json::json!([]));
+}
+
+#[test]
+fn a_meter_fault_on_a_child_row_pauses_and_stops_no_child() {
+    let lab = lab();
+    register_study(&lab, "meter", firing, &[], STAGED);
+    let mut plan = plan_of(&lab, "meter");
+    // The meter fails at row 18, the first child row.
+    let mut readings = vec![cost(0.0, 0.0); 18];
+    readings.push(Err(MeterError("gone".into())));
+    plan.meter = Box::new(FakeMeter::new(readings));
+    let why = "the cost meter failed: gone";
+    assert_eq!(run(&plan).unwrap(), RunStatus::Paused(why.into()));
+    assert!(kind_of(&lab, "meter", "spawn-stop").is_empty());
+    assert_eq!(indices(&lab, "meter"), (0..18).collect::<Vec<u64>>());
+    // Once the meter reads again, the children run.
+    plan.meter = Box::new(FakeMeter::new(vec![cost(0.0, 0.0)]));
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert!(kind_of(&lab, "meter", "spawn-stop").is_empty());
+    assert_eq!(indices(&lab, "meter"), (0..24).collect::<Vec<u64>>());
+}
+
+#[test]
+fn an_overrun_on_a_retried_child_row_stops_the_children() {
+    let lab = lab();
+    register_study(&lab, "retry-over", firing, &[], STAGED);
+    let mut plan = plan_of(&lab, "retry-over");
+    // Row 18's first attempt fails on the box; before its retry the meter reads 3570 of the
+    // 3600 cpu seconds, and a row estimates 60.
+    let script = (0..18)
+        .map(|_| Exit::Ok)
+        .chain([Exit::Infra("box fault".into())]);
+    let (b, _) = fake(script.collect());
+    plan.backend = Box::new(b);
+    let mut readings = vec![cost(0.0, 0.0); 19];
+    readings.push(cost(3570.0, 0.0));
+    plan.meter = Box::new(FakeMeter::new(readings));
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(indices(&lab, "retry-over"), (0..18).collect::<Vec<u64>>());
+    let spend = kind_of(&lab, "retry-over", "spend");
+    assert_eq!((spend.len(), spend[0].row), (1, Some(18)));
+    let stops = kind_of(&lab, "retry-over", "spawn-stop");
+    assert_eq!(
+        stops[0].body["children"],
+        serde_json::json!(["arm-a~window_tokens=64", "arm-a~window_tokens=512"])
+    );
+    assert_eq!(kind_of(&lab, "retry-over", "verdict").len(), 1);
+}
+
+#[test]
+fn triggers_that_need_no_pick_never_wait_for_one() {
+    let lab = lab();
+    // The stage's pick runs nowhere: confirmation runs arm-a, and no trigger names selected.
+    let spec = |t: String| {
+        let one = trigger("T1", "{ arm-b = 1.0 }", BELOW, WINDOWS);
+        with_triggers(WINDOW_ON_ARM_A, vec![one])(t)
+            .replacen("conditions = [\"selected\"]", "conditions = [\"arm-a\"]", 1)
+            .replacen(
+                "contrast = { selected = 1.0 }",
+                "contrast = { arm-a = 1.0 }",
+                1,
+            )
+    };
+    // arm-b writes no value: no selection unit is complete, so no pick could be made.
+    let payload = STAGED.replace("case", "case \"$2\" in arm-b) exit 0;; esac\ncase");
+    register_study(&lab, "no-wait", spec, &[], &payload);
+    let plan = plan_of(&lab, "no-wait");
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert!(selections_of(&lab, "no-wait").is_empty());
+    let t = triggers_of(&lab, "no-wait");
+    assert_eq!(t[0].0.body["reason"], "incomplete");
+    assert_eq!(indices(&lab, "no-wait"), (0..18).collect::<Vec<u64>>());
+    assert_eq!(kind_of(&lab, "no-wait", "verdict").len(), 1);
+}
+
+#[test]
+fn a_child_with_the_value_its_parent_takes_from_a_study_is_skipped_same_as_parent() {
+    let lab = lab();
+    // arm-b's `bits` is the condition study `chooser` selected, arm-a: a text.
+    chose(&lab, "chooser", "arm-a");
+    let bits = r#"{ name = "bits", type = "enum", range = ["arm-a", "arm-c"], acts_on = "arm-b" }"#;
+    let one = trigger(
+        "T1",
+        "{ arm-b = 1.0 }",
+        BELOW,
+        r#"{ operator = "bits", values = ["arm-a", "arm-c"] }"#,
+    );
+    let triggered = with_triggers(bits, vec![one]);
+    let spec = move |t: String| {
+        triggered(t).replace(
+            "params = { bits = 8 }",
+            "params = { bits = { from = \"chooser\" } }",
+        )
+    };
+    register_study(&lab, "from-parent", spec, &[], STAGED);
+    let plan = plan_of(&lab, "from-parent");
+    assert_eq!(plan.params["arm-b"], serde_json::json!({ "bits": "arm-a" }));
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let t = triggers_of(&lab, "from-parent");
+    assert_eq!(
+        t[0].0.body["admitted"],
+        serde_json::json!(["arm-b~bits=arm-c"])
+    );
+    assert_eq!(
+        t[0].0.body["skipped"],
+        serde_json::json!([{ "child": "arm-b~bits=arm-a", "reason": "same-as-parent" }])
+    );
 }
 
 #[test]

@@ -723,7 +723,7 @@ fn held(
 }
 
 /// `e` kept finite: above the largest float it is that float, and NaN is 0, so it fails.
-fn finite(e: f64) -> f64 {
+pub(crate) fn finite(e: f64) -> f64 {
     if e >= 0.0 { e.min(f64::MAX) } else { 0.0 }
 }
 
@@ -817,10 +817,11 @@ fn recheck(spec: &Spec, records: &[Record], carried_from: Option<String>) -> Opt
 /// row runs when the `resize` record admits its cluster, and every one runs in a study with no
 /// such record; the analysis reads the reserve clusters that ran, in the order they are
 /// appended. A child row runs when a `trigger` record admits its child and no `spawn-stop`
-/// record names it (`spawn::admitted`). A study the record stops fails its claims (`verdicts`). A call after a crash adds
-/// only what is missing; a complete study gets nothing. A log whose analysis record another
-/// box version wrote is refused when it lacks an estimate or a verdict. The close takes its
-/// e-value from the signed records alone, so it is added whatever box wrote them.
+/// record names it (`spawn::admitted`). A study the record stops fails its claims
+/// (`verdicts`). A call after a crash adds only what is missing; a complete study gets
+/// nothing. A log whose analysis record another box version wrote is refused when it lacks an
+/// estimate or a verdict. The close takes its e-value from the signed records alone, so it is
+/// added whatever box wrote them.
 pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
     let dir = plan.home.study_dir(&plan.study_id);
     let log = dir.join("records.jsonl");

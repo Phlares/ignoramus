@@ -12,7 +12,7 @@ Raise scope.budget, or declare fewer children. Otherwise a run where the trigger
 
 ## Why
 
-A fired trigger admits a child only when the spec estimate of the plan's rows at design.row_seconds, with the children admitted before it and its own rows, stays within each cap of scope.budget. The spec decides, not measured time, so every machine admits the same children and check can name the children a run would skip. check raises this warning; the detail names those children.
+A fired trigger admits a child only when the spec estimate of the plan's rows at design.row_seconds, with the children admitted before it and its own rows, stays within each cap of scope.budget. The spec decides, not measured time, so the same spec and the same machine rate admit the same children, and check can name the children a run would skip. check raises this warning; the detail names those children.
 
 ## Applies to
 

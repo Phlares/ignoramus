@@ -122,7 +122,7 @@ impl Estimate {
 /// The children of `candidates` the spec budget admits, in the order given: a child is in when
 /// the estimate of the rows of `rows` that are no child rows, the rows of the children in
 /// before it and its own rows stays `within` `spec.scope.budget`. The spec decides, never a
-/// measured time, so every machine admits the same children.
+/// measured time, so the same spec and the same rate admit the same children.
 pub fn admitted<'a>(
     spec: &Spec,
     machine: &Machine,
