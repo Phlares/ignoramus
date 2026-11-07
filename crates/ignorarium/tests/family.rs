@@ -1707,3 +1707,17 @@ fn a_broken_sibling_log_refuses_the_report() {
     assert!(err.contains("cannot report b: study fam: "), "{err}");
     assert_eq!(std::fs::read(&own).unwrap(), before);
 }
+
+#[test]
+fn a_root_report_ignores_a_broken_log_of_an_unrelated_study() {
+    let lab = lab();
+    plant_family_leaves(&lab);
+    plant_study(&lab, "fam", true);
+    plant_study(&lab, "x", true);
+    let log = lab.home.study_dir("x").join("records.jsonl");
+    let mut bytes = std::fs::read(&log).unwrap();
+    bytes[10] ^= 1;
+    std::fs::write(&log, bytes).unwrap();
+    let r = reported(&lab, "fam");
+    assert_eq!(r["family"]["root"], "fam", "{r}");
+}

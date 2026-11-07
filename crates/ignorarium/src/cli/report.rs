@@ -91,10 +91,12 @@ fn family_block(
     own: &Register,
     at: &str,
 ) -> Result<Value, String> {
-    let (root, lock) = match (&own.family, records.family_of(id)?) {
-        (Some(lock), _) => (id.to_string(), lock.clone()),
-        (None, Some(found)) => (found.root, found.lock),
-        (None, None) => return Ok(Value::Null),
+    let (root, lock) = match &own.family {
+        Some(lock) => (id.to_string(), lock.clone()),
+        None => match records.family_of(id)? {
+            Some(found) => (found.root, found.lock),
+            None => return Ok(Value::Null),
+        },
     };
     let others = std::iter::once(root.clone())
         .chain(lock.members.into_iter().map(|m| m.id))
@@ -245,8 +247,7 @@ fn text(r: &Value) -> String {
             .collect();
         let root = f["root"].as_str().unwrap_or_default();
         s.push_str(&format!(
-            "family {root}:{}
-",
+            "family {root}:{}\n",
             if waiting.is_empty() {
                 String::new()
             } else {
@@ -255,8 +256,7 @@ fn text(r: &Value) -> String {
         ));
         for m in members.filter(|m| m["state"] == "finished") {
             s.push_str(&format!(
-                "  {} finished {}, first opened {}, {} this study finished
-",
+                "  {} finished {}, first opened {}, {} this study finished\n",
                 m["study"].as_str().unwrap_or_default(),
                 m["finished_at"].as_str().unwrap_or_default(),
                 m["first_opened"].as_str().unwrap_or("never"),

@@ -17,7 +17,7 @@ Decision:
   - An unfinished member shows as `not finished`. A member with no log shows as `not registered`.
   - A finished member shows its finish time and the time of its first `opened` record, or `never`. It is marked `before` or `after` this study's finish time.
   - The JSON `before` is true when that member finished earlier. A reader sees which results were visible while this study ran.
-  - A fault in the log of another member refuses the report: `cannot report {id}: study {other}: {fault}`. The log of this study stays unchanged.
+  - A fault in the log of another member refuses the report: `cannot report {id}: study {other}: {fault}`. The log of this study stays unchanged. A fault in the box's register records or leaves also refuses the report.
 
 Why:
 
