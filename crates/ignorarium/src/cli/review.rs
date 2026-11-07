@@ -234,6 +234,10 @@ fn page(a: &Assessed) -> String {
     s.push_str(&format!("\nHypotheses:\n\n{}", bullets(hypotheses)));
     s.push_str(&format!("\nOutcomes:\n\n{}", bullets(outcomes)));
     s.push_str(&format!("\n## Conditions\n\n{}", bullets(conditions)));
+    if let Some(d) = &a.derivative {
+        let lines = check::derivative_lines(d);
+        s.push_str(&format!("\n## Derivative set\n\n{}", bullets(lines)));
+    }
     s.push_str(&family_section(a));
     s.push_str("\n## Estimate\n\n");
     s.push_str(&est.map_or(NO_ESTIMATE.into(), |e| bullets(check::figure_lines(e))));

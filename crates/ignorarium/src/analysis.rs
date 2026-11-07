@@ -2,8 +2,9 @@
 //! condition's value for the same unit and repeat.
 use crate::canon::{sha256_hex, to_canonical};
 use crate::derived::{
-    ANALYSIS, Analysis, BoundResult, CONTINUE, Candidate, ESTIMATE, Estimate, GroupClip, Inputs,
-    Instrument, Recheck, Register, Selection, VERDICT, Verdict, contrast_key,
+    ANALYSIS, Analysis, BoundResult, CHILD_ESTIMATE, CONTINUE, Candidate, ChildEstimate, ESTIMATE,
+    Estimate, GroupClip, Inputs, Instrument, Recheck, Register, Selection, VERDICT, Verdict,
+    contrast_key,
 };
 use crate::inputs::InputHashes;
 use crate::planlog::store::{PlanLog, RELEASE};
@@ -818,7 +819,9 @@ fn recheck(spec: &Spec, records: &[Record], carried_from: Option<String>) -> Opt
 /// such record; the analysis reads the reserve clusters that ran, in the order they are
 /// appended. A child row runs when a `trigger` record admits its child and no `spawn-stop`
 /// record names it (`spawn::admitted`). A study the record stops fails its claims
-/// (`verdicts`). A call after a crash adds only what is missing; a complete study gets
+/// (`verdicts`). Before the analysis record, each admitted child, a stopped one too, gets a
+/// `child-estimate` record per outcome (`spawn::estimates`); no count of them is promised.
+/// A call after a crash adds only what is missing; a complete study gets
 /// nothing. A log whose analysis record another box version wrote is refused when it lacks an
 /// estimate or a verdict. The close takes its e-value from the signed records alone, so it is
 /// added whatever box wrote them.
@@ -904,6 +907,15 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
                 appended_sd,
                 clipped: clip_counts(&plan.spec, &pairs, &measured),
             };
+            let made: BTreeSet<(String, String)> = (all.iter())
+                .filter_map(ChildEstimate::of)
+                .map(|e| (e.child, e.outcome))
+                .collect();
+            for e in spawn::estimates(&plan.spec, &all, &pairs, &measured)? {
+                if !made.contains(&(e.child.clone(), e.outcome.clone())) {
+                    append(plan, &log, CHILD_ESTIMATE, &e)?;
+                }
+            }
             append(plan, &log, ANALYSIS, &body)?;
         }
     }

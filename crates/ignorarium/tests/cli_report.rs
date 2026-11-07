@@ -385,3 +385,54 @@ fn a_finished_study_with_a_later_stop_record_still_reports() {
     assert_eq!(r["hypotheses"][0]["verdict"], "pass");
     assert_eq!(records_of(&lab, "s1").pop().unwrap().kind, "opened");
 }
+
+fn child_estimate(child: &str, value: u64, mean: f64) -> Value {
+    json!({
+        "child": child, "parent": "arm-a", "operator": "window_tokens", "value": value,
+        "outcome": "ppl-ratio", "units": 3, "mean": mean, "repeats": 1,
+    })
+}
+
+/// A finished study whose child estimates come before its analysis record, as `finish` writes
+/// them.
+fn with_children(children: &[Value]) -> Vec<(&'static str, Value)> {
+    let mut bodies = finished_study(&three(), &[]);
+    let at = bodies.iter().position(|(k, _)| *k == "analysis").unwrap();
+    for (i, c) in children.iter().enumerate() {
+        bodies.insert(at + i, ("child-estimate", c.clone()));
+    }
+    bodies
+}
+
+#[test]
+fn report_lists_children_with_their_estimates() {
+    let lab = lab();
+    let kids = [
+        child_estimate("arm-a~window_tokens=64", 64, -12.5),
+        child_estimate("arm-a~window_tokens=512", 512, 3.0),
+    ];
+    let bodies = with_children(&kids);
+    plant(&lab.home, "s1", &bodies);
+    let r = report_json(&lab, "s1");
+    assert_eq!(r["children"], json!(kids));
+    assert_eq!(r["records"], bodies.len());
+    // The verdicts are as before.
+    assert_eq!(r["hypotheses"].as_array().unwrap().len(), 3);
+    let a = bin(&lab).args(["report", "s1"]).assert().success();
+    let t = text(&a);
+    for line in [
+        "child arm-a~window_tokens=64: ppl-ratio mean -12.5 over 3 units, 1 repeats\n",
+        "child arm-a~window_tokens=512: ppl-ratio mean 3 over 3 units, 1 repeats\n",
+    ] {
+        assert!(t.contains(line), "missing {line:?} in {t}");
+    }
+}
+
+#[test]
+fn a_report_without_children_lists_none() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    assert_eq!(report_json(&lab, "s1")["children"], json!([]));
+    let a = bin(&lab).args(["report", "s1"]).assert().success();
+    assert!(!text(&a).contains("child "), "{}", text(&a));
+}

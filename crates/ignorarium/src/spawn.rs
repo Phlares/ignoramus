@@ -3,7 +3,7 @@
 //! rows stays within the budget. One `trigger` record per trigger holds the outcome, and only
 //! the children those records admit run.
 use crate::analysis::{self, Paired, group, strata_of};
-use crate::derived::{SPAWN_STOP, Selection, Skipped, SpawnStop, TRIGGER, Trigger};
+use crate::derived::{ChildEstimate, SPAWN_STOP, Selection, Skipped, SpawnStop, TRIGGER, Trigger};
 use crate::estimate;
 use crate::machine;
 use crate::records::{self, Record};
@@ -221,29 +221,86 @@ pub fn recorded(records: &[Record]) -> Result<Option<Vec<Fired>>, RunError> {
     Ok((!all.is_empty()).then_some(all))
 }
 
-/// Each child of `spec` whose rows run, by schedule id, with the hash of the first `trigger`
-/// record in `records` that admits it: every admitted child but those a `spawn-stop` record
-/// names. `Err` when a trigger or spawn-stop record does not parse.
-pub fn admitted(spec: &Spec, records: &[Record]) -> Result<BTreeMap<String, String>, RunError> {
-    let pick = picked(records);
-    let pick = pick.as_deref();
-    let mut stopped = BTreeSet::new();
+/// The ids the `spawn-stop` records of `records` name. `Err` when one does not parse.
+fn stopped(records: &[Record]) -> Result<BTreeSet<String>, RunError> {
+    let mut out = BTreeSet::new();
     for r in records.iter().filter(|r| r.kind == SPAWN_STOP) {
-        stopped.extend(
+        out.extend(
             SpawnStop::of(r)
                 .ok_or_else(|| unparsed(SPAWN_STOP))?
                 .children,
         );
     }
+    Ok(out)
+}
+
+/// Each child of `spec` a `trigger` record in `records` admits, by schedule id, with the hash
+/// of the first such record. `Err` when a trigger record does not parse.
+fn taken(spec: &Spec, records: &[Record]) -> Result<BTreeMap<String, String>, RunError> {
+    let pick = picked(records);
     let children = schedule::children(spec);
     let mut out = BTreeMap::new();
     for r in records.iter().filter(|r| r.kind == TRIGGER) {
         let t = Trigger::of(r).ok_or_else(|| unparsed(TRIGGER))?;
         for c in &children {
-            let id = run_id(c, pick);
-            if t.admitted.contains(&id) && !stopped.contains(&id) {
+            if t.admitted.contains(&run_id(c, pick.as_deref())) {
                 out.entry(c.id.clone()).or_insert_with(|| records::hash(r));
             }
+        }
+    }
+    Ok(out)
+}
+
+/// Each child of `spec` whose rows run, by schedule id, with the hash of the first `trigger`
+/// record in `records` that admits it: every admitted child but those a `spawn-stop` record
+/// names. `Err` when a trigger or spawn-stop record does not parse.
+pub fn admitted(spec: &Spec, records: &[Record]) -> Result<BTreeMap<String, String>, RunError> {
+    let stopped = stopped(records)?;
+    let pick = picked(records);
+    let mut out = taken(spec, records)?;
+    for c in schedule::children(spec) {
+        if stopped.contains(&run_id(&c, pick.as_deref())) {
+            out.remove(&c.id);
+        }
+    }
+    Ok(out)
+}
+
+/// One estimate per outcome for each child a `trigger` record admits, stopped children
+/// included, in schedule order: the child's paired values (`pairs`) against the reference on
+/// the confirmation clusters of `clusters`. The mean is over the units that pair; a child with
+/// no such unit has none. `Err` when a trigger record does not parse.
+pub fn estimates(
+    spec: &Spec,
+    records: &[Record],
+    pairs: &Paired,
+    clusters: &[Cluster],
+) -> Result<Vec<ChildEstimate>, RunError> {
+    let pick = picked(records);
+    let pick = pick.as_deref();
+    let taken = taken(spec, records)?;
+    let mut out = Vec::new();
+    for c in schedule::children(spec)
+        .iter()
+        .filter(|c| taken.contains_key(&c.id))
+    {
+        let contrast = BTreeMap::from([(c.id.clone(), 1.0)]);
+        for o in &spec.outcomes {
+            let (samples, _) = group(clusters, Role::Confirmation, "", &o.id, &contrast, pairs, 1);
+            let values: Vec<f64> = samples.into_iter().flatten().collect();
+            if values.is_empty() {
+                continue;
+            }
+            out.push(ChildEstimate {
+                child: run_id(c, pick),
+                parent: parent_of(c, pick).to_string(),
+                operator: c.operator.clone(),
+                value: serde_json::to_value(&c.value).unwrap_or_default(),
+                outcome: o.id.clone(),
+                units: values.len() as u64,
+                mean: values.iter().sum::<f64>() / values.len() as f64,
+                repeats: u64::from(spec.design.repeats),
+            });
         }
     }
     Ok(out)

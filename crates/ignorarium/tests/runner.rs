@@ -1928,7 +1928,9 @@ fn an_overrun_on_child_rows_stops_the_children_and_finishes() {
     let all = common::records_of(&lab, "overrun");
     let at = all.iter().position(|r| r.kind == "spawn-stop").unwrap();
     assert_eq!(all[at - 1].row, Some(18));
-    assert_eq!(all[at + 1].kind, "analysis");
+    // The one child row that ran gives its child an estimate, before the analysis record.
+    let next: Vec<&str> = all[at + 1..].iter().take(2).map(|r| &r.kind[..]).collect();
+    assert_eq!(next, ["child-estimate", "analysis"]);
     assert_eq!(kind_of(&lab, "overrun", "verdict").len(), 1);
     let p = ignorarium::runner::progress(&lab.home, "overrun", &all).unwrap();
     assert_eq!((p.done, p.total), (19, 19));
@@ -4891,4 +4893,188 @@ fn the_declared_row_memory_caps_every_row_and_its_absence_none() {
             assert_eq!(limits, want, "{id} row {}", row.index);
         }
     }
+}
+
+// ---- child estimates, and the triggers and children status shows ----
+
+/// The child-estimate records of study `id`, as bodies.
+fn child_estimates(lab: &Lab, id: &str) -> Vec<serde_json::Value> {
+    let all = common::records_of(lab, id);
+    all.iter()
+        .filter(|r| r.kind == "child-estimate")
+        .map(|r| r.body.clone())
+        .collect()
+}
+
+fn child_estimate(child: &str, parent: &str, value: i64) -> serde_json::Value {
+    serde_json::json!({
+        "child": child, "parent": parent, "operator": "window_tokens", "value": value,
+        "outcome": "ppl-ratio", "units": 3, "mean": -100.0, "repeats": 1,
+    })
+}
+
+#[test]
+fn each_admitted_child_gets_one_estimate_per_outcome_before_the_analysis_record() {
+    let lab = lab();
+    register_study(&lab, "kids", firing, &[], STAGED);
+    let plan = plan_of(&lab, "kids");
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    // Each child writes 0 where the reference writes 8: 100 x (0 / 8 - 1) on each of the 3
+    // confirmation units.
+    assert_eq!(
+        child_estimates(&lab, "kids"),
+        vec![
+            child_estimate("arm-a~window_tokens=64", "arm-a", 64),
+            child_estimate("arm-a~window_tokens=512", "arm-a", 512),
+        ]
+    );
+    let all = common::records_of(&lab, "kids");
+    let at = |kind: &str| all.iter().position(|r| r.kind == kind).unwrap();
+    assert!(at("child-estimate") < at("analysis"));
+    // A second finish adds nothing.
+    assert_eq!(run(&plan_of(&lab, "kids")).unwrap(), RunStatus::Done);
+    assert_eq!(child_estimates(&lab, "kids").len(), 2);
+    // A crash between the first estimate and the analysis record heals to the same two.
+    keep_records(&lab.home.study_dir("kids"), at("child-estimate") + 1);
+    assert_eq!(run(&plan_of(&lab, "kids")).unwrap(), RunStatus::Done);
+    assert_eq!(child_estimates(&lab, "kids").len(), 2);
+    assert_eq!(kind_of(&lab, "kids", "analysis").len(), 1);
+}
+
+#[test]
+fn a_child_of_selected_is_estimated_under_the_picks_id() {
+    let lab = lab();
+    let spec = spawn_on("{ arm-b = 1.0 }", WINDOW_ON_SELECTED, WINDOWS);
+    register_study(&lab, "sel-kids", spec, &[], STAGED);
+    assert_eq!(run(&plan_of(&lab, "sel-kids")).unwrap(), RunStatus::Done);
+    assert_eq!(
+        child_estimates(&lab, "sel-kids"),
+        vec![
+            child_estimate("arm-b~window_tokens=64", "arm-b", 64),
+            child_estimate("arm-b~window_tokens=512", "arm-b", 512),
+        ]
+    );
+}
+
+#[test]
+fn a_trigger_that_does_not_fire_leaves_no_child_estimate() {
+    let lab = lab();
+    register_study(&lab, "no-kids", spawning, &[], STAGED);
+    assert_eq!(run(&plan_of(&lab, "no-kids")).unwrap(), RunStatus::Done);
+    assert!(child_estimates(&lab, "no-kids").is_empty());
+}
+
+#[test]
+fn child_estimates_do_not_change_the_finished_rule() {
+    let lab = lab();
+    register_study(&lab, "rule", firing, &[], STAGED);
+    assert_eq!(run(&plan_of(&lab, "rule")).unwrap(), RunStatus::Done);
+    assert!(finished(&lab, "rule"));
+    let all = common::records_of(&lab, "rule");
+    let promised = all.iter().find_map(Analysis::of).unwrap();
+    let estimates = all.iter().filter(|r| r.kind == "estimate").count() as u64;
+    assert_eq!(promised.estimates, estimates);
+    // The log without its child estimates is as finished as the log with them.
+    let kept: Vec<records::Record> = (all.into_iter())
+        .filter(|r| r.kind != "child-estimate")
+        .collect();
+    let state = StudyState::of(Some(kept), |_, _| Ok(true)).unwrap();
+    assert!(matches!(state, StudyState::Finished(_)));
+}
+
+fn bin(lab: &Lab) -> assert_cmd::Command {
+    let mut c = assert_cmd::Command::cargo_bin("ignorarium").unwrap();
+    c.env("IGNORARIUM_HOME", &lab.home.root);
+    c
+}
+
+fn status_json(lab: &Lab, id: &str) -> serde_json::Value {
+    let a = bin(lab).args(["status", id, "--json"]).assert().success();
+    serde_json::from_slice(&a.get_output().stdout).unwrap()
+}
+
+fn status_text(lab: &Lab, id: &str) -> String {
+    let a = bin(lab).args(["status", id]).assert().success();
+    String::from_utf8_lossy(&a.get_output().stdout).into_owned()
+}
+
+#[test]
+fn status_lists_each_trigger_fired_value_admitted_skipped() {
+    let lab = lab();
+    let bits = r#"{ name = "bits", type = "int", range = [2, 16], acts_on = "selected" }"#;
+    let spec = spawn_on(
+        "{ arm-b = 1.0 }",
+        bits,
+        r#"{ operator = "bits", values = [8, 4] }"#,
+    );
+    register_study(&lab, "list", spec, &[], STAGED);
+    assert_eq!(run(&plan_of(&lab, "list")).unwrap(), RunStatus::Done);
+    let e = fired_e_value();
+    let s = status_json(&lab, "list");
+    assert_eq!(
+        s["triggers"],
+        serde_json::json!([{
+            "id": "T1", "state": "fired", "e_value": e, "threshold": 2.0, "reason": null,
+            "admitted": ["arm-b~bits=4"],
+            "skipped": [{ "child": "arm-b~bits=8", "reason": "same-as-parent" }],
+        }])
+    );
+    let t = status_text(&lab, "list");
+    let line = format!(
+        "T1: fired, e-value {e:.3}, threshold 2.000, admitted arm-b~bits=4, skipped arm-b~bits=8 (same-as-parent)\n"
+    );
+    assert!(t.contains(&line), "{t}");
+    assert!(!t.contains("triggers: none"), "{t}");
+}
+
+#[test]
+fn status_says_a_trigger_did_not_fire_and_one_is_not_yet_decided() {
+    let lab = lab();
+    register_study(&lab, "wait", spawning, &[], STAGED);
+    // Before any run no trigger record exists.
+    let s = status_json(&lab, "wait");
+    assert_eq!(s["triggers"][0]["state"], "pending");
+    assert_eq!(s["triggers"][0]["admitted"], serde_json::json!([]));
+    assert!(status_text(&lab, "wait").contains("T1: pending\n"));
+    assert_eq!(run(&plan_of(&lab, "wait")).unwrap(), RunStatus::Done);
+    let s = status_json(&lab, "wait");
+    assert_eq!(s["triggers"][0]["state"], "not fired");
+    assert_eq!(s["triggers"][0]["e_value"], 1.0);
+    let t = status_text(&lab, "wait");
+    let line = "T1: not fired, e-value 1.000, threshold 2.000, admitted none, skipped arm-a~window_tokens=64 (not-fired), arm-a~window_tokens=512 (not-fired)\n";
+    assert!(t.contains(line), "{t}");
+}
+
+#[test]
+fn status_shows_a_legacy_trigger_as_inert() {
+    let lab = lab();
+    let dir = common::plain(&lab, "legacy");
+    let file = dir.join("spec.toml");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let old = r#"triggers = [{ id = "T1", metric = "ppl-ratio", threshold_e = 2.0 }]"#;
+    std::fs::write(&file, text.replacen("triggers = []", old, 1)).unwrap();
+    let s = status_json(&lab, "legacy");
+    assert_eq!(
+        s["triggers"],
+        serde_json::json!([{
+            "id": "T1", "state": "inert (old shape)", "e_value": null, "threshold": 2.0,
+            "reason": null, "admitted": [], "skipped": [],
+        }])
+    );
+    assert!(status_text(&lab, "legacy").contains("T1: inert (old shape)\n"));
+}
+
+#[test]
+fn status_shows_children_by_the_blind_label_of_their_condition() {
+    let lab = lab();
+    let spec = |t: String| firing(t).replace("blind = false", "blind = true");
+    register_study(&lab, "blind-kids", spec, &[], STAGED);
+    assert_eq!(run(&plan_of(&lab, "blind-kids")).unwrap(), RunStatus::Done);
+    let s = status_json(&lab, "blind-kids");
+    let shown = s["triggers"][0]["admitted"].to_string();
+    assert!(!shown.contains("arm-a"), "{shown}");
+    let label = (s["conditions"].as_array().unwrap().iter())
+        .map(|c| c["label"].as_str().unwrap())
+        .find(|l| shown.contains(&format!("{l}~window_tokens=64")));
+    assert!(label.is_some(), "{shown}");
 }

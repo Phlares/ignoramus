@@ -12,6 +12,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 pub const ANALYSIS: &str = "analysis";
+pub const CHILD_ESTIMATE: &str = "child-estimate";
 pub const ESTIMATE: &str = "estimate";
 pub const INPUTS: &str = "inputs";
 pub const OPENED: &str = "opened";
@@ -60,6 +61,30 @@ impl Estimate {
             self.key_hash.clone(),
             self.stratum.clone(),
         )
+    }
+}
+
+/// A child's paired values against the reference on the confirmation units, for one outcome:
+/// the number of units that pair, their mean, and the repeats each unit takes. `child` and
+/// `parent` are the ids the child ran as (`selected` replaced by the pick). Not an `Estimate`:
+/// the "finished" rule counts no child estimate, and no later study reads one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildEstimate {
+    pub child: String,
+    pub parent: String,
+    pub operator: String,
+    pub value: Value,
+    pub outcome: String,
+    pub units: u64,
+    pub mean: f64,
+    pub repeats: u64,
+}
+
+impl ChildEstimate {
+    /// `None` for another kind of record, or a body that does not parse.
+    pub fn of(r: &Record) -> Option<ChildEstimate> {
+        body_of(r, CHILD_ESTIMATE)
     }
 }
 

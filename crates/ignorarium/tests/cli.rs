@@ -222,6 +222,22 @@ fn check_lists_the_derivative_set_and_its_worst_case_cost() {
 }
 
 #[test]
+fn review_lists_the_derivative_set_and_its_cost() {
+    let (_d, home, spec) = planted(|t| t);
+    let a = bin(&home).arg("review").arg(&spec).assert().code(0);
+    let out = stdout(&a);
+    let listed = "## Derivative set\n\n- arm-a~window_tokens=64: 1 rows, from T1\n- arm-a~window_tokens=512: 1 rows, from T1\n- worst case: 2 rows, cpu hours 0.03, wall hours 0.03, money $0.00\n";
+    assert!(out.contains(listed), "{out}");
+    let at = |h: &str| out.find(h).unwrap();
+    assert!(at("## Conditions") < at("## Derivative set"), "{out}");
+    assert!(at("## Derivative set") < at("## Estimate"), "{out}");
+    // A plan without triggers has no such section.
+    let (_d, home, spec) = setup(|t| t);
+    let a = bin(&home).arg("review").arg(&spec).assert().code(0);
+    assert!(!stdout(&a).contains("## Derivative set"));
+}
+
+#[test]
 fn a_derivative_set_over_budget_warns() {
     // 4 rows without children are 0.067 cpu hours; the first child takes it to 0.083, the
     // second to 0.1, over the cap of 0.09.
