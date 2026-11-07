@@ -251,6 +251,18 @@ fn a_missing_member_spec_is_refused() {
 }
 
 #[test]
+fn a_member_spec_that_cannot_be_parsed_is_refused() {
+    let lab = lab();
+    let root = family_root(&lab);
+    put(&root, "spec/b.toml", "[study\nid = ");
+    let spec = root_spec(&root, &study("fam"), &["spec/b.toml"]);
+    let (code, v) = check_json(&lab, &spec);
+    let p = problem_at(&v, "E-FAM-002", "family.members[0]");
+    assert!(p.contains("The spec cannot be read: "), "{p}");
+    assert_eq!(code, 1, "{v}");
+}
+
+#[test]
 fn a_registered_study_cannot_join() {
     let lab = lab();
     common::plain(&lab, "b");
@@ -1055,12 +1067,22 @@ fn a_family_leaf_that_does_not_commit_to_the_lock_fails_closed() {
         let label = family::leaf_label("fam");
         for c in &commitments {
             let c = c.map(|c| if c == "lock" { lock.hash() } else { c.into() });
-            append_leaf(&lab, "planlog", family::LEAF_KIND, &label, c.as_deref(), &data);
+            append_leaf(
+                &lab,
+                "planlog",
+                family::LEAF_KIND,
+                &label,
+                c.as_deref(),
+                &data,
+            );
         }
         plant_root(&lab, "planlog", 0, Some(&lock));
         let p = lock_unread(&lab, &b);
         let p2 = confirm_refused(&lab, &root, &b);
-        assert!(p2.contains("The family records cannot be read: "), "{p} {p2}");
+        assert!(
+            p2.contains("The family records cannot be read: "),
+            "{p} {p2}"
+        );
     }
 }
 
@@ -1072,7 +1094,14 @@ fn an_orphan_family_leaf_stops_no_other_family() {
     let orphan = file_hashes(b"orphan data\n");
     let label = family::leaf_label("orphan");
     let data = [orphan];
-    append_leaf(&lab, "planlog", family::LEAF_KIND, &label, Some("sha256:x"), &data);
+    append_leaf(
+        &lab,
+        "planlog",
+        family::LEAF_KIND,
+        &label,
+        Some("sha256:x"),
+        &data,
+    );
     let b = root.join("spec/b.toml");
     let (code, v) = check_json(&lab, &b);
     assert_eq!((code, errors(&v)), (0, vec![]), "{v}");
@@ -1156,7 +1185,9 @@ fn an_unreadable_plan_log_fails_a_member_closed() {
 
 /// `text` with a condition `arm-b` whose `bits` take the condition study `from` selected.
 fn taking_from(from: &str) -> impl Fn(String) -> String {
-    let taken = format!("[[design.conditions]]\nid = \"arm-b\"\nparams = {{ bits = {{ from = \"{from}\" }} }}");
+    let taken = format!(
+        "[[design.conditions]]\nid = \"arm-b\"\nparams = {{ bits = {{ from = \"{from}\" }} }}"
+    );
     move |t| {
         t.replace(
             "# [[design.conditions]]        # a second candidate for the selection stage below\n# id = \"arm-b\"",
@@ -1275,7 +1306,11 @@ fn late_confirmation_data_that_picked_the_condition_is_refused_at_run() {
     // Other late data runs.
     put(&work, "data/confirm.txt", "fresh data\n");
     let prepared = prepare_with(&lab.home, "late", &work, vec![Box::new(Level0)]);
-    assert!(prepared.is_ok(), "{:?}", prepared.err().map(|e| e.to_string()));
+    assert!(
+        prepared.is_ok(),
+        "{:?}",
+        prepared.err().map(|e| e.to_string())
+    );
 }
 
 #[test]

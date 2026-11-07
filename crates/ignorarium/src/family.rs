@@ -151,7 +151,12 @@ pub fn find(
             }
             i
         }
-        _ => return Err(format!("{} holds more than one family leaf of {root}", reg.log)),
+        _ => {
+            return Err(format!(
+                "{} holds more than one family leaf of {root}",
+                reg.log
+            ));
+        }
     };
     Ok(Some(Found {
         root: root.clone(),
@@ -257,9 +262,12 @@ pub fn inputs<'a>(
         .map(|((k, i), (_, h))| (format!("inputs[{k}]"), i, h.as_ref()))
 }
 
+/// Data by name: each entry's name and its `(exact, normalized)` hashes.
+pub type NamedData = Vec<(String, (String, String))>;
+
 /// The data of each input of `spec` with one of `roles` whose bytes were read, as its spec
 /// path and hashes.
-pub fn data(spec: &Value, hashes: &InputHashes, roles: &[&str]) -> Vec<(String, (String, String))> {
+pub fn data(spec: &Value, hashes: &InputHashes, roles: &[&str]) -> NamedData {
     inputs(spec, hashes)
         .filter(|(_, i, _)| i["role"].as_str().is_some_and(|r| roles.contains(&r)))
         .filter_map(|(at, _, h)| Some((at, h?.clone())))

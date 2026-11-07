@@ -250,7 +250,8 @@ impl HomeRecords {
 
     /// `read_registers`, read the first time it is asked for.
     fn registers(&self) -> Result<&[(String, Register)], String> {
-        (self.registers.get_or_init(|| self.read_registers()).as_deref()).map_err(Clone::clone)
+        let read = self.registers.get_or_init(|| self.read_registers());
+        read.as_deref().map_err(Clone::clone)
     }
 
     /// The `register` record that opens each study's log, by study. Only that first line is

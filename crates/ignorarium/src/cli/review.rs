@@ -177,7 +177,10 @@ fn lock_state(a: &Assessed, m: &MemberSpec) -> String {
         (Ok(None), Ok(_)) => "no slot reserved",
         (Err(_), _) | (_, Err(_)) => "slot state cannot be read",
     };
-    format!("locked spec {}, {slot}", short(&printable(&locked.spec_hash)))
+    format!(
+        "locked spec {}, {slot}",
+        short(&printable(&locked.spec_hash))
+    )
 }
 
 fn page(a: &Assessed) -> String {

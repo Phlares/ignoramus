@@ -377,7 +377,8 @@ fn faults() -> Vec<Fault> {
         ),
         // A family on an exploratory study; in a confirmatory one the member checks read the
         // members the context loaded, here none, so E-FAM-002 fails closed (tests/family.rs
-        // loads them).
+        // loads them). The base study's selection input has no file here, so E-FAM-003 refuses
+        // the family at its root.
         f(
             vec![
                 ("/study/mode", j(json!("exploratory"))),
@@ -389,7 +390,7 @@ fn faults() -> Vec<Fault> {
         ),
         f(
             vec![("/family", j(json!({ "members": ["spec/b.toml"] })))],
-            vec![("E-FAM-002", "family.members[0]")],
+            vec![("E-FAM-002", "family.members[0]"), ("E-FAM-003", "family")],
         ),
         // power_at lies strictly on the claimed side, inside the mean range; a mistyped one is
         // the type rule's.
@@ -1067,7 +1068,7 @@ fn faults() -> Vec<Fault> {
         ),
         f(
             vec![("/family", j(json!({ "members": ["../b.toml"] })))],
-            vec![("E-PTH-001", "family.members[0]")],
+            vec![("E-FAM-003", "family"), ("E-PTH-001", "family.members[0]")],
         ),
         // An unsafe path is never read: no hash or freshness check follows it.
         f(

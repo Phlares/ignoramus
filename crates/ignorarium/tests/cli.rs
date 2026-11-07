@@ -1728,8 +1728,7 @@ fn a_study_folder_that_cannot_be_read_is_an_error() {
         return;
     }
     let key = keys::load(&box_home).unwrap().map(|k| k.verifying_key());
-    let got = HomeRecords::new(box_home, Ok(key))
-    .study("my-pilot");
+    let got = HomeRecords::new(box_home, Ok(key)).study("my-pilot");
     mode(0o755);
     // Not "not registered": the box cannot tell.
     let e = got.unwrap_err();

@@ -355,8 +355,9 @@ fn data_fresh(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
         if first.is_none() {
             return Ok(None);
         }
-        let found = (family.get_or_init(|| ctx.records.locked_family(id)).as_ref())
-            .map_err(|e| format!("The family records cannot be read: {e}."))?;
+        let found = family.get_or_init(|| ctx.records.locked_family(id));
+        let found =
+            (found.as_ref()).map_err(|e| format!("The family records cannot be read: {e}."))?;
         // The plan log's leaf indexes say nothing about a family in another log.
         match found.as_ref().filter(|f| f.log == LogName::Plan.as_str()) {
             None => Ok(first),
@@ -423,7 +424,7 @@ pub fn selection_data(
     records: &dyn BoxRecords,
     store: &Store,
     from: &str,
-) -> Result<Option<Vec<(String, (String, String))>>, String> {
+) -> Result<Option<fam::NamedData>, String> {
     let unread = |e: String| format!("The box cannot read the records of study {from}: {e}.");
     let all = records.study(from).map_err(unread)?;
     let closed = |log: &str, slot| records.stream_closed(log, from, slot);
