@@ -146,7 +146,7 @@ fn success_writes_four_files_a_plan_leaf_and_a_record() {
         leaf.commitment.as_deref(),
         Some(commitment(&salt, &canon).as_str())
     );
-    assert_eq!(leaf.family.as_ref().map(String::len), Some(16));
+    assert_eq!(leaf.shape.as_ref().map(String::len), Some(16));
     // The input exists, so its hashes are in the leaf.
     assert_eq!(
         leaf.data_hashes,

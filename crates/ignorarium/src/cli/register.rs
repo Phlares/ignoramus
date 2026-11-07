@@ -12,7 +12,7 @@ use crate::home::Home;
 use crate::inputs::{self, Found};
 use crate::payload::{self, PayloadError};
 use crate::planlog::store::{Leaf, PlanLog};
-use crate::planlog::{commitment, family};
+use crate::planlog::{commitment, shape};
 use crate::records::{self, RecordDraft};
 use crate::rules::{self, Lookup, Taken};
 use crate::spec::model::{Condition, Param, PinDeviation, Spec, param_path};
@@ -553,7 +553,7 @@ fn store(
             Leaf {
                 kind: "plan".into(),
                 commitment: Some(commitment(&salt, &canon)),
-                family: Some(family(spec)),
+                shape: Some(shape(spec)),
                 mode: Some(mode.into()),
                 data_hashes,
                 label: label_of(a).into(),

@@ -21,7 +21,10 @@ pub struct Leaf {
     /// `plan`, `legacy` or `release`.
     pub kind: String,
     pub commitment: Option<String>,
-    pub family: Option<String>,
+    /// Fingerprint of the plan: payload pin, outcomes and hypotheses.
+    /// Logs on disk keep the older key `family`.
+    #[serde(rename = "family")]
+    pub shape: Option<String>,
     pub mode: Option<String>,
     /// `(exact sha256, normalized sha256)` per data file.
     pub data_hashes: Vec<(String, String)>,
@@ -276,7 +279,7 @@ impl PlanLog {
             Leaf {
                 kind: "legacy".into(),
                 commitment: None,
-                family: None,
+                shape: None,
                 mode: None,
                 data_hashes,
                 label: label.into(),
@@ -299,7 +302,7 @@ impl PlanLog {
             Leaf {
                 kind: RELEASE.into(),
                 commitment: Some(commitment.into()),
-                family: None,
+                shape: None,
                 mode: None,
                 data_hashes,
                 label: label.into(),

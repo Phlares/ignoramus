@@ -4,7 +4,7 @@ use ignorarium::planlog::merkle::{
     verify_inclusion,
 };
 use ignorarium::planlog::store::{Leaf, LogError, PlanLog, PlanLogOnce, Verified};
-use ignorarium::planlog::{commitment, family};
+use ignorarium::planlog::{commitment, shape};
 use ignorarium::prior::{PriorUse, same_data};
 use ignorarium::spec::model::Spec;
 use std::fs;
@@ -256,7 +256,7 @@ fn leaf(kind: &str, n: u32) -> Leaf {
     Leaf {
         kind: kind.into(),
         commitment: Some(format!("c{n}")),
-        family: None,
+        shape: None,
         mode: None,
         data_hashes: vec![(format!("exact{n}"), format!("norm{n}"))],
         label: format!("leaf {n}"),
@@ -315,6 +315,19 @@ fn leaf_line_is_canonical_json_of_the_leaf() {
         "{\"commitment\":\"c0\",\"data_hashes\":[[\"exact0\",\"norm0\"]],\"family\":null,\
 \"kind\":\"plan\",\"label\":\"leaf 0\",\"mode\":null,\"ts\":\"2026-10-28T00:00:00.000Z\"}\n"
     );
+}
+
+#[test]
+fn a_leaf_keeps_its_on_disk_family_key() {
+    let t = tempfile::tempdir().unwrap();
+    let log = PlanLog::open(t.path()).unwrap();
+    let mut l = leaf("plan", 0);
+    l.shape = Some("abcd".into());
+    log.append(l, &key(1)).unwrap();
+    let line = String::from_utf8(leaf_lines(t.path())[0].clone()).unwrap();
+    assert!(line.contains("\"family\":\"abcd\""), "{line}");
+    assert!(!line.contains("shape"), "{line}");
+    assert_eq!(log.leaves().unwrap()[0].shape.as_deref(), Some("abcd"));
 }
 
 #[test]
@@ -628,7 +641,7 @@ fn a_release_leaf_alone_is_no_use() {
     let want = Leaf {
         kind: "release".into(),
         commitment: Some("c0".into()),
-        family: None,
+        shape: None,
         mode: None,
         data_hashes: vec![pair("a"), pair("b")],
         label: "study:s".into(),
@@ -817,7 +830,7 @@ fn prior_use_on_an_empty_log_is_none() {
     );
 }
 
-// ---- family and commitment ----
+// ---- shape and commitment ----
 
 fn template() -> Spec {
     let raw = ignorarium::spec::load("../../templates/numeric-ablation.toml".as_ref()).unwrap();
@@ -825,20 +838,20 @@ fn template() -> Spec {
 }
 
 #[test]
-fn family_is_sixteen_hex_chars_and_stable() {
-    let f = family(&template());
+fn shape_is_sixteen_hex_chars_and_stable() {
+    let f = shape(&template());
     assert_eq!(f.len(), 16);
     assert!(
         f.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     );
-    assert_eq!(f, family(&template()));
+    assert_eq!(f, shape(&template()));
 }
 
 #[test]
-fn family_ignores_order_and_tracks_ids_units_and_payload() {
+fn shape_ignores_order_and_tracks_ids_units_and_payload() {
     let base = template();
-    let f = family(&base);
+    let f = shape(&base);
     let mut two = base.clone();
     let mut o2 = two.outcomes[0].clone();
     o2.id = format!("{}-zz", o2.id);
@@ -846,28 +859,28 @@ fn family_ignores_order_and_tracks_ids_units_and_payload() {
     let mut h2 = two.question.hypotheses[0].clone();
     h2.id = format!("{}-zz", h2.id);
     two.question.hypotheses.push(h2);
-    let f2 = family(&two);
+    let f2 = shape(&two);
     assert_ne!(f, f2);
     let mut rev = two.clone();
     rev.outcomes.reverse();
     rev.question.hypotheses.reverse();
-    assert_eq!(family(&rev), f2);
+    assert_eq!(shape(&rev), f2);
 
     let mut u = base.clone();
     u.outcomes[0].unit.push('x');
-    assert_ne!(family(&u), f);
+    assert_ne!(shape(&u), f);
     let mut i = base.clone();
     i.outcomes[0].id.push('x');
-    assert_ne!(family(&i), f);
+    assert_ne!(shape(&i), f);
     let mut h = base.clone();
     h.question.hypotheses[0].id.push('x');
-    assert_ne!(family(&h), f);
+    assert_ne!(shape(&h), f);
     let mut p = base.clone();
     p.pins.payload.push('x');
-    assert_ne!(family(&p), f);
+    assert_ne!(shape(&p), f);
     let mut q = base.clone();
     q.question.population.push('x');
-    assert_eq!(family(&q), f);
+    assert_eq!(shape(&q), f);
 }
 
 #[test]
