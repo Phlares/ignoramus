@@ -15,7 +15,7 @@ Decision:
 - **Contents.** Per hypothesis: the verdict, its basis, the e-value and level of a test, and the reason when the log holds one. Per mean claim and group: the units below `lo`, above `hi`, and in all. The count is descriptive and never changes a verdict. The text report prints each number in full, as JSON does. A quantile claim, or an analysis record written before the counts existed, prints no count.
 - **Family.** A study in a family names the family. It lists every other member, the root first, then in lock order.
   - An unfinished member shows as `not finished`. A member with no log shows as `not registered`.
-  - A finished member shows its finish time and the time of its first `opened` record, or `never`. It is marked `before` or `after` this study's finish time.
+  - A finished member shows its finish time and the time of its first `opened` record, or `never`. It is marked `before` or `after` this study's finish time. A member that finished in the same millisecond as this study reads `after`.
   - The JSON `before` is true when that member finished earlier. A reader sees which results were visible while this study ran.
   - A fault in the log of another member refuses the report: `cannot report {id}: study {other}: {fault}`. The log of this study stays unchanged. A fault in the box's register records or leaves also refuses the report.
 

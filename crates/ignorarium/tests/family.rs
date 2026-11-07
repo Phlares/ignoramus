@@ -8,6 +8,7 @@ use ignorarium::derived::Register;
 use ignorarium::family;
 use ignorarium::planlog::store::{Leaf, PlanLog};
 use ignorarium::prior::file_hashes;
+use ignorarium::records;
 use ignorarium::stream::{Log, LogName};
 use ignorarium::{inputs, keys};
 use serde_json::{Value, json};
@@ -1679,6 +1680,36 @@ fn a_member_that_finished_later_is_marked_after() {
         out.contains(", first opened never, after this study finished\n"),
         "{out}"
     );
+}
+
+#[test]
+fn a_sibling_with_a_stream_slot_finishes_at_its_close() {
+    let lab = lab();
+    plant_family_leaves(&lab);
+    let mut bodies = common::finished_with(common::instrument(), None, vec![]);
+    bodies[0].1["alpha"] = json!({ "log": "planlog", "slot": 1, "level": 0.005 });
+    bodies[0].1["log"] = json!("planlog");
+    bodies[1].1["slot"] = json!(1);
+    common::plant(&lab.home, "b", &bodies);
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let key = keys::load_or_create(&lab.home).unwrap();
+    let stream = Log::of(&lab.home, LogName::Plan);
+    stream.open(&key, "b", 0.005, 0).unwrap();
+    stream.close(&key, "b", 1, 0.0).unwrap();
+    let log = lab.home.root.join("stream").join("planlog.jsonl");
+    let closed = (records::read_all(&log, &key.verifying_key())
+        .unwrap()
+        .into_iter())
+    .find(|r| r.kind == ignorarium::stream::CLOSE)
+    .unwrap()
+    .ts;
+    let last = common::records_of(&lab, "b").pop().unwrap().ts;
+    assert!(closed > last, "{closed} {last}");
+    plant_study(&lab, "fam", true);
+    let r = reported(&lab, "fam");
+    let sibling = &r["family"]["members"][0];
+    assert_eq!(sibling["study"], "b", "{sibling}");
+    assert_eq!(sibling["finished_at"], closed, "{sibling}");
 }
 
 #[test]

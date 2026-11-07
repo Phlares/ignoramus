@@ -243,11 +243,7 @@ fn text(r: &Value) -> String {
             })
             .collect();
         let root = f["root"].as_str().unwrap_or_default();
-        s.push_str(&format!(
-            "family {root}:{}
-",
-            waiting.join(",")
-        ));
+        s.push_str(&format!("family {root}:{}\n", waiting.join(",")));
         for m in members.filter(|m| m["state"] == "finished") {
             s.push_str(&format!(
                 "  {} finished {}, first opened {}, {} this study finished\n",

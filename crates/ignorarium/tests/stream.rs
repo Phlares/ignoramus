@@ -693,21 +693,18 @@ fn closed_at_gives_the_close_time_of_a_closed_slot() {
 }
 
 #[test]
-fn closed_agrees_with_closed_at() {
+fn closed_is_true_only_for_a_closed_slot_of_the_study() {
     let lab = lab();
     let k = key(&lab);
     let vk = k.verifying_key();
     let log = Log::of(&lab.home, LogName::Plan);
     log.open(&k, "a", FIRST, 0).unwrap();
     log.open(&k, "b", FIRST, 0).unwrap();
-    log.close(&k, "b", 2, 0.0).unwrap();
-    for (study, slot) in [("a", 1), ("b", 2), ("a", 2), ("b", 1), ("c", 3)] {
-        assert_eq!(
-            log.closed(&vk, study, slot).unwrap(),
-            log.closed_at(&vk, study, slot).unwrap().is_some(),
-            "{study} {slot}"
-        );
-    }
+    assert!(!log.closed(&vk, "a", 1).unwrap(), "held, open");
+    log.close(&k, "a", 1, 0.0).unwrap();
+    assert!(log.closed(&vk, "a", 1).unwrap(), "held, closed");
+    assert!(!log.closed(&vk, "b", 1).unwrap(), "held by another study");
+    assert!(!log.closed(&vk, "c", 3).unwrap(), "unknown slot");
 }
 
 #[test]
