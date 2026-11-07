@@ -47,7 +47,7 @@ fn claimed_side(bound: &Bound) -> Result<Tail, Error> {
 /// The test of one bound: a fixed-size e-process, and the value the mean of its observations
 /// must reach on the side it bets on. A mean bets on the claimed side of the margin. A quantile
 /// bets that the share on the claimed side exceeds q (below) or 1 - q (above).
-fn test(stat: &Statistic, bound: &Bound) -> Result<(EProcess, f64, Tail), Error> {
+fn test(stat: &Statistic, bound: &Bound, stop: f64) -> Result<(EProcess, f64, Tail), Error> {
     let (lo, hi, point, tail) = match (*stat, claimed_side(bound)?) {
         (Statistic::Mean { lo, hi }, side) => (lo, hi, bound.margin, side),
         (Statistic::Quantile(q), Tail::Lower) => (0.0, 1.0, q, Tail::Upper),
@@ -58,7 +58,7 @@ fn test(stat: &Statistic, bound: &Bound) -> Result<(EProcess, f64, Tail), Error>
         hi,
         mean: point,
     };
-    Ok((EProcess::new(score, tail, f64::INFINITY)?, point, tail))
+    Ok((EProcess::new(score, tail, stop)?, point, tail))
 }
 
 fn mean(xs: impl ExactSizeIterator<Item = f64>) -> f64 {
@@ -122,17 +122,29 @@ pub fn e_value(stat: &Statistic, bound: &Bound, obs: &[f64]) -> Result<f64, Erro
 /// [`e_value`] after the last observation, and the largest value the e-process held at any
 /// point, the start's 1 included. An observation it refuses makes both 0.
 pub fn e_values(stat: &Statistic, bound: &Bound, obs: &[f64]) -> Result<(f64, f64), Error> {
-    let (mut p, _, _) = test(stat, bound)?;
+    let (mut p, _, _) = test(stat, bound, f64::INFINITY)?;
     if obs.iter().any(|&x| p.observe(x).is_err()) {
         return Ok((0.0, 0.0));
     }
     Ok((p.value(), p.peak()))
 }
 
+/// [`e_value`] with a stop: the e-process freezes at the first value of at least `stop`, and
+/// this returns that frozen value, or the last value when it never gets there. `stop` must
+/// exceed 1 (`Error::Parameter("stop")` otherwise); infinity gives `e_value`. An observation the
+/// e-process refuses makes it 0, as in `e_value`.
+pub fn stopped(stat: &Statistic, bound: &Bound, obs: &[f64], stop: f64) -> Result<f64, Error> {
+    let (mut p, _, _) = test(stat, bound, stop)?;
+    if obs.iter().any(|&x| p.observe(x).is_err()) {
+        return Ok(0.0);
+    }
+    Ok(p.value())
+}
+
 /// The point estimate of the same test: the mean of `obs` lies on the side its e-process bets
 /// on, at the value it tests, or past it. An exploratory claim routes on this.
 pub fn holds(stat: &Statistic, bound: &Bound, obs: &[f64]) -> Result<bool, Error> {
-    let (_, point, tail) = test(stat, bound)?;
+    let (_, point, tail) = test(stat, bound, f64::INFINITY)?;
     Ok(on_side(mean(obs.iter().copied()), point, tail))
 }
 
