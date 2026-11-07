@@ -1641,19 +1641,23 @@ fn reserve_data(paths: &[String]) -> Vec<(String, String)> {
     data
 }
 
-/// The `stream.close` body of the study's slot.
-fn close_of_slot(lab: &Lab, id: &str) -> Value {
+/// The `stream.close` record of the study's slot.
+fn close_record_of(lab: &Lab, id: &str) -> ignorarium::records::Record {
     use ignorarium::stream::{Log, LogName};
     let alpha = register_of(lab, id).alpha.unwrap();
     let key = keys::load(&lab.home).unwrap().unwrap();
     let log = Log::of(&lab.home, LogName::parse(&alpha.log).unwrap());
     let all = ignorarium::records::read_all(log.path(), &key.verifying_key()).unwrap();
-    let closes: Vec<Value> = (all.into_iter())
+    let closes: Vec<_> = (all.into_iter())
         .filter(|r| r.kind == "stream.close" && r.body["study"] == id)
-        .map(|r| r.body)
         .collect();
     assert_eq!(closes.len(), 1, "{closes:?}");
     closes[0].clone()
+}
+
+/// The `stream.close` body of the study's slot.
+fn close_of_slot(lab: &Lab, id: &str) -> Value {
+    close_record_of(lab, id).body
 }
 
 #[test]
@@ -1688,6 +1692,91 @@ fn finish_waits_for_admitted_rows_only() {
     finish(&plan).unwrap();
     assert_eq!(kind_of(&lab, "waits", "analysis").len(), 1);
     assert_eq!(kind_of(&lab, "waits", "verdict").len(), 1);
+}
+
+#[test]
+fn a_run_study_reports_its_recorded_verdict() {
+    use ignorarium::derived::Analysis;
+    use ignorarium::runner::{RunStatus, run};
+    let lab = lab();
+    common::resize_pilot(&lab.home);
+    let plan = resize_study(&lab, "told", &flat("99"));
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let a = bin(&lab)
+        .args(["report", "told", "--json"])
+        .assert()
+        .success();
+    let r: Value = serde_json::from_str(&text(&a)).unwrap();
+    let v = verdict_of(&lab, "told");
+    let h = &r["hypotheses"][0];
+    assert_eq!(h["hypothesis"], v.hypothesis);
+    assert_eq!(h["e_value"], serde_json::json!(v.e_value));
+    assert_eq!(h["level"], serde_json::json!(v.level));
+    assert_eq!(h["verdict"], v.verdict);
+    assert_eq!(h["basis"], v.basis);
+    let analysis = Analysis::of(&kind_of(&lab, "told", "analysis")[0]).unwrap();
+    let promised: Vec<_> = (analysis.clipped.iter())
+        .filter(|c| c.hypothesis == v.hypothesis)
+        .collect();
+    assert!(!promised.is_empty());
+    let shown = h["clipped"].as_array().unwrap();
+    assert_eq!(shown.len(), promised.len());
+    for (got, want) in shown.iter().zip(&promised) {
+        assert_eq!(got["stratum"], want.stratum.as_str());
+        assert_eq!(got["below"], want.below);
+        assert_eq!(got["above"], want.above);
+        assert_eq!(got["units"], want.units);
+    }
+    let close_ts = close_record_of(&lab, "told").ts;
+    let verdict_ts = kind_of(&lab, "told", "verdict")[0].ts.clone();
+    assert_eq!(r["finished_at"], close_ts.as_str());
+    assert!(close_ts >= verdict_ts, "{close_ts} {verdict_ts}");
+    let log = lab.home.study_dir("told").join("records.jsonl");
+    let before = std::fs::read(&log).unwrap();
+    let estimates = kind_of(&lab, "told", "estimate");
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(std::fs::read(&log).unwrap(), before);
+    assert_eq!(
+        common::records_of(&lab, "told").last().unwrap().kind,
+        "opened"
+    );
+    assert_eq!(kind_of(&lab, "told", "estimate"), estimates);
+}
+
+#[test]
+fn a_broken_stream_log_refuses_the_report() {
+    use ignorarium::runner::{RunStatus, run};
+    let lab = lab();
+    common::resize_pilot(&lab.home);
+    let plan = resize_study(&lab, "told", &flat("99"));
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let alpha = register_of(&lab, "told").alpha.unwrap();
+    let path = ignorarium::stream::Log::of(
+        &lab.home,
+        ignorarium::stream::LogName::parse(&alpha.log).unwrap(),
+    )
+    .path()
+    .to_path_buf();
+    let mut bytes = std::fs::read(&path).unwrap();
+    let close = bytes
+        .windows(14)
+        .rposition(|w| w == b"\"stream.close\"")
+        .unwrap();
+    let digit = close
+        + bytes[close..]
+            .iter()
+            .position(|b| b.is_ascii_digit())
+            .unwrap();
+    bytes[digit] = if bytes[digit] == b'7' { b'8' } else { b'7' };
+    std::fs::write(&path, &bytes).unwrap();
+    let log = lab.home.study_dir("told").join("records.jsonl");
+    let before = std::fs::read(&log).unwrap();
+    bin(&lab)
+        .args(["report", "told"])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::starts_with("error: cannot report "));
+    assert_eq!(std::fs::read(&log).unwrap(), before);
 }
 
 #[test]
@@ -1821,6 +1910,48 @@ fn the_analysis_record_holds_the_resize_sd_and_the_appended_sd_after_the_end() {
     assert_eq!(a.appended_sd, Some(sd(None)));
     let body = &kind_of(&lab, "flat", "analysis")[0].body;
     assert_eq!(body["appended_sd"][0]["sd"], Value::Null);
+}
+
+/// A payload that writes 100 for the reference and, for `arm-a`, 97, 103 or 99 by the
+/// checksum of the unit: -3 % lies below the range [-2, 2], +3 % above it, -1 % inside.
+const CLIPPED: &str = "#!/bin/sh\ncase \"$2\" in exact) v=100;; *) h=$(printf '%s' \"$4\" | cksum | cut -d' ' -f1); case $((h % 4)) in 0) v=97;; 1) v=103;; *) v=99;; esac;; esac\nprintf '{\"ppl\": %s}' \"$v\" > \"$IGNORARIUM_OUT/values.json\"\n";
+
+#[test]
+fn the_analysis_record_counts_the_units_the_range_clipped() {
+    use ignorarium::derived::GroupClip;
+    use ignorarium::runner::{RunStatus, run};
+    let lab = lab();
+    common::resize_pilot(&lab.home);
+    let plan = resize_study(&lab, "clip", CLIPPED);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    // The units the test read: the first batch, then the reserve clusters it appended.
+    let x = observed(&plan, &common::records_of(&lab, "clip"));
+    let appended = resize_of(&lab, "clip").strata[0].appended as usize;
+    let read: Vec<f64> = (first_batch(&plan).iter().chain(&by_pin(&plan)[..appended]))
+        .map(|p| x[p])
+        .collect();
+    let count = |f: fn(f64) -> bool| read.iter().filter(|&&v| f(v)).count() as u64;
+    let (below, above) = (count(|v| v < -2.0), count(|v| v > 2.0));
+    assert!(below > 0 && above > 0 && below + above < read.len() as u64);
+    let a = analysis_after_the_end(&lab, "clip");
+    let want = GroupClip {
+        hypothesis: "H1".into(),
+        stratum: String::new(),
+        below,
+        above,
+        units: read.len() as u64,
+    };
+    assert_eq!(a.clipped, [want]);
+    // Status does not show them: the report will, next to each verdict.
+    let s = status(&lab, "clip");
+    assert!(!keys_of(&s).iter().any(|k| k == "clipped"), "{s}");
+    let a = bin(&lab).args(["status", "clip"]).assert().success();
+    assert!(!text(&a).contains("clipped"), "{}", text(&a));
+    // A hypothesis with no claim clips nothing: the record leaves the field out.
+    plain(&lab, "none");
+    bin_at(&lab, "none").args(["run", "none"]).assert().code(0);
+    let body = &kind_of(&lab, "none", "analysis")[0].body;
+    assert!(body.get("clipped").is_none(), "{body}");
 }
 
 #[test]

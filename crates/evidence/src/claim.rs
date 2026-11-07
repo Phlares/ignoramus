@@ -5,6 +5,7 @@
 use crate::eprocess::{EProcess, Score};
 use crate::rng::Rng;
 use crate::{Error, Tail};
+use std::cmp::Ordering;
 
 /// One one-sided bound. `tail` is the claimed side: `Lower` claims the value lies below
 /// `margin`, `Upper` above it. It is not the side the e-process bets on: a quantile claim's
@@ -65,15 +66,35 @@ fn mean(xs: impl ExactSizeIterator<Item = f64>) -> f64 {
     xs.sum::<f64>() / n
 }
 
+/// Where `x` lies against `[lo, hi]`: `Less` below `lo`, `Greater` above `hi`, else `Equal`.
+/// An end is inside, and NaN is `Equal`.
+fn place(x: f64, lo: f64, hi: f64) -> Ordering {
+    if x < lo {
+        Ordering::Less
+    } else if x > hi {
+        Ordering::Greater
+    } else {
+        Ordering::Equal
+    }
+}
+
 /// `x` moved to the nearer end of `[lo, hi]` when it lies outside; NaN stays NaN.
 fn clip(x: f64, lo: f64, hi: f64) -> f64 {
-    if x < lo {
-        lo
-    } else if x > hi {
-        hi
-    } else {
-        x
+    match place(x, lo, hi) {
+        Ordering::Less => lo,
+        Ordering::Greater => hi,
+        Ordering::Equal => x,
     }
+}
+
+/// Of `units`, how many a mean's range clips: those below `lo`, and those above `hi`, as
+/// `observation` clips them. `None` for a quantile, which clips none.
+pub fn clipped(stat: &Statistic, units: &[f64]) -> Option<(u64, u64)> {
+    let Statistic::Mean { lo, hi } = *stat else {
+        return None;
+    };
+    let count = |end| units.iter().filter(|&&x| place(x, lo, hi) == end).count() as u64;
+    Some((count(Ordering::Less), count(Ordering::Greater)))
 }
 
 /// What one cluster gives the test of `bound`: the mean of its units, each clipped to the

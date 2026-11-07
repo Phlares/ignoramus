@@ -85,7 +85,7 @@ fn guide_json_lists_every_step_with_its_output() {
         report["does"]
             .as_str()
             .unwrap()
-            .contains("not available yet")
+            .contains("waits until the study is finished")
     );
 }
 
@@ -767,7 +767,7 @@ fn guide_wording_is_public() {
         !regex::Regex::new(r"Plan \d").unwrap().is_match(&out),
         "{out}"
     );
-    assert_eq!(out.matches("not available yet").count(), 3);
+    assert!(!out.contains("not available yet"), "{out}");
 }
 
 #[cfg(target_os = "linux")]

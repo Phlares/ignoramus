@@ -4,14 +4,14 @@ use evidence::claim::{Bound, Statistic, e_value, order};
 use evidence::rng::Rng;
 use evidence::{Tail, tree};
 use ignorarium::analysis::{
-    Paired, Source, distinct_clusters, estimates, instrument, paired, select, study_e_value,
-    verdicts,
+    Paired, Source, clip_counts, distinct_clusters, estimates, instrument, paired, select,
+    study_e_value, verdicts,
 };
 use ignorarium::backend::level0::Level0;
 use ignorarium::canon::sha256_hex;
 use ignorarium::derived::{
-    Analysis, BoundResult, Candidate, Estimate, Instrument, Register, Selection, Verdict,
-    contrast_key,
+    Analysis, BoundResult, Candidate, Estimate, GroupClip, Instrument, Register, Selection,
+    Verdict, contrast_key,
 };
 use ignorarium::home::Home;
 use ignorarium::keys;
@@ -945,6 +945,61 @@ fn reserve_clusters_follow_the_first_batch_in_the_order_given() {
         (vs[0].e_value, vs[0].incomplete_units, study),
         (Some(0.0), 1, Some(0.0))
     );
+}
+
+fn clip(stratum: &str, below: u64, above: u64, units: u64) -> GroupClip {
+    GroupClip {
+        hypothesis: "H1".into(),
+        stratum: stratum.into(),
+        below,
+        above,
+        units,
+    }
+}
+
+#[test]
+fn clip_counts_read_the_units_the_test_reads() {
+    // On [-1, 1]: -2 lies below, 3 and 5 above, and a unit at an end is inside.
+    let groups = [
+        group("c0", "code", &[-2.0, -1.0, 0.5]),
+        group("c1", "code", &[1.0, 3.0]),
+        group("r0", "code", &[5.0]),
+        group("q", "", &[-9.0]),
+    ];
+    for mode in ["confirmatory", "exploratory"] {
+        let spec = below_zero(mode, &["code"]);
+        let (p, mut all) = data(&spec, &groups);
+        for c in &mut all[2..] {
+            c.role = Role::Reserve;
+        }
+        // The appended reserve cluster counts; one outside the claimed stratum does not.
+        assert_eq!(
+            clip_counts(&spec, &p, &all),
+            [clip("code", 1, 2, 6)],
+            "{mode}"
+        );
+        // An incomplete unit is not read, so it is not counted.
+        all[0].picked.push(7);
+        assert_eq!(
+            clip_counts(&spec, &p, &all),
+            [clip("code", 1, 2, 6)],
+            "{mode}"
+        );
+    }
+    // The pooled group reads every cluster.
+    let spec = below_zero("confirmatory", &[]);
+    let (p, all) = data(&spec, &groups);
+    assert_eq!(clip_counts(&spec, &p, &all), [clip("", 2, 2, 7)]);
+    // A quantile clips nothing and a hypothesis with no claim tests nothing: no counts.
+    let quantile = claimed(
+        "confirmatory",
+        &[],
+        json!({ "below": 0.0 }),
+        json!({ "quantile": 0.5 }),
+    );
+    let (p, all) = data(&quantile, &groups);
+    assert_eq!(clip_counts(&quantile, &p, &all), []);
+    assert_eq!(clip_counts(&one_hypothesis(&[]), &p, &all), []);
 }
 
 #[test]

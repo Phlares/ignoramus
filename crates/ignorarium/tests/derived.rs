@@ -311,6 +311,7 @@ fn an_analysis_record_states_what_follows_it() {
             }),
             resize_sd: None,
             appended_sd: None,
+            clipped: vec![],
         }
     );
     assert_eq!(serde_json::to_value(&a).unwrap(), analysis_body());

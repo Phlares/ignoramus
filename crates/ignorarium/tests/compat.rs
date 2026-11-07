@@ -2,6 +2,7 @@
 //! version of them must read, hash and verify the same under the next.
 use ed25519_dalek::SigningKey;
 use ignorarium::canon::{canonical_line, canonical_of, sha256_hex};
+use ignorarium::derived::Analysis;
 use ignorarium::keys::{sign_hex, verify_hex};
 use ignorarium::records::{self, Record};
 use ignorarium::spec;
@@ -66,25 +67,58 @@ fn old_record() -> Record {
     }
 }
 
-#[test]
-fn a_record_written_before_still_seals_and_verifies() {
+/// `record` as the box stores it, signed with seed `07` repeated.
+fn stored_line(record: &Record) -> String {
     let k = SigningKey::from_bytes(&[7; 32]);
-    let record = old_record();
-    let bytes = canonical_of(&record).unwrap();
+    let bytes = canonical_of(record).unwrap();
     let stored = json!({
         "record": record,
         "hash": sha256_hex(&bytes),
         "sig": sign_hex(&k, &bytes),
     });
-    let line = String::from_utf8(canonical_line(&stored).unwrap()).unwrap();
-    assert_eq!(line, OLD_LINE);
+    String::from_utf8(canonical_line(&stored).unwrap()).unwrap()
+}
+
+/// The records `line` holds, read and verified as the box reads a study's log.
+fn read_back(line: &str) -> Vec<Record> {
     let d = tempfile::tempdir().unwrap();
     let log = d.path().join("records.jsonl");
-    std::fs::write(&log, OLD_LINE).unwrap();
-    assert_eq!(
-        records::read_all(&log, &k.verifying_key()).unwrap(),
-        [old_record()]
-    );
+    std::fs::write(&log, line).unwrap();
+    let k = SigningKey::from_bytes(&[7; 32]);
+    records::read_all(&log, &k.verifying_key()).unwrap()
+}
+
+#[test]
+fn a_record_written_before_still_seals_and_verifies() {
+    assert_eq!(stored_line(&old_record()), OLD_LINE);
+    assert_eq!(read_back(OLD_LINE), [old_record()]);
+}
+
+/// An `analysis` record as the box wrote it before it counted the units a range clipped.
+const OLD_ANALYSIS_LINE: &str = "{\"hash\":\"6a3216e0130dedf2c662468577dbb5bb37679601cda47c1a928f0eeea75f0aac\",\"record\":{\"body\":{\"box_version\":\"0.0.1\",\"commit\":\"efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef\",\"estimates\":1,\"instrument\":{\"environment\":\"\",\"inputs\":[],\"payload\":\"\"},\"recheck\":null,\"slot\":null,\"verdicts\":1},\"kind\":\"analysis\",\"prev\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"row\":null,\"seq\":0,\"study\":\"compat\",\"ts\":\"2026-11-06T00:00:00.000Z\"},\"sig\":\"d3111a316274a76d606200eb488654cf8fe8c0e6ec66434cd7e8a045af49d7f2d667ccf15e6bc8dfb266144f7728fa3143d1b4fe3fe6ec3dd70a260fb2721b0c\"}\n";
+
+fn old_analysis() -> Record {
+    Record {
+        row: None,
+        kind: "analysis".into(),
+        body: json!({
+            "commit": "ef".repeat(32), "box_version": "0.0.1", "estimates": 1, "verdicts": 1,
+            "slot": null, "instrument": { "payload": "", "environment": "", "inputs": [] },
+            "recheck": null,
+        }),
+        ..old_record()
+    }
+}
+
+#[test]
+fn an_analysis_record_without_clip_counts_still_verifies_and_reads() {
+    assert_eq!(stored_line(&old_analysis()), OLD_ANALYSIS_LINE);
+    let read = read_back(OLD_ANALYSIS_LINE);
+    assert_eq!(read, [old_analysis()]);
+    let a = Analysis::of(&read[0]).unwrap();
+    assert!(a.clipped.is_empty());
+    // Written again, it holds the fields it held: none was added.
+    assert_eq!(serde_json::to_value(&a).unwrap(), old_analysis().body);
 }
 
 /// Each TOML test fixture, parsed as a spec: its hash, or the error.
