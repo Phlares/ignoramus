@@ -705,25 +705,19 @@ fn family_lock(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
 /// For a study a registered root's lock lists, the first way its inputs, spec hash and payload
 /// hash differ from the lock, and both ways forward; `None` when they match, for any other
 /// study, and for a spec without a string `study.id`. Box records that cannot be read fail
-/// closed. Only a locked study reads its family, so a family leaf without its root refuses no
-/// other study. `check` runs it as E-FAM-006 on confirmatory plans, `register` on every plan.
+/// closed. `check` runs it as E-FAM-006 on confirmatory plans, `register` on every plan.
 pub fn differs_from_lock(spec: &Value, ctx: &CheckCtx) -> Option<String> {
     let id = text(spec, "study.id")?;
-    let unread = |e: String| Some(format!("The box records cannot be read: {e}."));
-    match ctx.records.locked_members() {
-        Err(e) => unread(e),
-        Ok(locked) if !locked.iter().any(|m| m == id) => None,
-        Ok(_) => match ctx.records.family_of(id) {
-            Err(e) => unread(e),
-            Ok(found) => (found.iter())
-                .flat_map(|f| f.lock.members.iter().filter(|m| m.id == id))
-                .find_map(|m| unlike(spec, ctx, m))
-                .map(|(what, d)| {
-                    format!(
-                        "{d} Restore the locked {what}, or register the changed study under a new id as a non-member, where the freshness rule applies in full."
-                    )
-                }),
-        },
+    match ctx.records.locked_family(id) {
+        Err(e) => Some(format!("The box records cannot be read: {e}.")),
+        Ok(found) => (found.iter())
+            .flat_map(|f| f.lock.members.iter().filter(|m| m.id == id))
+            .find_map(|m| unlike(spec, ctx, m))
+            .map(|(what, d)| {
+                format!(
+                    "{d} Restore the locked {what}, or register the changed study under a new id as a non-member, where the freshness rule applies in full."
+                )
+            }),
     }
 }
 

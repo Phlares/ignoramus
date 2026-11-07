@@ -34,6 +34,14 @@ pub trait BoxRecords {
     /// The registered family whose lock lists `study`, as `family::find` gives it from the
     /// box's register records and log leaves.
     fn family_of(&self, study: &str) -> Result<Option<crate::family::Found>, String>;
+    /// `family_of` for a study that `locked_members` lists; `None` for any other study, which
+    /// reads no family, so a family leaf without its root refuses no other study.
+    fn locked_family(&self, study: &str) -> Result<Option<crate::family::Found>, String> {
+        if !self.locked_members()?.iter().any(|m| m == study) {
+            return Ok(None);
+        }
+        self.family_of(study)
+    }
 }
 
 /// An empty box.

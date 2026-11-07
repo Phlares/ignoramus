@@ -367,10 +367,7 @@ fn family_line(value: &Value, room: Option<&Room>, records: &dyn BoxRecords) -> 
         ));
     }
     let id = value.pointer("/study/id")?.as_str()?;
-    if !records.locked_members().ok()?.iter().any(|m| m == id) {
-        return None;
-    }
-    let found = records.family_of(id).ok()??;
+    let found = records.locked_family(id).ok()??;
     let reserved = records.unopened().ok()?.iter().any(|m| m == id);
     let slot = if reserved { "; slot reserved" } else { "" };
     Some(format!("member of family {}{slot}", found.root))
