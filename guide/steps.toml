@@ -52,7 +52,7 @@ command = "ignorarium review studies/<id>/spec.toml"
 [[step]]
 id = "register"
 title = "Register the plan"
-does = "A person types the first 8 characters of the spec hash to approve. The plan is then frozen, with the records of other studies it takes values from. It refuses while a value waits on a study that has not finished. For a study that declares a family, the plan also locks every member: spec, payload and inputs, and the box imports each member input into the store. Each member then takes a plan stream slot. A member registers later only as locked, by the same command."
+does = "A person types the first 8 characters of the spec hash to approve. The plan is then frozen, with the records of other studies it takes values from. It refuses while a value waits on a study that has not finished. For a study that declares a family, the plan also locks every member: spec, payload and inputs, and the box imports each member input into the store. On the plan log, the box then reserves a stream slot for each member. A member registers later only as locked, by the same command."
 produces = "A frozen copy of the spec and of the payload folder, every input in the box's store, and a signed entry in the plan log."
 command = "ignorarium register studies/<id>/spec.toml"
 

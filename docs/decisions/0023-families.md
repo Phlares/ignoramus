@@ -5,7 +5,14 @@ Confirmatory studies declared together, before any of them runs, form a family. 
 Decision:
 
 - **Declaration.** The first study, the root, holds a top-level `[family]` table with `members`, a list of spec paths from the study root. The family's name is the root's study id. Members declare nothing. The order has no meaning. Membership is independent of `follow_on` routes: routes say what runs next, a family says what may share data.
-- **Check on the root.** `check` reads every member spec with the same rules as a standalone check, plus the family rules. Root and members are confirmatory and use the same log (E-FAM-001). Every member id is distinct, unregistered and in no other family, and no member holds a `[family]` table (E-FAM-002). Every input of every member, of every role, is pinned by SHA-256 and present at the study root or in the store (E-FAM-003). No member's confirmation or reserve data holds the data of a selection input of any family study, root included, compared by exact and normalized hash (E-FAM-004). The plan stream holds a free slot for the root and every member (E-FAM-005). A member value that waits on an unfinished study is allowed and listed (W-FAM-001): it resolves at the member's own registration (0014). A spec reachable through `follow_on` that shares confirmation or reserve data with the study and is not in its family draws a warning, while the family option is still open (W-FAM-002).
+- **Check on the root.** `check` reads every member spec with the same rules as a standalone check, plus the family rules:
+  - E-FAM-001: root and members are confirmatory and use the same log.
+  - E-FAM-002: every member id is distinct, unregistered and in no other family. No member holds a `[family]` table.
+  - E-FAM-003: every input of every member, of every role, is pinned by SHA-256. Its data is at the study root or in the store.
+  - E-FAM-004: no member's confirmation or reserve data holds the data of a selection input of any family study, root included. Exact and normalized hashes are compared.
+  - E-FAM-005: the plan stream holds a free slot for the root and every member.
+  - W-FAM-001: a member value that waits on an unfinished study is allowed and listed. It resolves at the member's own registration (0014).
+  - W-FAM-002: a spec reachable through `follow_on` shares confirmation or reserve data with the study and is not in its family. The warning comes while the family option is still open.
 - **Register on the root.** `register` imports every member input into the store, as it imports its own. It signs one plan-log leaf of kind `family`, labelled `family:<root id>`, after the root's plan leaf. The root's register record holds the lock: per member, the study id, spec path, spec hash, payload tree hash, and each input's role and SHA-256. It lists no absolute path (0012). The leaf commits to the lock's hash.
 - **The lock.** After the root registers, a member registers and checks only as locked: its spec hash, payload tree hash and input pins equal the locked ones (E-FAM-006). A locked member registers only as locked, in every mode. The check-time lock rule runs for confirmatory plans, and `register` enforces it for every mode. To change a member, register the changed study under a new id, as a study outside the family.
 - **The stream.** A member's slot opens when the member registers, as any study's does. Its level is 0.005 × (D + 1), with D the discoveries closed before the slot opens. The plan stream has 10 slots. A study that is not an unopened member may open a slot only if, after it, the slots left cover every unopened member of every registered family. A reserved slot that is never opened stays reserved and never counts a discovery. The test stream never runs out, so it reserves nothing. Every study of a family uses one log.
@@ -31,7 +38,7 @@ Why:
   2. The family is bounded when declared. Choosing which of many locked candidates to register is a selection, and control of the error rate needs the addition planned (added-arm error control). Reserved slots fix the family's size.
   3. No member's evidence comes from data that picked its condition (E-FAM-004). A condition picked on some data looks better on that data (FDA 2019).
   4. γ is fixed before the stream starts (0013).
-- Selection reuse rests on the same ground as condition 1: the hypothesis and design may come from any past data, and the e-value needs fresh data. A condition picked on old data does not bias a test of that condition on fresh data.
+- Selection reuse rests on the same ground as condition 1: the hypothesis and design may come from any past data, and the e-value needs fresh data (Neufeld, Perry and Witten). A condition picked on old data does not bias a test of that condition on fresh data.
 - A root may confirm on a member's selection data, because a member's selection result reaches nothing the root tests. Condition 3 holds in the other direction, where it matters.
 - There is no gate. Gatekeeping lets one secondary claim ride on a primary claim because one α covers the family (FDA 2022). Here each member has its own slot.
 - Locks are strict. Registered-report journals require withdrawal and a new registration for substantial changes. An amendment path needs a person to judge "minor"; here rules decide.
@@ -45,12 +52,12 @@ Cost:
 - A claim tested on data another claim used reaches "confirmed", never "replicated" (Junk and Lyons).
 - One payload folder serves a whole family, so one payload fix after the root registers removes every member.
 - A member gate that can run only at the member's own registration, because its values wait on an unfinished study, is a risk the lock accepts. A member that fails a gate then is refused and never opens its slot, which stays reserved and unused. Size its reserves generously.
-- A register record with a family lock cannot be read by an older box binary.
 
 Sources:
 
 - Xu and Ramdas, e-LOND, online false discovery rate control with e-values, https://arxiv.org/abs/2311.06412
 - Fischer and Ramdas, "Admissible online closed testing must employ e-values", https://arxiv.org/abs/2407.15733
+- Neufeld, Perry and Witten, one recipe for inference after selection: choose the target on selection data, then infer conditional on that choice, https://arxiv.org/abs/2604.09779
 - FDA (2019), "Adaptive Designs for Clinical Trials of Drugs and Biologics", https://www.fda.gov/media/78495/download
 - FDA (2022), serial and parallel gatekeeping, "Multiple Endpoints in Clinical Trials", https://www.fda.gov/media/162416/download
 - Added-arm designs and familywise error control, https://ar5iv.labs.arxiv.org/html/1902.05336
