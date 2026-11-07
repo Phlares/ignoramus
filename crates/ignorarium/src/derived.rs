@@ -14,6 +14,7 @@ use std::path::Path;
 pub const ANALYSIS: &str = "analysis";
 pub const ESTIMATE: &str = "estimate";
 pub const INPUTS: &str = "inputs";
+pub const OPENED: &str = "opened";
 pub const REGISTER: &str = "register";
 pub const RESIZE: &str = "resize";
 pub const SELECTION: &str = "selection";

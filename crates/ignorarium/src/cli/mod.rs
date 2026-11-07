@@ -16,6 +16,7 @@ mod new;
 mod pause;
 mod probe;
 pub mod register;
+mod report;
 mod resume;
 mod review;
 mod run;
@@ -182,6 +183,14 @@ enum Verb {
         #[arg(long)]
         json: bool,
     },
+    /// Print the verdicts of a finished study.
+    Report {
+        /// Study id.
+        study: String,
+        /// Print one JSON object instead of text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Ask a run to pause at the next row boundary.
     Pause {
         /// Study id.
@@ -230,6 +239,7 @@ impl Verb {
             Verb::Probe => "probe",
             Verb::Run { .. } => "run",
             Verb::Status { .. } => "status",
+            Verb::Report { .. } => "report",
             Verb::Pause { .. } => "pause",
             Verb::Resume { .. } => "resume",
             Verb::Stop { .. } => "stop",
@@ -251,6 +261,7 @@ impl Verb {
             Verb::Probe => probe::run(ctx),
             Verb::Run { study, max_level } => run::run(ctx, &study, max_level),
             Verb::Status { study, json } => status::run(ctx, &study, json),
+            Verb::Report { study, json } => report::run(ctx, &study, json),
             Verb::Pause { study } => pause::run(ctx, &study),
             Verb::Resume { study } => resume::run(ctx, &study),
             Verb::Stop { study, reason } => stop::run(ctx, &study, &reason),
