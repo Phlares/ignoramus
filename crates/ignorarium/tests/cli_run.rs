@@ -1641,19 +1641,23 @@ fn reserve_data(paths: &[String]) -> Vec<(String, String)> {
     data
 }
 
-/// The `stream.close` body of the study's slot.
-fn close_of_slot(lab: &Lab, id: &str) -> Value {
+/// The `stream.close` record of the study's slot.
+fn close_record_of(lab: &Lab, id: &str) -> ignorarium::records::Record {
     use ignorarium::stream::{Log, LogName};
     let alpha = register_of(lab, id).alpha.unwrap();
     let key = keys::load(&lab.home).unwrap().unwrap();
     let log = Log::of(&lab.home, LogName::parse(&alpha.log).unwrap());
     let all = ignorarium::records::read_all(log.path(), &key.verifying_key()).unwrap();
-    let closes: Vec<Value> = (all.into_iter())
+    let closes: Vec<_> = (all.into_iter())
         .filter(|r| r.kind == "stream.close" && r.body["study"] == id)
-        .map(|r| r.body)
         .collect();
     assert_eq!(closes.len(), 1, "{closes:?}");
     closes[0].clone()
+}
+
+/// The `stream.close` body of the study's slot.
+fn close_of_slot(lab: &Lab, id: &str) -> Value {
+    close_record_of(lab, id).body
 }
 
 #[test]
@@ -1688,6 +1692,54 @@ fn finish_waits_for_admitted_rows_only() {
     finish(&plan).unwrap();
     assert_eq!(kind_of(&lab, "waits", "analysis").len(), 1);
     assert_eq!(kind_of(&lab, "waits", "verdict").len(), 1);
+}
+
+#[test]
+fn a_run_study_reports_its_recorded_verdict() {
+    use ignorarium::derived::Analysis;
+    use ignorarium::runner::{RunStatus, run};
+    let lab = lab();
+    common::resize_pilot(&lab.home);
+    let plan = resize_study(&lab, "told", &flat("99"));
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let a = bin(&lab)
+        .args(["report", "told", "--json"])
+        .assert()
+        .success();
+    let r: Value = serde_json::from_str(&text(&a)).unwrap();
+    let v = verdict_of(&lab, "told");
+    let h = &r["hypotheses"][0];
+    assert_eq!(h["hypothesis"], v.hypothesis);
+    assert_eq!(h["e_value"], serde_json::json!(v.e_value));
+    assert_eq!(h["level"], serde_json::json!(v.level));
+    assert_eq!(h["verdict"], v.verdict);
+    assert_eq!(h["basis"], v.basis);
+    let analysis = Analysis::of(&kind_of(&lab, "told", "analysis")[0]).unwrap();
+    let clipped: Vec<Value> = (analysis.clipped.iter())
+        .filter(|c| c.hypothesis == v.hypothesis)
+        .map(|c| serde_json::json!({ "stratum": c.stratum, "below": c.below, "above": c.above, "units": c.units }))
+        .collect();
+    let expected = if clipped.is_empty() {
+        Value::Null
+    } else {
+        Value::Array(clipped)
+    };
+    assert_eq!(h["clipped"], expected);
+    let close_ts = close_record_of(&lab, "told").ts;
+    let verdict_ts = kind_of(&lab, "told", "verdict")[0].ts.clone();
+    assert_eq!(r["finished_at"], close_ts.as_str());
+    assert!(close_ts > verdict_ts, "{close_ts} {verdict_ts}");
+    // A second run adds nothing: the log keeps its bytes, and `opened` stays its last line.
+    let log = lab.home.study_dir("told").join("records.jsonl");
+    let before = std::fs::read(&log).unwrap();
+    let estimates = kind_of(&lab, "told", "estimate");
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(std::fs::read(&log).unwrap(), before);
+    assert_eq!(
+        common::records_of(&lab, "told").last().unwrap().kind,
+        "opened"
+    );
+    assert_eq!(kind_of(&lab, "told", "estimate"), estimates);
 }
 
 #[test]
