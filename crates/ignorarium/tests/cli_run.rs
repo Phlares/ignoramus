@@ -1729,7 +1729,6 @@ fn a_run_study_reports_its_recorded_verdict() {
     let verdict_ts = kind_of(&lab, "told", "verdict")[0].ts.clone();
     assert_eq!(r["finished_at"], close_ts.as_str());
     assert!(close_ts > verdict_ts, "{close_ts} {verdict_ts}");
-    // A second run adds nothing: the log keeps its bytes, and `opened` stays its last line.
     let log = lab.home.study_dir("told").join("records.jsonl");
     let before = std::fs::read(&log).unwrap();
     let estimates = kind_of(&lab, "told", "estimate");

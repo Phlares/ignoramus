@@ -68,14 +68,8 @@ fn a_finished_study_reports_each_verdict() {
     let bodies = finished_study(&three(), &[]);
     plant(&lab.home, "s1", &bodies);
     let r = report_json(&lab, "s1");
-    let last = records_of(&lab, "s1")
-        .iter()
-        .rev()
-        .find(|x| x.kind == "verdict")
-        .map(|x| x.ts.clone())
-        .unwrap();
     assert_eq!(r["study"], "s1");
-    assert_eq!(r["finished_at"], last);
+    assert_eq!(r["finished_at"], ts_of(&lab));
     assert_eq!(r["records"], bodies.len());
     let want = json!([
         { "hypothesis": "h1", "verdict": "pass", "basis": "test", "e_value": 312.4,

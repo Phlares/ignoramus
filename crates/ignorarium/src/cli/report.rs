@@ -2,10 +2,12 @@
 //! Appends one `opened` record, so a reader of the log sees that the results were read.
 use super::check::HomeRecords;
 use super::{CliError, Ctx, Done, Run, located, not_registered, out, stopped_why};
-use crate::derived::{Analysis, ESTIMATE, GroupClip, OPENED, Register, StudyState, Verdict};
+use crate::derived::{Analysis, ESTIMATE, OPENED, Register, StudyState, VERDICT, Verdict};
+use crate::home::Home;
 use crate::records::{self, Record, RecordDraft, RecordError};
 use crate::rules::BoxRecords;
 use crate::stream::{self, Log, LogName};
+use ed25519_dalek::VerifyingKey;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
@@ -30,45 +32,41 @@ impl From<CliError> for Stop {
 /// The time the results were complete: the later of the study's last estimate or verdict
 /// record and, when it holds a stream slot, the close of that slot.
 fn finished_at(
-    ctx: &Ctx,
-    key: &ed25519_dalek::VerifyingKey,
+    home: &Home,
+    key: &VerifyingKey,
     id: &str,
-    register: &Register,
-    analysis: &Analysis,
+    slot: Option<(&str, u64)>,
     after: &[Record],
 ) -> Result<String, CliError> {
     let io = |e: &dyn std::fmt::Display| CliError::usage(format!("cannot read the stream: {e}"));
-    let last = after
-        .iter()
-        .rfind(|r| r.kind == ESTIMATE || r.kind == crate::derived::VERDICT)
+    let mut stamps: Vec<String> = (after.iter())
+        .filter(|r| r.kind == ESTIMATE || r.kind == VERDICT)
         .map(|r| r.ts.clone())
-        .unwrap_or_default();
-    if let (Some(slot), Some(alpha)) = (analysis.slot, &register.alpha) {
-        let name = LogName::parse(&alpha.log).map_err(|e| io(&e))?;
-        let path = Log::of(ctx.home()?, name).path().to_path_buf();
-        let all = records::read_all(&path, key).map_err(|e| io(&e))?;
-        let close = all
-            .iter()
-            .find(|r| r.kind == stream::CLOSE && r.body["study"] == id && r.body["slot"] == slot);
-        if let Some(r) = close {
-            return Ok(last.max(r.ts.clone()));
-        }
+        .collect();
+    if let Some((log, slot)) = slot {
+        let name = LogName::parse(log).map_err(|e| io(&e))?;
+        let all = records::read_all(Log::of(home, name).path(), key).map_err(|e| io(&e))?;
+        stamps.extend(
+            (all.iter())
+                .filter(|r| {
+                    r.kind == stream::CLOSE && r.body["study"] == id && r.body["slot"] == slot
+                })
+                .map(|r| r.ts.clone()),
+        );
     }
-    Ok(last)
+    Ok(stamps.into_iter().max().unwrap_or_default())
 }
 
 fn clips(analysis: &Analysis, h: &str) -> Value {
-    let mine: Vec<&GroupClip> = analysis
-        .clipped
-        .iter()
+    let mine: Vec<Value> = (analysis.clipped.iter())
         .filter(|c| c.hypothesis == h)
+        .map(|c| json!({ "stratum": c.stratum, "below": c.below, "above": c.above, "units": c.units }))
         .collect();
     if mine.is_empty() {
-        return Value::Null;
+        Value::Null
+    } else {
+        Value::Array(mine)
     }
-    mine.iter()
-        .map(|c| json!({ "stratum": c.stratum, "below": c.below, "above": c.above, "units": c.units }))
-        .collect()
 }
 
 pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
@@ -118,7 +116,13 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
             .collect();
         value = json!({
             "study": id,
-            "finished_at": finished_at(ctx, &verifying, id, &register, &analysis, &after)?,
+            "finished_at": finished_at(
+                home,
+                &verifying,
+                id,
+                analysis.slot.map(|n| (register.log.as_str(), n)),
+                &after,
+            )?,
             "records": all.len(),
             "hypotheses": hypotheses,
         });
@@ -147,7 +151,7 @@ fn text(r: &Value) -> String {
         r["finished_at"].as_str().unwrap_or_default(),
         r["records"]
     );
-    for h in r["hypotheses"].as_array().map_or(&[][..], Vec::as_slice) {
+    for h in r["hypotheses"].as_array().into_iter().flatten() {
         s.push_str(&format!(
             "{}: {} ({})",
             h["hypothesis"].as_str().unwrap_or_default(),
@@ -164,7 +168,7 @@ fn text(r: &Value) -> String {
             s.push_str(&format!(": {why}"));
         }
         s.push('\n');
-        for c in h["clipped"].as_array().map_or(&[][..], Vec::as_slice) {
+        for c in h["clipped"].as_array().into_iter().flatten() {
             let stratum = match c["stratum"].as_str() {
                 Some("") | None => "all",
                 Some(x) => x,
