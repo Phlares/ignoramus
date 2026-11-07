@@ -534,6 +534,63 @@ target = [
 ]
 
 [[rule]]
+code = "E-FAM-001"
+severity = "error"
+problem = "An exploratory study declares a family, or a family member is not confirmatory or uses another log than this study."
+instruction = "Make this study and every member confirmatory, with the same study.test_log. An exploratory study needs no family to reuse data: remove the `[family]` table, or remove the member from it and run it as exploratory on the same data (no claim)."
+why = "Members may share data because each takes its own slot in one stream, and the stream keeps the false discovery rate at or below 0.05 over its studies whatever the dependence between them, shared data included. A study in another stream, or with no slot, falls outside that bound. An exploratory study makes no claim, so it needs no family."
+sources = ["https://arxiv.org/abs/2311.06412"]
+target = [
+  { path = "family", check = "named:family-confirmatory" },
+  { path = "family.members[*]", check = "named:family-confirmatory" },
+]
+
+[[rule]]
+code = "E-FAM-002"
+severity = "error"
+problem = "A family member cannot be read, is this study or another member again, is already registered, declares its own family, or lies under another study root."
+instruction = "List each member once, by the path of a readable spec under this study root, and not this study itself. Only this study holds a `[family]` table. A registered study cannot join: give it fresh data, or run it as exploratory on the same data (no claim)."
+why = "A family is fixed before any member runs: registering this study locks every member. A registered study may already have seen the data, so a later lock cannot cover it. One table in the first study keeps each family in one place, and one study root lets one payload folder and one data folder serve every member."
+sources = ["https://arxiv.org/abs/2407.15733"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "family.members[*]", check = "named:family-members" },
+]
+
+[[rule]]
+code = "E-FAM-003"
+severity = "error"
+problem = "An input of a family member is not pinned by sha256, or its data is neither at the study root nor in the store."
+instruction = "Set sha256 on every input of every member, of every role, and put each file at the study root or in the store before this study registers. Member specs are final then: nothing about a member can change after the lock."
+why = "Registering this study locks every member, inputs included. The lock needs the bytes: the box compares member data with earlier uses and with selection data by content, and an absent file has no content to compare."
+sources = ["https://arxiv.org/abs/2407.15733"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "family.members[*]", check = "named:family-pinned" },
+]
+
+[[rule]]
+code = "E-FAM-004"
+severity = "error"
+problem = "A family member's confirmation or reserve data is selection data of this study or of another member."
+instruction = "Give the member confirmation and reserve data that no selection input in the family holds: not the same bytes, and not the same text in other case or spacing. Or remove the member from the family and run it as exploratory on this data (no claim)."
+why = "A condition picked on some data looks better on that same data. A member may test a condition that a selection stage in the family picked, so its evidence must come from other data. The content decides, not the file name."
+sources = ["https://www.fda.gov/media/78495/download"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "family.members[*]", check = "named:family-selection" },
+]
+
+[[rule]]
+code = "W-FAM-001"
+severity = "warning"
+problem = "A family member's value waits on a study that has not finished."
+instruction = "Nothing to do now: the member reads the value when it registers, after that study ends. If the member then fails a gate, it is refused and its reserved stream slot stays unused, so size its reserve inputs generously."
+why = "A member's values may come from a study that runs first, such as a pilot or an earlier member. They are read at the member's own registration and cannot change after it. This study's check cannot run the member's gates on values that do not exist yet, so it lists each such value and the study it waits on."
+sources = []
+check = "documented"
+
+[[rule]]
 code = "E-CNF-006"
 severity = "error"
 problem = "A confirmatory study has no hypothesis, or a hypothesis of it has no claim."

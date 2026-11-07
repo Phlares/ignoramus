@@ -3,6 +3,7 @@ use super::{CliError, Ctx, Done, Run, out};
 use crate::derived::{Alpha, Carried, Register};
 use crate::diag::{Diagnostic, Severity, render_human};
 use crate::estimate::{Estimate, defaults_json, estimate};
+use crate::family;
 use crate::home::Home;
 use crate::inputs;
 use crate::keys;
@@ -286,8 +287,10 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
     let store = Store {
         root: home.root.join("store"),
     };
-    let cc = CheckCtx {
-        root: study_root(spec_path),
+    let root = study_root(spec_path);
+    let mut cc = CheckCtx {
+        members: family::load(&root, &raw.value, &store),
+        root,
         prior,
         machine_max_level: machine.max_level,
         spec_text: raw.text,
@@ -301,7 +304,8 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         gates: Default::default(),
         payload: Default::default(),
     };
-    let (value, filled, diags) = rules::check_all(&raw.value, rules::builtin(), &cc);
+    let (value, filled, mut diags) = rules::check_all(&raw.value, rules::builtin(), &cc);
+    diags.extend(family::check(&mut cc));
     let mut a = Assessed {
         root: cc.root.clone(),
         hash: raw.hash,

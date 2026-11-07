@@ -10,6 +10,7 @@ use crate::derived::{
     ANALYSIS, Alpha, Analysis, Carried, Estimate, Instrument, Selection, StudyState, contrast_key,
 };
 use crate::diag::{Diagnostic, printable};
+use crate::family::{self as fam, MemberSpec};
 use crate::inputs::{self, Found, input_path};
 use crate::payload::{self, PayloadError};
 use crate::power::{required_clusters, z};
@@ -50,6 +51,9 @@ pub struct CheckCtx {
     pub gates: Gates,
     /// The payload folder's tree hash, once read: see `payload_hash`.
     pub payload: OnceCell<Result<String, PayloadError>>,
+    /// One entry per element of the spec's `family.members`, as `family::load` read it;
+    /// empty for a spec without `[family]`.
+    pub members: Vec<Result<MemberSpec, String>>,
 }
 
 impl CheckCtx {
@@ -67,6 +71,7 @@ impl CheckCtx {
             spec_hash: [0; 32],
             gates: Gates::default(),
             payload: OnceCell::new(),
+            members: vec![],
         }
     }
 
@@ -107,6 +112,10 @@ const NAMED: &[(&str, NamedFn)] = &[
     ("deviation-borrowed", deviation_borrowed),
     ("confirmation-disjoint", confirmation_disjoint),
     ("data-fresh", data_fresh),
+    ("family-confirmatory", family_confirmatory),
+    ("family-members", family_members),
+    ("family-pinned", family_pinned),
+    ("family-selection", family_selection),
     ("units-declared", units_declared),
     ("row-cap", row_cap),
     ("selection-stage", selection_stage),
@@ -345,6 +354,160 @@ fn data_fresh(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
             path,
             detail: Some(detail),
         });
+    }
+    out
+}
+
+// ---- families ----
+
+/// Each member `pat` (`family.members[*]`) selects that `ctx.members` loaded and that is not
+/// nested, with its path.
+fn loaded<'a>(spec: &Value, ctx: &'a CheckCtx, pat: &str) -> Vec<(String, &'a MemberSpec)> {
+    (nodes(spec, pat).into_iter().zip(&ctx.members))
+        .filter_map(|((path, _), m)| Some((path, m.as_ref().ok().filter(|m| !m.nested())?)))
+        .collect()
+}
+
+fn at(path: &str, detail: String) -> Hit {
+    Hit {
+        path: path.to_string(),
+        detail: Some(detail),
+    }
+}
+
+/// E-FAM-001. At `family`: the study is not confirmatory. At `family.members[*]`, in a
+/// confirmatory study: a member is not confirmatory, or uses another log.
+fn family_confirmatory(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let mode = text(spec, "study.mode");
+    if pat == "family" {
+        return flag(spec, pat, |_| mode.is_some_and(|m| m != "confirmatory"));
+    }
+    if mode != Some("confirmatory") {
+        return vec![];
+    }
+    let log = val(spec, "study.test_log").and_then(Value::as_bool);
+    (loaded(spec, ctx, pat).into_iter())
+        .filter_map(|(path, m)| {
+            let study = &m.raw.value["study"];
+            let why = if study["mode"].as_str().is_some_and(|m| m != "confirmatory") {
+                "It is not confirmatory."
+            } else if study["test_log"]
+                .as_bool()
+                .zip(log)
+                .is_some_and(|(a, b)| a != b)
+            {
+                "Its study.test_log is not this study's."
+            } else {
+                return None;
+            };
+            Some(at(&path, why.into()))
+        })
+        .collect()
+}
+
+/// E-FAM-002: a member that cannot be read, has the id of this study or of an earlier member,
+/// is registered, declares its own family, or lies under another study root. A box whose
+/// records cannot be read fails closed.
+fn family_members(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let own = text(spec, "study.id");
+    let mut ids: Vec<(String, &str)> = vec![];
+    let mut out = vec![];
+    for ((path, entry), m) in nodes(spec, pat).into_iter().zip(&ctx.members) {
+        let m = match m {
+            Ok(m) => m,
+            Err(why) => {
+                let safe = entry.as_str().and_then(|rel| input_path(&ctx.root, rel));
+                out.extend(safe.map(|_| at(&path, why.clone())));
+                continue;
+            }
+        };
+        let v = &m.raw.value;
+        let mut why = vec![];
+        if let Some(id) = v["study"]["id"].as_str() {
+            if Some(id) == own {
+                why.push("It is this study.".to_string());
+            } else if let Some((first, _)) = ids.iter().find(|(_, x)| *x == id) {
+                why.push(format!("It has the study id of {first}."));
+            } else {
+                match ctx.records.study(id) {
+                    Ok(None) => {}
+                    Ok(Some(_)) => why.push("It is already registered.".into()),
+                    Err(e) => why.push(format!("The box records cannot be read: {e}.")),
+                }
+            }
+            ids.push((path.clone(), id));
+        }
+        if m.nested() {
+            why.push("It declares a family of its own.".into());
+        }
+        if m.root != ctx.root {
+            why.push("It lies under another study root.".into());
+        }
+        out.extend(why.into_iter().map(|w| at(&path, w)));
+    }
+    out
+}
+
+/// E-FAM-003: an input of a member has no `sha256`, or its data is neither at the study root
+/// nor in the store. A `sha256` of another type is the member's own check's.
+fn family_pinned(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let mut out = vec![];
+    for (path, m) in loaded(spec, ctx, pat) {
+        let (mut unpinned, mut absent) = (vec![], vec![]);
+        for (input, i, h) in fam::inputs(&m.raw.value, &m.input_hashes) {
+            match (i.get("sha256"), h) {
+                (None, _) => unpinned.push(input),
+                (Some(Value::String(s)), _) if s.is_empty() => unpinned.push(input),
+                (Some(Value::String(_)), None) => absent.push(input),
+                _ => {}
+            }
+        }
+        let found = [
+            (unpinned, "have no sha256"),
+            (absent, "are neither at the study root nor in the store"),
+        ];
+        for (list, why) in found.into_iter().filter(|(l, _)| !l.is_empty()) {
+            out.push(at(
+                &path,
+                format!("These inputs {why}: {}.", list.join(", ")),
+            ));
+        }
+    }
+    out
+}
+
+/// E-FAM-004: a member's confirmation or reserve input holds the data of a selection input of
+/// this study or of another member. A member's own selection data is E-CNF-004's.
+fn family_selection(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let members = loaded(spec, ctx, pat);
+    let own: Vec<(String, (String, String))> = nodes(spec, "inputs[*]")
+        .into_iter()
+        .filter(|(_, i)| role(i) == Some("selection"))
+        .filter_map(|(p, i)| Some((format!("{p} of this study"), input_hashes(ctx, i)?)))
+        .collect();
+    let picked: Vec<Vec<(String, (String, String))>> = (members.iter())
+        .map(|(path, m)| {
+            (fam::data(&m.raw.value, &m.input_hashes, &["selection"]).into_iter())
+                .map(|(input, h)| (format!("{input} of {path}"), h))
+                .collect()
+        })
+        .collect();
+    let mut out = vec![];
+    for (n, (path, m)) in members.iter().enumerate() {
+        let others: Vec<_> = (own.iter().cloned())
+            .chain(
+                (picked.iter().enumerate())
+                    .filter(|(k, _)| *k != n)
+                    .flat_map(|(_, p)| p.clone()),
+            )
+            .collect();
+        let held = fam::data(&m.raw.value, &m.input_hashes, &["confirmation", "reserve"]);
+        for (input, selection) in fam::shared(&held, &others) {
+            out.push(at(
+                path,
+                format!("Its input {input} holds the data of selection input {selection}."),
+            ));
+        }
     }
     out
 }

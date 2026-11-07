@@ -11,6 +11,7 @@ pub mod diag;
 pub mod environ;
 pub mod estimate;
 pub mod events;
+pub mod family;
 pub mod files;
 pub mod home;
 pub mod inputs;

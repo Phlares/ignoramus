@@ -1294,14 +1294,15 @@ check = \"required\"",
 }
 
 #[test]
-fn the_documented_codes_are_exactly_the_register_refusals() {
+fn the_documented_codes_are_exactly_those_the_cli_raises() {
     let mut codes: Vec<&str> = rules::builtin()
         .iter()
         .filter(|r| matches!(r.check, Check::Documented))
         .map(|r| r.code.as_str())
         .collect();
     codes.sort_unstable();
-    assert_eq!(codes, ["E-REG-001", "E-REG-002", "E-REG-003"]);
+    // The register refusals, and a family member's wait as its root's check reports it.
+    assert_eq!(codes, ["E-REG-001", "E-REG-002", "E-REG-003", "W-FAM-001"]);
 }
 
 #[test]
