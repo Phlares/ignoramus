@@ -2,8 +2,8 @@
 //! condition's value for the same unit and repeat.
 use crate::canon::{sha256_hex, to_canonical};
 use crate::derived::{
-    ANALYSIS, Analysis, BoundResult, CONTINUE, Candidate, ESTIMATE, Estimate, Inputs, Instrument,
-    Recheck, Register, Selection, VERDICT, Verdict, contrast_key,
+    ANALYSIS, Analysis, BoundResult, CONTINUE, Candidate, ESTIMATE, Estimate, GroupClip, Inputs,
+    Instrument, Recheck, Register, Selection, VERDICT, Verdict, contrast_key,
 };
 use crate::planlog::store::{PlanLog, RELEASE};
 use crate::prior::Seen;
@@ -557,29 +557,7 @@ fn judge(
     spec_hash: &[u8; 32],
 ) -> Verdict {
     let tested = spec.study.mode == Mode::Confirmatory;
-    let repeats = spec.design.repeats;
-    let scopes: Vec<Scope> = (claim_strata(h).into_iter())
-        .map(|stratum| {
-            let of = |role| {
-                group(
-                    clusters,
-                    role,
-                    stratum,
-                    &h.outcome,
-                    &h.contrast,
-                    paired,
-                    repeats,
-                )
-            };
-            let ((first, a), (appended, b)) = (of(Role::Confirmation), of(Role::Reserve));
-            Scope {
-                stratum,
-                first,
-                appended,
-                incomplete: a + b,
-            }
-        })
-        .collect();
+    let scopes = scopes(spec, h, paired, clusters);
     let incomplete = scopes.iter().map(|s| s.incomplete).sum();
     let mut v = Verdict {
         hypothesis: h.id.clone(),
@@ -625,6 +603,71 @@ struct Scope<'a> {
     first: Vec<Vec<f64>>,
     appended: Vec<Vec<f64>>,
     incomplete: u64,
+}
+
+/// The scope of each stratum a claim of `h` is held in (`claim_strata`), its units complete
+/// in all `design.repeats` repeats.
+fn scopes<'a>(
+    spec: &Spec,
+    h: &'a Hypothesis,
+    paired: &Paired,
+    clusters: &[Cluster],
+) -> Vec<Scope<'a>> {
+    let repeats = spec.design.repeats;
+    (claim_strata(h).into_iter())
+        .map(|stratum| {
+            let of = |role| {
+                group(
+                    clusters,
+                    role,
+                    stratum,
+                    &h.outcome,
+                    &h.contrast,
+                    paired,
+                    repeats,
+                )
+            };
+            let ((first, a), (appended, b)) = (of(Role::Confirmation), of(Role::Reserve));
+            Scope {
+                stratum,
+                first,
+                appended,
+                incomplete: a + b,
+            }
+        })
+        .collect()
+}
+
+/// Per hypothesis with a claim on a mean, per group it is held in, how many of the units its
+/// test reads (`verdicts`: the complete units of the first batch and the appended reserve
+/// clusters) the range clips at each end (`claim::clipped`). A quantile claim gives none.
+pub fn clip_counts(spec: &Spec, paired: &Paired, clusters: &[Cluster]) -> Vec<GroupClip> {
+    let mut out = Vec::new();
+    for h in &spec.question.hypotheses {
+        let (Some(_), Some(stat)) = (h.claim, h.statistic.as_ref()) else {
+            continue;
+        };
+        let stat = stat.to_evidence();
+        for s in scopes(spec, h, paired, clusters) {
+            let units: Vec<f64> = s
+                .first
+                .iter()
+                .chain(&s.appended)
+                .flatten()
+                .copied()
+                .collect();
+            if let Some((below, above)) = claim::clipped(&stat, &units) {
+                out.push(GroupClip {
+                    hypothesis: h.id.clone(),
+                    stratum: s.stratum.into(),
+                    below,
+                    above,
+                    units: units.len() as u64,
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Each bound of `claim` in each of `scopes`, with whether it holds by the point estimate. In
@@ -851,6 +894,7 @@ pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
                 recheck: recheck(&plan.spec, &all, carried_from),
                 resize_sd,
                 appended_sd,
+                clipped: clip_counts(&plan.spec, &pairs, &measured),
             };
             append(plan, &log, ANALYSIS, &body)?;
         }

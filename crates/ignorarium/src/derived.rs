@@ -289,6 +289,10 @@ pub struct Analysis {
     /// none: with `resize_sd`, the spread of the two stages side by side.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub appended_sd: Option<Vec<GroupSd>>,
+    /// Per mean claim and group, how many units its range clipped. Left out when no claim
+    /// is on a mean, and in a record written before the field existed: both read as none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clipped: Vec<GroupClip>,
 }
 
 /// The blinded sd (`evidence::power::blinded_sd`) of a claim's cluster observations in one
@@ -300,6 +304,19 @@ pub struct GroupSd {
     pub stratum: String,
     #[serde(deserialize_with = "Option::deserialize")]
     pub sd: Option<f64>,
+}
+
+/// Of the units a mean claim's test read in one group (`""` pools every cluster), how many lay
+/// below the range's `lo` and above its `hi`, and how many it read. A unit counts once, though
+/// its cluster gives one observation per bound.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupClip {
+    pub hypothesis: String,
+    pub stratum: String,
+    pub below: u64,
+    pub above: u64,
+    pub units: u64,
 }
 
 /// What the recheck copies of a run found, one copy per condition: `rows` counts the copies

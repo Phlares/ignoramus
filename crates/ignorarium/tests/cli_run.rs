@@ -1823,6 +1823,48 @@ fn the_analysis_record_holds_the_resize_sd_and_the_appended_sd_after_the_end() {
     assert_eq!(body["appended_sd"][0]["sd"], Value::Null);
 }
 
+/// A payload that writes 100 for the reference and, for `arm-a`, 97, 103 or 99 by the
+/// checksum of the unit: -3 % lies below the range [-2, 2], +3 % above it, -1 % inside.
+const CLIPPED: &str = "#!/bin/sh\ncase \"$2\" in exact) v=100;; *) h=$(printf '%s' \"$4\" | cksum | cut -d' ' -f1); case $((h % 4)) in 0) v=97;; 1) v=103;; *) v=99;; esac;; esac\nprintf '{\"ppl\": %s}' \"$v\" > \"$IGNORARIUM_OUT/values.json\"\n";
+
+#[test]
+fn the_analysis_record_counts_the_units_the_range_clipped() {
+    use ignorarium::derived::GroupClip;
+    use ignorarium::runner::{RunStatus, run};
+    let lab = lab();
+    common::resize_pilot(&lab.home);
+    let plan = resize_study(&lab, "clip", CLIPPED);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    // The units the test read: the first batch, then the reserve clusters it appended.
+    let x = observed(&plan, &common::records_of(&lab, "clip"));
+    let appended = resize_of(&lab, "clip").strata[0].appended as usize;
+    let read: Vec<f64> = (first_batch(&plan).iter().chain(&by_pin(&plan)[..appended]))
+        .map(|p| x[p])
+        .collect();
+    let count = |f: fn(f64) -> bool| read.iter().filter(|&&v| f(v)).count() as u64;
+    let (below, above) = (count(|v| v < -2.0), count(|v| v > 2.0));
+    assert!(below > 0 && above > 0 && below + above < read.len() as u64);
+    let a = analysis_after_the_end(&lab, "clip");
+    let want = GroupClip {
+        hypothesis: "H1".into(),
+        stratum: String::new(),
+        below,
+        above,
+        units: read.len() as u64,
+    };
+    assert_eq!(a.clipped, [want]);
+    // Status does not show them: the report will, next to each verdict.
+    let s = status(&lab, "clip");
+    assert!(!keys_of(&s).iter().any(|k| k == "clipped"), "{s}");
+    let a = bin(&lab).args(["status", "clip"]).assert().success();
+    assert!(!text(&a).contains("clipped"), "{}", text(&a));
+    // A hypothesis with no claim clips nothing: the record leaves the field out.
+    plain(&lab, "none");
+    bin_at(&lab, "none").args(["run", "none"]).assert().code(0);
+    let body = &kind_of(&lab, "none", "analysis")[0].body;
+    assert!(body.get("clipped").is_none(), "{body}");
+}
+
 #[test]
 fn unused_reserve_data_is_released_and_fresh_again() {
     use ignorarium::runner::{RunStatus, run};
