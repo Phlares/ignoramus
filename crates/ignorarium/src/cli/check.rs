@@ -15,7 +15,7 @@ use crate::schedule;
 use crate::spec::{self, LoadError};
 use crate::store::Store;
 use crate::stream::{self, Log, LogName, Next, StreamError};
-use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
@@ -231,6 +231,14 @@ fn members<'a>(
 }
 
 impl HomeRecords {
+    /// The records of the box in `home`, whose key is `key`.
+    pub fn signed(home: &Home, key: &SigningKey) -> HomeRecords {
+        HomeRecords {
+            home: home.clone(),
+            key: Ok(Some(key.verifying_key())),
+        }
+    }
+
     /// The `register` record that opens each study's log, by study. Only that first line is
     /// read and checked.
     fn registers(&self) -> Result<Vec<(String, Register)>, String> {

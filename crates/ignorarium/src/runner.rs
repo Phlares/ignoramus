@@ -857,10 +857,7 @@ fn gate_late_data(
         let found = match &member {
             Some(found) => found,
             None => {
-                let records = HomeRecords {
-                    home: home.clone(),
-                    key: Ok(Some(key.verifying_key())),
-                };
+                let records = HomeRecords::signed(home, key);
                 member.insert(records.family_of(id).map_err(RunError::Records)?)
             }
         };

@@ -622,11 +622,9 @@ fn store(
 /// The plan slots that must stay free after the one study `id` opens, from the box's register
 /// records as they are now: `family::keep`, with the members of `lock` when `id` is a root.
 fn keep_for(home: &Home, key: &SigningKey, id: &str, lock: Option<&Lock>) -> Result<u64, CliError> {
-    let records = HomeRecords {
-        home: home.clone(),
-        key: Ok(Some(key.verifying_key())),
-    };
-    let unopened = records.unopened().map_err(|e| io("box records", e))?;
+    let unopened = HomeRecords::signed(home, key)
+        .unopened()
+        .map_err(|e| io("box records", e))?;
     Ok(family::keep(
         &unopened,
         id,

@@ -549,10 +549,7 @@ fn alpha(log: &str, slot: u64, level: f64) -> Alpha {
 fn a_stream_that_lacks_a_registered_slot_is_refused() {
     let lab = lab();
     let k = key(&lab);
-    let records = HomeRecords {
-        home: lab.home.clone(),
-        key: Ok(Some(k.verifying_key())),
-    };
+    let records = HomeRecords::signed(&lab.home, &k);
     let log = Log::of(&lab.home, LogName::Plan);
     log.open(&k, "first", FIRST, 0).unwrap();
     registered(&lab, "first", alpha("planlog", 1, FIRST));
@@ -583,10 +580,7 @@ fn a_stream_that_lacks_a_registered_slot_is_refused() {
     // A register record at another level than its slot's, in the test stream.
     let lab = common::lab();
     let k = key(&lab);
-    let records = HomeRecords {
-        home: lab.home.clone(),
-        key: Ok(Some(k.verifying_key())),
-    };
+    let records = HomeRecords::signed(&lab.home, &k);
     Log::of(&lab.home, LogName::Test)
         .open(&k, "lone", FIRST, 0)
         .unwrap();
@@ -610,10 +604,7 @@ fn a_stream_that_lacks_a_registered_slot_is_refused() {
 fn a_test_stream_rolled_back_past_its_first_epoch_is_refused() {
     let lab = lab();
     let k = key(&lab);
-    let records = HomeRecords {
-        home: lab.home.clone(),
-        key: Ok(Some(k.verifying_key())),
-    };
+    let records = HomeRecords::signed(&lab.home, &k);
     let log = Log::of(&lab.home, LogName::Test);
     for i in 1..=10 {
         let id = format!("t{i:02}");
@@ -643,10 +634,7 @@ fn a_register_between_the_reads_of_a_check_is_no_lack() {
     // after that, so it finds slot 1 there.
     let lab = lab();
     let k = key(&lab);
-    let records = HomeRecords {
-        home: lab.home.clone(),
-        key: Ok(Some(k.verifying_key())),
-    };
+    let records = HomeRecords::signed(&lab.home, &k);
     let scratch = lab.root.join("scratch.jsonl");
     let mut body = common::finished(vec![])[0].1.clone();
     body["alpha"] = serde_json::to_value(alpha("testlog", 1, FIRST)).unwrap();
@@ -799,10 +787,7 @@ fn a_confirmatory_study_finishes_only_once_its_slot_closes() {
     let analysis = all.iter().find_map(Analysis::of).unwrap();
     assert_eq!(analysis.slot, Some(1));
     let k = key(&lab);
-    let records = HomeRecords {
-        home: lab.home.clone(),
-        key: Ok(Some(k.verifying_key())),
-    };
+    let records = HomeRecords::signed(&lab.home, &k);
     let state = || {
         let all = records.study("conf").unwrap();
         StudyState::of(all, |log, slot| records.stream_closed(log, "conf", slot)).unwrap()
