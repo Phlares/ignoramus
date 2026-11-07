@@ -151,6 +151,10 @@ pub enum RunError {
         path: String,
         label: String,
     },
+    /// In a confirmatory plan, a confirmation or reserve input holds the selection data of a
+    /// study a param takes its condition from, or that data cannot be read; the sentence says
+    /// which.
+    DataPicked(String),
     /// In a confirmatory plan, a confirmation or reserve input holds the same data as a
     /// selection or calibration input; one of them was absent when `check` compared them.
     DataShared {
@@ -222,6 +226,9 @@ impl fmt::Display for RunError {
                 f,
                 "E-CNF-005: input {path} was used by an earlier study ({label}). See docs/rules/E-CNF-005.md"
             ),
+            RunError::DataPicked(why) => {
+                write!(f, "E-CNF-007: {why} See docs/rules/E-CNF-007.md")
+            }
             RunError::DataShared {
                 path,
                 path_role,
@@ -434,6 +441,9 @@ pub fn prepare_with(
         for (folder, what) in folders {
             image::check_source(folder).map_err(|e| RunError::Disk(format!("{what}: {e}")))?;
         }
+    }
+    if frozen.is_none() {
+        gate_picked_data(home, &store, &key, &spec, &inputs)?;
     }
     gate_late_data(home, &spec, log, leaf, &key, &inputs)?;
     let rows = expand_rows(&spec, &spec_hash, Some(&register))?;
@@ -878,6 +888,57 @@ fn gate_late_data(
     }
     if !new.is_empty() {
         log.append_legacy(&own, new, key)?;
+    }
+    Ok(())
+}
+
+/// In a confirmatory plan, refuse a confirmation or reserve input that holds the selection
+/// data of a study a param takes its condition from (E-CNF-007). `check` skips an input that
+/// is absent, so `prepare` compares again when it first freezes the inputs. `all` are the
+/// inputs' hashes in spec order. A study whose selection data cannot be read refuses.
+fn gate_picked_data(
+    home: &Home,
+    store: &Store,
+    key: &SigningKey,
+    spec: &Spec,
+    all: &InputHashes,
+) -> Result<(), RunError> {
+    if spec.study.mode != Mode::Confirmatory {
+        return Ok(());
+    }
+    let held: Vec<(String, (String, String))> = (spec.inputs.iter().zip(all))
+        .filter(|(i, _)| matches!(i.role, Role::Confirmation | Role::Reserve))
+        .filter_map(|(i, (_, h))| Some((i.path.clone(), h.clone()?)))
+        .collect();
+    if held.is_empty() {
+        return Ok(());
+    }
+    let mut from: Vec<&str> = (spec.design.conditions.iter())
+        .flat_map(|c| c.params.values())
+        .filter_map(|p| match p {
+            Param::Ref(r) => Some(r.from.as_str()),
+            Param::Value(_) => None,
+        })
+        .collect();
+    from.sort_unstable();
+    from.dedup();
+    let records = HomeRecords::signed(home, key);
+    for study in from {
+        let picked = match crate::rules::selection_data(&records, store, study) {
+            Ok(Some(picked)) => picked,
+            Ok(None) => {
+                return Err(RunError::DataPicked(format!(
+                    "Study {study} has not finished, so its selection data is unknown."
+                )));
+            }
+            Err(why) => return Err(RunError::DataPicked(why)),
+        };
+        if let Some((path, selection)) = family::shared(&held, &picked).first() {
+            let path = printable(path);
+            return Err(RunError::DataPicked(format!(
+                "input {path} holds the data of selection input {selection} of study {study}, which picked the condition this study takes."
+            )));
+        }
     }
     Ok(())
 }

@@ -399,7 +399,7 @@ fn from_selection(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     }
     (references(spec, pat).into_iter())
         .filter_map(|(path, from)| {
-            let detail = match selection_data(ctx, from) {
+            let detail = match selection_data(ctx.records.as_ref(), &ctx.store, from) {
                 Ok(None) => return None,
                 Ok(Some(picked)) => {
                     let (input, selection) = *fam::shared(&held, &picked).first()?;
@@ -417,14 +417,16 @@ fn from_selection(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
 /// The data of each selection input of study `from` once it has finished, by its path in the
 /// plan the box stored: the store's hashes of the digest its `inputs` record froze at its first
 /// run. An input absent then holds no data. `None` while the study has not finished. Records,
-/// a plan or a store copy that cannot be read are an error.
-fn selection_data(
-    ctx: &CheckCtx,
+/// a plan or a store copy that cannot be read are an error. `check` reads it through
+/// E-CNF-007, and `run` for data that was absent at registration.
+pub fn selection_data(
+    records: &dyn BoxRecords,
+    store: &Store,
     from: &str,
 ) -> Result<Option<Vec<(String, (String, String))>>, String> {
     let unread = |e: String| format!("The box cannot read the records of study {from}: {e}.");
-    let all = ctx.records.study(from).map_err(unread)?;
-    let closed = |log: &str, slot| ctx.records.stream_closed(log, from, slot);
+    let all = records.study(from).map_err(unread)?;
+    let closed = |log: &str, slot| records.stream_closed(log, from, slot);
     if !matches!(
         StudyState::of(all.clone(), closed).map_err(unread)?,
         StudyState::Finished(_)
@@ -433,7 +435,7 @@ fn selection_data(
     }
     let frozen = (all.iter().flatten().find_map(Inputs::of))
         .ok_or_else(|| format!("Study {from} recorded no inputs."))?;
-    let plan = (ctx.records.spec(from).map_err(unread)?)
+    let plan = (records.spec(from).map_err(unread)?)
         .ok_or_else(|| format!("The box holds no plan of study {from}."))?;
     let plan = crate::spec::parse(&plan)
         .map_err(|e| format!("The plan of study {from} cannot be read: {e}."))?;
@@ -449,7 +451,7 @@ fn selection_data(
         let Some(digest) = &digest.1 else {
             continue;
         };
-        match inputs::stored(&ctx.store, digest) {
+        match inputs::stored(store, digest) {
             Some(Found::Stored { digest, meta }) => {
                 out.push((at, (digest, meta.normalized_sha256)));
             }

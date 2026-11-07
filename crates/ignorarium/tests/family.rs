@@ -1241,6 +1241,28 @@ fn an_outsider_cannot_confirm_on_the_data_that_picked_its_condition() {
 }
 
 #[test]
+fn late_confirmation_data_that_picked_the_condition_is_refused_at_run() {
+    use ignorarium::backend::level0::Level0;
+    use ignorarium::runner::prepare_with;
+    let lab = lab();
+    family_root(&lab);
+    plant_chooser(&lab, &chooser_records(&lab, "picked data\n"));
+    // `data/confirm.txt` is absent at register, so check cannot compare it.
+    let edit = |t| taking_from("x")(common::confirmatory(t));
+    common::register_study(&lab, "late", edit, &[], common::PAYLOAD);
+    let work = common::work(&lab, "late");
+    put(&work, "data/confirm.txt", "picked data\n");
+    let prepared = prepare_with(&lab.home, "late", &work, vec![Box::new(Level0)]);
+    let e = prepared.err().expect("the run is refused").to_string();
+    assert!(e.starts_with("E-CNF-007: input data/confirm.txt "), "{e}");
+    assert!(e.contains("of study x"), "{e}");
+    // Other late data runs.
+    put(&work, "data/confirm.txt", "fresh data\n");
+    let prepared = prepare_with(&lab.home, "late", &work, vec![Box::new(Level0)]);
+    assert!(prepared.is_ok(), "{:?}", prepared.err().map(|e| e.to_string()));
+}
+
+#[test]
 fn selection_data_the_box_cannot_read_fails_closed() {
     let lab = lab();
     family_root(&lab);
