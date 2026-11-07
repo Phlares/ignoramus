@@ -405,7 +405,15 @@ fn report_lists_children_with_their_estimates() {
     let bodies = with_children(&kids);
     plant(&lab.home, "s1", &bodies);
     let r = report_json(&lab, "s1");
-    assert_eq!(r["children"], json!(kids));
+    let listed: Vec<Value> = kids
+        .iter()
+        .map(|k| {
+            let mut k = k.clone();
+            k["stopped"] = json!(false);
+            k
+        })
+        .collect();
+    assert_eq!(r["children"], json!(listed));
     assert_eq!(r["records"], bodies.len());
     // The verdicts are as before.
     assert_eq!(r["hypotheses"].as_array().unwrap().len(), 3);
@@ -417,6 +425,51 @@ fn report_lists_children_with_their_estimates() {
     ] {
         assert!(t.contains(line), "missing {line:?} in {t}");
     }
+}
+
+#[test]
+fn a_child_named_in_a_spawn_stop_record_is_marked_stopped_and_partial() {
+    let lab = lab();
+    let kids = [
+        child_estimate("arm-a~window_tokens=64", 64, -12.5),
+        child_estimate("arm-a~window_tokens=512", 512, 3.0),
+    ];
+    let mut bodies = with_children(&kids);
+    let at = bodies.iter().position(|(k, _)| *k == "analysis").unwrap();
+    let stop = json!({ "children": ["arm-a~window_tokens=512"], "reason": "budget" });
+    bodies.insert(at, ("spawn-stop", stop));
+    plant(&lab.home, "s1", &bodies);
+    let r = report_json(&lab, "s1");
+    assert_eq!(r["children"][0]["stopped"], false);
+    assert_eq!(r["children"][1]["stopped"], true);
+    let a = bin(&lab).args(["report", "s1"]).assert().success();
+    let t = text(&a);
+    assert!(
+        t.contains("child arm-a~window_tokens=512: ppl-ratio mean 3 over 2 clusters, 4 units, 1 repeats, stopped (partial: only the rows that ran)
+"),
+        "{t}"
+    );
+    assert!(
+        t.contains(
+            "1 repeats
+"
+        ) && t.contains(
+            "window_tokens=64: ppl-ratio mean -12.5 over 2 clusters, 4 units, 1 repeats
+"
+        ),
+        "{t}"
+    );
+}
+
+#[test]
+fn a_child_id_with_a_control_character_prints_escaped() {
+    let lab = lab();
+    let kids = [child_estimate("arm-a~x\u{1b}[2J", 64, 1.0)];
+    plant(&lab.home, "s1", &with_children(&kids));
+    let a = bin(&lab).args(["report", "s1"]).assert().success();
+    let t = text(&a);
+    assert!(!t.contains('\u{1b}'), "{t:?}");
+    assert!(t.contains(r"child arm-a~x\u{1b}[2J: "), "{t:?}");
 }
 
 #[test]

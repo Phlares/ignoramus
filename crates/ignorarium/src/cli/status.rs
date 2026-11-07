@@ -4,6 +4,7 @@ use super::{CliError, Ctx, Done, Run, out, registered, stopped_why};
 use crate::canon::sha256_hex;
 use crate::control::{ControlFile, Signal, State, run_is_live};
 use crate::derived::{self, SpawnStop};
+use crate::diag::printable;
 use crate::records::Record;
 use crate::runner::RunError;
 use crate::runner::progress;
@@ -328,15 +329,15 @@ fn joined(list: impl Iterator<Item = String>) -> String {
     }
 }
 
-/// The strings of the JSON list `v`.
+/// The strings of the JSON list `v`, made printable.
 fn names(v: &Value) -> impl Iterator<Item = String> + '_ {
-    (v.as_array().into_iter().flatten()).filter_map(|x| x.as_str().map(String::from))
+    (v.as_array().into_iter().flatten()).filter_map(|x| x.as_str().map(printable))
 }
 
 /// `T1: fired, e-value 3.000, threshold 2.000, admitted a, skipped b (reason)`. A trigger
 /// with no decision shows its state alone.
 fn trigger_line(t: &Value) -> String {
-    let id = t["id"].as_str().unwrap_or("");
+    let id = printable(t["id"].as_str().unwrap_or(""));
     let state = t["state"].as_str().unwrap_or("");
     let Some(e) = t["e_value"].as_f64() else {
         return format!("{id}: {state}\n");
@@ -348,8 +349,8 @@ fn trigger_line(t: &Value) -> String {
         let (child, reason) = (&k["child"], &k["reason"]);
         format!(
             "{} ({})",
-            child.as_str().unwrap_or(""),
-            reason.as_str().unwrap_or("")
+            printable(child.as_str().unwrap_or("")),
+            printable(reason.as_str().unwrap_or(""))
         )
     });
     format!(

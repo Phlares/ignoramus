@@ -38,7 +38,7 @@ command = "ignorarium import --source <where the file came from> <file>"
 [[step]]
 id = "check"
 title = "Check the plan"
-does = "Run every rule on the spec. Fix each error the output lists, then run again until it passes. It exits 3 when no error is left but a value waits on a study that has not finished, such as the pilot whose estimates size a confirmatory hypothesis: run that study first. On a study that declares a family, it also checks every member spec with the same rules, and lists each member value that waits on a study. On a member of a registered family, it shows the root and the reserved slot. A spec with triggers must be exploratory or on the test log, needs selection inputs, and keeps them apart from its confirmation data. Check lists every child the triggers can spawn, once each, with its worst-case cost."
+does = "Run every rule on the spec. Fix each error the output lists, then run again until it passes. It exits 3 when no error is left but a value waits on a study that has not finished, such as the pilot whose estimates size a confirmatory hypothesis: run that study first. On a study that declares a family, it also checks every member spec with the same rules, and lists each member value that waits on a study. On a member of a registered family, it shows the root and the reserved slot. A spec with triggers must be exploratory, on either log, needs selection inputs, and keeps them apart from its confirmation data. Check lists every child the triggers can spawn, once each, with its worst-case cost."
 produces = "Diagnostics, a cost estimate and the claim label the plan can earn."
 command = "ignorarium check studies/<id>/spec.toml"
 
