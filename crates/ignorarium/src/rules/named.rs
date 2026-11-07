@@ -2239,7 +2239,8 @@ fn row_cap(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
 
 /// The stages, at each target (`condition-declared` checks the names the stages list):
 /// - `design.selection`: a stage, and no selection input.
-/// - `inputs[*].role`: a selection input, and no stage.
+/// - `inputs[*].role`: a selection input, and no stage and no trigger. A trigger reads the
+///   selection inputs without a stage.
 /// - `design.selection.conditions`: fewer than two candidates.
 /// - `design.selection.metric`: no outcome id.
 /// - `design.conditions[*].id`: a condition named `selected`.
@@ -2247,13 +2248,16 @@ fn row_cap(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
 /// A mistyped stage counts as present.
 fn selection_stage(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
     let staged = val(spec, "design.selection").is_some();
+    let triggered = list(spec, "mutations.triggers").is_some_and(|t| !t.is_empty());
     let has_input = |inputs: &Vec<Value>| inputs.iter().any(|i| role(i) == Some("selection"));
     match pat {
         "design.selection" => match list(spec, "inputs") {
             Some(inputs) if !has_input(inputs) => flag(spec, pat, Value::is_object),
             _ => vec![],
         },
-        "inputs[*].role" => flag(spec, pat, |v| !staged && v.as_str() == Some("selection")),
+        "inputs[*].role" => flag(spec, pat, |v| {
+            !(staged || triggered) && v.as_str() == Some("selection")
+        }),
         "design.selection.conditions" => {
             flag(spec, pat, |v| v.as_array().is_some_and(|a| a.len() < 2))
         }

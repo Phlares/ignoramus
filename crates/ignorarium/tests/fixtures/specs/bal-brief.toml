@@ -83,7 +83,7 @@ rule_base = ""
 [mutations]
 depth_cap = 2
 operators = []                  # [{ name, type = "int"|"float"|"enum", range = [..], acts_on }]
-triggers = []                   # [{ id, metric, threshold_e }]
+triggers = []                   # [{ id, outcome, contrast, claim, statistic, threshold_e, spawns = [{ operator, values }] }]
 [mutations.seeds]
 spawn = "spawn/"
 report = "report/"

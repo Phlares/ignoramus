@@ -4,6 +4,16 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::Path;
 
+/// A declared trigger with every key the shape has.
+fn trigger(id: &str, threshold_e: f64) -> Value {
+    json!({
+        "id": id, "outcome": "ppl-ratio", "contrast": { "arm-a": 1.0 }, "strata": ["fiction"],
+        "claim": { "below": 0.0 }, "statistic": { "quantile": 0.5 },
+        "threshold_e": threshold_e,
+        "spawns": [{ "operator": "window_tokens", "values": [64, 512] }],
+    })
+}
+
 fn v0() -> Vec<Rule> {
     rules::load("../../rules/v0.toml".as_ref()).unwrap()
 }
@@ -256,16 +266,24 @@ fn each_fault_row_yields_its_code_and_path_alone() {
 fn templates_have_no_generic_errors_and_no_unknown_keys() {
     let rules = v0();
     for t in ["numeric-ablation", "planted-spawn"] {
-        let d = rules::check_generic(&spec_at(&format!("../../templates/{t}.toml")), &rules);
-        assert_eq!(
-            codes_paths(&d),
-            [
-                ("W-LIC-001", "inputs[0].licence.spdx"),
-                ("W-LIC-001", "inputs[1].licence.spdx"),
-                ("W-HSH-001", "inputs[0].sha256"),
-                ("W-HSH-001", "inputs[1].sha256"),
-            ]
-        );
+        let spec = spec_at(&format!("../../templates/{t}.toml"));
+        let d = rules::check_generic(&spec, &rules);
+        let inputs = spec["inputs"].as_array().unwrap().len();
+        let warn = |code: &'static str, leaf: &str| -> Vec<(&'static str, String)> {
+            (0..inputs)
+                .map(|i| (code, format!("inputs[{i}].{leaf}")))
+                .collect()
+        };
+        let want: Vec<_> = [
+            warn("W-LIC-001", "licence.spdx"),
+            warn("W-HSH-001", "sha256"),
+        ]
+        .concat();
+        let got: Vec<_> = d
+            .iter()
+            .map(|x| (x.code.as_str(), x.path.clone()))
+            .collect();
+        assert_eq!(got, want, "{t}");
         assert!(d.iter().all(|x| x.severity == Severity::Warning));
     }
 }
@@ -365,10 +383,14 @@ fn fat_templates() -> Vec<Value> {
                 { "name": "o1", "type": "int", "range": [1, 2], "acts_on": "a" },
                 { "name": "o2", "type": "int", "range": [1, 2], "acts_on": "a" },
             ]);
-            s["mutations"]["triggers"] = json!([
-                { "id": "t1", "metric": "ppl-ratio", "threshold_e": 1.0 },
-                { "id": "t2", "metric": "ppl-ratio", "threshold_e": 1.0 },
-            ]);
+            // One trigger per claim shape, so every claim and statistic key has a node.
+            let mut t1 = trigger("t1", 2.0);
+            t1["contrast"] = json!({ "arm-a": 1.0, "selected": -1.0 });
+            t1["claim"] = json!({ "above": 0.0 });
+            let mut t2 = trigger("t2", 2.0);
+            t2["claim"] = json!({ "within": [-1.0, 1.0] });
+            t2["statistic"] = json!({ "mean": [-5.0, 5.0] });
+            s["mutations"]["triggers"] = json!([t1, t2, trigger("t3", 2.0)]);
             s["outcomes"].as_array_mut().unwrap().push(second);
             s["design"]["conditions"][1]["params"] =
                 json!({ "bits": 4, "mode": "fast", "chosen": { "from": "chooser" } });
@@ -701,8 +723,9 @@ fn a_plan_cannot_set_its_own_alpha() {
 fn nonfinite_is_reported_at_any_depth_and_nothing_else_fires() {
     let mut s = template();
     s["scope"]["budget"]["money_usd"] = json!("!nonfinite:inf");
-    s["mutations"]["triggers"] =
-        json!([{ "id": "T1", "metric": "m", "threshold_e": "!nonfinite:nan" }]);
+    let mut t = trigger("T1", 2.0);
+    t["threshold_e"] = json!("!nonfinite:nan");
+    s["mutations"]["triggers"] = json!([t]);
     let d = rules::check_generic(&s, &v0());
     let nums: Vec<_> = d
         .iter()
@@ -1127,7 +1150,11 @@ fn budget_values_of_zero_pass_the_range_and_negatives_do_not() {
 
 #[test]
 fn cost_inputs_are_range_checked_at_their_edges() {
-    let trig = |e: Value| json!([{ "id": "T1", "metric": "m", "threshold_e": e }]);
+    let trig = |e: Value| {
+        let mut t = trigger("T1", 2.0);
+        t["threshold_e"] = e;
+        json!([t])
+    };
     let cases: Vec<(Vec<&str>, Value, Vec<String>)> = vec![
         (
             vec!["design", "row_seconds"],
@@ -1189,7 +1216,12 @@ fn cost_inputs_are_range_checked_at_their_edges() {
             trig(json!(-1.0)),
             vec!["mutations.triggers[0].threshold_e".into()],
         ),
-        (vec!["mutations", "triggers"], trig(json!(1e-9)), vec![]),
+        (
+            vec!["mutations", "triggers"],
+            trig(json!(1.0)),
+            vec!["mutations.triggers[0].threshold_e".into()],
+        ),
+        (vec!["mutations", "triggers"], trig(json!(1.0001)), vec![]),
     ];
     for (path, v, want) in cases {
         assert_eq!(rng_codes(&with(&path, v.clone())), want, "{path:?} = {v}");
@@ -1581,4 +1613,60 @@ fn an_unknown_family_key_is_refused() {
         errors_of(&s),
         [("E-KEY-001".to_string(), "family.member".to_string())]
     );
+}
+
+#[test]
+fn a_trigger_names_each_spawn_operator_once() {
+    let mut s = template();
+    let mut t = trigger("T1", 2.0);
+    t["spawns"] = json!([
+        { "operator": "window_tokens", "values": [64] },
+        { "operator": "window_tokens", "values": [512] },
+    ]);
+    s["mutations"]["triggers"] = json!([t]);
+    let d = rules::check_generic(&s, &v0());
+    let unq: Vec<_> = d.iter().filter(|x| x.code == "E-UNQ-001").collect();
+    assert_eq!(unq.len(), 1);
+    assert_eq!(unq[0].path, "mutations.triggers[0].spawns[1].operator");
+}
+
+#[test]
+fn a_trigger_missing_a_declared_key_is_refused() {
+    for key in [
+        "outcome",
+        "contrast",
+        "claim",
+        "statistic",
+        "spawns",
+        "threshold_e",
+    ] {
+        let mut s = template();
+        s["mutations"]["triggers"] = json!([trigger("T1", 2.0)]);
+        s["mutations"]["triggers"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove(key);
+        let d = rules::check_generic(&s, &v0());
+        let want = format!("mutations.triggers[0].{key}");
+        assert!(
+            d.iter().any(|x| x.code == "E-REQ-001" && x.path == want),
+            "{key}"
+        );
+    }
+}
+
+#[test]
+fn an_unknown_trigger_key_is_refused() {
+    for at in ["", "/spawns/0", "/claim", "/statistic"] {
+        let mut s = template();
+        s["mutations"]["triggers"] = json!([trigger("T1", 2.0)]);
+        s.pointer_mut(&format!("/mutations/triggers/0{at}"))
+            .unwrap()["surprise"] = json!(1);
+        let d = rules::check_generic(&s, &v0());
+        assert!(
+            d.iter()
+                .any(|x| x.code == "E-KEY-001" && x.path.starts_with("mutations.triggers[0]")),
+            "{at}"
+        );
+    }
 }

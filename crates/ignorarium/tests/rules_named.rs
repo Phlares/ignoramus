@@ -183,10 +183,7 @@ fn ok() -> Value {
         ("/study/mode", json!("confirmatory")),
         ("/design/units_per_cluster", json!(5)),
         ("/inputs", inputs(35, 5)),
-        (
-            "/mutations/triggers",
-            json!([{ "id": "T1", "metric": "ppl-ratio", "threshold_e": 1.0 }]),
-        ),
+        ("/mutations/triggers", json!([trigger()])),
         ("/pins/deviations", json!([deviation("pilot")])),
     ];
     for (p, v) in edits {
@@ -267,6 +264,15 @@ fn power_edits(upc: u32, clusters: usize) -> Vec<Edit> {
 
 /// No selection stage: the confirmation stage runs `arm-a`, the hypothesis tests it, and
 /// `extra` follows.
+/// A declared trigger on the base plan's outcome and a condition its confirmation stage lists.
+fn trigger() -> Value {
+    json!({
+        "id": "T1", "outcome": "ppl-ratio", "contrast": { "arm-a": 1.0 },
+        "claim": { "below": 0.0 }, "statistic": { "quantile": 0.5 }, "threshold_e": 2.0,
+        "spawns": [{ "operator": "window_tokens", "values": [64, 512] }],
+    })
+}
+
 fn unstaged(extra: Vec<Edit>) -> Vec<Edit> {
     let mut e = vec![
         ("/design/selection", None),
@@ -619,7 +625,19 @@ fn faults() -> Vec<Fault> {
             vec![("/inputs/1/role", j(json!("confirmation")))],
             vec![("E-SEL-001", "design.selection")],
         ),
-        f(unstaged(vec![]), vec![("E-SEL-001", "inputs[1].role")]),
+        f(
+            unstaged(vec![("/mutations/triggers", j(json!([])))]),
+            vec![("E-SEL-001", "inputs[1].role")],
+        ),
+        // A trigger reads selection data with no stage; either trigger shape counts.
+        f(unstaged(vec![]), vec![]),
+        f(
+            unstaged(vec![(
+                "/mutations/triggers",
+                j(json!([{ "id": "T0", "metric": "ppl-ratio", "threshold_e": 2.0 }])),
+            )]),
+            vec![],
+        ),
         // Two or more candidates, each a declared condition other than the reference.
         f(
             vec![("/design/selection/conditions", j(json!(["arm-a"])))],
@@ -1047,8 +1065,8 @@ fn faults() -> Vec<Fault> {
             vec![("E-MUT-002", "mutations.seeds")],
         ),
         f(
-            vec![("/mutations/triggers/0/metric", j(json!("nope")))],
-            vec![("E-MUT-003", "mutations.triggers[0].metric")],
+            vec![("/mutations/triggers/0/outcome", j(json!("nope")))],
+            vec![("E-MUT-003", "mutations.triggers[0].outcome")],
         ),
         // machine_max_level is 2.
         f(

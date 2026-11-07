@@ -84,8 +84,14 @@ target = [
   { path = "mutations.operators[*].acts_on", check = "required" },
   { path = "mutations.triggers", check = "required" },
   { path = "mutations.triggers[*].id", check = "required" },
-  { path = "mutations.triggers[*].metric", check = "required" },
+  { path = "mutations.triggers[*].outcome", check = "required" },
+  { path = "mutations.triggers[*].contrast", check = "required" },
+  { path = "mutations.triggers[*].claim", check = "required" },
+  { path = "mutations.triggers[*].statistic", check = "required" },
   { path = "mutations.triggers[*].threshold_e", check = "required" },
+  { path = "mutations.triggers[*].spawns", check = "required" },
+  { path = "mutations.triggers[*].spawns[*].operator", check = "required" },
+  { path = "mutations.triggers[*].spawns[*].values", check = "required" },
   { path = "mutations.seeds", check = "required" },
   { path = "mutations.seeds.spawn", check = "required" },
   { path = "mutations.seeds.report", check = "required" },
@@ -222,8 +228,26 @@ target = [
   { path = "mutations.triggers", check = "type", kind = "array" },
   { path = "mutations.triggers[*]", check = "type", kind = "table" },
   { path = "mutations.triggers[*].id", check = "type", kind = "string" },
-  { path = "mutations.triggers[*].metric", check = "type", kind = "string" },
+  { path = "mutations.triggers[*].outcome", check = "type", kind = "string" },
+  { path = "mutations.triggers[*].contrast", check = "type", kind = "table" },
+  { path = "mutations.triggers[*].contrast.*", check = "type", kind = "float" },
+  { path = "mutations.triggers[*].strata", check = "type", kind = "array" },
+  { path = "mutations.triggers[*].strata[*]", check = "type", kind = "string" },
+  { path = "mutations.triggers[*].claim", check = "type", kind = "table" },
+  { path = "mutations.triggers[*].claim.below", check = "type", kind = "float" },
+  { path = "mutations.triggers[*].claim.above", check = "type", kind = "float" },
+  { path = "mutations.triggers[*].claim.within", check = "type", kind = "array" },
+  { path = "mutations.triggers[*].claim.within[*]", check = "type", kind = "float" },
+  { path = "mutations.triggers[*].statistic", check = "type", kind = "table" },
+  { path = "mutations.triggers[*].statistic.mean", check = "type", kind = "array" },
+  { path = "mutations.triggers[*].statistic.mean[*]", check = "type", kind = "float" },
+  { path = "mutations.triggers[*].statistic.quantile", check = "type", kind = "float" },
   { path = "mutations.triggers[*].threshold_e", check = "type", kind = "float" },
+  { path = "mutations.triggers[*].spawns", check = "type", kind = "array" },
+  { path = "mutations.triggers[*].spawns[*]", check = "type", kind = "table" },
+  { path = "mutations.triggers[*].spawns[*].operator", check = "type", kind = "string" },
+  { path = "mutations.triggers[*].spawns[*].values", check = "type", kind = "array" },
+  { path = "mutations.triggers[*].spawns[*].values[*]", check = "type", kind = "any" },
   { path = "mutations.seeds", check = "type", kind = "table" },
   { path = "mutations.seeds.spawn", check = "type", kind = "string" },
   { path = "mutations.seeds.report", check = "type", kind = "string" },
@@ -263,8 +287,8 @@ target = [
 code = "E-RNG-001"
 severity = "error"
 problem = "A number is outside its allowed range."
-instruction = "Bring the value into range: min_isolation 0 to 3, power 0.5 to 0.999, repeats at least 1, each budget value 0 or more, row_seconds above 0, row_memory_mib 1 up to 1048576, units_per_cluster 1 up to 4294967295, each input's units 1 up to 4294967295, repeats up to 4294967295, depth_cap 0 to 255, each trigger threshold_e above 0."
-why = "Values outside these ranges are meaningless or make the sample-size maths fail."
+instruction = "Bring the value into range: min_isolation 0 to 3, power 0.5 to 0.999, repeats at least 1, each budget value 0 or more, row_seconds above 0, row_memory_mib 1 up to 1048576, units_per_cluster 1 up to 4294967295, each input's units 1 up to 4294967295, repeats up to 4294967295, depth_cap 0 to 255, each trigger threshold_e above 1."
+why = "Values outside these ranges are meaningless or make the sample-size maths fail. An e-process starts at 1, so a trigger threshold at or below 1 would fire before any data."
 sources = ["https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661"]
 target = [
   { path = "scope.min_isolation", check = "range", interval = "[0, 3]" },
@@ -278,7 +302,7 @@ target = [
   { path = "design.units_per_cluster", check = "range", interval = "[1, 4294967295]" },
   { path = "inputs[*].units", check = "range", interval = "[1, 4294967295]" },
   { path = "mutations.depth_cap", check = "range", interval = "[0, 255]" },
-  { path = "mutations.triggers[*].threshold_e", check = "range", interval = "(0, inf)" },
+  { path = "mutations.triggers[*].threshold_e", check = "range", interval = "(1, inf)" },
 ]
 
 [[rule]]
@@ -296,6 +320,7 @@ target = [
   { path = "design.stratum", check = "format", pattern = "^([a-z0-9]+(-[a-z0-9]+)*)?$" },
   { path = "inputs[*].stratum", check = "format", pattern = "^([a-z0-9]+(-[a-z0-9]+)*)?$" },
   { path = "question.hypotheses[*].strata[*]", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
+  { path = "mutations.triggers[*].strata[*]", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
   { path = "question.hypotheses[*].estimates.from", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
   { path = "design.conditions[*].params.*.from", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
   { path = "pins.deviations[*].from", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
@@ -351,6 +376,7 @@ target = [
   { path = "inputs", check = "unique", key = "path" },
   { path = "mutations.operators", check = "unique", key = "name" },
   { path = "mutations.triggers", check = "unique", key = "id" },
+  { path = "mutations.triggers[*].spawns", check = "unique", key = "operator" },
   { path = "pins.deviations", check = "unique", key = "from" },
 ]
 
@@ -861,12 +887,12 @@ target = [
 [[rule]]
 code = "E-MUT-003"
 severity = "error"
-problem = "A trigger names a metric that is not an outcome."
-instruction = "Set the trigger metric to the id of an outcome."
-why = "A trigger on an unregistered metric would let the run pick its own signal after the fact."
+problem = "A trigger names an outcome that is not listed."
+instruction = "Set the trigger outcome to the id of an outcome. Declare the trigger with outcome, contrast, claim, statistic, threshold_e and spawns."
+why = "A trigger on an unregistered outcome would let the run pick its own signal after the fact."
 sources = []
 target = [
-  { path = "mutations.triggers[*].metric", check = "named:trigger-declared" },
+  { path = "mutations.triggers[*].outcome", check = "named:trigger-declared" },
 ]
 
 [[rule]]

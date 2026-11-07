@@ -4,16 +4,16 @@ Severity: error
 
 ## Problem
 
-A trigger names a metric that is not an outcome.
+A trigger names an outcome that is not listed.
 
 ## Fix
 
-Set the trigger metric to the id of an outcome.
+Set the trigger outcome to the id of an outcome. Declare the trigger with outcome, contrast, claim, statistic, threshold_e and spawns.
 
 ## Why
 
-A trigger on an unregistered metric would let the run pick its own signal after the fact.
+A trigger on an unregistered outcome would let the run pick its own signal after the fact.
 
 ## Applies to
 
-- `mutations.triggers[*].metric` (named:trigger-declared)
+- `mutations.triggers[*].outcome` (named:trigger-declared)

@@ -492,7 +492,11 @@ fn a_spec_that_passes_check_always_deserializes() {
             }
             let last = path[path.len() - 1];
             cur[last] = if last == "triggers" {
-                json!([{ "id": "T1", "metric": "m", "threshold_e": x }])
+                json!([{
+                    "id": "T1", "outcome": "ppl-ratio", "contrast": { "arm-a": 1.0 },
+                    "claim": { "below": 0.0 }, "statistic": { "quantile": 0.5 },
+                    "threshold_e": x, "spawns": [],
+                }])
             } else {
                 x.clone()
             };
