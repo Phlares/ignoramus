@@ -1615,7 +1615,11 @@ fn a_late_reused_selection_input_runs_and_is_recorded() {
     assert_eq!(uses[0].1.label, "study:fourth");
     // A later confirmation of the same data is an earlier use.
     register_study(&lab, "third", staged, &[], PAYLOAD);
-    std::fs::write(common::work(&lab, "third").join("data/confirm.txt"), "fresh pool").unwrap();
+    std::fs::write(
+        common::work(&lab, "third").join("data/confirm.txt"),
+        "fresh pool",
+    )
+    .unwrap();
     assert!(matches!(err_of(&lab, "third"), RunError::DataReused { .. }));
 }
 

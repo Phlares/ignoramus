@@ -3223,17 +3223,15 @@ fn fresh(spec: &Value, dir: &Path, prior: Box<dyn PriorUse>) -> Vec<Diagnostic> 
 fn reused_confirmation_data_is_refused_naming_the_entry() {
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "d.txt", b"abc");
-    for role in ["confirmation"] {
-        let (prior, seen) = fake(Some(ABC), None);
-        let d = fresh(&with_input("d.txt", "", role), dir.path(), prior);
-        assert_eq!(codes_paths(&d), [("E-CNF-005", "inputs[0].path")], "{role}");
-        assert!(
-            d[0].problem.ends_with("The earlier entry is entry-exact."),
-            "{}",
-            d[0].problem
-        );
-        assert_eq!(seen.borrow().len(), 1);
-    }
+    let (prior, seen) = fake(Some(ABC), None);
+    let d = fresh(&with_input("d.txt", "", "confirmation"), dir.path(), prior);
+    assert_eq!(codes_paths(&d), [("E-CNF-005", "inputs[0].path")]);
+    assert!(
+        d[0].problem.ends_with("The earlier entry is entry-exact."),
+        "{}",
+        d[0].problem
+    );
+    assert_eq!(seen.borrow().len(), 1);
     // Other roles are not asked.
     for role in ["selection", "calibration", "model"] {
         let (prior, seen) = fake(Some(ABC), None);
