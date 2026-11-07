@@ -58,11 +58,11 @@ Cost:
 Sources:
 
 - Xu and Ramdas, e-LOND, online false discovery rate control with e-values, https://arxiv.org/abs/2311.06412
-- Fischer and Ramdas, "Admissible online closed testing must employ e-values", https://arxiv.org/abs/2407.15733
-- Neufeld, Perry and Witten, one recipe for inference after selection: choose the target on selection data, then infer conditional on that choice, https://arxiv.org/abs/2604.09779
+- Fischer and Ramdas, online closed testing with e-values: a hypothesis may come from past data, but its e-value needs fresh data, https://arxiv.org/abs/2407.15733
+- Inference after selection, one recipe: choose the target on selection data, then infer conditional on that choice, https://arxiv.org/abs/2604.09779
 - FDA (2019), "Adaptive Designs for Clinical Trials of Drugs and Biologics", https://www.fda.gov/media/78495/download
 - FDA (2022), serial and parallel gatekeeping, "Multiple Endpoints in Clinical Trials", https://www.fda.gov/media/162416/download
 - Added-arm designs and familywise error control, https://ar5iv.labs.arxiv.org/html/1902.05336
-- Pima trial, specifications fixed before the results, https://ar5iv.labs.arxiv.org/html/2210.02794
+- Post-selection inference in multiverse analysis (PIMA): the list of specifications is fixed before the results, https://ar5iv.labs.arxiv.org/html/2210.02794
 - Journal of Cognition, "Registered reports": substantial changes need withdrawal and a new registration, https://journalofcognition.org/about/registered-reports
 - Junk and Lyons, overlapping data are not independent confirmation, https://arxiv.org/abs/2009.06864
