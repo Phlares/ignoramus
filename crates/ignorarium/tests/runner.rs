@@ -5129,12 +5129,12 @@ printf '{\"ppl\": %s}' \"$v\" > \"$IGNORARIUM_OUT/values.json\"
 ";
 
 #[test]
-fn a_unit_with_fewer_paired_repeats_than_the_spec_asks_does_not_count() {
+fn a_unit_with_one_of_two_paired_repeats_counts_in_a_child_estimate() {
     let lab = lab();
     let spec = |t: String| firing(t).replacen("repeats = 1", "repeats = 2", 1);
     register_study(&lab, "repeats", spec, &[], FAIL_REPEAT);
     assert_eq!(run(&plan_of(&lab, "repeats")).unwrap(), RunStatus::Done);
-    let want = (1, 2, -100.0, 2);
+    let want = (1, 3, -100.0, 2);
     assert_eq!(
         child_estimates(&lab, "repeats"),
         vec![

@@ -286,15 +286,7 @@ pub fn estimates(
     {
         let contrast = BTreeMap::from([(c.id.clone(), 1.0)]);
         for o in &spec.outcomes {
-            let (samples, _) = group(
-                clusters,
-                Role::Confirmation,
-                "",
-                &o.id,
-                &contrast,
-                pairs,
-                spec.design.repeats,
-            );
+            let (samples, _) = group(clusters, Role::Confirmation, "", &o.id, &contrast, pairs, 1);
             if samples.is_empty() {
                 continue;
             }
