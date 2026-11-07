@@ -1088,14 +1088,18 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
         .filter(|r| !done.contains(&r.index))
     {
         // In a study with triggers, the trigger records come at the selection boundary, after
-        // the pick when a trigger needs it, and no later row runs before them. A trigger that
-        // needs no pick never waits for one, so its children cannot block the parent.
+        // the pick when a trigger needs it, and no later row runs before them. Children never
+        // block the parent: a pick that cannot be made pauses only a study whose confirmation
+        // runs it; elsewhere the triggers that need it record `no-pick`.
         if triggered && row.stage != SELECTION_STAGE && spawned.is_none() {
             let picks = plan.spec.design.selection.is_some() && spawn::needs_pick(&plan.spec);
             if picks && pick.is_none() {
                 match selection(plan, &log)? {
                     Ok(p) => pick = Some(p),
-                    Err(why) => return halt(plan, &dir, lock, Halt::Pause(why), None),
+                    Err(why) if plan.spec.design.confirmation.runs_pick() => {
+                        return halt(plan, &dir, lock, Halt::Pause(why), None);
+                    }
+                    Err(_) => {}
                 }
             }
             spawned = Some(triggers(plan, &log)?);

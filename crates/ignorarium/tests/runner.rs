@@ -2251,6 +2251,47 @@ fn triggers_that_need_no_pick_never_wait_for_one() {
 }
 
 #[test]
+fn a_trigger_that_needs_a_pick_none_can_make_records_no_pick() {
+    let lab = lab();
+    // Confirmation runs arm-a, so only T1 needs the pick; arm-b writes no value, so no
+    // selection unit is complete and no pick can be made.
+    let spec = |t: String| {
+        let one = trigger("T1", "{ selected = 1.0 }", BELOW, WINDOWS);
+        with_triggers(WINDOW_ON_ARM_A, vec![one])(t)
+            .replacen("conditions = [\"selected\"]", "conditions = [\"arm-a\"]", 1)
+            // The first is the hypothesis's, above `[mutations]`.
+            .replacen(
+                "contrast = { selected = 1.0 }",
+                "contrast = { arm-a = 1.0 }",
+                1,
+            )
+    };
+    let payload = STAGED.replace("case", "case \"$2\" in arm-b) exit 0;; esac\ncase");
+    register_study(&lab, "no-pick-t", spec, &[], &payload);
+    let plan = plan_of(&lab, "no-pick-t");
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert!(selections_of(&lab, "no-pick-t").is_empty());
+    let t = triggers_of(&lab, "no-pick-t");
+    assert_eq!(
+        t[0].0.body,
+        serde_json::json!({
+            "id": "T1",
+            "e_value": 0.0,
+            "threshold": 2.0,
+            "fired": false,
+            "reason": "no-pick",
+            "admitted": [],
+            "skipped": [
+                { "child": "arm-a~window_tokens=64", "reason": "not-fired" },
+                { "child": "arm-a~window_tokens=512", "reason": "not-fired" },
+            ],
+        })
+    );
+    assert_eq!(indices(&lab, "no-pick-t"), (0..18).collect::<Vec<u64>>());
+    assert_eq!(kind_of(&lab, "no-pick-t", "verdict").len(), 1);
+}
+
+#[test]
 fn a_child_with_the_value_its_parent_takes_from_a_study_is_skipped_same_as_parent() {
     let lab = lab();
     // arm-b's `bits` is the condition study `chooser` selected, arm-a: a text.

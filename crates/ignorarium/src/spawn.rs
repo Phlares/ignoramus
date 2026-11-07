@@ -24,6 +24,7 @@ pub const NOT_FIRED: &str = "not-fired";
 pub const SAME_AS_PARENT: &str = "same-as-parent";
 pub const BUDGET: &str = "budget";
 pub const INCOMPLETE: &str = "incomplete";
+pub const NO_PICK: &str = "no-pick";
 
 /// Each declared trigger of `plan`, in spec order, at the selection boundary: the one its
 /// `trigger` record in `records` holds, or else one decided now from the selection rows in
@@ -31,7 +32,8 @@ pub const INCOMPLETE: &str = "incomplete";
 /// `threshold_e`) over its claim's bounds and strata, each from one observation per selection
 /// cluster in the order drawn from `seed(spec_hash, "<seeds.spawn><id>/<stratum>")`; an
 /// incomplete selection unit in scope makes it 0. `selected` in a contrast is the pick of the
-/// study's `selection` record. A trigger fires when its value reaches `threshold_e`. A fired
+/// study's `selection` record; a trigger that needs the pick (`wants_pick`) when the records
+/// hold none gets 0 and reason `no-pick`. A trigger fires when its value reaches `threshold_e`. A fired
 /// trigger admits each of its children in declared order, unless the child's value is the one
 /// its parent holds (`same-as-parent`), or the spec estimate of the rows that are no child
 /// rows, the rows of the children admitted before it and its own does not stay within the
@@ -64,7 +66,11 @@ pub fn evaluate(plan: &RunPlan, records: &[Record]) -> Result<Vec<Fired>, RunErr
             out.push(r.clone());
             continue;
         }
-        let (e_value, reason) = bet(plan, t, &clusters, &pairs, pick);
+        // With no pick, a trigger that needs one cannot bet, and admits no child.
+        let (e_value, reason) = match pick {
+            None if wants_pick(t, &children) => (0.0, Some(NO_PICK.into())),
+            _ => bet(plan, t, &clusters, &pairs, pick),
+        };
         let fired = reason.is_none() && e_value >= t.threshold_e;
         let mut f = Trigger {
             id: t.id.clone(),
@@ -114,7 +120,7 @@ fn bet(
     for (c, w) in &t.contrast {
         let c = match (c.as_str(), pick) {
             (SELECTED, Some(p)) => p,
-            (SELECTED, None) => return (0.0, Some("the study has no pick".into())),
+            (SELECTED, None) => return (0.0, Some(NO_PICK.into())),
             (c, _) => c,
         };
         *contrast.entry(c.into()).or_default() += w;
@@ -154,13 +160,16 @@ fn bet(
     (analysis::finite(least), None)
 }
 
-/// A declared trigger's contrast names `selected`, or a declared child acts on it.
+/// A declared trigger needs the pick (`wants_pick`).
 pub fn needs_pick(spec: &Spec) -> bool {
-    let watched = (spec.mutations.declared()).any(|t| t.contrast.contains_key(SELECTED));
-    watched
-        || schedule::children(spec)
-            .iter()
-            .any(|c| c.parent == SELECTED)
+    let children = schedule::children(spec);
+    (spec.mutations.declared()).any(|t| wants_pick(t, &children))
+}
+
+/// Trigger `t`'s contrast names `selected`, or a child of `children` it declares acts on it.
+fn wants_pick(t: &DeclaredTrigger, children: &[Child]) -> bool {
+    let acts = |c: &Child| c.parent == SELECTED && c.triggers.contains(&t.id);
+    t.contrast.contains_key(SELECTED) || children.iter().any(acts)
 }
 
 /// The pick of the study's `selection` record, when it holds one.
