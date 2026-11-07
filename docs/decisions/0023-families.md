@@ -8,7 +8,7 @@ Decision:
 - **Check on the root.** `check` reads every member spec with the same rules as a standalone check, plus the family rules:
   - E-FAM-001: root and members are confirmatory and use the same log.
   - E-FAM-002: every member id is distinct, unregistered and in no other family. No member holds a `[family]` table.
-  - E-FAM-003: every input of every member, of every role, is pinned by SHA-256. Its data is at the study root or in the store.
+  - E-FAM-003: every input of every member, of every role, is pinned by SHA-256. Its data is at the study root or in the store. Every selection input of the root is there too.
   - E-FAM-004: no member's confirmation or reserve data holds the data of a selection input of any family study, root included. Exact and normalized hashes are compared.
   - E-FAM-005: the plan stream holds a free slot for the root and every member.
   - W-FAM-001: a member value that waits on an unfinished study is allowed and listed. It resolves at the member's own registration (0014).

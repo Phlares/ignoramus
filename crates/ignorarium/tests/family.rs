@@ -310,6 +310,27 @@ fn an_unpinned_or_absent_member_input_is_refused() {
     assert!(p.contains(&format!("inputs[{k}]")), "{p}");
 }
 
+#[test]
+fn a_root_needs_its_own_selection_data_present() {
+    let lab = lab();
+    let root = family_root(&lab);
+    put(&root, "spec/b.toml", &pinned(&root, &study("b")));
+    let fam = adding(study("fam"), &input("data/pick.txt", "selection"));
+    let spec = root_spec(&root, &fam, &["spec/b.toml"]);
+    let (code, v) = check_json(&lab, &spec);
+    let p = problem_at(&v, "E-FAM-003", "family");
+    let k = input_index(&root, "spec.toml", "data/pick.txt");
+    assert!(p.ends_with(&format!("inputs[{k}].")), "{p}");
+    assert_eq!(code, 1, "{v}");
+    put(&root, "data/pick.txt", "picked text\n");
+    let (_, v) = check_json(&lab, &spec);
+    assert!(lacks(&v, "E-FAM-003"), "{v}");
+    // A study without a family may leave its selection data for the run.
+    let alone = adding(study("fam"), &input("data/later.txt", "selection"));
+    let (_, v) = check_json(&lab, &put(&root, "spec.toml", &alone));
+    assert!(lacks(&v, "E-FAM-003"), "{v}");
+}
+
 /// An unpinned input of 3 units in stratum fiction, as spec text.
 fn input(path: &str, role: &str) -> String {
     format!(

@@ -676,9 +676,33 @@ fn family_members(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     out
 }
 
-/// E-FAM-003: an input of a member has no `sha256`, or its data is neither at the study root
-/// nor in the store. A `sha256` of another type is the member's own check's.
+/// E-FAM-003. At `family`: a selection input of this study has no data at the study root or
+/// in the store. At `family.members[*]`: an input of a member has no `sha256`, or its data is
+/// neither at the study root nor in the store. A `sha256` of another type, and an unsafe path,
+/// are other rules' to report.
 fn family_pinned(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    if pat == "family" {
+        let absent: Vec<String> = (nodes(spec, "inputs[*]").into_iter())
+            .filter(|(_, i)| role(i) == Some("selection"))
+            .filter(|(_, i)| {
+                let path = i.get("path").and_then(Value::as_str);
+                path.is_some_and(|rel| input_path(&ctx.root, rel).is_some())
+                    && input_hashes(ctx, i).is_none()
+            })
+            .map(|(p, _)| p)
+            .collect();
+        if absent.is_empty() {
+            return vec![];
+        }
+        let detail = format!(
+            "These selection inputs of this study are neither at the study root nor in the store: {}.",
+            absent.join(", ")
+        );
+        return (nodes(spec, pat).into_iter())
+            .filter(|(_, v)| v.is_object())
+            .map(|(path, _)| at(&path, detail.clone()))
+            .collect();
+    }
     let mut out = vec![];
     for (path, m) in loaded(spec, ctx, pat) {
         let (mut unpinned, mut absent) = (vec![], vec![]);
