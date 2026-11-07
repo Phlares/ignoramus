@@ -1,4 +1,6 @@
-use evidence::claim::{Bound, Statistic, clipped, e_value, e_values, holds, observation, order};
+use evidence::claim::{
+    Bound, Statistic, clipped, e_value, e_values, holds, observation, order, stopped,
+};
 use evidence::eprocess::{EProcess, Score};
 use evidence::rng::Rng;
 use evidence::sim::Estimate;
@@ -374,4 +376,49 @@ fn clipped_counts_the_units_observation_moves() {
         assert_eq!(lo + hi == 1, moved, "{x}");
         assert_eq!(lo == 1, x < 0.0, "{x}");
     }
+}
+
+#[test]
+fn a_stopped_value_freezes_at_the_threshold() {
+    let mean = Statistic::Mean { lo: 0.0, hi: 1.0 };
+    let obs = [0.0; 12];
+    let walk = path(mean, below(0.5), &obs);
+    let stop = 3.0;
+    let first = walk.iter().copied().find(|&w| w >= stop).unwrap();
+    assert!(first < walk[obs.len()], "later wealth must differ");
+    close(stopped(&mean, &below(0.5), &obs, stop).unwrap(), first);
+    // Later observations, even against the claim, change nothing.
+    let mut more = obs.to_vec();
+    more.extend([1.0; 5]);
+    close(stopped(&mean, &below(0.5), &more, stop).unwrap(), first);
+}
+
+#[test]
+fn a_weak_series_never_reaches_the_threshold() {
+    let mean = Statistic::Mean { lo: 0.0, hi: 1.0 };
+    let obs = [0.0, 1.0, 0.0, 1.0];
+    let free = e_value(&mean, &below(0.5), &obs).unwrap();
+    assert!(free < 1e6);
+    close(stopped(&mean, &below(0.5), &obs, 1e6).unwrap(), free);
+}
+
+#[test]
+fn stop_at_or_below_one_is_an_error() {
+    let mean = Statistic::Mean { lo: 0.0, hi: 1.0 };
+    for stop in [1.0, 0.5, f64::NAN] {
+        assert_eq!(
+            stopped(&mean, &below(0.5), &[0.0], stop),
+            Err(Error::Parameter("stop"))
+        );
+    }
+}
+
+#[test]
+fn with_infinite_stop_it_equals_e_value() {
+    let mean = Statistic::Mean { lo: 0.0, hi: 1.0 };
+    let obs = [0.0, 0.0, 1.0, 0.0];
+    assert_eq!(
+        stopped(&mean, &below(0.5), &obs, f64::INFINITY),
+        e_value(&mean, &below(0.5), &obs)
+    );
 }

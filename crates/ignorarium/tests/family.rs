@@ -1,8 +1,7 @@
 //! Families: `check` on a root checks each member with the full rules and the family rules;
 //! `register` on a root locks its members and reserves their stream slots.
 mod common;
-use assert_cmd::Command;
-use common::{Lab, lab};
+use common::{Lab, bin, lab};
 use ignorarium::canon::sha256_hex;
 use ignorarium::cli::register;
 use ignorarium::derived::Register;
@@ -13,12 +12,6 @@ use ignorarium::stream::{Log, LogName};
 use ignorarium::{inputs, keys};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
-
-fn bin(lab: &Lab) -> Command {
-    let mut c = Command::cargo_bin("ignorarium").unwrap();
-    c.env("IGNORARIUM_HOME", &lab.home.root);
-    c
-}
 
 /// What `ignorarium <command> <spec>` prints.
 fn printed(lab: &Lab, command: &str, spec: &Path) -> String {
@@ -410,7 +403,7 @@ fn member_data_used_by_an_outside_plan_is_refused() {
 fn a_member_that_does_not_fit_the_typed_model_is_refused() {
     let lab = lab();
     // Every rule accepts this operator, and the typed model does not.
-    let bad = "operators = [{ name = \"k\", type = \"int\", range = [true], acts_on = \"x\" }]";
+    let bad = "operators = [{ name = \"k\", type = \"int\", range = [true], acts_on = \"arm-a\" }]";
     let (code, v) = with_member(&lab, |t| t.replace("operators = []", bad));
     assert!(has(&v, "E-TYP-001", B), "{v}");
     assert!(

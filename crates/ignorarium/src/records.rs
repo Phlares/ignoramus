@@ -6,7 +6,7 @@ use crate::keys::{sign_hex, verify_hex};
 use crate::time::now_rfc3339;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::Path;
 
@@ -264,6 +264,14 @@ pub fn hash(r: &Record) -> String {
     let bytes =
         canonical_of(r).expect("a record is plain data, so canonical serialization cannot fail");
     sha256_hex(&bytes)
+}
+
+/// The schedule indices the `row` records of `records` hold.
+pub fn row_indices(records: &[Record]) -> BTreeSet<u64> {
+    (records.iter())
+        .filter(|r| r.kind == "row")
+        .filter_map(|r| r.row)
+        .collect()
 }
 
 /// The study folders of the box that hold a record log, as (study id, log path), sorted by id.

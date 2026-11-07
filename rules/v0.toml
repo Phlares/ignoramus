@@ -84,8 +84,14 @@ target = [
   { path = "mutations.operators[*].acts_on", check = "required" },
   { path = "mutations.triggers", check = "required" },
   { path = "mutations.triggers[*].id", check = "required" },
-  { path = "mutations.triggers[*].metric", check = "required" },
+  { path = "mutations.triggers[*].outcome", check = "required" },
+  { path = "mutations.triggers[*].contrast", check = "required" },
+  { path = "mutations.triggers[*].claim", check = "required" },
+  { path = "mutations.triggers[*].statistic", check = "required" },
   { path = "mutations.triggers[*].threshold_e", check = "required" },
+  { path = "mutations.triggers[*].spawns", check = "required" },
+  { path = "mutations.triggers[*].spawns[*].operator", check = "required" },
+  { path = "mutations.triggers[*].spawns[*].values", check = "required" },
   { path = "mutations.seeds", check = "required" },
   { path = "mutations.seeds.spawn", check = "required" },
   { path = "mutations.seeds.report", check = "required" },
@@ -222,8 +228,26 @@ target = [
   { path = "mutations.triggers", check = "type", kind = "array" },
   { path = "mutations.triggers[*]", check = "type", kind = "table" },
   { path = "mutations.triggers[*].id", check = "type", kind = "string" },
-  { path = "mutations.triggers[*].metric", check = "type", kind = "string" },
+  { path = "mutations.triggers[*].outcome", check = "type", kind = "string" },
+  { path = "mutations.triggers[*].contrast", check = "type", kind = "table" },
+  { path = "mutations.triggers[*].contrast.*", check = "type", kind = "float" },
+  { path = "mutations.triggers[*].strata", check = "type", kind = "array" },
+  { path = "mutations.triggers[*].strata[*]", check = "type", kind = "string" },
+  { path = "mutations.triggers[*].claim", check = "type", kind = "table" },
+  { path = "mutations.triggers[*].claim.below", check = "type", kind = "float" },
+  { path = "mutations.triggers[*].claim.above", check = "type", kind = "float" },
+  { path = "mutations.triggers[*].claim.within", check = "type", kind = "array" },
+  { path = "mutations.triggers[*].claim.within[*]", check = "type", kind = "float" },
+  { path = "mutations.triggers[*].statistic", check = "type", kind = "table" },
+  { path = "mutations.triggers[*].statistic.mean", check = "type", kind = "array" },
+  { path = "mutations.triggers[*].statistic.mean[*]", check = "type", kind = "float" },
+  { path = "mutations.triggers[*].statistic.quantile", check = "type", kind = "float" },
   { path = "mutations.triggers[*].threshold_e", check = "type", kind = "float" },
+  { path = "mutations.triggers[*].spawns", check = "type", kind = "array" },
+  { path = "mutations.triggers[*].spawns[*]", check = "type", kind = "table" },
+  { path = "mutations.triggers[*].spawns[*].operator", check = "type", kind = "string" },
+  { path = "mutations.triggers[*].spawns[*].values", check = "type", kind = "array" },
+  { path = "mutations.triggers[*].spawns[*].values[*]", check = "type", kind = "any" },
   { path = "mutations.seeds", check = "type", kind = "table" },
   { path = "mutations.seeds.spawn", check = "type", kind = "string" },
   { path = "mutations.seeds.report", check = "type", kind = "string" },
@@ -263,8 +287,8 @@ target = [
 code = "E-RNG-001"
 severity = "error"
 problem = "A number is outside its allowed range."
-instruction = "Bring the value into range: min_isolation 0 to 3, power 0.5 to 0.999, repeats at least 1, each budget value 0 or more, row_seconds above 0, row_memory_mib 1 up to 1048576, units_per_cluster 1 up to 4294967295, each input's units 1 up to 4294967295, repeats up to 4294967295, depth_cap 0 to 255, each trigger threshold_e above 0."
-why = "Values outside these ranges are meaningless or make the sample-size maths fail."
+instruction = "Bring the value into range: min_isolation 0 to 3, power 0.5 to 0.999, repeats at least 1, each budget value 0 or more, row_seconds above 0, row_memory_mib 1 up to 1048576, units_per_cluster 1 up to 4294967295, each input's units 1 up to 4294967295, repeats up to 4294967295, depth_cap 0 to 255, each trigger threshold_e above 1."
+why = "Values outside these ranges are meaningless or make the sample-size maths fail. An e-process starts at 1, so a trigger threshold at or below 1 would fire before any data."
 sources = ["https://doi.org/10.1038/nrn3475", "https://doi.org/10.1136/bmj.e5661"]
 target = [
   { path = "scope.min_isolation", check = "range", interval = "[0, 3]" },
@@ -278,7 +302,7 @@ target = [
   { path = "design.units_per_cluster", check = "range", interval = "[1, 4294967295]" },
   { path = "inputs[*].units", check = "range", interval = "[1, 4294967295]" },
   { path = "mutations.depth_cap", check = "range", interval = "[0, 255]" },
-  { path = "mutations.triggers[*].threshold_e", check = "range", interval = "(0, inf)" },
+  { path = "mutations.triggers[*].threshold_e", check = "range", interval = "(1, inf)" },
 ]
 
 [[rule]]
@@ -296,6 +320,7 @@ target = [
   { path = "design.stratum", check = "format", pattern = "^([a-z0-9]+(-[a-z0-9]+)*)?$" },
   { path = "inputs[*].stratum", check = "format", pattern = "^([a-z0-9]+(-[a-z0-9]+)*)?$" },
   { path = "question.hypotheses[*].strata[*]", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
+  { path = "mutations.triggers[*].strata[*]", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
   { path = "question.hypotheses[*].estimates.from", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
   { path = "design.conditions[*].params.*.from", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
   { path = "pins.deviations[*].from", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
@@ -351,6 +376,7 @@ target = [
   { path = "inputs", check = "unique", key = "path" },
   { path = "mutations.operators", check = "unique", key = "name" },
   { path = "mutations.triggers", check = "unique", key = "id" },
+  { path = "mutations.triggers[*].spawns", check = "unique", key = "operator" },
   { path = "pins.deviations", check = "unique", key = "from" },
 ]
 
@@ -513,9 +539,8 @@ code = "E-CNF-004"
 severity = "error"
 problem = "The plan has no confirmation input, or a confirmation or reserve input holds the same data as a selection or calibration input, or a reserve input holds the data of a confirmation input or of an earlier reserve input."
 instruction = "Add a confirmation input. Give each confirmation and reserve input data that no selection or calibration input holds, and each reserve input data that no confirmation input and no earlier reserve input holds: not the same bytes, and not the same text in other case or spacing."
-why = "A winner picked on some data looks better on that same data. Only fresh data gives an honest test. The content decides, not the file name. A model calibrated on a text has adapted to it; its error there is not its error on new text. A reserve cluster the re-size adds must be new to the test too, or the test counts one text twice."
-sources = ["https://doi.org/10.1038/s41562-016-0021", "https://arxiv.org/html/2311.09755v2"]
-when = { mode = "confirmatory" }
+why = "A winner picked on some data looks better on that same data. Only fresh data gives an honest test. The content decides, not the file name. A model calibrated on some data has adapted to it; its error there is not its error on new data. A reserve cluster the re-size adds must be new to the test too, or the test counts the same data twice. The rule binds a confirmatory plan, and a plan with triggers in any mode: a trigger decides on the selection data which children run, and the children are tested on the confirmation data, so the tests stay valid only when the two are apart. An exploratory plan without triggers may share data."
+sources = ["https://doi.org/10.1038/s41562-016-0021", "https://arxiv.org/html/2311.09755v2", "https://www.fda.gov/media/78495/download"]
 target = [
   { path = "inputs", check = "named:confirmation-disjoint" },
   { path = "inputs[*].sha256", check = "named:confirmation-disjoint" },
@@ -679,8 +704,8 @@ target = [
 [[rule]]
 code = "E-SEL-001"
 severity = "error"
-problem = "A stage is not well formed: a selection stage with no selection input, or a selection input with no stage; fewer than two candidates; a stage condition that is the reference or not in design.conditions; a metric that is not an outcome; selected with no selection stage; or a condition named selected."
-instruction = "Give design.selection two or more candidates from design.conditions other than the reference, a metric that is an outcome id, and at least one selection input; or remove the stage and the selection inputs. List conditions from design.conditions in design.confirmation.conditions, and selected only with a selection stage. Name no condition selected."
+problem = "A stage is not well formed: a selection stage with no selection input, or a selection input with no stage and no declared trigger; fewer than two candidates; a stage condition that is the reference or not in design.conditions; a metric that is not an outcome; selected with no selection stage; or a condition named selected."
+instruction = "Give design.selection two or more candidates from design.conditions other than the reference, a metric that is an outcome id, and at least one selection input; or remove the stage and the selection inputs. A declared trigger may read selection inputs without a stage. List conditions from design.conditions in design.confirmation.conditions, and selected only with a selection stage. Name no condition selected."
 why = "The selection stage picks one candidate on the selection inputs by a rule fixed before the data come in, and the confirmation stage then tests the pick on other data. Only a declared rule over declared candidates shows that the confirmation data did not shape the choice. The rule best-mean takes only the selection units that have a paired metric value for every candidate, and each mean is over those units. The best mean in the metric outcome's direction wins, and a tie goes to the candidate listed first. With no such unit the run pauses before any confirmation row. The reference runs in every stage."
 sources = ["https://www.fda.gov/media/78495/download"]
 target = [
@@ -755,38 +780,44 @@ target = [
 [[rule]]
 code = "E-HYP-001"
 severity = "error"
-problem = "A hypothesis names an outcome that is not listed, or its contrast is empty, has a weight of 0, or names a condition the confirmation stage does not run."
-instruction = "Set outcome to an id from outcomes. Give contrast one or more condition ids from design.confirmation.conditions, each with a weight other than 0, for example { selected = 1.0 } or { arm-a = 1.0, arm-b = -1.0 }. Name selected only with a selection stage, and never the reference."
-why = "The test reads the contrast's paired values in the confirmation stage. A condition that stage does not run, or the reference, which has no paired value, leaves every unit incomplete, and the claim fails after the budget is spent."
+problem = "A hypothesis names an outcome that is not listed, or its contrast, or a trigger's contrast, is empty, has a weight of 0, or names a condition the stage that reads it does not run."
+instruction = "Set outcome to an id from outcomes. Give contrast one or more condition ids, each with a weight other than 0, for example { selected = 1.0 } or { arm-a = 1.0, arm-b = -1.0 }. A hypothesis names conditions from design.confirmation.conditions. A trigger names candidates of design.selection, or with no selection stage any declared condition. Name selected only with a selection stage, and never the reference."
+why = "The test reads the contrast's paired values in one stage: confirmation for a hypothesis, selection for a trigger. A condition that stage does not run, or the reference, which has no paired value, leaves every unit incomplete, and the claim fails after the budget is spent."
 sources = []
 target = [
   { path = "question.hypotheses[*].outcome", check = "named:hypothesis-shape" },
   { path = "question.hypotheses[*].contrast", check = "named:hypothesis-shape" },
   { path = "question.hypotheses[*].contrast.*", check = "named:hypothesis-shape" },
   { path = "question.hypotheses[*].contrast.*", check = "named:condition-declared" },
+  { path = "mutations.triggers[*].contrast", check = "named:hypothesis-shape" },
+  { path = "mutations.triggers[*].contrast.*", check = "named:hypothesis-shape" },
+  { path = "mutations.triggers[*].contrast.*", check = "named:condition-declared" },
 ]
 
 [[rule]]
 code = "E-HYP-002"
 severity = "error"
-problem = "A stratum a hypothesis lists has no confirmation input."
-instruction = "List only strata that confirmation inputs name in their stratum field, or add a confirmation input for the stratum. Leave strata empty to test all units as one group."
-why = "A claim holds only when it holds in every stratum it lists, each tested on its own clusters. A stratum with no confirmation input has no data, so the claim could never hold."
+problem = "A stratum a hypothesis lists has no confirmation input, or a stratum a trigger lists has no selection input."
+instruction = "List only strata that inputs of the right role name in their stratum field, or add an input for the stratum: confirmation for a hypothesis, selection for a trigger. Leave strata empty to test all units as one group."
+why = "A claim holds only when it holds in every stratum it lists, each tested on its own clusters. A stratum with no input of the role that reads it has no data, so the claim could never hold."
 sources = ["https://doi.org/10.1080/00401706.1982.10487790"]
 target = [
   { path = "question.hypotheses[*].strata[*]", check = "named:hypothesis-strata" },
+  { path = "mutations.triggers[*].strata[*]", check = "named:hypothesis-strata" },
 ]
 
 [[rule]]
 code = "E-HYP-003"
 severity = "error"
-problem = "A claim or a statistic is not well formed."
+problem = "A claim or a statistic, of a hypothesis or of a trigger, is not well formed."
 instruction = "Write the claim as one of { below = m }, { above = m } or { within = [a, b] } with a below b. Give a claim one statistic: { mean = [lo, hi] } with lo below hi and every margin strictly between them, or { quantile = q } with q strictly between 0 and 1."
 why = "A claim is one or two one-sided bounds, and it holds when every bound holds. within [a, b] is two one-sided tests, above a and below b, so it needs no alpha correction. The test counts each cluster once: the mean of its units, or the share of its units on the claimed side. Before a mean is taken, each unit is clipped to the declared range, so every cluster mean lies inside it and the claim is about the mean of the clipped units. A unit far outside the range cannot then push a cluster mean outside it, which the test could not bound. A margin at or outside the range can never be tested."
 sources = ["https://doi.org/10.1080/00401706.1982.10487790", "https://doi.org/10.1177/1948550617697177"]
 target = [
   { path = "question.hypotheses[*].claim", check = "named:hypothesis-shape" },
   { path = "question.hypotheses[*].statistic", check = "named:hypothesis-shape" },
+  { path = "mutations.triggers[*].claim", check = "named:hypothesis-shape" },
+  { path = "mutations.triggers[*].statistic", check = "named:hypothesis-shape" },
 ]
 
 [[rule]]
@@ -839,9 +870,9 @@ target = [
 [[rule]]
 code = "E-MUT-001"
 severity = "error"
-problem = "The spawn depth cap is above 2."
-instruction = "Set mutations.depth_cap to 2 or less."
-why = "Each spawn level multiplies the number of runs and the chances of a chance finding. The cap is 2."
+problem = "The spawn depth cap is above 2, or below 1 in a plan with a declared trigger."
+instruction = "Set mutations.depth_cap to 2 or less, and to 1 or more when the plan declares a trigger."
+why = "Each spawn level multiplies the number of runs and the chances of a chance finding. The cap is 2. A declared trigger spawns children at level 1, so a cap of 0 would contradict the plan."
 sources = []
 target = [
   { path = "mutations.depth_cap", check = "named:depth-cap" },
@@ -861,13 +892,90 @@ target = [
 [[rule]]
 code = "E-MUT-003"
 severity = "error"
-problem = "A trigger names a metric that is not an outcome."
-instruction = "Set the trigger metric to the id of an outcome."
-why = "A trigger on an unregistered metric would let the run pick its own signal after the fact."
+problem = "A trigger has the old shape, or names an outcome that is not listed."
+instruction = "Declare each trigger with outcome, contrast, claim, statistic, threshold_e and spawns, in place of metric. Set outcome to the id of an outcome."
+why = "A trigger on an unregistered outcome would let the run pick its own signal after the fact. The old shape names a metric and no claim, so nothing fixes what the trigger bets on or what it spawns."
 sources = []
 target = [
-  { path = "mutations.triggers[*].metric", check = "named:trigger-declared" },
+  { path = "mutations.triggers[*]", check = "named:trigger-declared" },
+  { path = "mutations.triggers[*].outcome", check = "named:trigger-declared" },
 ]
+
+[[rule]]
+code = "E-MUT-004"
+severity = "error"
+problem = "A trigger spawns an operator that is not declared."
+instruction = "Set each spawns operator to the name of an entry in mutations.operators, or declare the operator."
+why = "A child is its condition with one operator set to one value. An operator the plan does not declare has no type, no range and no condition to act on."
+sources = []
+target = [
+  { path = "mutations.triggers[*].spawns[*].operator", check = "named:spawn-operator-declared" },
+]
+
+[[rule]]
+code = "E-MUT-005"
+severity = "error"
+problem = "A spawn value does not fit its operator."
+instruction = "List single values of the operator's type: for an enum, a member of its range; for an int, a whole number from lo to hi; for a float, a number from lo to hi."
+why = "A value outside the range, or of another type, would run a child the plan never declared an operator for. A list or a table in place of a value has no meaning as a param."
+sources = []
+target = [
+  { path = "mutations.triggers[*].spawns[*].values[*]", check = "named:spawn-value-fits" },
+]
+
+[[rule]]
+code = "E-MUT-006"
+severity = "error"
+problem = "An operator acts on a condition that is not declared."
+instruction = "Set acts_on to the id of a condition in design.conditions, or to selected when the plan has a design.selection stage."
+why = "A child takes the params of the condition its operator acts on. With no such condition, or no pick for selected, the child has no params to start from."
+sources = []
+target = [
+  { path = "mutations.operators[*].acts_on", check = "named:acts-on-declared" },
+]
+
+[[rule]]
+code = "E-MUT-007"
+severity = "error"
+problem = "The plan has triggers and no selection input."
+instruction = "Add an input with role selection, or remove the triggers."
+why = "A trigger decides on selection data, and its children are tested on confirmation data. The tests stay valid only when the set of children that run does not depend on the data they are tested on."
+sources = ["https://www.fda.gov/media/78495/download"]
+target = [
+  { path = "mutations.triggers", check = "named:triggers-need-selection" },
+]
+
+[[rule]]
+code = "E-MUT-008"
+severity = "error"
+problem = "A confirmatory plan has triggers."
+instruction = "Run the study as exploratory, or remove the triggers."
+why = "Children chosen by a trigger may inflate the error rate of a confirmatory claim. This holds until the box simulates the declared spawn policy and evaluates the trigger decision blind. An exploratory study tests no claim, so its children cost nothing in level."
+sources = ["https://www.fda.gov/media/78495/download"]
+when = { mode = "confirmatory" }
+target = [
+  { path = "mutations.triggers", check = "named:triggers-declared" },
+]
+
+[[rule]]
+code = "W-MUT-001"
+severity = "warning"
+problem = "A child is declared twice."
+instruction = "List each value once, under one trigger. Equal numbers, such as 64 and 64.0, are one value. Otherwise accept that the child runs once and the first trigger that fires admits it."
+why = "A child is its condition with one operator set to one value, and its id names the three. Declared twice, it still runs once and its cost counts once, so the second declaration adds nothing."
+sources = []
+target = [
+  { path = "mutations.triggers[*].spawns[*].values[*]", check = "named:child-declared-once" },
+]
+
+[[rule]]
+code = "W-MUT-002"
+severity = "warning"
+problem = "Running every declared child would exceed the budget."
+instruction = "Raise scope.budget, or declare fewer children. Otherwise a run where the triggers fire skips each child that does not fit, in declared order."
+why = "A fired trigger admits a child only when the spec estimate of the plan's rows at design.row_seconds, with the children admitted before it and its own rows, stays within each cap of scope.budget. The spec decides, not measured time, so the same spec and the same machine rate admit the same children, and check can name the children a run would skip. check raises this warning; the detail names those children."
+sources = []
+check = "documented"
 
 [[rule]]
 code = "E-ISO-001"

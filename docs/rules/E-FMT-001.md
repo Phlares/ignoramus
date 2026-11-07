@@ -27,6 +27,7 @@ Ids and strata become file names, seed inputs and record keys, and are printed i
 - `design.stratum` (format)
 - `inputs[*].stratum` (format)
 - `question.hypotheses[*].strata[*]` (format)
+- `mutations.triggers[*].strata[*]` (format)
 - `question.hypotheses[*].estimates.from` (format)
 - `design.conditions[*].params.*.from` (format)
 - `pins.deviations[*].from` (format)

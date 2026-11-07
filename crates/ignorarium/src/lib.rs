@@ -29,6 +29,7 @@ pub mod runner;
 pub mod scan;
 pub mod schedule;
 pub mod seed;
+pub mod spawn;
 pub mod spec;
 pub mod store;
 pub mod stream;

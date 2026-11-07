@@ -1,8 +1,8 @@
 use evidence::Tail;
 use evidence::claim::{Bound, Statistic};
 use ignorarium::spec::model::{
-    Claim, Label, Mode, PinDeviation, Reference, Resize, ResizeRule, Role, Spec, StatisticSpec,
-    Timing,
+    Claim, Label, Mode, PinDeviation, Reference, Resize, ResizeRule, Role, Scalar, Spec,
+    StatisticSpec, Timing, Trigger,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -34,7 +34,73 @@ fn templates_differ_where_the_brief_says() {
     assert!(a.mutations.operators.is_empty() && a.mutations.triggers.is_empty());
     assert_eq!(b.mutations.operators.len(), 1);
     assert_eq!(b.mutations.operators[0].range.len(), 2);
-    assert_eq!(b.mutations.triggers[0].threshold_e, 1.0);
+    assert!(matches!(&b.mutations.triggers[0], Trigger::Declared(t) if t.threshold_e == 2.0));
+}
+
+fn planted() -> Value {
+    ignorarium::spec::load(TEMPLATES[1].as_ref()).unwrap().value
+}
+
+#[test]
+fn a_declared_trigger_parses() {
+    let mut v = planted();
+    v["mutations"]["triggers"] = json!([{
+        "id": "T1", "outcome": "ppl-ratio", "contrast": { "arm-a": 1.0, "selected": -0.5 },
+        "strata": ["fiction"], "claim": { "within": [-1.0, 1.0] },
+        "statistic": { "mean": [-5.0, 5.0] }, "threshold_e": 20.0,
+        "spawns": [{ "operator": "window_tokens", "values": [64, 0.5, "x"] }],
+    }]);
+    let spec = Spec::from_value(&v).unwrap();
+    let Trigger::Declared(t) = &spec.mutations.triggers[0] else {
+        panic!("not declared");
+    };
+    assert_eq!(spec.mutations.triggers[0].id(), "T1");
+    assert_eq!(t.outcome, "ppl-ratio");
+    assert_eq!(t.contrast["selected"], -0.5);
+    assert_eq!(t.strata, ["fiction"]);
+    assert_eq!(t.claim, Claim::Within([-1.0, 1.0]));
+    assert_eq!(t.statistic, StatisticSpec::Mean([-5.0, 5.0]));
+    assert_eq!(t.threshold_e, 20.0);
+    assert_eq!(t.spawns[0].operator, "window_tokens");
+    assert_eq!(
+        t.spawns[0].values,
+        [
+            Scalar::Int(64),
+            Scalar::Float(0.5),
+            Scalar::Text("x".into())
+        ]
+    );
+    assert_eq!(spec.mutations.declared().count(), 1);
+}
+
+#[test]
+fn a_legacy_trigger_still_parses_and_is_legacy() {
+    let mut v = planted();
+    v["mutations"]["triggers"] = json!([{ "id": "T0", "metric": "ppl-ratio", "threshold_e": 1.0 }]);
+    let spec = Spec::from_value(&v).unwrap();
+    assert!(matches!(&spec.mutations.triggers[0], Trigger::Legacy(l) if l.metric == "ppl-ratio"));
+    assert_eq!(spec.mutations.triggers[0].id(), "T0");
+    assert_eq!(spec.mutations.declared().count(), 0);
+}
+
+#[test]
+fn a_trigger_mixing_both_shapes_is_refused() {
+    let mut v = planted();
+    v["mutations"]["triggers"][0]["metric"] = json!("ppl-ratio");
+    assert!(Spec::from_value(&v).is_err());
+}
+
+#[test]
+fn the_planted_template_declares_a_full_trigger() {
+    let spec = Spec::from_value(&planted()).unwrap();
+    let Trigger::Declared(t) = &spec.mutations.triggers[0] else {
+        panic!("not declared");
+    };
+    assert_eq!(t.threshold_e, 2.0);
+    assert_eq!(t.claim, Claim::Below(0.0));
+    assert_eq!(t.spawns[0].values, [Scalar::Int(64), Scalar::Int(512)]);
+    assert!(spec.inputs.iter().any(|i| i.role == Role::Selection));
+    assert!(spec.design.selection.is_none());
 }
 
 #[test]

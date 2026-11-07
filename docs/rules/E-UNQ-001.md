@@ -25,4 +25,5 @@ A repeated input would run its units twice and count them twice in the power gat
 - `inputs` (unique)
 - `mutations.operators` (unique)
 - `mutations.triggers` (unique)
+- `mutations.triggers[*].spawns` (unique)
 - `pins.deviations` (unique)

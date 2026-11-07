@@ -185,6 +185,92 @@ fn check_json_passing_plan_has_estimate_and_defaults() {
     );
 }
 
+/// `setup` with the planted-spawn template.
+fn planted(edit: impl Fn(String) -> String) -> (TempDir, PathBuf, PathBuf) {
+    let planted = std::fs::read_to_string("../../templates/planted-spawn.toml").unwrap();
+    setup(move |_| edit(planted.clone()))
+}
+
+#[test]
+fn check_lists_the_derivative_set_and_its_worst_case_cost() {
+    let (_d, home, spec) = planted(|t| t);
+    let out = check_out(&home, &spec, 0);
+    // 1 selection unit and 1 confirmation unit run the reference and arm-a; each child runs
+    // on the confirmation unit. 6 rows at 60 s in all.
+    let listed = "derivative set:\n  arm-a~window_tokens=64: 1 rows, from T1\n  arm-a~window_tokens=512: 1 rows, from T1\n  worst case: 2 rows, cpu hours 0.03, wall hours 0.03, money $0.00\n";
+    assert!(out.contains(listed), "{out}");
+    assert!(out.contains("rows: 6\n"), "{out}");
+    assert!(!out.contains("W-MUT-002"), "{out}");
+    let v = check_json(&home, &spec, 0);
+    assert_eq!(v["estimate"]["rows"], 6);
+    let set = &v["derivative_set"];
+    assert_eq!(set["rows"], 2);
+    assert_eq!(
+        set["children"][1],
+        json!({
+            "id": "arm-a~window_tokens=512", "parent": "arm-a", "operator": "window_tokens",
+            "value": 512, "triggers": ["T1"], "rows": 1,
+        })
+    );
+    for key in ["cpu_hours", "wall_hours", "money_usd"] {
+        assert!(set[key].is_number(), "{set}");
+    }
+    // A plan without triggers lists none.
+    let (_d, home, spec) = setup(|t| t);
+    assert!(!check_out(&home, &spec, 0).contains("derivative set:"));
+    assert!(check_json(&home, &spec, 0)["derivative_set"].is_null());
+}
+
+#[test]
+fn review_lists_the_derivative_set_and_its_cost() {
+    let (_d, home, spec) = planted(|t| t);
+    let a = bin(&home).arg("review").arg(&spec).assert().code(0);
+    let out = stdout(&a);
+    let listed = "## Derivative set\n\n- arm-a~window_tokens=64: 1 rows, from T1\n- arm-a~window_tokens=512: 1 rows, from T1\n- worst case: 2 rows, cpu hours 0.03, wall hours 0.03, money $0.00\n";
+    assert!(out.contains(listed), "{out}");
+    let at = |h: &str| out.find(h).unwrap();
+    assert!(at("## Conditions") < at("## Derivative set"), "{out}");
+    assert!(at("## Derivative set") < at("## Estimate"), "{out}");
+    // A plan without triggers has no such section.
+    let (_d, home, spec) = setup(|t| t);
+    let a = bin(&home).arg("review").arg(&spec).assert().code(0);
+    assert!(!stdout(&a).contains("## Derivative set"));
+}
+
+#[test]
+fn a_derivative_set_over_budget_warns() {
+    // 4 rows without children are 0.067 cpu hours; the first child takes it to 0.083, the
+    // second to 0.1, over the cap of 0.09.
+    let tight = |t: String| t.replace("cpu_hours = 1.0", "cpu_hours = 0.09");
+    let (_d, home, spec) = planted(tight);
+    let v = check_json(&home, &spec, 0);
+    let warned = with_code(&v, "W-MUT-002");
+    assert_eq!(warned.len(), 1, "{v}");
+    assert_eq!(warned[0]["severity"], "warning");
+    assert_eq!(warned[0]["path"], "mutations.triggers");
+    assert!(
+        warned[0]["problem"]
+            .as_str()
+            .unwrap()
+            .ends_with(" A run where every trigger fires skips arm-a~window_tokens=512."),
+        "{}",
+        warned[0]["problem"]
+    );
+    let out = check_out(&home, &spec, 0);
+    assert!(out.contains("warning[W-MUT-002]"), "{out}");
+    // Each cap binds: wall time too.
+    let wall = |t: String| t.replace("wall_hours = 1.0", "wall_hours = 0.07");
+    let (_d, home, spec) = planted(wall);
+    let v = check_json(&home, &spec, 0);
+    assert!(
+        with_code(&v, "W-MUT-002")[0]["problem"]
+            .as_str()
+            .unwrap()
+            .ends_with(" skips arm-a~window_tokens=64, arm-a~window_tokens=512."),
+        "{v}"
+    );
+}
+
 #[test]
 fn check_uses_the_machine_level_from_the_box() {
     let (_d, home, spec) = setup(|t| t);
@@ -1236,7 +1322,7 @@ fn content_faults_that_break_the_model_exit_1_with_a_code() {
         ),
         (
             |t| {
-                t.replace("operators = []", "operators = [{ name = \"k\", type = \"int\", range = [true], acts_on = \"x\" }]")
+                t.replace("operators = []", "operators = [{ name = \"k\", type = \"int\", range = [true], acts_on = \"arm-a\" }]")
             },
             "E-TYP-001",
             "spec",
@@ -2128,4 +2214,21 @@ fn the_fill_step_explains_the_family_table() {
     let fill = steps.as_array().unwrap().iter().find(|s| s["id"] == "fill");
     let does = fill.unwrap()["does"].as_str().unwrap();
     assert!(does.contains("[family]") && does.contains("stream slot"));
+}
+
+#[test]
+fn the_check_run_and_status_steps_explain_triggers_and_children() {
+    let dir = TempDir::new().unwrap();
+    let a = bin(dir.path()).args(["guide", "--json"]).assert().success();
+    let steps = json_out(&a);
+    let does = |id: &str| {
+        let s = steps.as_array().unwrap().iter().find(|s| s["id"] == id);
+        s.unwrap()["does"].as_str().unwrap().to_string()
+    };
+    let check = does("check");
+    assert!(check.contains("trigger") && check.contains("exploratory"));
+    let run = does("run");
+    assert!(run.contains("trigger") && run.contains("child"));
+    let status = does("status");
+    assert!(status.contains("trigger") && status.contains("child"));
 }

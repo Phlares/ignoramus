@@ -1,11 +1,16 @@
 //! `report`: the verdicts of a finished study, with the clip counts of its mean claims.
 //! Appends one `opened` record, so a reader of the log sees that the results were read.
 use super::check::HomeRecords;
+use super::status::{relabelled, shown_labels};
 use super::{CliError, Ctx, Done, Run, located, not_registered, out, stopped_why};
-use crate::derived::{Analysis, Estimate, OPENED, Register, StudyState, Verdict};
+use crate::derived::{
+    Analysis, ChildEstimate, Estimate, OPENED, Register, SpawnStop, StudyState, Verdict,
+};
+use crate::diag::printable;
 use crate::home::Home;
 use crate::records::{self, Record, RecordDraft, RecordError};
 use crate::rules::BoxRecords;
+use crate::runner::stored_spec;
 use crate::stream::{self, Log, LogName};
 use ed25519_dalek::VerifyingKey;
 use serde_json::{Value, json};
@@ -124,6 +129,31 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
                 })
             })
             .collect();
+        let mut seen = BTreeSet::new();
+        let kids: Vec<ChildEstimate> = (all.iter().filter_map(ChildEstimate::of))
+            .filter(|e| seen.insert((e.child.clone(), e.outcome.clone())))
+            .collect();
+        let shown = if kids.is_empty() {
+            vec![]
+        } else {
+            let (spec, _, hash, _) = stored_spec(&home.study_dir(id))
+                .map_err(|e| CliError::usage(format!("cannot report {id}: {e}")))?;
+            shown_labels(&spec, &hash)
+        };
+        let stopped: BTreeSet<String> = (all.iter().filter_map(SpawnStop::of))
+            .flat_map(|s| s.children)
+            .collect();
+        let children: Vec<Value> = (kids.iter())
+            .map(|e| {
+                json!({
+                    "child": relabelled(&shown, &e.child),
+                    "parent": relabelled(&shown, &e.parent),
+                    "operator": e.operator, "value": e.value, "outcome": e.outcome,
+                    "clusters": e.clusters, "units": e.units, "mean": e.mean, "repeats": e.repeats,
+                    "stopped": stopped.contains(&e.child),
+                })
+            })
+            .collect();
         value = json!({
             "study": id,
             "finished_at": finished_at(
@@ -136,6 +166,7 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
             )?,
             "records": all.len(),
             "hypotheses": hypotheses,
+            "children": children,
         });
         Ok(vec![RecordDraft::new(id, OPENED, json!({}))])
     })
@@ -185,6 +216,22 @@ fn text(r: &Value) -> String {
                 c["below"], c["above"], c["units"]
             ));
         }
+    }
+    for c in r["children"].as_array().into_iter().flatten() {
+        let partial = if c["stopped"] == true {
+            ", stopped (partial: only the rows that ran)"
+        } else {
+            ""
+        };
+        s.push_str(&format!(
+            "child {}: {} mean {} over {} clusters, {} units, {} repeats{partial}\n",
+            printable(c["child"].as_str().unwrap_or_default()),
+            c["outcome"].as_str().unwrap_or_default(),
+            c["mean"].as_f64().unwrap_or(f64::NAN),
+            c["clusters"],
+            c["units"],
+            c["repeats"]
+        ));
     }
     s
 }

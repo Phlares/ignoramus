@@ -453,9 +453,64 @@ pub enum Scalar {
     Text(String),
 }
 
+impl Mutations {
+    /// The triggers of the current shape. A legacy trigger never runs.
+    pub fn declared(&self) -> impl Iterator<Item = &DeclaredTrigger> {
+        self.triggers.iter().filter_map(|t| match t {
+            Trigger::Declared(d) => Some(d),
+            Trigger::Legacy(_) => None,
+        })
+    }
+}
+
+/// The declared shape comes first: a stored spec with the old shape still parses as `Legacy`.
+/// A trigger of neither shape fails with serde's generic untagged-enum error, which names no
+/// field. A raw `from_value` caller gets only that; `check` names the fault by rule.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum Trigger {
+    Declared(DeclaredTrigger),
+    Legacy(LegacyTrigger),
+}
+
+impl Trigger {
+    pub fn id(&self) -> &str {
+        match self {
+            Trigger::Declared(t) => &t.id,
+            Trigger::Legacy(t) => &t.id,
+        }
+    }
+}
+
+/// A bet on selection data: when the e-process on the contrast reaches `threshold_e`, the
+/// trigger spawns the children `spawns` lists.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Trigger {
+pub struct DeclaredTrigger {
+    pub id: String,
+    /// The outcome id whose paired values the contrast weighs.
+    pub outcome: String,
+    pub contrast: BTreeMap<String, f64>,
+    #[serde(default)]
+    pub strata: Vec<String>,
+    pub claim: Claim,
+    pub statistic: StatisticSpec,
+    pub threshold_e: f64,
+    pub spawns: Vec<Spawn>,
+}
+
+/// The values to try for one operator.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Spawn {
+    pub operator: String,
+    pub values: Vec<Scalar>,
+}
+
+/// The trigger shape before the spawn engine. It is inert.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyTrigger {
     pub id: String,
     pub metric: String,
     pub threshold_e: f64,

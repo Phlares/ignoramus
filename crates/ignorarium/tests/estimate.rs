@@ -171,6 +171,87 @@ fn the_cpu_count_does_not_change_the_estimate() {
     }
 }
 
+/// `sized()` with the operator `w` on `b` and a trigger that spawns `values` of it.
+fn spawning(values: Value) -> Value {
+    let mut v = sized();
+    v["mutations"]["operators"] =
+        json!([{ "name": "w", "type": "int", "range": [1, 9], "acts_on": "b" }]);
+    v["mutations"]["triggers"] = json!([{
+        "id": "T1", "outcome": "ppl-ratio", "contrast": { "b": 1.0 }, "claim": { "below": 0.0 },
+        "statistic": { "quantile": 0.5 }, "threshold_e": 2.0,
+        "spawns": [{ "operator": "w", "values": values }],
+    }]);
+    v
+}
+
+#[test]
+fn the_estimate_counts_every_child_row() {
+    let mut v = spawning(json!([1, 2]));
+    v["pins"]["deterministic"] = json!(true);
+    let spec = spec_of(&v);
+    let rows = schedule::rows(&spec, &H, true).unwrap();
+    let e = estimate(&spec, &machine(4, 0.5), &rows);
+    // The 120 rows; 2 children x 3 confirmation clusters x 5 units x 2 repeats; one recheck
+    // copy for each of the 5 condition ids, the children's among them.
+    assert_eq!(e.rows, 120 + 60 + 5);
+    close(e.cpu_hours, 185.0 * 36.0 / 3600.0);
+    close(e.money_usd, 185.0 * 36.0 / 3600.0 * 0.5);
+    let child = |id: &str| rows.iter().filter(|r| r.condition == id).count();
+    assert_eq!((child("b~w=1"), child("b~w=2")), (31, 31));
+    // Rows count per declared condition; the children's rows count in the total.
+    assert_eq!(
+        e.rows_per_condition,
+        vec![("a".into(), 41), ("b".into(), 41), ("c".into(), 41)]
+    );
+}
+
+#[test]
+fn children_are_admitted_in_order_while_the_estimate_fits_the_budget() {
+    // 120 rows at 36 s are 1.2 hours; each child adds 30 rows, 0.3 hours.
+    let at = |cpu: f64, wall: f64, money: f64| {
+        let mut v = spawning(json!([1, 2, 3]));
+        v["scope"]["budget"] = json!({ "cpu_hours": cpu, "wall_hours": wall, "money_usd": money });
+        spec_of(&v)
+    };
+    let ids = ["b~w=1", "b~w=2", "b~w=3"];
+    let admit = |s: &Spec, ids: &[&'static str]| {
+        ignorarium::estimate::admitted(s, &machine(1, 0.5), &rows_of(s), ids)
+    };
+    let s = at(1.85, 9.0, 9.0);
+    assert_eq!(admit(&s, &ids), ["b~w=1", "b~w=2"]);
+    // The order given decides which fit.
+    assert_eq!(admit(&s, &["b~w=3", "b~w=1", "b~w=2"]), ["b~w=3", "b~w=1"]);
+    // A child that reaches a cap exactly is out: the run gate would pause before its last row.
+    assert!(admit(&at(1.5, 9.0, 9.0), &ids).is_empty());
+    assert_eq!(admit(&at(1.51, 9.0, 9.0), &ids), ["b~w=1"]);
+    // Each cap binds; a cap of 0 is no cap.
+    assert_eq!(admit(&at(9.0, 1.6, 0.0), &ids), ["b~w=1"]);
+    assert_eq!(admit(&at(0.0, 9.0, 0.8), &ids), ["b~w=1"]);
+    assert_eq!(admit(&at(0.0, 0.0, 9.0), &ids), ids);
+    // A child that does not fit adds nothing: a smaller one after it may still fit. Here the
+    // rows given hold 10 of b~w=3's 30 rows, 0.1 hours.
+    let s = at(1.65, 9.0, 9.0);
+    let mut kept = 0;
+    let part: Vec<Row> = (rows_of(&s).into_iter())
+        .filter(|r| {
+            r.condition != "b~w=3"
+                || (kept < 10 && {
+                    kept += 1;
+                    true
+                })
+        })
+        .collect();
+    let some = ignorarium::estimate::admitted(&s, &machine(1, 0.5), &part, &ids);
+    assert_eq!(some, ["b~w=1", "b~w=3"]);
+    // With no room for a child, none is admitted.
+    assert!(admit(&at(1.2, 9.0, 9.0), &ids).is_empty());
+    // The whole schedule fits, every child in.
+    let e = estimate(&s, &machine(1, 0.5), &rows_of(&s));
+    assert!(!e.within(&s.scope.budget));
+    assert!(!e.within(&at(2.1, 9.0, 9.0).scope.budget));
+    assert!(e.within(&at(2.15, 9.0, 9.0).scope.budget));
+}
+
 #[test]
 fn long_job_needs_more_than_the_limit() {
     // One condition, one row: wall minutes = row_seconds / 60.
@@ -492,7 +573,11 @@ fn a_spec_that_passes_check_always_deserializes() {
             }
             let last = path[path.len() - 1];
             cur[last] = if last == "triggers" {
-                json!([{ "id": "T1", "metric": "m", "threshold_e": x }])
+                json!([{
+                    "id": "T1", "outcome": "ppl-ratio", "contrast": { "arm-a": 1.0 },
+                    "claim": { "below": 0.0 }, "statistic": { "quantile": 0.5 },
+                    "threshold_e": x, "spawns": [],
+                }])
             } else {
                 x.clone()
             };

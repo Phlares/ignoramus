@@ -19,7 +19,7 @@ use ignorarium::spec::model::Role;
 use ignorarium::stream::{Log, LogName};
 use ignorarium::{analysis, estimate, keys, records, schedule, spec, view};
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
@@ -1591,6 +1591,767 @@ fn a_late_input_with_the_data_of_the_other_role_is_refused() {
     std::fs::write(work("loose").join(sel), "both").unwrap();
     std::fs::write(work("loose").join(conf), "both").unwrap();
     plan_of(&lab, "loose");
+}
+
+/// `staged` with a trigger on `arm-a` that spawns two values of `window_tokens`.
+fn spawning(t: String) -> String {
+    let operators = r#"operators = [{ name = "window_tokens", type = "int", range = [64, 512], acts_on = "arm-a" }]"#;
+    let triggers = r#"triggers = [{ id = "T1", outcome = "ppl-ratio", contrast = { arm-a = 1.0 }, claim = { below = 0.0 }, statistic = { quantile = 0.5 }, threshold_e = 2.0, spawns = [{ operator = "window_tokens", values = [64, 512] }] }]"#;
+    staged(t)
+        .replacen("operators = []", operators, 1)
+        .replacen("triggers = []", triggers, 1)
+}
+
+#[test]
+fn exploratory_triggers_need_disjoint_data_at_run() {
+    let lab = lab();
+    let (sel, conf) = ("data/select.txt", "data/confirm.txt");
+    let dir = register_study(
+        &lab,
+        "spawn-late",
+        spawning,
+        &[(sel, "same bytes")],
+        PAYLOAD,
+    );
+    std::fs::write(common::work(&lab, "spawn-late").join(conf), "Same  Bytes").unwrap();
+    match err_of(&lab, "spawn-late") {
+        RunError::DataShared {
+            path,
+            path_role,
+            other,
+            role,
+        } => assert_eq!(
+            (path, path_role, other, role),
+            (conf.into(), Role::Confirmation, sel.into(), Role::Selection)
+        ),
+        e => panic!("{e}"),
+    }
+    assert!(!dir.join("schedule.json").exists());
+    // Other data passes.
+    std::fs::write(common::work(&lab, "spawn-late").join(conf), "other text").unwrap();
+    plan_of(&lab, "spawn-late");
+}
+
+#[test]
+fn a_trigger_that_does_not_fire_runs_no_child_and_finishes() {
+    let lab = lab();
+    register_study(&lab, "spawn-wait", spawning, &[], STAGED);
+    let plan = plan_of(&lab, "spawn-wait");
+    let stages: Vec<_> = plan.schedule.rows.iter().map(|r| &r.stage[..]).collect();
+    assert_eq!(
+        stages,
+        [["selection"; 6], ["confirmation"; 6], ["spawn"; 6]].concat()
+    );
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    // arm-a pairs to +25 % on the one selection cluster: no unit lies at or below 0, and the
+    // first bet is 0, so the e-process stays at 1.
+    let t = kind_of(&lab, "spawn-wait", "trigger");
+    assert_eq!(t.len(), 1);
+    assert_eq!(
+        t[0].body,
+        serde_json::json!({
+            "id": "T1",
+            "e_value": 1.0,
+            "threshold": 2.0,
+            "fired": false,
+            "reason": null,
+            "admitted": [],
+            "skipped": [
+                { "child": "arm-a~window_tokens=64", "reason": "not-fired" },
+                { "child": "arm-a~window_tokens=512", "reason": "not-fired" },
+            ],
+        })
+    );
+    let ran = indices(&lab, "spawn-wait");
+    assert_eq!(ran, (0..12).collect::<Vec<u64>>());
+    // The study finishes without the child rows, and its progress leaves them out.
+    assert_eq!(kind_of(&lab, "spawn-wait", "analysis").len(), 1);
+    let all = common::records_of(&lab, "spawn-wait");
+    let p = ignorarium::runner::progress(&lab.home, "spawn-wait", &all).unwrap();
+    assert_eq!((p.done, p.total), (12, 12));
+}
+
+/// The spec text with a selection input of one unit at each of `paths`, before `[pins]`.
+fn selection_inputs(t: String, paths: &[&str]) -> String {
+    let input = |path: &&str| {
+        format!(
+            "[[inputs]]\npath = \"{path}\"\nsha256 = \"\"\nrole = \"selection\"\nstratum = \"fiction\"\nunits = 1\n[inputs.licence]\nspdx = \"\"\ntype = \"unspecified\"\nsource = \"\"\ncreators = []\n\n"
+        )
+    };
+    let inputs: String = paths.iter().map(input).collect();
+    t.replacen("[pins]", &format!("{inputs}[pins]"), 1)
+}
+
+/// Trigger `id` on `contrast` with `claim` by the median, stop at 2, spawning `spawns`.
+fn trigger(id: &str, contrast: &str, claim: &str, spawns: &str) -> String {
+    format!(
+        r#"{{ id = "{id}", outcome = "ppl-ratio", contrast = {contrast}, claim = {claim}, statistic = {{ quantile = 0.5 }}, threshold_e = 2.0, spawns = [{spawns}] }}"#
+    )
+}
+
+/// `staged` with two more selection inputs, so the selection stage has 3 clusters, operator
+/// `operator` and `triggers`. Rows 0 to 11 select, 12 to 17 confirm, then each child's 3 rows.
+fn with_triggers(operator: &'static str, triggers: Vec<String>) -> impl Fn(String) -> String {
+    move |t| {
+        selection_inputs(staged(t), &["data/s2.txt", "data/s3.txt"])
+            .replacen("operators = []", &format!("operators = [{operator}]"), 1)
+            .replacen(
+                "triggers = []",
+                &format!("triggers = [{}]", triggers.join(", ")),
+                1,
+            )
+    }
+}
+
+const BELOW: &str = "{ below = 0.0 }";
+
+/// `with_triggers` with one trigger, T1, on `contrast`, below 0.
+fn spawn_on(
+    contrast: &'static str,
+    operator: &'static str,
+    spawns: &'static str,
+) -> impl Fn(String) -> String {
+    with_triggers(operator, vec![trigger("T1", contrast, BELOW, spawns)])
+}
+
+const WINDOW_ON_ARM_A: &str =
+    r#"{ name = "window_tokens", type = "int", range = [64, 512], acts_on = "arm-a" }"#;
+const WINDOW_ON_SELECTED: &str =
+    r#"{ name = "window_tokens", type = "int", range = [64, 512], acts_on = "selected" }"#;
+const WINDOWS: &str = r#"{ operator = "window_tokens", values = [64, 512] }"#;
+
+/// T1 watches arm-b, which pairs to -25 % on every unit: each of the 3 selection clusters has
+/// all its units at or below 0, and the e-process passes 2 at the third. Its children set
+/// `window_tokens` of arm-a.
+fn firing(t: String) -> String {
+    spawn_on("{ arm-b = 1.0 }", WINDOW_ON_ARM_A, WINDOWS)(t)
+}
+
+/// The stopped e-value of 3 clusters with every unit on the claimed side, at the stop of 2.
+fn fired_e_value() -> f64 {
+    use evidence::claim::{Bound, Statistic, stopped};
+    let below = Bound {
+        tail: evidence::Tail::Lower,
+        margin: 0.0,
+    };
+    stopped(&Statistic::Quantile(0.5), &below, &[1.0; 3], 2.0).unwrap()
+}
+
+/// The trigger records of study `id`, and each record's hash.
+fn triggers_of(lab: &Lab, id: &str) -> Vec<(records::Record, String)> {
+    let t = kind_of(lab, id, "trigger");
+    t.into_iter()
+        .map(|r| {
+            let h = records::hash(&r);
+            (r, h)
+        })
+        .collect()
+}
+
+#[test]
+fn a_firing_trigger_admits_its_children_and_they_run_after_confirmation_rows() {
+    let lab = lab();
+    register_study(&lab, "fires", firing, &[], STAGED);
+    let plan = plan_of(&lab, "fires");
+    let stages: Vec<_> = plan.schedule.rows.iter().map(|r| &r.stage[..]).collect();
+    assert_eq!(
+        stages,
+        [&["selection"; 12][..], &["confirmation"; 6], &["spawn"; 6]].concat()
+    );
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let t = triggers_of(&lab, "fires");
+    assert_eq!(t.len(), 1);
+    let e = fired_e_value();
+    assert!(e >= 2.0, "{e}");
+    assert_eq!(
+        t[0].0.body,
+        serde_json::json!({
+            "id": "T1",
+            "e_value": e,
+            "threshold": 2.0,
+            "fired": true,
+            "reason": null,
+            "admitted": ["arm-a~window_tokens=64", "arm-a~window_tokens=512"],
+            "skipped": [],
+        })
+    );
+    // The trigger record at the boundary; T1 needs no pick, so the selection record follows it,
+    // before the first `selected` row. Every row ran.
+    let all = common::records_of(&lab, "fires");
+    let at = all.iter().position(|r| r.kind == "trigger").unwrap();
+    assert_eq!(all[at + 1].kind, "selection");
+    assert_eq!((all[at - 1].row, all[at + 2].row), (Some(11), Some(12)));
+    assert_eq!(indices(&lab, "fires"), (0..24).collect::<Vec<u64>>());
+    for r in rows_of(&lab, "fires") {
+        let row = &plan.schedule.rows[r.row.unwrap() as usize];
+        if row.stage == "spawn" {
+            assert_eq!(r.body["trigger"], t[0].1.as_str());
+        } else {
+            assert!(r.body.get("trigger").is_none());
+        }
+    }
+    assert_eq!(kind_of(&lab, "fires", "analysis").len(), 1);
+    let p = ignorarium::runner::progress(&lab.home, "fires", &all).unwrap();
+    assert_eq!((p.done, p.total), (24, 24));
+}
+
+#[test]
+fn child_params_are_the_parents_plus_the_operator() {
+    let lab = lab();
+    let dir = register_study(&lab, "child-params", firing, &[], STAGED);
+    let plan = plan_of(&lab, "child-params");
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let mut seen = 0;
+    for row in plan.schedule.rows.iter().filter(|r| r.stage == "spawn") {
+        let out = dir.join(format!("run/rows/{}/out", row.index));
+        let params = std::fs::read_to_string(out.join("params")).unwrap();
+        let ran = std::fs::read_to_string(out.join("result")).unwrap();
+        let value = row.condition.rsplit('=').next().unwrap();
+        assert_eq!(
+            params,
+            format!(r#"{{"bits":4,"mode":"fast","window_tokens":{value}}}"#)
+        );
+        assert_eq!(ran, format!("{} {} 0", row.condition, row.unit));
+        seen += 1;
+    }
+    assert_eq!(seen, 6);
+}
+
+#[test]
+fn children_of_selected_take_the_picks_id_and_params() {
+    let lab = lab();
+    let spec = spawn_on("{ arm-b = 1.0 }", WINDOW_ON_SELECTED, WINDOWS);
+    let dir = register_study(&lab, "sel-child", spec, &[], STAGED);
+    let plan = plan_of(&lab, "sel-child");
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let t = triggers_of(&lab, "sel-child");
+    assert_eq!(
+        t[0].0.body["admitted"],
+        serde_json::json!(["arm-b~window_tokens=64", "arm-b~window_tokens=512"])
+    );
+    let selection = records::hash(&selections_of(&lab, "sel-child")[0]);
+    let mut seen = 0;
+    for r in rows_of(&lab, "sel-child") {
+        let row = &plan.schedule.rows[r.row.unwrap() as usize];
+        if row.stage != "spawn" {
+            continue;
+        }
+        seen += 1;
+        let value = row.condition.rsplit('=').next().unwrap();
+        assert_eq!(row.condition, format!("selected~window_tokens={value}"));
+        assert_eq!(r.body["condition"], row.condition.as_str());
+        assert_eq!(r.body["picked"], "arm-b");
+        assert_eq!(r.body["selection"], selection.as_str());
+        assert_eq!(r.body["trigger"], t[0].1.as_str());
+        let out = dir.join(format!("run/rows/{}/out", row.index));
+        let ran = std::fs::read_to_string(out.join("result")).unwrap();
+        assert_eq!(ran, format!("arm-b~window_tokens={value} {} 0", row.unit));
+        let params = std::fs::read_to_string(out.join("params")).unwrap();
+        assert_eq!(params, format!(r#"{{"bits":8,"window_tokens":{value}}}"#));
+    }
+    assert_eq!(seen, 6);
+}
+
+#[test]
+fn a_selected_child_with_the_picks_own_value_is_skipped_same_as_parent() {
+    let lab = lab();
+    let bits = r#"{ name = "bits", type = "int", range = [2, 16], acts_on = "selected" }"#;
+    let spec = spawn_on(
+        "{ arm-b = 1.0 }",
+        bits,
+        r#"{ operator = "bits", values = [8, 4] }"#,
+    );
+    register_study(&lab, "same-parent", spec, &[], STAGED);
+    let plan = plan_of(&lab, "same-parent");
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    // The pick, arm-b, already has bits = 8.
+    let t = triggers_of(&lab, "same-parent");
+    assert_eq!(t[0].0.body["admitted"], serde_json::json!(["arm-b~bits=4"]));
+    assert_eq!(
+        t[0].0.body["skipped"],
+        serde_json::json!([{ "child": "arm-b~bits=8", "reason": "same-as-parent" }])
+    );
+    let children: Vec<String> = rows_of(&lab, "same-parent")
+        .iter()
+        .map(|r| &plan.schedule.rows[r.row.unwrap() as usize])
+        .filter(|row| row.stage == "spawn")
+        .map(|row| row.condition.clone())
+        .collect();
+    assert_eq!(children, vec!["selected~bits=4".to_string(); 3]);
+    assert_eq!(kind_of(&lab, "same-parent", "analysis").len(), 1);
+}
+
+#[test]
+fn children_that_do_not_fit_the_budget_are_skipped_budget() {
+    let lab = lab();
+    // 18 rows before the children and 3 per child at 60 s each: 1260 s fit a 1368 s cap, 1440
+    // s do not.
+    let spec = |t: String| firing(t).replacen("cpu_hours = 1.0", "cpu_hours = 0.38", 1);
+    register_study(&lab, "tight", spec, &[], STAGED);
+    let plan = plan_of(&lab, "tight");
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let t = triggers_of(&lab, "tight");
+    assert_eq!(
+        t[0].0.body["admitted"],
+        serde_json::json!(["arm-a~window_tokens=64"])
+    );
+    assert_eq!(
+        t[0].0.body["skipped"],
+        serde_json::json!([{ "child": "arm-a~window_tokens=512", "reason": "budget" }])
+    );
+    assert_eq!(indices(&lab, "tight"), (0..21).collect::<Vec<u64>>());
+    assert_eq!(kind_of(&lab, "tight", "analysis").len(), 1);
+}
+
+#[test]
+fn an_overrun_on_child_rows_stops_the_children_and_finishes() {
+    let lab = lab();
+    register_study(&lab, "overrun", firing, &[], STAGED);
+    let mut plan = plan_of(&lab, "overrun");
+    // Rows 0 to 18 see no spend; row 19, the second child row, sees 3570 of the 3600 cpu
+    // seconds, and a row estimates 60.
+    let mut readings = vec![cost(0.0, 0.0); 19];
+    readings.push(cost(3570.0, 0.0));
+    plan.meter = Box::new(FakeMeter::new(readings));
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(indices(&lab, "overrun"), (0..19).collect::<Vec<u64>>());
+    let stops = kind_of(&lab, "overrun", "spawn-stop");
+    assert_eq!(stops.len(), 1);
+    assert_eq!(
+        stops[0].body,
+        serde_json::json!({
+            "children": ["arm-a~window_tokens=64", "arm-a~window_tokens=512"],
+            "reason": "budget",
+        })
+    );
+    // The parent's hypotheses get their verdicts.
+    let all = common::records_of(&lab, "overrun");
+    let at = all.iter().position(|r| r.kind == "spawn-stop").unwrap();
+    assert_eq!(all[at - 1].row, Some(18));
+    // The one child row that ran gives its child an estimate, before the analysis record.
+    let next: Vec<&str> = all[at + 1..].iter().take(2).map(|r| &r.kind[..]).collect();
+    assert_eq!(next, ["child-estimate", "analysis"]);
+    assert_eq!(kind_of(&lab, "overrun", "verdict").len(), 1);
+    let p = ignorarium::runner::progress(&lab.home, "overrun", &all).unwrap();
+    assert_eq!((p.done, p.total), (19, 19));
+    // A resume runs no child row and adds nothing.
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(common::records_of(&lab, "overrun").len(), all.len());
+}
+
+#[test]
+fn an_incomplete_selection_unit_stops_the_trigger_firing() {
+    let lab = lab();
+    // arm-b writes no value on one selection unit: the pick still has complete units.
+    let payload = STAGED.replace(
+        "case",
+        "case \"$2 $4\" in \"arm-b data/s2.txt#0\") exit 0;; esac\ncase",
+    );
+    register_study(&lab, "gap", firing, &[], &payload);
+    let plan = plan_of(&lab, "gap");
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let t = triggers_of(&lab, "gap");
+    assert_eq!(
+        (
+            &t[0].0.body["e_value"],
+            &t[0].0.body["fired"],
+            &t[0].0.body["reason"]
+        ),
+        (
+            &serde_json::json!(0.0),
+            &serde_json::json!(false),
+            &serde_json::json!("incomplete")
+        )
+    );
+    assert_eq!(t[0].0.body["admitted"], serde_json::json!([]));
+    assert_eq!(indices(&lab, "gap"), (0..18).collect::<Vec<u64>>());
+    assert_eq!(kind_of(&lab, "gap", "analysis").len(), 1);
+}
+
+#[test]
+fn a_resumed_run_writes_each_trigger_record_once() {
+    let lab = lab();
+    register_study(&lab, "t-again", firing, &[], STAGED);
+    let plan = plan_of(&lab, "t-again");
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let dir = lab.home.study_dir("t-again");
+    let log = dir.join("records.jsonl");
+    let whole = std::fs::read_to_string(&log).unwrap();
+    let all = common::records_of(&lab, "t-again");
+    let at = all.iter().position(|r| r.kind == "trigger").unwrap();
+    let made = all[at].body.clone();
+    // A box killed before the record, or after it and one row, then resumed: one record, the
+    // same body, the same rows and no other.
+    for (n, kept) in [(0, at), (1, at + 2)] {
+        let text: String = whole.split_inclusive('\n').take(kept).collect();
+        std::fs::write(&log, text).unwrap();
+        std::fs::rename(dir.join("run"), dir.join(format!("run-old-{n}"))).unwrap();
+        assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+        let again = common::records_of(&lab, "t-again");
+        let t: Vec<_> = again.iter().filter(|r| r.kind == "trigger").collect();
+        assert_eq!(t.len(), 1, "{n}");
+        assert_eq!(t[0].body, made, "{n}");
+        assert_eq!(again.len(), all.len(), "{n}");
+    }
+    // A resume reads the record it finds and never evaluates the trigger again: one that
+    // admits no child runs none.
+    let text: String = whole.split_inclusive('\n').take(at).collect();
+    std::fs::write(&log, text).unwrap();
+    std::fs::rename(dir.join("run"), dir.join("run-old-2")).unwrap();
+    let mut planted = made.clone();
+    planted["fired"] = serde_json::json!(false);
+    planted["admitted"] = serde_json::json!([]);
+    common::plant(&lab.home, "t-again", &[("trigger", planted)]);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(kind_of(&lab, "t-again", "trigger").len(), 1);
+    assert_eq!(indices(&lab, "t-again"), (0..18).collect::<Vec<u64>>());
+}
+
+#[test]
+fn a_legacy_trigger_is_inert_at_run() {
+    use ignorarium::spec::model::{LegacyTrigger, Trigger};
+    let lab = lab();
+    register_study(&lab, "inert", firing, &[], STAGED);
+    let mut plan = plan_of(&lab, "inert");
+    // The schedule holds the children; the trigger that declares them has the old shape.
+    plan.spec.mutations.triggers = vec![Trigger::Legacy(LegacyTrigger {
+        id: "T1".into(),
+        metric: "ppl-ratio".into(),
+        threshold_e: 2.0,
+    })];
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert!(kind_of(&lab, "inert", "trigger").is_empty());
+    assert_eq!(indices(&lab, "inert"), (0..18).collect::<Vec<u64>>());
+    assert_eq!(kind_of(&lab, "inert", "analysis").len(), 1);
+}
+
+#[test]
+fn no_child_row_runs_before_its_trigger_record() {
+    let lab = lab();
+    register_study(&lab, "first", firing, &[], STAGED);
+    let mut plan = plan_of(&lab, "first");
+    // A child row moves to the front of the confirmation stage: the boundary still comes
+    // before it.
+    let child = plan.schedule.rows.remove(18);
+    plan.schedule.rows.insert(12, child);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let all = common::records_of(&lab, "first");
+    let at = all.iter().position(|r| r.kind == "trigger").unwrap();
+    let hash = records::hash(&all[at]);
+    assert_eq!(all[at + 1].row, Some(18));
+    for (i, r) in all.iter().enumerate().filter(|(_, r)| r.kind == "row") {
+        if r.body["stage"] == "spawn" {
+            assert!(i > at, "row {:?}", r.row);
+            assert_eq!(r.body["trigger"], hash.as_str());
+        }
+    }
+}
+
+#[test]
+fn a_trigger_only_stage_fires_with_no_pick() {
+    let lab = lab();
+    // No `[design.selection]`: the 3 selection clusters run the reference and arm-a, which
+    // pairs to +25 % on every unit.
+    let spec = |t: String| {
+        let one = trigger(
+            "T1",
+            "{ arm-a = 1.0 }",
+            "{ above = 0.0 }",
+            r#"{ operator = "window_tokens", values = [64] }"#,
+        );
+        selection_inputs(t, &["data/s1.txt", "data/s2.txt", "data/s3.txt"])
+            .replacen(
+                "operators = []",
+                &format!("operators = [{WINDOW_ON_ARM_A}]"),
+                1,
+            )
+            .replacen("triggers = []", &format!("triggers = [{one}]"), 1)
+    };
+    register_study(&lab, "no-pick", spec, &[], STAGED);
+    let plan = plan_of(&lab, "no-pick");
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert!(selections_of(&lab, "no-pick").is_empty());
+    let t = triggers_of(&lab, "no-pick");
+    assert_eq!(t[0].0.body["fired"], true);
+    assert_eq!(
+        t[0].0.body["admitted"],
+        serde_json::json!(["arm-a~window_tokens=64"])
+    );
+    // 6 selection rows, then the record, then 6 confirmation rows and the child's 3.
+    let all = common::records_of(&lab, "no-pick");
+    let at = all.iter().position(|r| r.kind == "trigger").unwrap();
+    assert_eq!((all[at - 1].row, all[at + 1].row), (Some(5), Some(6)));
+    assert_eq!(indices(&lab, "no-pick"), (0..15).collect::<Vec<u64>>());
+}
+
+#[test]
+fn a_child_two_triggers_declare_runs_once_named_by_the_first() {
+    let lab = lab();
+    let spec = with_triggers(
+        WINDOW_ON_ARM_A,
+        vec![
+            trigger(
+                "T1",
+                "{ arm-b = 1.0 }",
+                BELOW,
+                r#"{ operator = "window_tokens", values = [64] }"#,
+            ),
+            trigger("T2", "{ arm-b = 1.0 }", BELOW, WINDOWS),
+        ],
+    );
+    register_study(&lab, "twice", spec, &[], STAGED);
+    let plan = plan_of(&lab, "twice");
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let t = triggers_of(&lab, "twice");
+    let admitted: Vec<_> = t.iter().map(|(r, _)| r.body["admitted"].clone()).collect();
+    assert_eq!(
+        admitted,
+        vec![
+            serde_json::json!(["arm-a~window_tokens=64"]),
+            serde_json::json!(["arm-a~window_tokens=64", "arm-a~window_tokens=512"]),
+        ]
+    );
+    let mut named = BTreeMap::new();
+    for r in rows_of(&lab, "twice") {
+        let row = &plan.schedule.rows[r.row.unwrap() as usize];
+        if row.stage == "spawn" {
+            named
+                .entry(row.condition.clone())
+                .or_insert_with(Vec::new)
+                .push(r.body["trigger"].as_str().unwrap().to_string());
+        }
+    }
+    assert_eq!(named["arm-a~window_tokens=64"], vec![t[0].1.clone(); 3]);
+    assert_eq!(named["arm-a~window_tokens=512"], vec![t[1].1.clone(); 3]);
+    // A box killed between the two records: the resume reads T1's and writes T2's alone.
+    let dir = lab.home.study_dir("twice");
+    let log = dir.join("records.jsonl");
+    let whole = std::fs::read_to_string(&log).unwrap();
+    let all = common::records_of(&lab, "twice");
+    let at = all.iter().position(|r| r.kind == "trigger").unwrap();
+    let text: String = whole.split_inclusive('\n').take(at + 1).collect();
+    std::fs::write(&log, text).unwrap();
+    std::fs::rename(dir.join("run"), dir.join("run-old")).unwrap();
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let again = triggers_of(&lab, "twice");
+    assert_eq!(again[0], t[0]);
+    let bodies = |t: &[(records::Record, String)]| -> Vec<serde_json::Value> {
+        t.iter().map(|(r, _)| r.body.clone()).collect()
+    };
+    assert_eq!(bodies(&again), bodies(&t));
+    assert_eq!(common::records_of(&lab, "twice").len(), all.len());
+}
+
+#[test]
+fn a_later_trigger_admits_against_what_the_recorded_ones_admit() {
+    let lab = lab();
+    // Room for one child: T1's takes it, and T2's is skipped.
+    let one = |id: &str, value: u32| {
+        let spawns = format!(r#"{{ operator = "window_tokens", values = [{value}] }}"#);
+        trigger(id, "{ arm-b = 1.0 }", BELOW, &spawns)
+    };
+    let both = with_triggers(WINDOW_ON_ARM_A, vec![one("T1", 64), one("T2", 512)]);
+    let spec = move |t: String| both(t).replacen("cpu_hours = 1.0", "cpu_hours = 0.38", 1);
+    register_study(&lab, "later", spec, &[], STAGED);
+    let plan = plan_of(&lab, "later");
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let skipped = |lab: &Lab| triggers_of(lab, "later")[1].0.body["skipped"].clone();
+    let budget = serde_json::json!([{ "child": "arm-a~window_tokens=512", "reason": "budget" }]);
+    assert_eq!(skipped(&lab), budget);
+    // A resume that finds a T1 record admitting nothing leaves the room to T2.
+    let dir = lab.home.study_dir("later");
+    let log = dir.join("records.jsonl");
+    let whole = std::fs::read_to_string(&log).unwrap();
+    let all = common::records_of(&lab, "later");
+    let at = all.iter().position(|r| r.kind == "trigger").unwrap();
+    let mut planted = all[at].body.clone();
+    planted["admitted"] = serde_json::json!([]);
+    let text: String = whole.split_inclusive('\n').take(at).collect();
+    std::fs::write(&log, text).unwrap();
+    std::fs::rename(dir.join("run"), dir.join("run-old")).unwrap();
+    common::plant(&lab.home, "later", &[("trigger", planted)]);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let t = triggers_of(&lab, "later");
+    assert_eq!(
+        t[1].0.body["admitted"],
+        serde_json::json!(["arm-a~window_tokens=512"])
+    );
+    assert_eq!(skipped(&lab), serde_json::json!([]));
+}
+
+#[test]
+fn a_meter_fault_on_a_child_row_pauses_and_stops_no_child() {
+    let lab = lab();
+    register_study(&lab, "meter", firing, &[], STAGED);
+    let mut plan = plan_of(&lab, "meter");
+    // The meter fails at row 18, the first child row.
+    let mut readings = vec![cost(0.0, 0.0); 18];
+    readings.push(Err(MeterError("gone".into())));
+    plan.meter = Box::new(FakeMeter::new(readings));
+    let why = "the cost meter failed: gone";
+    assert_eq!(run(&plan).unwrap(), RunStatus::Paused(why.into()));
+    assert!(kind_of(&lab, "meter", "spawn-stop").is_empty());
+    assert_eq!(indices(&lab, "meter"), (0..18).collect::<Vec<u64>>());
+    // Once the meter reads again, the children run.
+    plan.meter = Box::new(FakeMeter::new(vec![cost(0.0, 0.0)]));
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert!(kind_of(&lab, "meter", "spawn-stop").is_empty());
+    assert_eq!(indices(&lab, "meter"), (0..24).collect::<Vec<u64>>());
+}
+
+#[test]
+fn an_overrun_on_a_retried_child_row_stops_the_children() {
+    let lab = lab();
+    register_study(&lab, "retry-over", firing, &[], STAGED);
+    let mut plan = plan_of(&lab, "retry-over");
+    // Row 18's first attempt fails on the box; before its retry the meter reads 3570 of the
+    // 3600 cpu seconds, and a row estimates 60.
+    let script = (0..18)
+        .map(|_| Exit::Ok)
+        .chain([Exit::Infra("box fault".into())]);
+    let (b, _) = fake(script.collect());
+    plan.backend = Box::new(b);
+    let mut readings = vec![cost(0.0, 0.0); 19];
+    readings.push(cost(3570.0, 0.0));
+    plan.meter = Box::new(FakeMeter::new(readings));
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(indices(&lab, "retry-over"), (0..18).collect::<Vec<u64>>());
+    let spend = kind_of(&lab, "retry-over", "spend");
+    assert_eq!((spend.len(), spend[0].row), (1, Some(18)));
+    let stops = kind_of(&lab, "retry-over", "spawn-stop");
+    assert_eq!(
+        stops[0].body["children"],
+        serde_json::json!(["arm-a~window_tokens=64", "arm-a~window_tokens=512"])
+    );
+    assert_eq!(kind_of(&lab, "retry-over", "verdict").len(), 1);
+}
+
+#[test]
+fn triggers_that_need_no_pick_never_wait_for_one() {
+    let lab = lab();
+    // The stage's pick runs nowhere: confirmation runs arm-a, and no trigger names selected.
+    let spec = |t: String| {
+        let one = trigger("T1", "{ arm-b = 1.0 }", BELOW, WINDOWS);
+        with_triggers(WINDOW_ON_ARM_A, vec![one])(t)
+            .replacen("conditions = [\"selected\"]", "conditions = [\"arm-a\"]", 1)
+            .replacen(
+                "contrast = { selected = 1.0 }",
+                "contrast = { arm-a = 1.0 }",
+                1,
+            )
+    };
+    // arm-b writes no value: no selection unit is complete, so no pick could be made.
+    let payload = STAGED.replace("case", "case \"$2\" in arm-b) exit 0;; esac\ncase");
+    register_study(&lab, "no-wait", spec, &[], &payload);
+    let plan = plan_of(&lab, "no-wait");
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert!(selections_of(&lab, "no-wait").is_empty());
+    let t = triggers_of(&lab, "no-wait");
+    assert_eq!(t[0].0.body["reason"], "incomplete");
+    assert_eq!(indices(&lab, "no-wait"), (0..18).collect::<Vec<u64>>());
+    assert_eq!(kind_of(&lab, "no-wait", "verdict").len(), 1);
+}
+
+#[test]
+fn a_trigger_that_needs_a_pick_none_can_make_records_no_pick() {
+    let lab = lab();
+    // Confirmation runs arm-a, so only T1 needs the pick; arm-b writes no value, so no
+    // selection unit is complete and no pick can be made.
+    let spec = |t: String| {
+        let one = trigger("T1", "{ selected = 1.0 }", BELOW, WINDOWS);
+        with_triggers(WINDOW_ON_ARM_A, vec![one])(t)
+            .replacen("conditions = [\"selected\"]", "conditions = [\"arm-a\"]", 1)
+            // The first is the hypothesis's, above `[mutations]`.
+            .replacen(
+                "contrast = { selected = 1.0 }",
+                "contrast = { arm-a = 1.0 }",
+                1,
+            )
+    };
+    let payload = STAGED.replace("case", "case \"$2\" in arm-b) exit 0;; esac\ncase");
+    register_study(&lab, "no-pick-t", spec, &[], &payload);
+    let plan = plan_of(&lab, "no-pick-t");
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    assert!(selections_of(&lab, "no-pick-t").is_empty());
+    let t = triggers_of(&lab, "no-pick-t");
+    assert_eq!(
+        t[0].0.body,
+        serde_json::json!({
+            "id": "T1",
+            "e_value": 0.0,
+            "threshold": 2.0,
+            "fired": false,
+            "reason": "no-pick",
+            "admitted": [],
+            "skipped": [
+                { "child": "arm-a~window_tokens=64", "reason": "not-fired" },
+                { "child": "arm-a~window_tokens=512", "reason": "not-fired" },
+            ],
+        })
+    );
+    assert_eq!(indices(&lab, "no-pick-t"), (0..18).collect::<Vec<u64>>());
+    assert_eq!(kind_of(&lab, "no-pick-t", "verdict").len(), 1);
+}
+
+#[test]
+fn a_child_with_the_value_its_parent_takes_from_a_study_is_skipped_same_as_parent() {
+    let lab = lab();
+    // arm-b's `bits` is the condition study `chooser` selected, arm-a: a text.
+    chose(&lab, "chooser", "arm-a");
+    let bits = r#"{ name = "bits", type = "enum", range = ["arm-a", "arm-c"], acts_on = "arm-b" }"#;
+    let one = trigger(
+        "T1",
+        "{ arm-b = 1.0 }",
+        BELOW,
+        r#"{ operator = "bits", values = ["arm-a", "arm-c"] }"#,
+    );
+    let triggered = with_triggers(bits, vec![one]);
+    let spec = move |t: String| {
+        triggered(t).replace(
+            "params = { bits = 8 }",
+            "params = { bits = { from = \"chooser\" } }",
+        )
+    };
+    register_study(&lab, "from-parent", spec, &[], STAGED);
+    let plan = plan_of(&lab, "from-parent");
+    assert_eq!(plan.params["arm-b"], serde_json::json!({ "bits": "arm-a" }));
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let t = triggers_of(&lab, "from-parent");
+    assert_eq!(
+        t[0].0.body["admitted"],
+        serde_json::json!(["arm-b~bits=arm-c"])
+    );
+    assert_eq!(
+        t[0].0.body["skipped"],
+        serde_json::json!([{ "child": "arm-b~bits=arm-a", "reason": "same-as-parent" }])
+    );
+}
+
+#[test]
+fn a_childs_recheck_copy_runs_only_when_its_child_is_admitted() {
+    let lab = lab();
+    // With a recheck copy per condition: 22 rows before the children and 4 per child at 60 s
+    // each, so 1560 s fit a 1620 s cap and 1800 s do not.
+    let spec = |t: String| {
+        firing(t)
+            .replacen("# deterministic = true", "deterministic = true", 1)
+            .replacen("cpu_hours = 1.0", "cpu_hours = 0.45", 1)
+    };
+    register_study(&lab, "copies", spec, &[], STAGED);
+    let plan = plan_of(&lab, "copies");
+    let copies: Vec<&schedule::Row> = (plan.schedule.rows.iter())
+        .filter(|r| r.stage == "spawn" && r.recheck_of.is_some())
+        .collect();
+    assert_eq!(copies.len(), 2);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let ran: Vec<u64> = indices(&lab, "copies");
+    for copy in copies {
+        let admitted = copy.condition == "arm-a~window_tokens=64";
+        assert_eq!(ran.contains(&copy.index), admitted, "{}", copy.condition);
+    }
+    let analysis = Analysis::of(&kind_of(&lab, "copies", "analysis")[0]).unwrap();
+    let recheck = analysis.recheck.unwrap();
+    assert_eq!((recheck.rows, recheck.passed()), (5, true));
 }
 
 #[test]
@@ -4132,4 +4893,284 @@ fn the_declared_row_memory_caps_every_row_and_its_absence_none() {
             assert_eq!(limits, want, "{id} row {}", row.index);
         }
     }
+}
+
+// ---- child estimates, and the triggers and children status shows ----
+
+/// The child-estimate records of study `id`, as bodies.
+fn child_estimates(lab: &Lab, id: &str) -> Vec<serde_json::Value> {
+    let all = common::records_of(lab, id);
+    all.iter()
+        .filter(|r| r.kind == "child-estimate")
+        .map(|r| r.body.clone())
+        .collect()
+}
+
+fn child_estimate(child: &str, parent: &str, value: i64) -> serde_json::Value {
+    sized_estimate(child, parent, value, (1, 3, -100.0, 1))
+}
+
+/// A child estimate with its (clusters, units, mean, repeats).
+fn sized_estimate(
+    child: &str,
+    parent: &str,
+    value: i64,
+    (clusters, units, mean, repeats): (u64, u64, f64, u64),
+) -> serde_json::Value {
+    serde_json::json!({
+        "child": child, "parent": parent, "operator": "window_tokens", "value": value,
+        "outcome": "ppl-ratio", "clusters": clusters, "units": units, "mean": mean,
+        "repeats": repeats,
+    })
+}
+
+#[test]
+fn each_admitted_child_gets_one_estimate_per_outcome_before_the_analysis_record() {
+    let lab = lab();
+    register_study(&lab, "kids", firing, &[], STAGED);
+    let plan = plan_of(&lab, "kids");
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    // Each child writes 0 where the reference writes 8: 100 x (0 / 8 - 1) on each of the 3
+    // confirmation units.
+    assert_eq!(
+        child_estimates(&lab, "kids"),
+        vec![
+            child_estimate("arm-a~window_tokens=64", "arm-a", 64),
+            child_estimate("arm-a~window_tokens=512", "arm-a", 512),
+        ]
+    );
+    let all = common::records_of(&lab, "kids");
+    let at = |kind: &str| all.iter().position(|r| r.kind == kind).unwrap();
+    assert!(at("child-estimate") < at("analysis"));
+    // A second finish adds nothing.
+    assert_eq!(run(&plan_of(&lab, "kids")).unwrap(), RunStatus::Done);
+    assert_eq!(child_estimates(&lab, "kids").len(), 2);
+    // A crash between the first estimate and the analysis record heals to the same two.
+    keep_records(&lab.home.study_dir("kids"), at("child-estimate") + 1);
+    assert_eq!(run(&plan_of(&lab, "kids")).unwrap(), RunStatus::Done);
+    assert_eq!(child_estimates(&lab, "kids").len(), 2);
+    assert_eq!(kind_of(&lab, "kids", "analysis").len(), 1);
+}
+
+#[test]
+fn a_child_of_selected_is_estimated_under_the_picks_id() {
+    let lab = lab();
+    let spec = spawn_on("{ arm-b = 1.0 }", WINDOW_ON_SELECTED, WINDOWS);
+    register_study(&lab, "sel-kids", spec, &[], STAGED);
+    assert_eq!(run(&plan_of(&lab, "sel-kids")).unwrap(), RunStatus::Done);
+    assert_eq!(
+        child_estimates(&lab, "sel-kids"),
+        vec![
+            child_estimate("arm-b~window_tokens=64", "arm-b", 64),
+            child_estimate("arm-b~window_tokens=512", "arm-b", 512),
+        ]
+    );
+}
+
+#[test]
+fn a_trigger_that_does_not_fire_leaves_no_child_estimate() {
+    let lab = lab();
+    register_study(&lab, "no-kids", spawning, &[], STAGED);
+    assert_eq!(run(&plan_of(&lab, "no-kids")).unwrap(), RunStatus::Done);
+    assert!(child_estimates(&lab, "no-kids").is_empty());
+}
+
+#[test]
+fn child_estimates_do_not_change_the_finished_rule() {
+    let lab = lab();
+    register_study(&lab, "rule", firing, &[], STAGED);
+    assert_eq!(run(&plan_of(&lab, "rule")).unwrap(), RunStatus::Done);
+    assert!(finished(&lab, "rule"));
+    let all = common::records_of(&lab, "rule");
+    let promised = all.iter().find_map(Analysis::of).unwrap();
+    let estimates = all.iter().filter(|r| r.kind == "estimate").count() as u64;
+    assert_eq!(promised.estimates, estimates);
+    // The log without its child estimates is as finished as the log with them.
+    let kept: Vec<records::Record> = (all.into_iter())
+        .filter(|r| r.kind != "child-estimate")
+        .collect();
+    let state = StudyState::of(Some(kept), |_, _| Ok(true)).unwrap();
+    assert!(matches!(state, StudyState::Finished(_)));
+}
+
+fn status_text(lab: &Lab, id: &str) -> String {
+    common::text(&common::bin(lab).args(["status", id]).assert().success())
+}
+
+#[test]
+fn status_lists_each_trigger_fired_value_admitted_skipped() {
+    let lab = lab();
+    let bits = r#"{ name = "bits", type = "int", range = [2, 16], acts_on = "selected" }"#;
+    let spec = spawn_on(
+        "{ arm-b = 1.0 }",
+        bits,
+        r#"{ operator = "bits", values = [8, 4] }"#,
+    );
+    register_study(&lab, "list", spec, &[], STAGED);
+    assert_eq!(run(&plan_of(&lab, "list")).unwrap(), RunStatus::Done);
+    let e = fired_e_value();
+    let s = common::status(&lab, "list");
+    assert_eq!(
+        s["triggers"],
+        serde_json::json!([{
+            "id": "T1", "state": "fired", "e_value": e, "threshold": 2.0, "reason": null,
+            "admitted": ["arm-b~bits=4"],
+            "skipped": [{ "child": "arm-b~bits=8", "reason": "same-as-parent" }],
+        }])
+    );
+    let t = status_text(&lab, "list");
+    let line = format!(
+        "T1: fired, e-value {e:.3}, threshold 2.000, admitted arm-b~bits=4, skipped arm-b~bits=8 (same-as-parent)\n"
+    );
+    assert!(t.contains(&line), "{t}");
+    assert!(!t.contains("triggers: none"), "{t}");
+}
+
+#[test]
+fn status_says_a_trigger_did_not_fire_and_one_is_not_yet_decided() {
+    let lab = lab();
+    register_study(&lab, "wait", spawning, &[], STAGED);
+    // Before any run no trigger record exists.
+    let s = common::status(&lab, "wait");
+    assert_eq!(s["triggers"][0]["state"], "pending");
+    assert_eq!(s["triggers"][0]["admitted"], serde_json::json!([]));
+    assert!(status_text(&lab, "wait").contains("T1: pending\n"));
+    assert_eq!(run(&plan_of(&lab, "wait")).unwrap(), RunStatus::Done);
+    let s = common::status(&lab, "wait");
+    assert_eq!(s["triggers"][0]["state"], "not fired");
+    assert_eq!(s["triggers"][0]["e_value"], 1.0);
+    let t = status_text(&lab, "wait");
+    let line = "T1: not fired, e-value 1.000, threshold 2.000, admitted none, skipped arm-a~window_tokens=64 (not-fired), arm-a~window_tokens=512 (not-fired)\n";
+    assert!(t.contains(line), "{t}");
+}
+
+#[test]
+fn status_shows_a_legacy_trigger_as_inert() {
+    let lab = lab();
+    let dir = common::plain(&lab, "legacy");
+    let file = dir.join("spec.toml");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let old = r#"triggers = [{ id = "T1", metric = "ppl-ratio", threshold_e = 2.0 }]"#;
+    std::fs::write(&file, text.replacen("triggers = []", old, 1)).unwrap();
+    let s = common::status(&lab, "legacy");
+    assert_eq!(
+        s["triggers"],
+        serde_json::json!([{
+            "id": "T1", "state": "inert (old shape)", "e_value": null, "threshold": 2.0,
+            "reason": null, "admitted": [], "skipped": [],
+        }])
+    );
+    assert!(status_text(&lab, "legacy").contains("T1: inert (old shape)\n"));
+}
+
+#[test]
+fn status_shows_children_by_the_blind_label_of_their_condition() {
+    let lab = lab();
+    let spec = |t: String| firing(t).replace("blind = false", "blind = true");
+    register_study(&lab, "blind-kids", spec, &[], STAGED);
+    assert_eq!(run(&plan_of(&lab, "blind-kids")).unwrap(), RunStatus::Done);
+    let s = common::status(&lab, "blind-kids");
+    let shown = s["triggers"][0]["admitted"].to_string();
+    assert!(!shown.contains("arm-a"), "{shown}");
+    let label = (s["conditions"].as_array().unwrap().iter())
+        .map(|c| c["label"].as_str().unwrap())
+        .find(|l| shown.contains(&format!("{l}~window_tokens=64")));
+    assert!(label.is_some(), "{shown}");
+}
+
+/// `firing` with a second confirmation cluster of one unit, `data/c2.txt`.
+fn two_clusters(t: String) -> String {
+    let input = "[[inputs]]\npath = \"data/c2.txt\"\nsha256 = \"\"\nrole = \"confirmation\"\nstratum = \"fiction\"\nunits = 1\n[inputs.licence]\nspdx = \"\"\ntype = \"unspecified\"\nsource = \"\"\ncreators = []\n\n";
+    firing(t).replacen("[pins]", &format!("{input}[pins]"), 1)
+}
+
+/// STAGED, but a child writes 0 on `data/c2.txt#0` and 4 on every other unit; the reference
+/// writes 8, so a child pairs to -100 % there and -50 % elsewhere.
+const BY_UNIT: &str = "#!/bin/sh
+printf '%s' \"$IGNORARIUM_PARAMS\" > \"$IGNORARIUM_OUT/params\"
+case \"$2\" in exact) v=8;; arm-a) v=10;; arm-b) v=6;; *) case \"$4\" in data/c2.txt#0) v=0;; *) v=4;; esac;; esac
+printf '{\"ppl\": %s}' \"$v\" > \"$IGNORARIUM_OUT/values.json\"
+";
+
+#[test]
+fn a_child_estimate_is_the_mean_over_clusters_of_cluster_means() {
+    let lab = lab();
+    register_study(&lab, "clusters", two_clusters, &[], BY_UNIT);
+    assert_eq!(run(&plan_of(&lab, "clusters")).unwrap(), RunStatus::Done);
+    // Cluster means -50 (3 units) and -100 (1 unit): -75, where the mean of the 4 units is
+    // -62.5.
+    let want = (2, 4, -75.0, 1);
+    assert_eq!(
+        child_estimates(&lab, "clusters"),
+        vec![
+            sized_estimate("arm-a~window_tokens=64", "arm-a", 64, want),
+            sized_estimate("arm-a~window_tokens=512", "arm-a", 512, want),
+        ]
+    );
+}
+
+/// STAGED, but a child's second repeat of `data/confirm.txt#0` fails.
+const FAIL_REPEAT: &str = "#!/bin/sh
+case \"$2\" in exact) v=8;; arm-a) v=10;; arm-b) v=6;; *) v=0;; esac
+case \"$2 $4 $6\" in \"arm-a~\"*\" data/confirm.txt#0 1\") exit 1;; esac
+printf '{\"ppl\": %s}' \"$v\" > \"$IGNORARIUM_OUT/values.json\"
+";
+
+#[test]
+fn a_unit_with_one_of_two_paired_repeats_counts_in_a_child_estimate() {
+    let lab = lab();
+    let spec = |t: String| firing(t).replacen("repeats = 1", "repeats = 2", 1);
+    register_study(&lab, "repeats", spec, &[], FAIL_REPEAT);
+    assert_eq!(run(&plan_of(&lab, "repeats")).unwrap(), RunStatus::Done);
+    let want = (1, 3, -100.0, 2);
+    assert_eq!(
+        child_estimates(&lab, "repeats"),
+        vec![
+            sized_estimate("arm-a~window_tokens=64", "arm-a", 64, want),
+            sized_estimate("arm-a~window_tokens=512", "arm-a", 512, want),
+        ]
+    );
+}
+
+#[test]
+fn a_blind_status_shows_skipped_and_stopped_children_by_label() {
+    let lab = lab();
+    let spec = |t: String| spawning(t).replace("blind = false", "blind = true");
+    register_study(&lab, "blind-stop", spec, &[], STAGED);
+    let child = |v: u32| format!("arm-a~window_tokens={v}");
+    let trigger = serde_json::json!({
+        "id": "T1", "e_value": 3.0, "threshold": 2.0, "fired": true, "reason": null,
+        "admitted": [child(64)],
+        "skipped": [{ "child": child(512), "reason": "budget" }],
+    });
+    let stop = serde_json::json!({ "children": [child(64)], "reason": "budget" });
+    common::plant(
+        &lab.home,
+        "blind-stop",
+        &[("trigger", trigger), ("spawn-stop", stop)],
+    );
+    let s = common::status(&lab, "blind-stop");
+    let shown = s["triggers"][0].to_string() + &s["spawn_stopped"].to_string();
+    assert!(!shown.contains("arm-a"), "{shown}");
+    let label = (s["conditions"].as_array().unwrap().iter())
+        .map(|c| c["label"].as_str().unwrap())
+        .find(|l| s["spawn_stopped"][0] == format!("{l}~window_tokens=64").as_str())
+        .unwrap_or_else(|| panic!("{shown}"));
+    assert_eq!(
+        s["triggers"][0]["skipped"][0]["child"],
+        format!("{label}~window_tokens=512").as_str()
+    );
+    assert!(!status_text(&lab, "blind-stop").contains("arm-a"));
+}
+
+// The firing decision uses the e-process's own stop test (value at least the stop), so a value
+// frozen at the threshold fires. 12.25 is a threshold where 1 / (1 / t) is not t.
+#[test]
+fn a_trigger_fires_at_its_stop_and_never_on_nan() {
+    use ignorarium::spawn::fires;
+    assert!(fires(12.25, 12.25));
+    assert!(fires(20.0, 12.25));
+    assert!(!fires(12.0, 12.25));
+    assert!(!fires(f64::NAN, 12.25));
+    assert!(!fires(f64::INFINITY, f64::NAN));
 }

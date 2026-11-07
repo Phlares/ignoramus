@@ -3,9 +3,13 @@
 use super::{CliError, Ctx, Done, Run, out, registered, stopped_why};
 use crate::canon::sha256_hex;
 use crate::control::{ControlFile, Signal, State, run_is_live};
+use crate::derived::{self, SpawnStop};
+use crate::diag::printable;
 use crate::records::Record;
+use crate::runner::RunError;
 use crate::runner::progress;
-use crate::{resize, seed};
+use crate::spec::model::{Spec, Trigger};
+use crate::{resize, seed, spawn};
 use serde_json::{Value, json};
 
 /// The condition ids in a fixed order that depends on the spec hash and on nothing else:
@@ -60,6 +64,77 @@ fn standing(
     })
 }
 
+/// Each condition of `spec` with the label status shows for it: its id, or when the study is
+/// blind, an opaque label in an order that depends on the spec hash alone.
+pub fn shown_labels(spec: &Spec, spec_hash: &[u8; 32]) -> Vec<(String, String)> {
+    let ids: Vec<String> = (spec.design.conditions.iter())
+        .map(|c| c.id.clone())
+        .collect();
+    if spec.access.blind {
+        blind_order(spec_hash, &ids)
+            .into_iter()
+            .enumerate()
+            .map(|(i, real)| (real, opaque_label(i)))
+            .collect()
+    } else {
+        ids.iter().map(|i| (i.clone(), i.clone())).collect()
+    }
+}
+
+/// `id` as `shown` labels it: a condition id by its label, a child id (its parent's id, `~`,
+/// then its operator and value) with the parent's label in front. The `~` prefix finds the
+/// parent because a condition id never holds `~` (its format rule).
+pub fn relabelled(shown: &[(String, String)], id: &str) -> String {
+    let split = |(real, label): &(String, String)| {
+        if id == real {
+            return Some(label.clone());
+        }
+        let rest = id.strip_prefix(&format!("{real}~"))?;
+        Some(format!("{label}~{rest}"))
+    };
+    shown.iter().find_map(split).unwrap_or_else(|| id.into())
+}
+
+/// Each trigger of `spec` in spec order: its decision when a `trigger` record holds one, else
+/// `pending`; a trigger of the old shape is `inert (old shape)`. Children show by the label of
+/// their condition.
+fn triggers(
+    spec: &Spec,
+    all: &[Record],
+    shown: &[(String, String)],
+) -> Result<Vec<Value>, RunError> {
+    let recorded = spawn::recorded(all)?;
+    let label = |ids: &[String]| ids.iter().map(|i| relabelled(shown, i)).collect::<Vec<_>>();
+    let skipped = |t: &derived::Trigger| {
+        let each = |k: &derived::Skipped| {
+            let child = relabelled(shown, &k.child);
+            json!({ "child": child, "reason": k.reason })
+        };
+        t.skipped.iter().map(each).collect::<Vec<_>>()
+    };
+    let entry = |id: &str, state: &str, threshold: f64, t: Option<&derived::Trigger>| {
+        json!({
+            "id": id, "state": state, "e_value": t.map(|t| t.e_value), "threshold": threshold,
+            "reason": t.and_then(|t| t.reason.clone()),
+            "admitted": t.map(|t| label(&t.admitted)).unwrap_or_default(),
+            "skipped": t.map(skipped).unwrap_or_default(),
+        })
+    };
+    let each = |t: &Trigger| match t {
+        Trigger::Legacy(l) => entry(&l.id, "inert (old shape)", l.threshold_e, None),
+        Trigger::Declared(d) => {
+            let done = recorded.iter().find(|r| r.id == d.id);
+            let state = match done {
+                None => "pending",
+                Some(r) if r.fired => "fired",
+                Some(_) => "not fired",
+            };
+            entry(&d.id, state, d.threshold_e, done)
+        }
+    };
+    Ok(spec.mutations.triggers.iter().map(each).collect())
+}
+
 /// Every field of the report, as one JSON object.
 pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
     let (home, _, all) = registered(ctx, id)?;
@@ -79,22 +154,8 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
     let cost = json!({ "cpu_hours": cpu_hours, "wall_hours": hours, "money_usd": money });
     let fraction = |spent: f64, cap: f64| (cap > 0.0).then(|| spent / cap);
 
-    let ids: Vec<String> = spec
-        .design
-        .conditions
-        .iter()
-        .map(|c| c.id.clone())
-        .collect();
     let blind = spec.access.blind;
-    let shown: Vec<(String, String)> = if blind {
-        blind_order(&spec_hash, &ids)
-            .into_iter()
-            .enumerate()
-            .map(|(i, real)| (real, opaque_label(i)))
-            .collect()
-    } else {
-        ids.iter().map(|i| (i.clone(), i.clone())).collect()
-    };
+    let shown = shown_labels(spec, &spec_hash);
     let conditions: Vec<Value> = shown
         .iter()
         .map(|(real, label)| {
@@ -122,6 +183,11 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
             .collect();
         json!({ "decision": r.decision, "strata": strata })
     });
+    let triggers = triggers(spec, &all, &shown).map_err(|e| bad(&e))?;
+    let stopped_children: Vec<String> = (all.iter().filter_map(SpawnStop::of))
+        .flat_map(|s| s.children)
+        .map(|c| relabelled(&shown, &c))
+        .collect();
     Ok(json!({
         "study": id,
         "state": state,
@@ -147,7 +213,8 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
         "voided": p.voided,
         "retried": p.retried,
         "unknown_cpu": p.unknown_cpu,
-        "triggers": [],
+        "triggers": triggers,
+        "spawn_stopped": stopped_children,
         "blind": blind,
         "conditions": conditions,
         "resize": resize,
@@ -234,6 +301,13 @@ fn render(r: &Value) -> String {
     if triggers.is_empty() {
         s.push_str("triggers: none\n");
     }
+    for t in triggers {
+        s.push_str(&trigger_line(t));
+    }
+    let stopped = joined(names(&r["spawn_stopped"]));
+    if stopped != "none" {
+        s.push_str(&format!("children stopped by the budget: {stopped}\n"));
+    }
     for c in r["conditions"].as_array().map_or(&[][..], Vec::as_slice) {
         s.push_str(&format!(
             "{}: {}/{}\n",
@@ -243,6 +317,48 @@ fn render(r: &Value) -> String {
         ));
     }
     s
+}
+
+/// `list` joined, or `none` when it is empty.
+fn joined(list: impl Iterator<Item = String>) -> String {
+    let list: Vec<String> = list.collect();
+    if list.is_empty() {
+        "none".into()
+    } else {
+        list.join(", ")
+    }
+}
+
+/// The strings of the JSON list `v`, made printable.
+fn names(v: &Value) -> impl Iterator<Item = String> + '_ {
+    (v.as_array().into_iter().flatten()).filter_map(|x| x.as_str().map(printable))
+}
+
+/// `T1: fired, e-value 3.000, threshold 2.000, admitted a, skipped b (reason)`. A trigger
+/// with no decision shows its state alone.
+fn trigger_line(t: &Value) -> String {
+    let id = printable(t["id"].as_str().unwrap_or(""));
+    let state = t["state"].as_str().unwrap_or("");
+    let Some(e) = t["e_value"].as_f64() else {
+        return format!("{id}: {state}\n");
+    };
+    let why = t["reason"]
+        .as_str()
+        .map_or(String::new(), |w| format!(" ({w})"));
+    let skipped = (t["skipped"].as_array().into_iter().flatten()).map(|k| {
+        let (child, reason) = (&k["child"], &k["reason"]);
+        format!(
+            "{} ({})",
+            printable(child.as_str().unwrap_or("")),
+            printable(reason.as_str().unwrap_or(""))
+        )
+    });
+    format!(
+        "{id}: {state}{why}, e-value {e:.3}, threshold {}, admitted {}, skipped {}\n",
+        num(&t["threshold"]),
+        joined(names(&t["admitted"])),
+        joined(skipped),
+    )
 }
 
 fn num(v: &Value) -> String {

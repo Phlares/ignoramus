@@ -13,7 +13,6 @@ use crate::{spec, sys};
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::{self, File, TryLockError};
 use std::io::{self, Read, Write};
@@ -230,12 +229,7 @@ impl RunLock {
                         )),
                     ),
                 };
-                let rows_done = all
-                    .iter()
-                    .filter(|r| r.kind == "row")
-                    .filter_map(|r| r.row)
-                    .collect::<BTreeSet<_>>()
-                    .len();
+                let rows_done = records::row_indices(&all).len();
                 let body = json!({
                     "who": who(),
                     "when": now_rfc3339(),

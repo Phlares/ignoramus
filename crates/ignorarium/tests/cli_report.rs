@@ -1,18 +1,9 @@
 //! `report`: the verdicts of a finished study, through the real binary.
 mod common;
-use assert_cmd::Command;
-use common::{Lab, edited, finished_with, instrument, lab, plain, plant, records_of, source_spec};
+use common::{
+    Lab, bin, edited, finished_with, instrument, lab, plain, plant, records_of, source_spec, text,
+};
 use serde_json::{Value, json};
-
-fn bin(lab: &Lab) -> Command {
-    let mut c = Command::cargo_bin("ignorarium").unwrap();
-    c.env("IGNORARIUM_HOME", &lab.home.root);
-    c
-}
-
-fn text(a: &assert_cmd::assert::Assert) -> String {
-    String::from_utf8_lossy(&a.get_output().stdout).into_owned()
-}
 
 fn verdict(h: &str, v: &str, basis: &str, e: Value, level: Value, reason: Value) -> Value {
     json!({
@@ -384,4 +375,131 @@ fn a_finished_study_with_a_later_stop_record_still_reports() {
     assert_eq!(r["hypotheses"].as_array().unwrap().len(), 3);
     assert_eq!(r["hypotheses"][0]["verdict"], "pass");
     assert_eq!(records_of(&lab, "s1").pop().unwrap().kind, "opened");
+}
+
+fn child_estimate(child: &str, value: u64, mean: f64) -> Value {
+    json!({
+        "child": child, "parent": "arm-a", "operator": "window_tokens", "value": value,
+        "outcome": "ppl-ratio", "clusters": 2, "units": 4, "mean": mean, "repeats": 1,
+    })
+}
+
+/// A finished study whose child estimates come before its analysis record, as `finish` writes
+/// them.
+fn with_children(children: &[Value]) -> Vec<(&'static str, Value)> {
+    let mut bodies = finished_study(&three(), &[]);
+    let at = bodies.iter().position(|(k, _)| *k == "analysis").unwrap();
+    for (i, c) in children.iter().enumerate() {
+        bodies.insert(at + i, ("child-estimate", c.clone()));
+    }
+    bodies
+}
+
+#[test]
+fn report_lists_children_with_their_estimates() {
+    let lab = lab();
+    let kids = [
+        child_estimate("arm-a~window_tokens=64", 64, -12.5),
+        child_estimate("arm-a~window_tokens=512", 512, 3.0),
+    ];
+    let bodies = with_children(&kids);
+    plant(&lab.home, "s1", &bodies);
+    let r = report_json(&lab, "s1");
+    let listed: Vec<Value> = kids
+        .iter()
+        .map(|k| {
+            let mut k = k.clone();
+            k["stopped"] = json!(false);
+            k
+        })
+        .collect();
+    assert_eq!(r["children"], json!(listed));
+    assert_eq!(r["records"], bodies.len());
+    // The verdicts are as before.
+    assert_eq!(r["hypotheses"].as_array().unwrap().len(), 3);
+    let a = bin(&lab).args(["report", "s1"]).assert().success();
+    let t = text(&a);
+    for line in [
+        "child arm-a~window_tokens=64: ppl-ratio mean -12.5 over 2 clusters, 4 units, 1 repeats\n",
+        "child arm-a~window_tokens=512: ppl-ratio mean 3 over 2 clusters, 4 units, 1 repeats\n",
+    ] {
+        assert!(t.contains(line), "missing {line:?} in {t}");
+    }
+}
+
+#[test]
+fn a_child_named_in_a_spawn_stop_record_is_marked_stopped_and_partial() {
+    let lab = lab();
+    let kids = [
+        child_estimate("arm-a~window_tokens=64", 64, -12.5),
+        child_estimate("arm-a~window_tokens=512", 512, 3.0),
+    ];
+    let mut bodies = with_children(&kids);
+    let at = bodies.iter().position(|(k, _)| *k == "analysis").unwrap();
+    let stop = json!({ "children": ["arm-a~window_tokens=512"], "reason": "budget" });
+    bodies.insert(at, ("spawn-stop", stop));
+    plant(&lab.home, "s1", &bodies);
+    let r = report_json(&lab, "s1");
+    assert_eq!(r["children"][0]["stopped"], false);
+    assert_eq!(r["children"][1]["stopped"], true);
+    let a = bin(&lab).args(["report", "s1"]).assert().success();
+    let t = text(&a);
+    assert!(
+        t.contains("child arm-a~window_tokens=512: ppl-ratio mean 3 over 2 clusters, 4 units, 1 repeats, stopped (partial: only the rows that ran)
+"),
+        "{t}"
+    );
+    assert!(
+        t.contains(
+            "1 repeats
+"
+        ) && t.contains(
+            "window_tokens=64: ppl-ratio mean -12.5 over 2 clusters, 4 units, 1 repeats
+"
+        ),
+        "{t}"
+    );
+}
+
+#[test]
+fn a_child_id_with_a_control_character_prints_escaped() {
+    let lab = lab();
+    let kids = [child_estimate("arm-a~x\u{1b}[2J", 64, 1.0)];
+    plant(&lab.home, "s1", &with_children(&kids));
+    let a = bin(&lab).args(["report", "s1"]).assert().success();
+    let t = text(&a);
+    assert!(!t.contains('\u{1b}'), "{t:?}");
+    assert!(t.contains(r"child arm-a~x\u{1b}[2J: "), "{t:?}");
+}
+
+#[test]
+fn a_report_without_children_lists_none() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    assert_eq!(report_json(&lab, "s1")["children"], json!([]));
+    let a = bin(&lab).args(["report", "s1"]).assert().success();
+    assert!(!text(&a).contains("child "), "{}", text(&a));
+}
+
+#[test]
+fn a_blind_report_shows_children_by_the_blind_label_of_their_condition() {
+    let lab = lab();
+    let dir = lab.home.study_dir("s1");
+    std::fs::create_dir_all(&dir).unwrap();
+    let blind = source_spec(&["fiction".to_string()]).replace("blind = false", "blind = true");
+    std::fs::write(dir.join("spec.toml"), blind).unwrap();
+    let kids = [child_estimate("arm-a~window_tokens=64", 64, -12.5)];
+    plant(&lab.home, "s1", &with_children(&kids));
+    let r = report_json(&lab, "s1");
+    let child = r["children"][0]["child"].as_str().unwrap();
+    let parent = r["children"][0]["parent"].as_str().unwrap();
+    assert!(parent.starts_with("condition "), "{parent}");
+    assert_eq!(child, format!("{parent}~window_tokens=64"));
+    let a = bin(&lab).args(["report", "s1"]).assert().success();
+    assert!(!text(&a).contains("arm-a"), "{}", text(&a));
+    assert!(
+        text(&a).contains(&format!("child {child}: ")),
+        "{}",
+        text(&a)
+    );
 }

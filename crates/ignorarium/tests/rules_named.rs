@@ -183,10 +183,6 @@ fn ok() -> Value {
         ("/study/mode", json!("confirmatory")),
         ("/design/units_per_cluster", json!(5)),
         ("/inputs", inputs(35, 5)),
-        (
-            "/mutations/triggers",
-            json!([{ "id": "T1", "metric": "ppl-ratio", "threshold_e": 1.0 }]),
-        ),
         ("/pins/deviations", json!([deviation("pilot")])),
     ];
     for (p, v) in edits {
@@ -267,6 +263,63 @@ fn power_edits(upc: u32, clusters: usize) -> Vec<Edit> {
 
 /// No selection stage: the confirmation stage runs `arm-a`, the hypothesis tests it, and
 /// `extra` follows.
+/// A declared trigger on the base plan's outcome and a candidate of its selection stage.
+fn trigger() -> Value {
+    json!({
+        "id": "T1", "outcome": "ppl-ratio", "contrast": { "arm-a": 1.0 },
+        "claim": { "below": 0.0 }, "statistic": { "quantile": 0.5 }, "threshold_e": 2.0,
+        "spawns": [{ "operator": "window_tokens", "values": [64, 512] }],
+    })
+}
+
+/// A trigger and the operator it spawns. A confirmatory spec may not have one, so the plan turns
+/// exploratory; then `extra` follows.
+fn triggered(extra: Vec<Edit>) -> Vec<Edit> {
+    and(
+        vec![
+            ("/study/mode", j(json!("exploratory"))),
+            UNDECLARED,
+            (
+                "/mutations/operators",
+                j(operators("int", json!([64, 512]))),
+            ),
+            ("/mutations/triggers", j(json!([trigger()]))),
+        ],
+        extra,
+    )
+}
+
+/// The one operator `trigger()` spawns, with a type and range.
+fn operators(kind: &str, range: Value) -> Value {
+    json!([{ "name": "window_tokens", "type": kind, "range": range, "acts_on": "arm-a" }])
+}
+
+/// The old trigger shape.
+fn legacy() -> Edit {
+    (
+        "/mutations/triggers",
+        j(json!([{ "id": "T0", "metric": "ppl-ratio", "threshold_e": 2.0 }])),
+    )
+}
+
+/// The first trigger's one spawn lists `values`.
+fn spawn_values(values: Value) -> Edit {
+    ("/mutations/triggers/0/spawns/0/values", j(values))
+}
+
+/// The first trigger's contrast.
+fn contrast(c: Value) -> Edit {
+    ("/mutations/triggers/0/contrast", j(c))
+}
+
+/// Another trigger, spawning `values` of the same operator.
+fn second_trigger(values: Value) -> Value {
+    let mut t = trigger();
+    t["id"] = json!("T2");
+    t["spawns"] = json!([{ "operator": "window_tokens", "values": values }]);
+    t
+}
+
 fn unstaged(extra: Vec<Edit>) -> Vec<Edit> {
     let mut e = vec![
         ("/design/selection", None),
@@ -619,7 +672,20 @@ fn faults() -> Vec<Fault> {
             vec![("/inputs/1/role", j(json!("confirmation")))],
             vec![("E-SEL-001", "design.selection")],
         ),
-        f(unstaged(vec![]), vec![("E-SEL-001", "inputs[1].role")]),
+        f(
+            unstaged(vec![("/mutations/triggers", j(json!([])))]),
+            vec![("E-SEL-001", "inputs[1].role")],
+        ),
+        // A trigger reads selection data with no stage; either trigger shape counts.
+        f(unstaged(triggered(vec![])), vec![]),
+        // The old shape is refused by E-MUT-003, and it does not excuse the missing stage.
+        f(
+            unstaged(triggered(vec![legacy()])),
+            vec![
+                ("E-SEL-001", "inputs[1].role"),
+                ("E-MUT-003", "mutations.triggers[0]"),
+            ],
+        ),
         // Two or more candidates, each a declared condition other than the reference.
         f(
             vec![("/design/selection/conditions", j(json!(["arm-a"])))],
@@ -1047,8 +1113,265 @@ fn faults() -> Vec<Fault> {
             vec![("E-MUT-002", "mutations.seeds")],
         ),
         f(
-            vec![("/mutations/triggers/0/metric", j(json!("nope")))],
-            vec![("E-MUT-003", "mutations.triggers[0].metric")],
+            triggered(vec![("/mutations/triggers/0/outcome", j(json!("nope")))]),
+            vec![("E-MUT-003", "mutations.triggers[0].outcome")],
+        ),
+        f(
+            triggered(vec![legacy()]),
+            vec![("E-MUT-003", "mutations.triggers[0]")],
+        ),
+        // E-MUT-004: a spawn names a declared operator.
+        f(
+            triggered(vec![(
+                "/mutations/triggers/0/spawns/0/operator",
+                j(json!("nope")),
+            )]),
+            vec![("E-MUT-004", "mutations.triggers[0].spawns[0].operator")],
+        ),
+        // E-MUT-005: a value is a scalar of the operator's type, inside its range.
+        f(triggered(vec![spawn_values(json!([64, 512]))]), vec![]),
+        f(
+            triggered(vec![spawn_values(json!([64, 100.5]))]),
+            vec![("E-MUT-005", "mutations.triggers[0].spawns[0].values[1]")],
+        ),
+        f(
+            triggered(vec![spawn_values(json!([63, 513]))]),
+            vec![
+                ("E-MUT-005", "mutations.triggers[0].spawns[0].values[0]"),
+                ("E-MUT-005", "mutations.triggers[0].spawns[0].values[1]"),
+            ],
+        ),
+        f(
+            triggered(vec![spawn_values(json!(["x", [64], { "a": 1 }, true]))]),
+            vec![
+                ("E-MUT-005", "mutations.triggers[0].spawns[0].values[0]"),
+                ("E-MUT-005", "mutations.triggers[0].spawns[0].values[1]"),
+                ("E-MUT-005", "mutations.triggers[0].spawns[0].values[2]"),
+                ("E-MUT-005", "mutations.triggers[0].spawns[0].values[3]"),
+            ],
+        ),
+        f(
+            triggered(vec![
+                (
+                    "/mutations/operators",
+                    j(operators("enum", json!([64, 128, "wide"]))),
+                ),
+                spawn_values(json!([128, "wide", 100, "narrow", [128]])),
+            ]),
+            vec![
+                ("E-MUT-005", "mutations.triggers[0].spawns[0].values[2]"),
+                ("E-MUT-005", "mutations.triggers[0].spawns[0].values[3]"),
+                ("E-MUT-005", "mutations.triggers[0].spawns[0].values[4]"),
+            ],
+        ),
+        f(
+            triggered(vec![
+                (
+                    "/mutations/operators",
+                    j(operators("float", json!([0.5, 2.5]))),
+                ),
+                spawn_values(json!([0.5, 1, 2.5, 3.0, 0.25])),
+            ]),
+            vec![
+                ("E-MUT-005", "mutations.triggers[0].spawns[0].values[3]"),
+                ("E-MUT-005", "mutations.triggers[0].spawns[0].values[4]"),
+            ],
+        ),
+        // E-MUT-006: acts_on is a declared condition, or `selected` with a selection stage.
+        f(
+            triggered(vec![("/mutations/operators/0/acts_on", j(json!("arm-z")))]),
+            vec![("E-MUT-006", "mutations.operators[0].acts_on")],
+        ),
+        f(
+            triggered(vec![(
+                "/mutations/operators/0/acts_on",
+                j(json!("selected")),
+            )]),
+            vec![],
+        ),
+        f(
+            unstaged(triggered(vec![(
+                "/mutations/operators/0/acts_on",
+                j(json!("selected")),
+            )])),
+            vec![("E-MUT-006", "mutations.operators[0].acts_on")],
+        ),
+        // E-MUT-007: a trigger reads selection inputs.
+        f(
+            unstaged(triggered(vec![("/inputs/1/role", j(json!("calibration")))])),
+            vec![("E-MUT-007", "mutations.triggers")],
+        ),
+        // E-MUT-008: a confirmatory spec has no trigger.
+        f(
+            vec![
+                (
+                    "/mutations/operators",
+                    j(operators("int", json!([64, 512]))),
+                ),
+                ("/mutations/triggers", j(json!([trigger()]))),
+            ],
+            vec![("E-MUT-008", "mutations.triggers")],
+        ),
+        // W-MUT-001: a later trigger declares a child an earlier one declares.
+        f(
+            triggered(vec![(
+                "/mutations/triggers",
+                j(json!([trigger(), second_trigger(json!([64, 300]))])),
+            )]),
+            vec![("W-MUT-001", "mutations.triggers[1].spawns[0].values[0]")],
+        ),
+        f(
+            triggered(vec![(
+                "/mutations/triggers",
+                j(json!([trigger(), second_trigger(json!([100, 300]))])),
+            )]),
+            vec![],
+        ),
+        // A child's identity is its id: 64 and 64.0 are one value, inside one trigger too.
+        f(
+            triggered(vec![
+                (
+                    "/mutations/operators",
+                    j(operators("enum", json!([64, 300, 512]))),
+                ),
+                (
+                    "/mutations/triggers",
+                    j(json!([trigger(), second_trigger(json!([512.0, 300]))])),
+                ),
+            ]),
+            vec![("W-MUT-001", "mutations.triggers[1].spawns[0].values[0]")],
+        ),
+        f(
+            triggered(vec![spawn_values(json!([64, 512, 64]))]),
+            vec![("W-MUT-001", "mutations.triggers[0].spawns[0].values[2]")],
+        ),
+        // An enum value is in its range when it shows as a member does.
+        f(
+            triggered(vec![
+                (
+                    "/mutations/operators",
+                    j(operators("enum", json!([64, 128.5, "wide"]))),
+                ),
+                spawn_values(json!([64.0, 128.5, "wide"])),
+            ]),
+            vec![],
+        ),
+        // A text that reads as a number is a text: "64" is no member of [64], and 64 and "64"
+        // are two children.
+        f(
+            triggered(vec![
+                (
+                    "/mutations/operators",
+                    j(operators("enum", json!([64, 128]))),
+                ),
+                spawn_values(json!(["64", 128, "128.0"])),
+            ]),
+            vec![
+                ("E-MUT-005", "mutations.triggers[0].spawns[0].values[0]"),
+                ("E-MUT-005", "mutations.triggers[0].spawns[0].values[2]"),
+            ],
+        ),
+        f(
+            triggered(vec![
+                (
+                    "/mutations/operators",
+                    j(operators("enum", json!([64, "64", 512]))),
+                ),
+                (
+                    "/mutations/triggers",
+                    j(json!([trigger(), second_trigger(json!(["64", 64]))])),
+                ),
+            ]),
+            vec![("W-MUT-001", "mutations.triggers[1].spawns[0].values[1]")],
+        ),
+        // A trigger's contrast, claim, statistic and strata follow the hypothesis rules.
+        f(
+            triggered(vec![contrast(json!({ "nope": 1.0 }))]),
+            vec![("E-HYP-001", "mutations.triggers[0].contrast.nope")],
+        ),
+        f(
+            triggered(vec![contrast(json!({}))]),
+            vec![("E-HYP-001", "mutations.triggers[0].contrast")],
+        ),
+        f(
+            triggered(vec![contrast(json!({ "arm-a": 0.0 }))]),
+            vec![("E-HYP-001", "mutations.triggers[0].contrast.arm-a")],
+        ),
+        f(
+            triggered(vec![("/mutations/triggers/0/statistic", None)]),
+            vec![("E-HYP-003", "mutations.triggers[0].statistic")],
+        ),
+        f(
+            triggered(vec![(
+                "/mutations/triggers/0/claim",
+                j(json!({ "below": 0.0, "above": -1.0 })),
+            )]),
+            vec![("E-HYP-003", "mutations.triggers[0].claim")],
+        ),
+        f(
+            triggered(vec![
+                (
+                    "/mutations/triggers/0/statistic",
+                    j(json!({ "mean": [-2.0, 2.0] })),
+                ),
+                ("/mutations/triggers/0/claim", j(json!({ "below": 2.0 }))),
+            ]),
+            vec![("E-HYP-003", "mutations.triggers[0].claim")],
+        ),
+        // A trigger's strata come from selection inputs; confirmation inputs do not count.
+        f(
+            triggered(vec![(
+                "/mutations/triggers/0/strata",
+                j(json!(["fiction"])),
+            )]),
+            vec![],
+        ),
+        f(
+            triggered(vec![("/mutations/triggers/0/strata", j(json!(["code"])))]),
+            vec![("E-HYP-002", "mutations.triggers[0].strata[0]")],
+        ),
+        f(
+            triggered(vec![
+                ("/mutations/triggers/0/strata", j(json!(["fiction"]))),
+                ("/inputs/1/stratum", j(json!("code"))),
+            ]),
+            vec![("E-HYP-002", "mutations.triggers[0].strata[0]")],
+        ),
+        // Ruling 2: a trigger contrast runs on selection units. With a stage, it names the
+        // candidates or `selected`, not the reference and not a condition the stage skips.
+        f(
+            triggered(vec![contrast(json!({ "selected": 1.0, "arm-b": -1.0 }))]),
+            vec![],
+        ),
+        f(
+            triggered(vec![contrast(json!({ "exact": 1.0 }))]),
+            vec![("E-HYP-001", "mutations.triggers[0].contrast.exact")],
+        ),
+        f(
+            triggered(vec![
+                (
+                    "/design/conditions",
+                    j(
+                        json!([{ "id": "exact" }, { "id": "arm-a" }, { "id": "arm-b", "params": { "bits": 4 } }, { "id": "arm-c" }]),
+                    ),
+                ),
+                contrast(json!({ "arm-c": 1.0 })),
+            ]),
+            vec![("E-HYP-001", "mutations.triggers[0].contrast.arm-c")],
+        ),
+        // With no stage, the selection rows run any declared condition but the reference.
+        // `selected` has no pick.
+        f(
+            unstaged(triggered(vec![contrast(json!({ "arm-b": 1.0 }))])),
+            vec![],
+        ),
+        f(
+            unstaged(triggered(vec![contrast(json!({ "selected": 1.0 }))])),
+            vec![("E-HYP-001", "mutations.triggers[0].contrast.selected")],
+        ),
+        f(
+            unstaged(triggered(vec![contrast(json!({ "exact": 1.0 }))])),
+            vec![("E-HYP-001", "mutations.triggers[0].contrast.exact")],
         ),
         // machine_max_level is 2.
         f(
@@ -2502,6 +2825,12 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
         "E-MUT-001",
         "E-MUT-002",
         "E-MUT-003",
+        "E-MUT-004",
+        "E-MUT-005",
+        "E-MUT-006",
+        "E-MUT-007",
+        "E-MUT-008",
+        "W-MUT-001",
         "E-ISO-001",
         "E-PTH-001",
         "E-HSH-001",
@@ -2592,6 +2921,26 @@ fn boundaries_hold_on_both_sides() {
     // The planted-spawn template: depth 2, declared trigger, exploratory.
     let p = spec_at("../../templates/planted-spawn.toml");
     assert!(named(&p, dir.path()).is_empty());
+}
+
+#[test]
+fn declared_triggers_need_a_depth_cap_of_at_least_one() {
+    let dir = study_dir();
+    let codes = |edits: Vec<Edit>| -> Vec<String> {
+        (named(&edited(&edits), dir.path()).into_iter())
+            .map(|d| format!("{} {}", d.code, d.path))
+            .collect()
+    };
+    let cap = |n: u8| ("/mutations/depth_cap", j(json!(n)));
+    assert_eq!(
+        codes(triggered(vec![cap(0)])),
+        ["E-MUT-001 mutations.depth_cap"]
+    );
+    assert!(codes(triggered(vec![cap(1)])).is_empty());
+    assert!(codes(vec![cap(0)]).is_empty());
+    // An inert legacy trigger spawns nothing.
+    let old = codes(triggered(vec![legacy(), cap(0)]));
+    assert!(!old.iter().any(|c| c.starts_with("E-MUT-001")), "{old:?}");
 }
 
 #[test]
@@ -4142,6 +4491,110 @@ fn a_folder_input_holds_no_data_to_share() {
         [
             ("E-PTH-001", "inputs[1].path"),
             ("E-PTH-001", "inputs[2].path")
+        ]
+    );
+}
+
+#[test]
+fn exploratory_triggers_need_disjoint_selection_and_confirmation_data() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "data/s.txt", b"One  Text");
+    write(dir.path(), "data/c.txt", b"one text");
+    write(dir.path(), "data/d.txt", b"another text");
+    let with = |edits: Vec<Edit>, conf: &str| {
+        let mut s = pair("data/s.txt", conf);
+        for (p, v) in triggered(edits) {
+            set(&mut s, p, v);
+        }
+        named(&s, dir.path())
+    };
+    // An exploratory plan with a trigger: the trigger decides on the selection data and the
+    // children are tested on the confirmation data.
+    let d = with(vec![], "data/c.txt");
+    assert_eq!(codes_paths(&d), [("E-CNF-004", "inputs[2].sha256")]);
+    assert!(with(vec![], "data/d.txt").is_empty());
+    // Without a trigger, or with only an inert legacy one, an exploratory plan may share.
+    let none = with(vec![("/mutations/triggers", j(json!([])))], "data/c.txt");
+    assert!(none.is_empty(), "{none:?}");
+    let old = with(vec![legacy()], "data/c.txt");
+    assert_eq!(codes_paths(&old), [("E-MUT-003", "mutations.triggers[0]")]);
+    // The rule needs a confirmation input in any plan with a trigger.
+    let mut s = pair("data/s.txt", "data/c.txt");
+    for (p, v) in triggered(vec![(
+        "/inputs",
+        j(json!([input("data/s.txt", "selection", 5)])),
+    )]) {
+        set(&mut s, p, v);
+    }
+    let found = named(&s, dir.path());
+    assert!(
+        codes_paths(&found).contains(&("E-CNF-004", "inputs")),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn selection_inputs_without_a_stage_pass_when_triggers_exist() {
+    let dir = study_dir();
+    let at = |edits: Vec<Edit>| {
+        let d = named(&edited(&unstaged(edits)), dir.path());
+        (d.iter())
+            .map(|x| (x.code.clone(), x.path.clone()))
+            .collect::<Vec<_>>()
+    };
+    let pair = |c: &str, p: &str| vec![(c.to_string(), p.to_string())];
+    assert!(at(triggered(vec![])).is_empty());
+    assert_eq!(
+        at(triggered(vec![("/mutations/triggers", j(json!([])))])),
+        pair("E-SEL-001", "inputs[1].role")
+    );
+    // A legacy trigger is inert: it is refused by its own rule, and the stage rule still holds.
+    let mut got = at(triggered(vec![legacy()]));
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            ("E-MUT-003".to_string(), "mutations.triggers[0]".to_string()),
+            ("E-SEL-001".to_string(), "inputs[1].role".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn the_row_cap_counts_trigger_only_selection_rows_and_child_rows() {
+    let dir = study_dir();
+    // No stage: the selection rows run the reference and the two conditions the contrast
+    // names, the confirmation rows the reference and arm-a, and the 2 children run on the
+    // confirmation units. 7 rows per unit in all.
+    let at = |units: u64| {
+        edited(&triggered(unstaged(vec![
+            ("/design/units_per_cluster", j(json!(units))),
+            ("/inputs", j(inputs(1, units))),
+            contrast(json!({ "arm-a": 1.0, "arm-b": -1.0 })),
+        ])))
+    };
+    let count = |v: &Value| {
+        let s = ignorarium::spec::model::Spec::from_value(v).unwrap();
+        ignorarium::schedule::rows(&s, &[0; 32], false)
+            .unwrap()
+            .len()
+    };
+    let capped = |v: &Value| {
+        named(v, dir.path())
+            .into_iter()
+            .filter(|d| d.code == "E-UNT-002")
+            .map(|d| d.problem)
+            .collect::<Vec<_>>()
+    };
+    let under = at(14_285);
+    assert_eq!(count(&under), 99_995);
+    assert!(capped(&under).is_empty());
+    let over = at(14_286);
+    assert_eq!(count(&over), 100_002);
+    assert_eq!(
+        capped(&over),
+        [
+            "The schedule has more rows than the box allows. It would hold 100002 rows; the cap is 100000."
         ]
     );
 }
@@ -5946,4 +6399,14 @@ fn an_unknown_resize_rule_runs_no_simulation() {
     assert!(rules::power(&spec, &ctx(dir.path()))[0].resized);
     spec["design"]["resize"] = json!({ "rule": "blinded-twice" });
     assert!(rules::power(&spec, &ctx(dir.path())).is_empty());
+}
+
+#[test]
+fn a_legacy_trigger_is_refused_with_the_new_shape_named() {
+    let dir = study_dir();
+    let d = named(&edited(&triggered(vec![legacy()])), dir.path());
+    assert_eq!(codes_paths(&d), [("E-MUT-003", "mutations.triggers[0]")]);
+    assert!(d[0].problem.ends_with(
+        "This trigger names a metric. Declare outcome, contrast, claim, statistic and spawns instead."
+    ));
 }
