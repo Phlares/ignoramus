@@ -1112,6 +1112,122 @@ fn an_unreadable_plan_log_fails_a_member_closed() {
     assert_eq!(code, 1);
 }
 
+// ---- the data that picked a condition ----
+
+/// `text` with a condition `arm-b` whose `bits` take the condition study `from` selected.
+fn taking_from(from: &str) -> impl Fn(String) -> String {
+    let taken = format!("[[design.conditions]]\nid = \"arm-b\"\nparams = {{ bits = {{ from = \"{from}\" }} }}");
+    move |t| {
+        t.replace(
+            "# [[design.conditions]]        # a second candidate for the selection stage below\n# id = \"arm-b\"",
+            &taken,
+        )
+    }
+}
+
+/// Where `taking_from` takes the condition.
+const TAKES: &str = "design.conditions[2].params.bits";
+
+/// The records of study `x`, finished, which picked `arm-a` on its selection input
+/// `data/pick.txt`, holding `picked`. The data goes into the store, as its run puts it there.
+fn chooser_records(lab: &Lab, picked: &str) -> Vec<(&'static str, Value)> {
+    let file = put(&lab.root, "x-pick.txt", picked);
+    let store = ignorarium::store::Store::open(&lab.home.root).unwrap();
+    let (digest, _) = store.import(&file).unwrap();
+    chooser_with(&digest)
+}
+
+/// `chooser_records`, whose inputs record holds `digest` for `data/pick.txt`.
+fn chooser_with(digest: &str) -> Vec<(&'static str, Value)> {
+    let mut all = common::finished_selecting("arm-a", vec![]);
+    let (_, inputs) = all.iter_mut().find(|(k, _)| *k == "inputs").unwrap();
+    let frozen = inputs["inputs"].as_array_mut().unwrap();
+    frozen.push(json!(["data/pick.txt", digest]));
+    all
+}
+
+/// Sign `records` into study `x`'s log, whose stored plan has the selection input
+/// `data/pick.txt`.
+fn plant_chooser(lab: &Lab, records: &[(&str, Value)]) {
+    let plan = lab.home.study_dir("x").join("spec.toml");
+    if !plan.exists() {
+        let text = common::source_spec(&["fiction".into()]);
+        put(
+            plan.parent().unwrap(),
+            "spec.toml",
+            &adding(text, &input("data/pick.txt", "selection")),
+        );
+    }
+    common::plant(&lab.home, "x", records);
+}
+
+#[test]
+fn a_member_cannot_confirm_on_the_data_that_picked_its_condition() {
+    // x registers after the lock; or before it, with its selection data absent until its run.
+    for before_lock in [false, true] {
+        let lab = lab();
+        let (root, b) = lone_member(&lab, taking_from("x"));
+        let picked = std::fs::read_to_string(root.join("data/confirm.txt")).unwrap();
+        let records = chooser_records(&lab, &picked);
+        let (now, later) = records.split_at(if before_lock { 1 } else { 0 });
+        plant_chooser(&lab, now);
+        let spec = root_spec(&root, &study("fam"), &["spec/b.toml"]);
+        let (_, v) = check_json(&lab, &spec);
+        assert!(has(&v, "W-FAM-001", B), "{v}");
+        register(&lab, &spec);
+        plant_chooser(&lab, later);
+        let (code, v) = check_json(&lab, &b);
+        let p = problem_at(&v, "E-CNF-007", TAKES);
+        assert!(
+            p.contains("Its input inputs[1] holds the data of selection input"),
+            "{p}"
+        );
+        assert!(p.ends_with("of study x."), "{p}");
+        assert_eq!(code, 1, "{v}");
+        let (code, out) = try_register(&lab, &b);
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("E-CNF-007"), "{out}");
+        assert!(!lab.home.study_dir("b").exists());
+    }
+}
+
+#[test]
+fn a_member_whose_condition_was_picked_on_other_data_registers() {
+    let lab = lab();
+    let (root, b) = lone_member(&lab, taking_from("x"));
+    register(&lab, &root_spec(&root, &study("fam"), &["spec/b.toml"]));
+    plant_chooser(&lab, &chooser_records(&lab, "other data\n"));
+    let (code, v) = check_json(&lab, &b);
+    assert_eq!((code, errors(&v)), (0, vec![]), "{v}");
+    register(&lab, &b);
+}
+
+#[test]
+fn an_outsider_cannot_confirm_on_the_data_that_picked_its_condition() {
+    let lab = lab();
+    family_root(&lab);
+    plant_chooser(&lab, &chooser_records(&lab, "Picked  Data\n"));
+    // A case-changed copy is the same data.
+    let (code, v) = check_json(&lab, &outsider(&lab, "picked data\n", taking_from("x")));
+    let p = problem_at(&v, "E-CNF-007", TAKES);
+    assert!(p.ends_with("of study x."), "{p}");
+    assert_eq!(code, 1, "{v}");
+    let (_, v) = check_json(&lab, &outsider(&lab, "fresh data\n", taking_from("x")));
+    assert!(lacks(&v, "E-CNF-007"), "{v}");
+}
+
+#[test]
+fn selection_data_the_box_cannot_read_fails_closed() {
+    let lab = lab();
+    family_root(&lab);
+    // The inputs record names a digest the store does not hold.
+    plant_chooser(&lab, &chooser_with(&"ab".repeat(32)));
+    let (code, v) = check_json(&lab, &outsider(&lab, "fresh data\n", taking_from("x")));
+    let p = problem_at(&v, "E-CNF-007", TAKES);
+    assert!(p.contains("store"), "{p}");
+    assert_eq!(code, 1, "{v}");
+}
+
 /// `text` with `follow_on` routes to `specs`.
 fn following(text: String, specs: &[&str]) -> String {
     let list: Vec<String> = specs

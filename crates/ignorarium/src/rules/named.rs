@@ -7,7 +7,8 @@ use super::{BoxRecords, Check, NoRecords, Rule, has_format, is_study_id};
 use crate::analysis::Source;
 use crate::backend::PINNED_LEVEL;
 use crate::derived::{
-    ANALYSIS, Alpha, Analysis, Carried, Estimate, Instrument, Selection, StudyState, contrast_key,
+    ANALYSIS, Alpha, Analysis, Carried, Estimate, Inputs, Instrument, Selection, StudyState,
+    contrast_key,
 };
 use crate::diag::{Diagnostic, printable};
 use crate::family::{self as fam, MemberSpec};
@@ -116,6 +117,7 @@ const NAMED: &[(&str, NamedFn)] = &[
     ("deviation-borrowed", deviation_borrowed),
     ("confirmation-disjoint", confirmation_disjoint),
     ("data-fresh", data_fresh),
+    ("from-selection", from_selection),
     ("family-confirmatory", family_confirmatory),
     ("family-members", family_members),
     ("family-pinned", family_pinned),
@@ -382,6 +384,83 @@ fn data_fresh(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
         });
     }
     out
+}
+
+/// E-CNF-007 at each param that takes its condition from another study: a confirmation or
+/// reserve input of this study holds the data of a selection input of that study, by exact or
+/// normalized hash. A study that has not finished is W-REF-001's, and `register` waits for it.
+fn from_selection(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let held: Vec<(String, (String, String))> = (nodes(spec, "inputs[*]").into_iter())
+        .filter(|(_, i)| matches!(role(i), Some("confirmation" | "reserve")))
+        .filter_map(|(p, i)| Some((p, input_hashes(ctx, i)?)))
+        .collect();
+    if held.is_empty() {
+        return vec![];
+    }
+    (references(spec, pat).into_iter())
+        .filter_map(|(path, from)| {
+            let detail = match selection_data(ctx, from) {
+                Ok(None) => return None,
+                Ok(Some(picked)) => {
+                    let (input, selection) = *fam::shared(&held, &picked).first()?;
+                    format!(
+                        "Its input {input} holds the data of selection input {selection} of study {from}."
+                    )
+                }
+                Err(why) => why,
+            };
+            Some(at(&path, detail))
+        })
+        .collect()
+}
+
+/// The data of each selection input of study `from` once it has finished, by its path in the
+/// plan the box stored: the store's hashes of the digest its `inputs` record froze at its first
+/// run. An input absent then holds no data. `None` while the study has not finished. Records,
+/// a plan or a store copy that cannot be read are an error.
+fn selection_data(
+    ctx: &CheckCtx,
+    from: &str,
+) -> Result<Option<Vec<(String, (String, String))>>, String> {
+    let unread = |e: String| format!("The box cannot read the records of study {from}: {e}.");
+    let all = ctx.records.study(from).map_err(unread)?;
+    let closed = |log: &str, slot| ctx.records.stream_closed(log, from, slot);
+    if !matches!(
+        StudyState::of(all.clone(), closed).map_err(unread)?,
+        StudyState::Finished(_)
+    ) {
+        return Ok(None);
+    }
+    let frozen = (all.iter().flatten().find_map(Inputs::of))
+        .ok_or_else(|| format!("Study {from} recorded no inputs."))?;
+    let plan = (ctx.records.spec(from).map_err(unread)?)
+        .ok_or_else(|| format!("The box holds no plan of study {from}."))?;
+    let plan = crate::spec::parse(&plan)
+        .map_err(|e| format!("The plan of study {from} cannot be read: {e}."))?;
+    let mut out = vec![];
+    for (at, input) in nodes(&plan.value, "inputs[*]") {
+        if role(input) != Some("selection") {
+            continue;
+        }
+        let path = input.get("path").and_then(Value::as_str);
+        let digest = (frozen.inputs.iter())
+            .find(|(p, _)| Some(p.as_str()) == path)
+            .ok_or_else(|| format!("The inputs record of study {from} lacks its {at}."))?;
+        let Some(digest) = &digest.1 else {
+            continue;
+        };
+        match inputs::stored(&ctx.store, digest) {
+            Some(Found::Stored { digest, meta }) => {
+                out.push((at, (digest, meta.normalized_sha256)));
+            }
+            _ => {
+                return Err(format!(
+                    "The store holds no readable copy of the {at} of study {from}."
+                ));
+            }
+        }
+    }
+    Ok(Some(out))
 }
 
 /// W-FAM-002 at each `follow_on[*].spec` of a confirmatory study: a confirmatory spec reachable
