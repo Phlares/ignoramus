@@ -8,8 +8,8 @@ use crate::derived::{
 };
 use crate::diag::printable;
 use crate::records::{self, Record, RecordDraft, RecordError};
-use crate::runner::stored_spec;
 use crate::rules::BoxRecords;
+use crate::runner::stored_spec;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
