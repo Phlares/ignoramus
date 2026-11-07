@@ -17,6 +17,7 @@ Members may share data because every member was fixed before any of them ran. A 
 ## Sources
 
 - <https://doi.org/10.1038/s41562-016-0021>
+- <https://journalofcognition.org/about/registered-reports>
 
 ## Applies to
 

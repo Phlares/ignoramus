@@ -1228,3 +1228,70 @@ fn a_route_to_another_familys_member_still_warns() {
         "{v}"
     );
 }
+
+fn review_page(lab: &Lab, spec: &Path) -> String {
+    let a = bin(lab).arg("review").arg(spec).assert();
+    String::from_utf8(a.get_output().stdout.clone()).unwrap()
+}
+
+#[test]
+fn review_shows_the_family() {
+    let lab = lab();
+    let root = family_root(&lab);
+    put(&root, "spec/b.toml", &pinned(&root, &study("b")));
+    put(&root, "spec/c.toml", &pinned(&root, &study("c")));
+    let spec = root_spec(&root, &study("fam"), &["spec/b.toml", "spec/c.toml"]);
+    let out = review_page(&lab, &spec);
+    let section = out.split("## Family\n").nth(1).expect(&out);
+    let section = section.split("\n## ").next().unwrap();
+    let share = "may share confirmation and reserve data";
+    let want = |id: &str| format!("- {id}: `spec/{id}.toml`, {share}\n");
+    assert!(section.contains(&want("b")), "{section}");
+    assert!(section.contains(&want("c")), "{section}");
+    assert_eq!(
+        section.matches("- b:").count() + section.matches("- c:").count(),
+        2
+    );
+    register(&lab, &spec);
+    let out = review_page(&lab, &root.join("spec/b.toml"));
+    let section = out.split("## Family\n").nth(1).expect(&out);
+    assert!(
+        section.contains("- member of family fam; slot reserved\n"),
+        "{section}"
+    );
+    // A study outside every family has no section.
+    let out = review_page(&lab, &outsider(&lab, "fresh data\n", |t| t));
+    assert!(!out.contains("## Family"), "{out}");
+}
+
+#[test]
+fn e_cnf_005_lists_the_ways_forward() {
+    let doc = std::fs::read_to_string("../../docs/rules/E-CNF-005.md").unwrap();
+    let fix = doc.split("## Fix\n").nth(1).unwrap();
+    let fix = fix.split("\n## ").next().unwrap();
+    for part in [
+        "add this study to its family",
+        "every member is then locked, and each takes a stream slot",
+        "run this study as exploratory on the same data (no claim)",
+        "give it fresh data",
+        "A member of the earlier study's family needs nothing.",
+    ] {
+        assert!(fix.contains(part), "{part}: {fix}");
+    }
+}
+
+#[test]
+fn the_guide_names_members_in_check_and_register() {
+    let a = bin(&lab()).args(["guide", "--json"]).assert().success();
+    let steps: Value = serde_json::from_slice(&a.get_output().stdout).unwrap();
+    for id in ["check", "register"] {
+        let s = steps
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == id)
+            .unwrap();
+        let text = format!("{} {}", s["does"], s["produces"]);
+        assert!(text.contains("member"), "{id}: {text}");
+    }
+}

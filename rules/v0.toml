@@ -525,9 +525,9 @@ target = [
 code = "E-CNF-005"
 severity = "error"
 problem = "Confirmation or reserve data was used by an earlier study."
-instruction = "Use data no earlier plan used for confirmation or reserve, or change the role of this input. Selection data may be reused."
-why = "Reused data has already shaped a decision. A test on it is not independent. A reserve input is confirmation data held back, so it must be fresh too."
-sources = ["https://doi.org/10.1038/s41562-016-0021"]
+instruction = "Choose one: if the earlier study is not registered yet, add this study to its family (every member is then locked, and each takes a stream slot); run this study as exploratory on the same data (no claim); or give it fresh data. A member of the earlier study's family needs nothing."
+why = "Reused data has already shaped a decision. A test on it is not independent. A reserve input is confirmation data held back, so it must be fresh too. Data that shaped a decision cannot also be its evidence. Studies locked together before any data is scored may share data: each keeps its own stream slot, and the stream controls the false discovery rate under any dependence."
+sources = ["https://doi.org/10.1038/s41562-016-0021", "https://arxiv.org/abs/2311.06412", "https://arxiv.org/abs/2407.15733"]
 when = { mode = "confirmatory" }
 target = [
   { path = "inputs[*].path", check = "named:data-fresh" },
@@ -599,7 +599,7 @@ severity = "error"
 problem = "This study is a member of a registered family and differs from what the family locked."
 instruction = "Choose one: restore the spec, payload or input the family locked, byte for byte; or register the changed study under a new study id, as a study outside the family. Outside the family the freshness rule applies in full: it needs confirmation and reserve data no earlier study used, or it runs as exploratory on the same data (no claim)."
 why = "Members may share data because every member was fixed before any of them ran. A member changed after the lock may have been shaped by what the root or another member found, so a test of it on the shared data is no longer an independent test. The lock holds each member's spec hash, payload hash and input pins, so any change shows. `check` reports this rule for confirmatory plans; `register` refuses a changed member in any mode, so no change of mode frees a locked id or its reserved slot."
-sources = ["https://doi.org/10.1038/s41562-016-0021"]
+sources = ["https://doi.org/10.1038/s41562-016-0021", "https://journalofcognition.org/about/registered-reports"]
 when = { mode = "confirmatory" }
 target = [
   { path = "study.id", check = "named:family-lock" },

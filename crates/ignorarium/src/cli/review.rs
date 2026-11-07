@@ -2,7 +2,7 @@
 //! It reads the spec as plain values, so it also renders a plan that fails check.
 use super::check::{self, Assessed};
 use super::{Ctx, Done, Run, out};
-use crate::diag::{Diagnostic, Severity};
+use crate::diag::{Diagnostic, Severity, printable};
 use crate::rules::{self, safe_key};
 use serde_json::Value;
 use std::path::Path;
@@ -124,6 +124,33 @@ fn shown_root(root: &Path) -> String {
     }
 }
 
+/// `## Family`: the check's family line, then, for a root, one bullet per member. Empty for a
+/// study outside every family.
+fn family_section(a: &Assessed) -> String {
+    let Some(line) = &a.family_line else {
+        return String::new();
+    };
+    let shown = |s: &str| plain(&withheld(&Value::String(printable(s))));
+    let members = a.ctx.members.iter().enumerate().map(|(i, m)| match m {
+        Ok(m) => {
+            let id = m.raw.value.pointer("/study/id").and_then(Value::as_str);
+            format!(
+                "{}: `{}`, may share confirmation and reserve data",
+                shown(id.unwrap_or("(no id)")),
+                shown(&m.path)
+            )
+        }
+        Err(e) => format!("member {}: {}", i + 1, shown(e)),
+    });
+    format!(
+        "
+## Family
+
+{}",
+        bullets(std::iter::once(line.clone()).chain(members))
+    )
+}
+
 fn page(a: &Assessed) -> String {
     let v = &withheld(&a.value);
     let est = a.estimate.as_ref();
@@ -175,6 +202,7 @@ fn page(a: &Assessed) -> String {
     s.push_str(&format!("\nHypotheses:\n\n{}", bullets(hypotheses)));
     s.push_str(&format!("\nOutcomes:\n\n{}", bullets(outcomes)));
     s.push_str(&format!("\n## Conditions\n\n{}", bullets(conditions)));
+    s.push_str(&family_section(a));
     s.push_str("\n## Estimate\n\n");
     s.push_str(&est.map_or(NO_ESTIMATE.into(), |e| bullets(check::figure_lines(e))));
     let level = a.stream.iter().map(check::stream_line);
