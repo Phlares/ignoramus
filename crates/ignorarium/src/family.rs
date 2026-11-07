@@ -3,13 +3,13 @@
 //! checks each with every rule, builds the lock the root's `register` signs, and finds the
 //! registered family of a member.
 use crate::canon::{canonical_of, sha256_hex};
-use crate::cli::check::{PENDING, scheduled};
 use crate::derived::Register;
 use crate::diag::{Diagnostic, Severity, printable};
 use crate::inputs::{InputHashes, input_path, regular_file, spec_hashes, study_root};
 use crate::planlog::store::Leaf;
 use crate::prior::{NoPriorUse, same_data};
-use crate::rules::{self, CheckCtx, NoRecords};
+use crate::rules::{self, CheckCtx, NoRecords, PENDING};
+use crate::schedule;
 use crate::spec::model::{Role, Spec};
 use crate::spec::{self, RawSpec};
 use crate::store::Store;
@@ -315,7 +315,7 @@ pub fn check(ctx: &mut CheckCtx, root_id: &str) -> Vec<Diagnostic> {
         let (value, _, mut diags) = rules::check_all(&m.raw.value, rules::builtin(), &each);
         let clean = diags.iter().all(|d| d.severity != Severity::Error);
         let carried = rules::carried(&value, &each).is_some();
-        if clean && scheduled(&value, &m.raw.hash, carried).is_none() {
+        if clean && schedule::of_value(&value, &m.raw.hash, carried).is_none() {
             diags.push(rules::schema_fault());
         }
         out.extend(report(m, diags));

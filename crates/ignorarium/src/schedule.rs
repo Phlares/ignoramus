@@ -2,9 +2,13 @@
 use crate::canon;
 use crate::files::{self, WriteOnceError};
 use crate::seed::seed;
-use crate::spec::model::{Pick, Role, Spec};
+use crate::spec::{
+    self,
+    model::{Pick, Role, Spec},
+};
 use crate::units::{self, Cluster};
 use serde::Serialize;
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
@@ -171,6 +175,17 @@ pub fn reserve_order<'a>(spec: &'a Spec, clusters: &'a [Cluster]) -> Vec<&'a Clu
         .collect();
     reserve.sort_by_key(|c| place(&pins, c));
     reserve
+}
+
+/// The typed spec and its schedule for the defaulted `value` with spec hash `hash`; `None`
+/// when a value that passes every rule still does not fit the typed model or build a
+/// schedule, which `rules::schema_fault` reports. `carried`: the plan takes its determinism
+/// check from another study, so its schedule holds no recheck rows.
+pub fn of_value(value: &Value, hash: &str, carried: bool) -> Option<(Spec, Vec<Row>)> {
+    let s = Spec::from_value(value).ok()?;
+    let hash = spec::hash_bytes(hash)?;
+    let rows = rows(&s, &hash, s.pins.deterministic && !carried).ok()?;
+    Some((s, rows))
 }
 
 /// The schedule `run` writes for `spec`: its clusters' picked units, expanded, and with

@@ -1,6 +1,6 @@
 //! `register`: a person approves a checked plan; the box stores it, its payload and its
 //! inputs, and logs it.
-use super::check::{self, Assessed, HomeRecords, PENDING};
+use super::check::{self, Assessed, HomeRecords};
 use super::{CliError, Ctx, Done};
 use crate::backend::output::file_digest;
 use crate::canon::to_canonical;
@@ -15,7 +15,7 @@ use crate::payload::{self, PayloadError};
 use crate::planlog::store::{Leaf, PlanLog};
 use crate::planlog::{commitment, shape};
 use crate::records::{self, RecordDraft};
-use crate::rules::{self, BoxRecords, Lookup, Taken};
+use crate::rules::{self, BoxRecords, Lookup, PENDING, Taken};
 use crate::spec::model::{Condition, Param, PinDeviation, Spec, param_path};
 use crate::spec::{self};
 use crate::store::Store;

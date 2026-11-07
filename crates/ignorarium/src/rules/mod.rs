@@ -136,6 +136,9 @@ impl<B: BoxRecords> BoxRecords for ReadOnce<B> {
     }
 }
 
+/// The code of a value that waits on a study that has not finished.
+pub const PENDING: &str = "W-REF-001";
+
 /// True when `id` has the form E-FMT-001 gives `study.id` in the built-in rules.
 pub fn is_study_id(id: &str) -> bool {
     has_format("study.id", id)

@@ -11,8 +11,8 @@ use crate::planlog::store::{PlanLog, PlanLogOnce};
 use crate::prior::{PriorError, PriorUse};
 use crate::records;
 use crate::rules::{self, BoxRecords, CheckCtx, ReadOnce};
-use crate::schedule::{self, Row};
-use crate::spec::{self, LoadError, model::Spec};
+use crate::schedule;
+use crate::spec::{self, LoadError};
 use crate::store::Store;
 use crate::stream::{self, Log, LogName, Next, StreamError};
 use ed25519_dalek::VerifyingKey;
@@ -73,9 +73,6 @@ impl Room {
     }
 }
 
-/// The code of a value that waits on a study that has not finished.
-pub const PENDING: &str = "W-REF-001";
-
 impl Assessed {
     pub fn has_errors(&self) -> bool {
         self.diags.iter().any(|d| d.severity == Severity::Error)
@@ -85,7 +82,7 @@ impl Assessed {
     pub fn pending(&self) -> Vec<&str> {
         self.diags
             .iter()
-            .filter(|d| d.code == PENDING)
+            .filter(|d| d.code == rules::PENDING)
             .map(|d| d.path.as_str())
             .collect()
     }
@@ -339,7 +336,7 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
     };
     a.family_line = family_line(&a.value, a.room.as_ref(), a.ctx.records.as_ref());
     if !a.has_errors() {
-        match scheduled(&a.value, &a.hash, a.carried.is_some()) {
+        match schedule::of_value(&a.value, &a.hash, a.carried.is_some()) {
             Some((s, rows)) => {
                 let copies = rows.iter().filter(|r| r.recheck_of.is_some()).count();
                 a.rechecks = s.pins.deterministic.then_some(copies);
@@ -349,17 +346,6 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         }
     }
     Ok(a)
-}
-
-/// The typed spec and its schedule for the defaulted `value` with spec hash `hash`; `None`
-/// when a value that passes every rule still does not fit the typed model or build a
-/// schedule, which `rules::schema_fault` reports. `carried`: the plan takes its determinism
-/// check from another study, so its schedule holds no recheck rows.
-pub fn scheduled(value: &Value, hash: &str, carried: bool) -> Option<(Spec, Vec<Row>)> {
-    let s = Spec::from_value(value).ok()?;
-    let hash = spec::hash_bytes(hash)?;
-    let rows = schedule::rows(&s, &hash, s.pins.deterministic && !carried).ok()?;
-    Some((s, rows))
 }
 
 /// For a root, `family: <n> members; plan stream slots left <s>, reserved <k>`, with `room`
