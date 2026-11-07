@@ -1049,6 +1049,10 @@ fn faults() -> Vec<Fault> {
             route(one("H1.pass", "../next.toml")),
             vec![("E-PTH-001", "scope.end_of_run.follow_on[0].spec")],
         ),
+        f(
+            vec![("/family", j(json!({ "members": ["../b.toml"] })))],
+            vec![("E-PTH-001", "family.members[0]")],
+        ),
         // An unsafe path is never read: no hash or freshness check follows it.
         f(
             vec![

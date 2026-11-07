@@ -185,6 +185,9 @@ target = [
   { path = "design.confirmation.conditions[*]", check = "type", kind = "string" },
   { path = "design.resize", check = "type", kind = "table" },
   { path = "design.resize.rule", check = "type", kind = "string" },
+  { path = "family", check = "type", kind = "table" },
+  { path = "family.members", check = "type", kind = "array" },
+  { path = "family.members[*]", check = "type", kind = "string" },
   { path = "inputs", check = "type", kind = "array" },
   { path = "inputs[*]", check = "type", kind = "table" },
   { path = "inputs[*].path", check = "type", kind = "string" },
@@ -782,6 +785,7 @@ target = [
   { path = "inputs[*].path", check = "named:input-path-safe" },
   { path = "inputs[*].path", check = "named:input-path-nested" },
   { path = "scope.end_of_run.follow_on[*].spec", check = "named:input-path-safe" },
+  { path = "family.members[*]", check = "named:input-path-safe" },
 ]
 
 [[rule]]

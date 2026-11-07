@@ -2129,3 +2129,13 @@ fn a_resize_shortfall_states_no_needed_count() {
         "{out}"
     );
 }
+
+#[test]
+fn the_fill_step_explains_the_family_table() {
+    let dir = TempDir::new().unwrap();
+    let a = bin(dir.path()).args(["guide", "--json"]).assert().success();
+    let steps = json_out(&a);
+    let fill = steps.as_array().unwrap().iter().find(|s| s["id"] == "fill");
+    let does = fill.unwrap()["does"].as_str().unwrap();
+    assert!(does.contains("[family]") && does.contains("stream slot"));
+}
