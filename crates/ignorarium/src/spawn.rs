@@ -286,19 +286,30 @@ pub fn estimates(
     {
         let contrast = BTreeMap::from([(c.id.clone(), 1.0)]);
         for o in &spec.outcomes {
-            let (samples, _) = group(clusters, Role::Confirmation, "", &o.id, &contrast, pairs, 1);
-            let values: Vec<f64> = samples.into_iter().flatten().collect();
-            if values.is_empty() {
+            let (samples, _) = group(
+                clusters,
+                Role::Confirmation,
+                "",
+                &o.id,
+                &contrast,
+                pairs,
+                spec.design.repeats,
+            );
+            if samples.is_empty() {
                 continue;
             }
+            let means = samples
+                .iter()
+                .map(|xs| xs.iter().sum::<f64>() / xs.len() as f64);
             out.push(ChildEstimate {
                 child: run_id(c, pick),
                 parent: parent_of(c, pick).to_string(),
                 operator: c.operator.clone(),
                 value: serde_json::to_value(&c.value).unwrap_or_default(),
                 outcome: o.id.clone(),
-                units: values.len() as u64,
-                mean: values.iter().sum::<f64>() / values.len() as f64,
+                clusters: samples.len() as u64,
+                units: samples.iter().map(Vec::len).sum::<usize>() as u64,
+                mean: means.sum::<f64>() / samples.len() as f64,
                 repeats: u64::from(spec.design.repeats),
             });
         }

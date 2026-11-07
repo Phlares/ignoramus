@@ -65,7 +65,8 @@ impl Estimate {
 }
 
 /// A child's paired values against the reference on the confirmation units, for one outcome:
-/// the number of units that pair, their mean, and the repeats each unit takes. `child` and
+/// the mean over clusters of each cluster's mean over the units that pair (a unit pairs when
+/// it has `repeats` paired repeats), the cluster and unit counts, and the repeats. `child` and
 /// `parent` are the ids the child ran as (`selected` replaced by the pick). Not an `Estimate`:
 /// the "finished" rule counts no child estimate, and no later study reads one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -76,7 +77,10 @@ pub struct ChildEstimate {
     pub operator: String,
     pub value: Value,
     pub outcome: String,
+    /// The confirmation clusters with a unit that pairs, and those units.
+    pub clusters: u64,
     pub units: u64,
+    /// The mean over clusters of each cluster's mean over its units.
     pub mean: f64,
     pub repeats: u64,
 }

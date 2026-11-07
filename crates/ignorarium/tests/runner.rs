@@ -4907,9 +4907,20 @@ fn child_estimates(lab: &Lab, id: &str) -> Vec<serde_json::Value> {
 }
 
 fn child_estimate(child: &str, parent: &str, value: i64) -> serde_json::Value {
+    sized_estimate(child, parent, value, (1, 3, -100.0, 1))
+}
+
+/// A child estimate with its (clusters, units, mean, repeats).
+fn sized_estimate(
+    child: &str,
+    parent: &str,
+    value: i64,
+    (clusters, units, mean, repeats): (u64, u64, f64, u64),
+) -> serde_json::Value {
     serde_json::json!({
         "child": child, "parent": parent, "operator": "window_tokens", "value": value,
-        "outcome": "ppl-ratio", "units": 3, "mean": -100.0, "repeats": 1,
+        "outcome": "ppl-ratio", "clusters": clusters, "units": units, "mean": mean,
+        "repeats": repeats,
     })
 }
 
@@ -5077,4 +5088,89 @@ fn status_shows_children_by_the_blind_label_of_their_condition() {
         .map(|c| c["label"].as_str().unwrap())
         .find(|l| shown.contains(&format!("{l}~window_tokens=64")));
     assert!(label.is_some(), "{shown}");
+}
+
+/// `firing` with a second confirmation cluster of one unit, `data/c2.txt`.
+fn two_clusters(t: String) -> String {
+    let input = "[[inputs]]\npath = \"data/c2.txt\"\nsha256 = \"\"\nrole = \"confirmation\"\nstratum = \"fiction\"\nunits = 1\n[inputs.licence]\nspdx = \"\"\ntype = \"unspecified\"\nsource = \"\"\ncreators = []\n\n";
+    firing(t).replacen("[pins]", &format!("{input}[pins]"), 1)
+}
+
+/// STAGED, but a child writes 0 on `data/c2.txt#0` and 4 on every other unit; the reference
+/// writes 8, so a child pairs to -100 % there and -50 % elsewhere.
+const BY_UNIT: &str = "#!/bin/sh
+printf '%s' \"$IGNORARIUM_PARAMS\" > \"$IGNORARIUM_OUT/params\"
+case \"$2\" in exact) v=8;; arm-a) v=10;; arm-b) v=6;; *) case \"$4\" in data/c2.txt#0) v=0;; *) v=4;; esac;; esac
+printf '{\"ppl\": %s}' \"$v\" > \"$IGNORARIUM_OUT/values.json\"
+";
+
+#[test]
+fn a_child_estimate_is_the_mean_over_clusters_of_cluster_means() {
+    let lab = lab();
+    register_study(&lab, "clusters", two_clusters, &[], BY_UNIT);
+    assert_eq!(run(&plan_of(&lab, "clusters")).unwrap(), RunStatus::Done);
+    // Cluster means -50 (3 units) and -100 (1 unit): -75, where the mean of the 4 units is
+    // -62.5.
+    let want = (2, 4, -75.0, 1);
+    assert_eq!(
+        child_estimates(&lab, "clusters"),
+        vec![
+            sized_estimate("arm-a~window_tokens=64", "arm-a", 64, want),
+            sized_estimate("arm-a~window_tokens=512", "arm-a", 512, want),
+        ]
+    );
+}
+
+/// STAGED, but a child's second repeat of `data/confirm.txt#0` fails.
+const FAIL_REPEAT: &str = "#!/bin/sh
+case \"$2\" in exact) v=8;; arm-a) v=10;; arm-b) v=6;; *) v=0;; esac
+case \"$2 $4 $6\" in \"arm-a~\"*\" data/confirm.txt#0 1\") exit 1;; esac
+printf '{\"ppl\": %s}' \"$v\" > \"$IGNORARIUM_OUT/values.json\"
+";
+
+#[test]
+fn a_unit_with_fewer_paired_repeats_than_the_spec_asks_does_not_count() {
+    let lab = lab();
+    let spec = |t: String| firing(t).replacen("repeats = 1", "repeats = 2", 1);
+    register_study(&lab, "repeats", spec, &[], FAIL_REPEAT);
+    assert_eq!(run(&plan_of(&lab, "repeats")).unwrap(), RunStatus::Done);
+    let want = (1, 2, -100.0, 2);
+    assert_eq!(
+        child_estimates(&lab, "repeats"),
+        vec![
+            sized_estimate("arm-a~window_tokens=64", "arm-a", 64, want),
+            sized_estimate("arm-a~window_tokens=512", "arm-a", 512, want),
+        ]
+    );
+}
+
+#[test]
+fn a_blind_status_shows_skipped_and_stopped_children_by_label() {
+    let lab = lab();
+    let spec = |t: String| spawning(t).replace("blind = false", "blind = true");
+    register_study(&lab, "blind-stop", spec, &[], STAGED);
+    let child = |v: u32| format!("arm-a~window_tokens={v}");
+    let trigger = serde_json::json!({
+        "id": "T1", "e_value": 3.0, "threshold": 2.0, "fired": true, "reason": null,
+        "admitted": [child(64)],
+        "skipped": [{ "child": child(512), "reason": "budget" }],
+    });
+    let stop = serde_json::json!({ "children": [child(64)], "reason": "budget" });
+    common::plant(
+        &lab.home,
+        "blind-stop",
+        &[("trigger", trigger), ("spawn-stop", stop)],
+    );
+    let s = status_json(&lab, "blind-stop");
+    let shown = s["triggers"][0].to_string() + &s["spawn_stopped"].to_string();
+    assert!(!shown.contains("arm-a"), "{shown}");
+    let label = (s["conditions"].as_array().unwrap().iter())
+        .map(|c| c["label"].as_str().unwrap())
+        .find(|l| s["spawn_stopped"][0] == format!("{l}~window_tokens=64").as_str())
+        .unwrap_or_else(|| panic!("{shown}"));
+    assert_eq!(
+        s["triggers"][0]["skipped"][0]["child"],
+        format!("{label}~window_tokens=512").as_str()
+    );
+    assert!(!status_text(&lab, "blind-stop").contains("arm-a"));
 }

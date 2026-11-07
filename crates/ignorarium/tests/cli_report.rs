@@ -389,7 +389,7 @@ fn a_finished_study_with_a_later_stop_record_still_reports() {
 fn child_estimate(child: &str, value: u64, mean: f64) -> Value {
     json!({
         "child": child, "parent": "arm-a", "operator": "window_tokens", "value": value,
-        "outcome": "ppl-ratio", "units": 3, "mean": mean, "repeats": 1,
+        "outcome": "ppl-ratio", "clusters": 2, "units": 4, "mean": mean, "repeats": 1,
     })
 }
 
@@ -421,8 +421,8 @@ fn report_lists_children_with_their_estimates() {
     let a = bin(&lab).args(["report", "s1"]).assert().success();
     let t = text(&a);
     for line in [
-        "child arm-a~window_tokens=64: ppl-ratio mean -12.5 over 3 units, 1 repeats\n",
-        "child arm-a~window_tokens=512: ppl-ratio mean 3 over 3 units, 1 repeats\n",
+        "child arm-a~window_tokens=64: ppl-ratio mean -12.5 over 2 clusters, 4 units, 1 repeats\n",
+        "child arm-a~window_tokens=512: ppl-ratio mean 3 over 2 clusters, 4 units, 1 repeats\n",
     ] {
         assert!(t.contains(line), "missing {line:?} in {t}");
     }
@@ -435,4 +435,27 @@ fn a_report_without_children_lists_none() {
     assert_eq!(report_json(&lab, "s1")["children"], json!([]));
     let a = bin(&lab).args(["report", "s1"]).assert().success();
     assert!(!text(&a).contains("child "), "{}", text(&a));
+}
+
+#[test]
+fn a_blind_report_shows_children_by_the_blind_label_of_their_condition() {
+    let lab = lab();
+    let dir = lab.home.study_dir("s1");
+    std::fs::create_dir_all(&dir).unwrap();
+    let blind = source_spec(&["fiction".to_string()]).replace("blind = false", "blind = true");
+    std::fs::write(dir.join("spec.toml"), blind).unwrap();
+    let kids = [child_estimate("arm-a~window_tokens=64", 64, -12.5)];
+    plant(&lab.home, "s1", &with_children(&kids));
+    let r = report_json(&lab, "s1");
+    let child = r["children"][0]["child"].as_str().unwrap();
+    let parent = r["children"][0]["parent"].as_str().unwrap();
+    assert!(parent.starts_with("condition "), "{parent}");
+    assert_eq!(child, format!("{parent}~window_tokens=64"));
+    let a = bin(&lab).args(["report", "s1"]).assert().success();
+    assert!(!text(&a).contains("arm-a"), "{}", text(&a));
+    assert!(
+        text(&a).contains(&format!("child {child}: ")),
+        "{}",
+        text(&a)
+    );
 }

@@ -143,7 +143,7 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
                     "child": relabelled(&shown, &e.child),
                     "parent": relabelled(&shown, &e.parent),
                     "operator": e.operator, "value": e.value, "outcome": e.outcome,
-                    "units": e.units, "mean": e.mean, "repeats": e.repeats,
+                    "clusters": e.clusters, "units": e.units, "mean": e.mean, "repeats": e.repeats,
                 })
             })
             .collect();
@@ -212,10 +212,11 @@ fn text(r: &Value) -> String {
     }
     for c in r["children"].as_array().into_iter().flatten() {
         s.push_str(&format!(
-            "child {}: {} mean {} over {} units, {} repeats\n",
+            "child {}: {} mean {} over {} clusters, {} units, {} repeats\n",
             c["child"].as_str().unwrap_or_default(),
             c["outcome"].as_str().unwrap_or_default(),
             c["mean"].as_f64().unwrap_or(f64::NAN),
+            c["clusters"],
             c["units"],
             c["repeats"]
         ));
