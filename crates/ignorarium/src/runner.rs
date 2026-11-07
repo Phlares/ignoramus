@@ -858,7 +858,7 @@ fn gate_late_data(
             Some(found) => found,
             None => {
                 let records = HomeRecords::signed(home, key);
-                member.insert(records.family_of(id).map_err(RunError::Records)?)
+                member.insert(records.locked_family(id).map_err(RunError::Records)?)
             }
         };
         let counts = |(i, _): &&(usize, Leaf)| {

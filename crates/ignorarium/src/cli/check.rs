@@ -202,7 +202,7 @@ impl BoxRecords for HomeRecords {
     }
 
     /// The register records first, then the leaves of each log: a root writes its family leaf
-    /// before its record, so a leaf read after the records may lack its root; that fails closed.
+    /// before its record, so the leaves read after a root's record hold its family leaf.
     fn family_of(&self, study: &str) -> Result<Option<family::Found>, String> {
         let registers = self.registers()?;
         let mut logs = vec![];

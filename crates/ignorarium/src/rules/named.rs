@@ -353,7 +353,7 @@ fn data_fresh(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
         if first.is_none() {
             return Ok(None);
         }
-        let found = (family.get_or_init(|| ctx.records.family_of(id)).as_ref())
+        let found = (family.get_or_init(|| ctx.records.locked_family(id)).as_ref())
             .map_err(|e| format!("The family records cannot be read: {e}."))?;
         // The plan log's leaf indexes say nothing about a family in another log.
         match found.as_ref().filter(|f| f.log == LogName::Plan.as_str()) {
@@ -419,7 +419,7 @@ fn follow_on_shares(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
                 if !ctx.family_ids.is_empty() {
                     return Some(ctx.family_ids.clone());
                 }
-                let found = own.first().map(|i| ctx.records.family_of(i));
+                let found = own.first().map(|i| ctx.records.locked_family(i));
                 match found {
                     Some(Err(_)) => None,
                     Some(Ok(Some(f))) => {

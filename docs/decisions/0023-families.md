@@ -24,7 +24,7 @@ Decision:
 
 Limits:
 
-- If a root's `register` stops after it signs its family leaf and before its register record lands, the family leaf has no lock. The data it lists stays blocked for every study, which fails closed, and the root's id cannot register again. New data is the way out.
+- If a root's `register` stops after it signs its family leaf and before its register record lands, the family leaf has no lock: it is an orphan. Its data stays blocked for every study outside a family that holds it, and its root's id cannot register again. New data is the way out. Other families are unaffected: a member's family is read only from the leaf of the root whose lock lists it.
 - For a family on the test log, a later plan-log use of a member's data still counts against that member. Only plan-log families get the rule that a later outside use never counts.
 - A root reserves slots, and `register` reads the slots left before it takes the stream lock. A concurrent register between the root's slot opening and its register record landing can take a slot that a member needs.
 - A register record that holds a family lock cannot be read by an older box binary.

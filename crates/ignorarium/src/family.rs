@@ -112,40 +112,15 @@ pub fn exempt(found: &Found, leaf: u64) -> bool {
 }
 
 /// The family whose lock lists `study`, from the register record of each study (`registers`,
-/// by study id) and the leaves of each log (`logs`, by log name). Each family leaf must name a
-/// root that registered in its log, whose plan leaf comes before it and whose record holds a
-/// lock with the leaf's commitment; and a lock that lists `study` must have its family leaf.
-/// Anything else is an error, never "not a member".
+/// by study id) and the leaves of each log (`logs`, by log name). Only the root whose lock
+/// lists `study` is read: its log must hold exactly one family leaf labelled with its id, after
+/// its plan leaf, that commits to the lock. Anything else is an error, never "not a member".
+/// Family leaves of other roots are not read, so an orphan leaf stops no other family.
 pub fn find(
     registers: &[(String, Register)],
     logs: &[(&str, Vec<Leaf>)],
     study: &str,
 ) -> Result<Option<Found>, String> {
-    let mut leaves: Vec<(&str, &str, u64)> = vec![];
-    for (log, all) in logs {
-        for (i, leaf) in (all.iter().enumerate()).filter(|(_, l)| l.kind == LEAF_KIND) {
-            let i = i as u64;
-            let shown = printable(&leaf.label);
-            let root = (registers.iter())
-                .find(|(id, r)| {
-                    leaf.label == leaf_label(id)
-                        && r.log == *log
-                        && r.leaf < i
-                        && leaf.commitment.is_some()
-                        && r.family.as_ref().map(Lock::hash) == leaf.commitment
-                })
-                .map(|(id, _)| id.as_str())
-                .ok_or_else(|| {
-                    format!("{log} leaf {i} ({shown}) names no root whose record holds its lock")
-                })?;
-            if leaves.iter().any(|(l, r, _)| l == log && *r == root) {
-                return Err(format!(
-                    "{log} holds a second family leaf of {root}, leaf {i}"
-                ));
-            }
-            leaves.push((log, root, i));
-        }
-    }
     let listing: Vec<&(String, Register)> = (registers.iter())
         .filter(|(_, r)| (r.family.iter()).any(|l| l.members.iter().any(|m| m.id == study)))
         .collect();
@@ -154,19 +129,35 @@ pub fn find(
         [(root, reg)] => (root, reg),
         _ => return Err(format!("more than one lock lists {study}")),
     };
-    let (_, _, family_leaf) = (leaves.iter())
-        .find(|(log, r, _)| *log == reg.log && r == root)
-        .ok_or_else(|| {
-            format!(
+    let lock = reg.family.clone().expect("a listing register holds a lock");
+    let label = leaf_label(root);
+    let leaves = (logs.iter().filter(|(log, _)| *log == reg.log))
+        .flat_map(|(_, all)| all.iter().enumerate())
+        .filter(|(_, l)| l.kind == LEAF_KIND && l.label == label);
+    let family_leaf = match leaves.collect::<Vec<_>>()[..] {
+        [] => {
+            return Err(format!(
                 "the lock of {root} lists {study}, and {} holds no family leaf for it",
                 reg.log
-            )
-        })?;
+            ));
+        }
+        [(i, leaf)] => {
+            let i = i as u64;
+            if i <= reg.leaf || leaf.commitment.as_ref() != Some(&lock.hash()) {
+                return Err(format!(
+                    "{} leaf {i} ({label}) does not follow the plan leaf of {root} and commit to its lock",
+                    reg.log
+                ));
+            }
+            i
+        }
+        _ => return Err(format!("{} holds more than one family leaf of {root}", reg.log)),
+    };
     Ok(Some(Found {
         root: root.clone(),
         root_leaf: reg.leaf,
-        family_leaf: *family_leaf,
-        lock: reg.family.clone().expect("a listing register holds a lock"),
+        family_leaf,
+        lock,
         log: reg.log.clone(),
     }))
 }

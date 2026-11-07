@@ -973,50 +973,75 @@ fn confirm_refused(lab: &Lab, root: &Path, b: &Path) -> String {
     problem_at(&v, "E-CNF-005", &format!("inputs[{k}].path"))
 }
 
+/// The problem of b's E-FAM-006, which must refuse because the family records cannot be read.
+fn lock_unread(lab: &Lab, b: &Path) -> String {
+    let (code, v) = check_json(lab, b);
+    let p = problem_at(&v, "E-FAM-006", "study.id");
+    assert!(p.contains("cannot be read"), "{p}");
+    assert_eq!(code, 1, "{v}");
+    p
+}
+
 #[test]
 fn a_root_without_its_family_leaf_fails_member_checks_closed() {
     // A lock that lists b, and no family leaf.
     let lab = lab();
     let (_, b) = lone_member(&lab, |t| t);
     plant_root(&lab, "planlog", 0, Some(&lock_of_b(&b)));
-    let (code, v) = check_json(&lab, &b);
-    let p = problem_at(&v, "E-FAM-006", "study.id");
-    assert!(
-        p.contains("cannot be read") && p.contains("no family leaf"),
-        "{p}"
-    );
-    assert_eq!(code, 1);
-    // A family leaf whose root's record holds no lock.
+    let p = lock_unread(&lab, &b);
+    assert!(p.contains("no family leaf"), "{p}");
+    // A family leaf of the root before its plan leaf.
     let lab = common::lab();
     let (root, b) = lone_member(&lab, |t| t);
     let data = confirmation_data(&root);
-    append_leaf(&lab, "planlog", "plan", "", Some("sha256:plan"), &data);
+    let lock = lock_of_b(&b);
     let label = family::leaf_label("fam");
-    append_leaf(
-        &lab,
-        "planlog",
-        family::LEAF_KIND,
-        &label,
-        Some("sha256:x"),
-        &data,
-    );
-    plant_root(&lab, "planlog", 0, None);
-    let p = confirm_refused(&lab, &root, &b);
-    assert!(p.contains("The family records cannot be read: "), "{p}");
+    let kind = family::LEAF_KIND;
+    append_leaf(&lab, "planlog", kind, &label, Some(&lock.hash()), &data);
+    append_leaf(&lab, "planlog", "plan", "", Some("sha256:plan"), &data);
+    plant_root(&lab, "planlog", 1, Some(&lock));
+    lock_unread(&lab, &b);
 }
 
 #[test]
-fn a_family_leaf_without_a_commitment_fails_closed() {
-    // The root's record holds no lock, and the leaf no commitment: they must not match.
+fn a_family_leaf_that_does_not_commit_to_the_lock_fails_closed() {
+    // No commitment, another commitment, and a second leaf of the root.
+    for commitments in [vec![None], vec![Some("sha256:x")], vec![Some("lock"); 2]] {
+        let lab = lab();
+        let (root, b) = lone_member(&lab, |t| t);
+        let data = confirmation_data(&root);
+        let lock = lock_of_b(&b);
+        append_leaf(&lab, "planlog", "plan", "", Some("sha256:plan"), &data);
+        let label = family::leaf_label("fam");
+        for c in &commitments {
+            let c = c.map(|c| if c == "lock" { lock.hash() } else { c.into() });
+            append_leaf(&lab, "planlog", family::LEAF_KIND, &label, c.as_deref(), &data);
+        }
+        plant_root(&lab, "planlog", 0, Some(&lock));
+        let p = lock_unread(&lab, &b);
+        let p2 = confirm_refused(&lab, &root, &b);
+        assert!(p2.contains("The family records cannot be read: "), "{p} {p2}");
+    }
+}
+
+#[test]
+fn an_orphan_family_leaf_stops_no_other_family() {
     let lab = lab();
-    let (root, b) = lone_member(&lab, |t| t);
-    let data = confirmation_data(&root);
-    append_leaf(&lab, "planlog", "plan", "", Some("sha256:plan"), &data);
-    let label = family::leaf_label("fam");
-    append_leaf(&lab, "planlog", family::LEAF_KIND, &label, None, &data);
-    plant_root(&lab, "planlog", 0, None);
-    let p = confirm_refused(&lab, &root, &b);
-    assert!(p.contains("The family records cannot be read: "), "{p}");
+    let root = registered_family(&lab);
+    // Root `orphan` stopped after its family leaf, before its register record.
+    let orphan = file_hashes(b"orphan data\n");
+    let label = family::leaf_label("orphan");
+    let data = [orphan];
+    append_leaf(&lab, "planlog", family::LEAF_KIND, &label, Some("sha256:x"), &data);
+    let b = root.join("spec/b.toml");
+    let (code, v) = check_json(&lab, &b);
+    assert_eq!((code, errors(&v)), (0, vec![]), "{v}");
+    assert_eq!(v["family"], "member of family fam; slot reserved", "{v}");
+    register(&lab, &b);
+    // Its data stays blocked for outsiders.
+    let (_, v) = check_json(&lab, &outsider(&lab, "orphan data\n", |t| t));
+    let p = problem_at(&v, "E-CNF-005", "inputs[1].path");
+    assert!(p.contains("(family)"), "{p}");
 }
 
 #[test]
