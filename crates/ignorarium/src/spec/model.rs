@@ -464,6 +464,8 @@ impl Mutations {
 }
 
 /// The declared shape comes first: a stored spec with the old shape still parses as `Legacy`.
+/// A trigger of neither shape fails with serde's generic untagged-enum error, which names no
+/// field. A raw `from_value` caller gets only that; `check` names the fault by rule.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(untagged)]
 pub enum Trigger {

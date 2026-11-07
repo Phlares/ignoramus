@@ -814,11 +814,11 @@ pub fn progress(
 }
 
 /// In a confirmatory plan or a plan with a declared trigger, refuse a confirmation or reserve
-/// input that holds the same data as a selection or calibration input (E-CNF-004): `check` cannot compare a file that was absent
-/// at registration, and a late copy of a registered file has a registered hash. Then a
-/// selection, confirmation or reserve input that the registered plan leaf did not hold is
-/// late: refuse a confirmation or reserve input that another study used; a selection input may
-/// reuse data. Else record new data under this study's id once. The
+/// input that holds the same data as a selection or calibration input (E-CNF-004): `check`
+/// cannot compare a file that was absent at registration, and a late copy of a registered file
+/// has a registered hash. Then a selection, confirmation or reserve input that the registered
+/// plan leaf did not hold is late: refuse a confirmation or reserve input that another study
+/// used; a selection input may reuse data. Else record new data under this study's id once. The
 /// study's own leaves, its plan leaf and its late-data leaves, are no earlier use, and for a
 /// member of a registered family neither are the leaves `family::exempt` names. `all` are
 /// the inputs' hashes in spec order.
@@ -989,15 +989,15 @@ fn no_links(base: &Path, parts: &[&str]) -> Result<(), RunError> {
 /// first reserve row waits for the `resize` record (`resized`), and a reserve row of a cluster
 /// it does not admit never runs. In a study with declared triggers, the first row past the
 /// selection stage waits for the trigger records (`triggers`), and a child row runs only when
-/// one admits its child; a cap reached on a child row signs a `spawn-stop` record of the
+/// one admits its child. A cap reached on a child row signs a `spawn-stop` record of the
 /// children not finished, and the run finishes without their rows. At each row boundary the
-/// control file is read: a stop ends the run with the stop trace, a pause ends it at that boundary. Then the
-/// gate runs before each attempt, retries included: the run pauses instead of starting it
-/// when a cap is reached or the attempt would reach one, or when the payload or an input
-/// changed. While a row runs, the backend ticks the watch, which emits heartbeats and ends
-/// the row on a stop. Once the caller has called `sys::catch_interrupts`, SIGINT, SIGTERM or
-/// SIGHUP ends the row as a stop does, and the run pauses. The library leaves signal handling
-/// to its caller.
+/// control file is read: a stop ends the run with the stop trace, a pause ends it at that
+/// boundary. Then the gate runs before each attempt, retries included: the run pauses instead
+/// of starting it when a cap is reached or the attempt would reach one, or when the payload or
+/// an input changed. While a row runs, the backend ticks the watch, which emits heartbeats and
+/// ends the row on a stop. Once the caller has called `sys::catch_interrupts`, SIGINT, SIGTERM
+/// or SIGHUP ends the row as a stop does, and the run pauses. The library leaves signal
+/// handling to its caller.
 pub fn run(plan: &RunPlan) -> Result<RunStatus, RunError> {
     no_links(&plan.home.study_dir(&plan.study_id), &["run"])?;
     let lock = RunLock::try_take(&plan.home, &plan.study_id)

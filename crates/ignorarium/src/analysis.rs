@@ -820,11 +820,11 @@ fn recheck(spec: &Spec, records: &[Record], carried_from: Option<String>) -> Opt
 /// appended. A child row runs when a `trigger` record admits its child and no `spawn-stop`
 /// record names it (`spawn::admitted`). A study the record stops fails its claims
 /// (`verdicts`). Before the analysis record, each admitted child, a stopped one too, gets a
-/// `child-estimate` record per outcome (`spawn::estimates`); no count of them is promised.
-/// A call after a crash adds only what is missing; a complete study gets
-/// nothing. A log whose analysis record another box version wrote is refused when it lacks an
-/// estimate or a verdict. The close takes its e-value from the signed records alone, so it is
-/// added whatever box wrote them.
+/// `child-estimate` record per outcome (`spawn::estimates`); no count of them is promised. A
+/// call after a crash adds only what is missing; a complete study gets nothing. A log whose
+/// analysis record another box version wrote is refused when it lacks an estimate or a
+/// verdict. The close takes its e-value from the signed records alone, so it is added whatever
+/// box wrote them.
 pub fn finish(plan: &RunPlan) -> Result<(), RunError> {
     let dir = plan.home.study_dir(&plan.study_id);
     let log = dir.join("records.jsonl");

@@ -106,8 +106,8 @@ pub fn estimate(spec: &Spec, machine: &Machine, rows: &[Row]) -> Estimate {
 
 impl Estimate {
     /// Each cap of `budget` above 0 covers this estimate as the run gate counts it
-    /// (`budget::decide`): the gate pauses when spend times `SAFETY_MARGIN` reaches a cap, so
-    /// an estimate that reaches one is out. A cap of 0 is no cap.
+    /// (`budget::decide`): the estimate times `SAFETY_MARGIN` stays below the cap. A cap of 0
+    /// is no cap.
     pub fn within(&self, budget: &Budget) -> bool {
         [
             (self.cpu_hours, budget.cpu_hours),

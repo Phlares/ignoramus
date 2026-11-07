@@ -65,11 +65,11 @@ impl Estimate {
 }
 
 /// A child's paired values against the reference on the confirmation units, for one outcome:
-/// the mean over clusters of each cluster's mean over the units that pair (a unit pairs when
-/// any repeat pairs, as for an `Estimate`), the cluster and unit counts, and the spec's repeats
-/// per unit. `child` and
-/// `parent` are the ids the child ran as (`selected` replaced by the pick). Not an `Estimate`:
-/// the "finished" rule counts no child estimate, and no later study reads one.
+/// the mean over clusters of each cluster's mean over the units that pair, the cluster and unit
+/// counts, and the spec's repeats per unit. A unit pairs when any repeat pairs, as for an
+/// `Estimate`. `child` and `parent` are the ids the child ran as (`selected` replaced by the
+/// pick). Not an `Estimate`: the "finished" rule counts no child estimate, and no later study
+/// reads one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChildEstimate {

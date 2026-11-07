@@ -81,7 +81,8 @@ pub fn shown_labels(spec: &Spec, spec_hash: &[u8; 32]) -> Vec<(String, String)> 
 }
 
 /// `id` as `shown` labels it: a condition id by its label, a child id (its parent's id, `~`,
-/// then its operator and value) with the parent's label in front.
+/// then its operator and value) with the parent's label in front. The `~` prefix finds the
+/// parent because a condition id never holds `~` (its format rule).
 pub fn relabelled(shown: &[(String, String)], id: &str) -> String {
     let split = |(real, label): &(String, String)| {
         if id == real {
@@ -104,7 +105,10 @@ fn triggers(
     let recorded = spawn::recorded(all)?;
     let label = |ids: &[String]| ids.iter().map(|i| relabelled(shown, i)).collect::<Vec<_>>();
     let skipped = |t: &derived::Trigger| {
-        let each = |k: &derived::Skipped| json!({ "child": relabelled(shown, &k.child), "reason": k.reason });
+        let each = |k: &derived::Skipped| {
+            let child = relabelled(shown, &k.child);
+            json!({ "child": child, "reason": k.reason })
+        };
         t.skipped.iter().map(each).collect::<Vec<_>>()
     };
     let entry = |id: &str, state: &str, threshold: f64, t: Option<&derived::Trigger>| {

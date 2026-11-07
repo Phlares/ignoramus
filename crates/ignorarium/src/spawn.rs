@@ -23,18 +23,23 @@ pub const BUDGET: &str = "budget";
 pub const INCOMPLETE: &str = "incomplete";
 pub const NO_PICK: &str = "no-pick";
 
-/// Each declared trigger of `plan`, in spec order, at the selection boundary: the one its
-/// `trigger` record in `records` holds, or else one decided now from the selection rows in
-/// `records`. A trigger's value is the least stopped e-value (`claim::stopped`, stop at
-/// `threshold_e`) over its claim's bounds and strata, each from one observation per selection
-/// cluster in the order drawn from `seed(spec_hash, "<seeds.spawn><id>/<stratum>")`; an
-/// incomplete selection unit in scope makes it 0. `selected` in a contrast is the pick of the
-/// study's `selection` record; a trigger that needs the pick (`wants_pick`) when the records
-/// hold none gets 0 and reason `no-pick`. A trigger fires when its value reaches `threshold_e`. A fired
-/// trigger admits each of its children in declared order, unless the child's value is the one
-/// its parent holds (`same-as-parent`), or the spec estimate of the rows that are no child
-/// rows, the rows of the children admitted before it and its own does not stay within the
-/// budget (`budget`). A child an earlier trigger admitted is admitted again at no cost.
+/// Each declared trigger of `plan`, in spec order, at the selection boundary. A trigger that
+/// a `trigger` record in `records` holds keeps that record. Any other is decided now from the
+/// selection rows in `records`.
+///
+/// A trigger's value is the least stopped e-value (`claim::stopped`, stop at `threshold_e`)
+/// over its claim's bounds and strata. Each comes from one observation per selection cluster,
+/// in the order drawn from `seed(spec_hash, "<seeds.spawn><id>/<stratum>")`. An incomplete
+/// selection unit in scope makes the value 0, reason `incomplete`. `selected` in a contrast is
+/// the pick of the study's `selection` record. When the records hold no pick, a trigger that
+/// needs one (`wants_pick`) gets 0, reason `no-pick`. A trigger fires when its value reaches
+/// `threshold_e`.
+///
+/// A fired trigger admits each of its children in declared order. It skips a child whose value
+/// the parent already holds (`same-as-parent`). It skips a child (`budget`) when the spec
+/// estimate of the rows that are no child rows, the rows of the children admitted before it
+/// and its own rows does not stay within the budget. A child an earlier trigger admitted is
+/// admitted again at no cost.
 pub fn evaluate(plan: &RunPlan, records: &[Record]) -> Result<Vec<Trigger>, RunError> {
     let spec = &plan.spec;
     let have = recorded(records)?;
