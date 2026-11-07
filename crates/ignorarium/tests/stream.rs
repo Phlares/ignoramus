@@ -669,6 +669,48 @@ fn a_register_between_the_reads_of_a_check_is_no_lack() {
 }
 
 #[test]
+fn closed_at_gives_the_close_time_of_a_closed_slot() {
+    let lab = lab();
+    let k = key(&lab);
+    let vk = k.verifying_key();
+    let log = Log::of(&lab.home, LogName::Plan);
+    log.open(&k, "a", FIRST, 0).unwrap();
+    log.open(&k, "b", FIRST, 0).unwrap();
+    assert_eq!(log.closed_at(&vk, "a", 1).unwrap(), None);
+    log.close(&k, "a", 1, 0.0).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    log.close(&k, "b", 2, 0.0).unwrap();
+    let stamp = |study: &str| {
+        (all(&lab, "planlog").iter())
+            .find(|r| r.kind == stream::CLOSE && r.body["study"] == study)
+            .map(|r| r.ts.clone())
+    };
+    assert!(stamp("a").is_some() && stamp("a") != stamp("b"));
+    assert_eq!(log.closed_at(&vk, "a", 1).unwrap(), stamp("a"));
+    assert_eq!(log.closed_at(&vk, "b", 2).unwrap(), stamp("b"));
+    assert_eq!(log.closed_at(&vk, "b", 1).unwrap(), None);
+    assert_eq!(log.closed_at(&vk, "a", 2).unwrap(), None);
+}
+
+#[test]
+fn closed_agrees_with_closed_at() {
+    let lab = lab();
+    let k = key(&lab);
+    let vk = k.verifying_key();
+    let log = Log::of(&lab.home, LogName::Plan);
+    log.open(&k, "a", FIRST, 0).unwrap();
+    log.open(&k, "b", FIRST, 0).unwrap();
+    log.close(&k, "b", 2, 0.0).unwrap();
+    for (study, slot) in [("a", 1), ("b", 2), ("a", 2), ("b", 1), ("c", 3)] {
+        assert_eq!(
+            log.closed(&vk, study, slot).unwrap(),
+            log.closed_at(&vk, study, slot).unwrap().is_some(),
+            "{study} {slot}"
+        );
+    }
+}
+
+#[test]
 fn a_slot_closes_once_with_a_finite_e_value() {
     let lab = lab();
     let k = key(&lab);

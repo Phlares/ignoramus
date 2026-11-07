@@ -229,12 +229,7 @@ impl BoxRecords for HomeRecords {
     }
 
     fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String> {
-        let name = LogName::parse(log).map_err(|e| e.to_string())?;
-        let stream = Log::of(&self.home, name);
-        match self.key_for(stream.path())? {
-            None => Ok(false),
-            Some(key) => stream.closed(key, study, slot).map_err(|e| e.to_string()),
-        }
+        self.stream_closed_at(log, study, slot).map(|t| t.is_some())
     }
 
     fn locked_members(&self) -> Result<Vec<String>, String> {
@@ -294,6 +289,24 @@ impl HomeRecords {
             home,
             key,
             registers: Default::default(),
+        }
+    }
+
+    /// The close time of slot `slot` of log `log` when `study` held it and it is closed. A log
+    /// that does not exist gives `None`.
+    pub fn stream_closed_at(
+        &self,
+        log: &str,
+        study: &str,
+        slot: u64,
+    ) -> Result<Option<String>, String> {
+        let name = LogName::parse(log).map_err(|e| e.to_string())?;
+        let stream = Log::of(&self.home, name);
+        match self.key_for(stream.path())? {
+            None => Ok(None),
+            Some(key) => stream
+                .closed_at(key, study, slot)
+                .map_err(|e| e.to_string()),
         }
     }
 

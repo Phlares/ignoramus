@@ -7,12 +7,8 @@ use crate::derived::{
     Analysis, ChildEstimate, Estimate, OPENED, Register, SpawnStop, StudyState, Verdict,
 };
 use crate::diag::printable;
-use crate::home::Home;
 use crate::records::{self, Record, RecordDraft, RecordError};
-use crate::rules::BoxRecords;
 use crate::runner::stored_spec;
-use crate::stream::{self, Log, LogName};
-use ed25519_dalek::VerifyingKey;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
@@ -37,15 +33,7 @@ impl From<CliError> for Stop {
 /// The time the results were complete: the later of the last counted estimate or verdict
 /// record and, when the study holds a stream slot, the close of that slot. A record the report
 /// drops as a repeat does not count. With neither, the analysis record's time.
-fn finished_at(
-    home: &Home,
-    key: &VerifyingKey,
-    id: &str,
-    slot: Option<(&str, u64)>,
-    analysed: &str,
-    after: &[Record],
-) -> Result<String, CliError> {
-    let broken = |e: &dyn std::fmt::Display| CliError::refuse(format!("cannot report {id}: {e}"));
+fn finished_at(close: Option<String>, analysed: &str, after: &[Record]) -> String {
     let mut estimates = BTreeSet::new();
     let mut verdicts = BTreeSet::new();
     let mut stamps: Vec<String> = (after.iter())
@@ -56,21 +44,11 @@ fn finished_at(
         })
         .map(|r| r.ts.clone())
         .collect();
-    if let Some((log, slot)) = slot {
-        let name = LogName::parse(log).map_err(|e| broken(&e))?;
-        let all = records::read_all(Log::of(home, name).path(), key).map_err(|e| broken(&e))?;
-        stamps.extend(
-            (all.iter())
-                .filter(|r| {
-                    r.kind == stream::CLOSE && r.body["study"] == id && r.body["slot"] == slot
-                })
-                .map(|r| r.ts.clone()),
-        );
-    }
-    Ok(stamps
+    stamps.extend(close);
+    stamps
         .into_iter()
         .max()
-        .unwrap_or_else(|| analysed.to_string()))
+        .unwrap_or_else(|| analysed.to_string())
 }
 
 fn clips(analysis: &Analysis, h: &str) -> Value {
@@ -90,7 +68,6 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
     let key = crate::keys::load(home)
         .map_err(|e| CliError::usage(format!("box key: {e}")))?
         .ok_or_else(|| not_registered(id))?;
-    let verifying = key.verifying_key();
     let mut value = Value::Null;
     let appended = records::append_with(&log, &key, |all| -> Result<_, Stop> {
         if let Some(r) = all.iter().find(|r| r.study != id) {
@@ -100,10 +77,12 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
             ))
             .into());
         }
-        let register = (all.iter().find_map(Register::of)).ok_or_else(|| not_registered(id))?;
+        (all.iter().find_map(Register::of)).ok_or_else(|| not_registered(id))?;
         let box_records = HomeRecords::signed(home, &key);
+        let mut close = None;
         let state = StudyState::of(Some(all.to_vec()), |log, slot| {
-            box_records.stream_closed(log, id, slot)
+            close = box_records.stream_closed_at(log, id, slot)?;
+            Ok(close.is_some())
         })
         .map_err(|e| CliError::refuse(format!("cannot report {id}: {e}")))?;
         let StudyState::Finished(after) = state else {
@@ -156,14 +135,7 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
             .collect();
         value = json!({
             "study": id,
-            "finished_at": finished_at(
-                home,
-                &verifying,
-                id,
-                analysis.slot.map(|n| (register.log.as_str(), n)),
-                &analysed.ts,
-                &after,
-            )?,
+            "finished_at": finished_at(close, &analysed.ts, &after),
             "records": all.len(),
             "hypotheses": hypotheses,
             "children": children,
