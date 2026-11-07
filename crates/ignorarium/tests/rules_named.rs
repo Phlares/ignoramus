@@ -3195,10 +3195,10 @@ fn fresh(spec: &Value, dir: &Path, prior: Box<dyn PriorUse>) -> Vec<Diagnostic> 
 }
 
 #[test]
-fn reused_selection_or_confirmation_data_is_refused_naming_the_entry() {
+fn reused_confirmation_data_is_refused_naming_the_entry() {
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "d.txt", b"abc");
-    for role in ["selection", "confirmation"] {
+    for role in ["confirmation"] {
         let (prior, seen) = fake(Some(ABC), None);
         let d = fresh(&with_input("d.txt", "", role), dir.path(), prior);
         assert_eq!(codes_paths(&d), [("E-CNF-005", "inputs[0].path")], "{role}");
@@ -3210,7 +3210,7 @@ fn reused_selection_or_confirmation_data_is_refused_naming_the_entry() {
         assert_eq!(seen.borrow().len(), 1);
     }
     // Other roles are not asked.
-    for role in ["calibration", "model"] {
+    for role in ["selection", "calibration", "model"] {
         let (prior, seen) = fake(Some(ABC), None);
         assert!(fresh(&with_input("d.txt", "", role), dir.path(), prior).is_empty());
         assert!(seen.borrow().is_empty(), "{role}");
@@ -3218,6 +3218,23 @@ fn reused_selection_or_confirmation_data_is_refused_naming_the_entry() {
     // Unknown data passes.
     let (prior, _) = fake(Some("nope"), Some("nope"));
     assert!(fresh(&with_input("d.txt", "", "confirmation"), dir.path(), prior).is_empty());
+}
+
+#[test]
+fn selection_data_used_earlier_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "d.txt", b"abc");
+    let (prior, _) = fake(Some(ABC), Some(&normalized_sha256("abc")));
+    assert!(fresh(&with_input("d.txt", "", "selection"), dir.path(), prior).is_empty());
+}
+
+#[test]
+fn confirmation_data_used_earlier_still_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "d.txt", b"abc");
+    let (prior, _) = fake(Some(ABC), None);
+    let d = fresh(&with_input("d.txt", "", "confirmation"), dir.path(), prior);
+    assert_eq!(codes_paths(&d), [("E-CNF-005", "inputs[0].path")]);
 }
 
 #[test]
@@ -3240,7 +3257,7 @@ fn non_utf8_data_passes_an_empty_normalized_hash() {
     let bytes = [0xff_u8, 0xfe, 0x00];
     write(dir.path(), "d.bin", &bytes);
     let (prior, seen) = fake(None, None);
-    assert!(fresh(&with_input("d.bin", "", "selection"), dir.path(), prior).is_empty());
+    assert!(fresh(&with_input("d.bin", "", "confirmation"), dir.path(), prior).is_empty());
     assert_eq!(*seen.borrow(), [(sha256_hex(&bytes), String::new())]);
 }
 

@@ -330,7 +330,7 @@ fn follow_on_exists(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
 fn data_fresh(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     let mut out = vec![];
     for (path, input, _) in with_parent(spec, pat) {
-        if !is_cluster(input) {
+        if !is_cluster(input) || role(input) == Some("selection") {
             continue;
         }
         let Some((exact, normalized)) = input_hashes(ctx, input) else {

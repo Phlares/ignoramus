@@ -799,7 +799,8 @@ pub fn progress(
 /// a selection or calibration input (E-CNF-004): `check` cannot compare a file that was absent
 /// at registration, and a late copy of a registered file has a registered hash. Then a
 /// selection, confirmation or reserve input that the registered plan leaf did not hold is
-/// late: refuse it if another study used it, else record it under this study's id once. The
+/// late: refuse a confirmation or reserve input that another study used; a selection input may
+/// reuse data. Else record new data under this study's id once. The
 /// study's own leaves, its plan leaf and its late-data leaves, are no earlier use. `all` are
 /// the inputs' hashes in spec order.
 /// Every lookup finishes before the append takes its lock.
@@ -839,11 +840,12 @@ fn gate_late_data(
         .filter(|(_, _, h)| !registered.contains(h));
     let own = own_label(id);
     let mut new = Vec::new();
-    for (path, _, hashes) in late {
+    for (path, role, hashes) in late {
         let uses = log.uses(&hashes.0, &hashes.1)?;
         let earlier =
             |(i, l): &&(usize, Leaf)| u64::try_from(*i) != Ok(leaf_index) && !is_own(l, &own);
-        if let Some((i, leaf)) = uses.iter().find(earlier) {
+        let refusable = *role != Role::Selection;
+        if let Some((i, leaf)) = uses.iter().find(earlier).filter(|_| refusable) {
             let label = match (leaf.kind.as_str(), leaf.label.strip_prefix(OWN_PREFIX)) {
                 ("legacy", Some(study)) => format!("study {study}"),
                 ("legacy", None) => format!("phase {}", leaf.label),

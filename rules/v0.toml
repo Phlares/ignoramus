@@ -524,8 +524,8 @@ target = [
 [[rule]]
 code = "E-CNF-005"
 severity = "error"
-problem = "Selection, confirmation or reserve data was used by an earlier study."
-instruction = "Use data no earlier plan used for selection, confirmation or reserve, or change the role of this input."
+problem = "Confirmation or reserve data was used by an earlier study."
+instruction = "Use data no earlier plan used for confirmation or reserve, or change the role of this input. Selection data may be reused."
 why = "Reused data has already shaped a decision. A test on it is not independent. A reserve input is confirmation data held back, so it must be fresh too."
 sources = ["https://doi.org/10.1038/s41562-016-0021"]
 when = { mode = "confirmatory" }

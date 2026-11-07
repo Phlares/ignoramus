@@ -4,11 +4,11 @@ Severity: error
 
 ## Problem
 
-Selection, confirmation or reserve data was used by an earlier study.
+Confirmation or reserve data was used by an earlier study.
 
 ## Fix
 
-Use data no earlier plan used for selection, confirmation or reserve, or change the role of this input.
+Use data no earlier plan used for confirmation or reserve, or change the role of this input. Selection data may be reused.
 
 ## Why
 

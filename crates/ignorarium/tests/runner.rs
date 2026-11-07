@@ -1579,16 +1579,44 @@ fn a_late_near_copy_of_the_studys_own_data_is_not_an_earlier_use() {
             .iter()
             .any(|(p, h)| p == sel && h.as_ref() == Some(&late))
     );
-    // Another study's use of the same text is still refused.
+    // Another study's use of the same text is still refused for a confirmation input.
     register_study(&lab, "other", staged, &[], PAYLOAD);
-    std::fs::write(common::work(&lab, "other").join(sel), "OWN text").unwrap();
+    std::fs::write(common::work(&lab, "other").join(conf), "OWN text").unwrap();
     match err_of(&lab, "other") {
         RunError::DataReused { path, label } => {
-            assert_eq!(path, sel);
+            assert_eq!(path, conf);
             assert_eq!(label, "registered plan, leaf 0");
         }
         e => panic!("{e}"),
     }
+}
+
+#[test]
+fn a_late_reused_selection_input_runs_and_is_recorded() {
+    let lab = lab();
+    let sel = "data/select.txt";
+    register_study(&lab, "first", staged, &[], PAYLOAD);
+    std::fs::write(common::work(&lab, "first").join(sel), "shared pool").unwrap();
+    plan_of(&lab, "first");
+    // A second study selects on the same data: no refusal, and no second leaf.
+    register_study(&lab, "second", staged, &[], PAYLOAD);
+    std::fs::write(common::work(&lab, "second").join(sel), "shared pool").unwrap();
+    plan_of(&lab, "second");
+    let (exact, norm) = file_hashes(b"shared pool");
+    let log = PlanLog::open(&lab.home.root.join("planlog")).unwrap();
+    assert_eq!(log.uses(&exact, &norm).unwrap().len(), 1);
+    // Data never seen before gets one legacy leaf.
+    register_study(&lab, "fourth", staged, &[], PAYLOAD);
+    std::fs::write(common::work(&lab, "fourth").join(sel), "fresh pool").unwrap();
+    plan_of(&lab, "fourth");
+    let (exact, norm) = file_hashes(b"fresh pool");
+    let uses = log.uses(&exact, &norm).unwrap();
+    assert_eq!(uses.len(), 1);
+    assert_eq!(uses[0].1.label, "study:fourth");
+    // A later confirmation of the same data is an earlier use.
+    register_study(&lab, "third", staged, &[], PAYLOAD);
+    std::fs::write(common::work(&lab, "third").join("data/confirm.txt"), "fresh pool").unwrap();
+    assert!(matches!(err_of(&lab, "third"), RunError::DataReused { .. }));
 }
 
 #[test]

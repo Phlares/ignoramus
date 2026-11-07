@@ -846,7 +846,7 @@ fn reuse_spec(dir: &Path, bytes: &[u8]) -> PathBuf {
             "sha256 = \"\"",
             &format!("sha256 = \"{}\"", ignorarium::canon::sha256_hex(bytes)),
         )
-        .replace("role = \"calibration\"", "role = \"selection\"");
+        .replace("role = \"calibration\"", "role = \"confirmation\"");
     let spec = dir.join("spec.toml");
     std::fs::write(&spec, text).unwrap();
     spec
