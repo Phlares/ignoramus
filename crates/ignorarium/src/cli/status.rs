@@ -3,7 +3,6 @@
 use super::{CliError, Ctx, Done, Run, out, registered, stopped_why};
 use crate::canon::sha256_hex;
 use crate::control::{ControlFile, Signal, State, run_is_live};
-use crate::derived::{ANALYSIS, Analysis, Verdict};
 use crate::records::Record;
 use crate::runner::progress;
 use crate::{resize, seed};
@@ -59,33 +58,6 @@ fn standing(
         Some(State::Done) => ("done", None),
         None => ("not started", None),
     })
-}
-
-/// Each verdict after the study's first analysis record, with the count of units its claim's
-/// mean range clipped in each group, from that record. The count only describes: it never
-/// changes a verdict. A quantile claim, a hypothesis with no claim, and an analysis record
-/// written before the count existed give none.
-fn verdicts(all: &[Record]) -> Vec<Value> {
-    let Some(at) = all.iter().position(|r| r.kind == ANALYSIS) else {
-        return vec![];
-    };
-    let clipped = Analysis::of(&all[at])
-        .map(|a| a.clipped)
-        .unwrap_or_default();
-    (all[at + 1..].iter().filter_map(Verdict::of))
-        .map(|v| {
-            let groups: Vec<Value> = (clipped.iter())
-                .filter(|c| c.hypothesis == v.hypothesis)
-                .map(|c| {
-                    json!({
-                        "stratum": c.stratum, "below": c.below, "above": c.above,
-                        "units": c.units,
-                    })
-                })
-                .collect();
-            json!({ "hypothesis": v.hypothesis, "verdict": v.verdict, "clipped": groups })
-        })
-        .collect()
 }
 
 /// Every field of the report, as one JSON object.
@@ -179,7 +151,6 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
         "blind": blind,
         "conditions": conditions,
         "resize": resize,
-        "verdicts": verdicts(&all),
     }))
 }
 
@@ -221,23 +192,6 @@ fn render(r: &Value) -> String {
             g["first"],
             g["appended"]
         ));
-    }
-    for v in r["verdicts"].as_array().map_or(&[][..], Vec::as_slice) {
-        let h = v["hypothesis"].as_str().unwrap_or("");
-        s.push_str(&format!(
-            "verdict {h}: {}\n",
-            v["verdict"].as_str().unwrap_or("")
-        ));
-        for c in v["clipped"].as_array().map_or(&[][..], Vec::as_slice) {
-            let name = c["stratum"].as_str().filter(|n| !n.is_empty());
-            s.push_str(&format!(
-                "clipped {h} {}: {} below, {} above, of {} units\n",
-                name.unwrap_or("pooled"),
-                c["below"],
-                c["above"],
-                c["units"]
-            ));
-        }
     }
     s.push_str(&format!(
         "rate: {}\n",

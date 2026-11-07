@@ -1828,7 +1828,7 @@ fn the_analysis_record_holds_the_resize_sd_and_the_appended_sd_after_the_end() {
 const CLIPPED: &str = "#!/bin/sh\ncase \"$2\" in exact) v=100;; *) h=$(printf '%s' \"$4\" | cksum | cut -d' ' -f1); case $((h % 4)) in 0) v=97;; 1) v=103;; *) v=99;; esac;; esac\nprintf '{\"ppl\": %s}' \"$v\" > \"$IGNORARIUM_OUT/values.json\"\n";
 
 #[test]
-fn the_analysis_record_and_status_count_the_units_the_range_clipped() {
+fn the_analysis_record_counts_the_units_the_range_clipped() {
     use ignorarium::derived::GroupClip;
     use ignorarium::runner::{RunStatus, run};
     let lab = lab();
@@ -1853,56 +1853,16 @@ fn the_analysis_record_and_status_count_the_units_the_range_clipped() {
         units: read.len() as u64,
     };
     assert_eq!(a.clipped, [want]);
-    // Status shows them next to the verdict.
-    let verdict = kind_of(&lab, "clip", "verdict")[0].body["verdict"].clone();
+    // Status does not show them: the report will, next to each verdict.
     let s = status(&lab, "clip");
-    assert_eq!(
-        s["verdicts"],
-        serde_json::json!([{
-            "hypothesis": "H1", "verdict": verdict,
-            "clipped": [{ "stratum": "", "below": below, "above": above, "units": read.len() }],
-        }])
-    );
+    assert!(!keys_of(&s).iter().any(|k| k == "clipped"), "{s}");
     let a = bin(&lab).args(["status", "clip"]).assert().success();
-    let want = format!(
-        "verdict H1: {}\nclipped H1 pooled: {below} below, {above} above, of {} units\n",
-        verdict.as_str().unwrap(),
-        read.len()
-    );
-    assert!(text(&a).contains(&want), "{}", text(&a));
-    // The same log, signed again with an analysis record written before the count existed:
-    // it verifies, and status prints the verdict with no count.
-    let key = keys::load(&lab.home).unwrap().unwrap();
-    let log = lab.home.study_dir("clip").join("records.jsonl");
-    let all = common::records_of(&lab, "clip");
-    std::fs::rename(&log, log.with_extension("before")).unwrap();
-    for mut r in all {
-        if r.kind == "analysis" {
-            r.body.as_object_mut().unwrap().remove("clipped").unwrap();
-        }
-        let draft = ignorarium::records::RecordDraft {
-            study: r.study,
-            row: r.row,
-            kind: r.kind,
-            body: r.body,
-        };
-        ignorarium::records::append(&log, &key, draft).unwrap();
-    }
-    let s = status(&lab, "clip");
-    assert_eq!(s["verdicts"][0]["verdict"], verdict);
-    assert_eq!(s["verdicts"][0]["clipped"], serde_json::json!([]));
-    let a = bin(&lab).args(["status", "clip"]).assert().success();
-    let want = format!("verdict H1: {}\n", verdict.as_str().unwrap());
-    assert!(text(&a).contains(&want), "{}", text(&a));
     assert!(!text(&a).contains("clipped"), "{}", text(&a));
-    // A hypothesis with no claim clips nothing, so status prints no count for it.
+    // A hypothesis with no claim clips nothing: the record leaves the field out.
     plain(&lab, "none");
     bin_at(&lab, "none").args(["run", "none"]).assert().code(0);
-    let s = status(&lab, "none");
-    assert_eq!(s["verdicts"][0]["clipped"], serde_json::json!([]));
-    let a = bin(&lab).args(["status", "none"]).assert().success();
-    assert!(text(&a).contains("verdict H1: none\n"), "{}", text(&a));
-    assert!(!text(&a).contains("clipped"), "{}", text(&a));
+    let body = &kind_of(&lab, "none", "analysis")[0].body;
+    assert!(body.get("clipped").is_none(), "{body}");
 }
 
 #[test]
