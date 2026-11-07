@@ -740,10 +740,13 @@ fn a_plan_that_would_take_a_reserved_slot_is_refused() {
 #[test]
 fn check_shows_slots_left_and_reserved() {
     let lab = lab();
-    registered_family(&lab);
+    let root = registered_family(&lab);
     let spec = outsider(&lab, "fresh data\n", |t| t);
     let (_, v) = check_json(&lab, &spec);
     assert_eq!(v["plan_stream"], json!({ "slots_left": 9, "reserved": 2 }));
+    // A member's own slot is not among those reserved for others.
+    let (_, v) = check_json(&lab, &root.join("spec/b.toml"));
+    assert_eq!(v["plan_stream"], json!({ "slots_left": 9, "reserved": 1 }));
     let out = printed(&lab, "check", &spec);
     assert!(
         out.contains("\nstream: slot 2, level 0.005\nplan stream: slots left 9, reserved 2\n"),

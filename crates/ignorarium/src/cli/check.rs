@@ -60,15 +60,16 @@ pub struct Room {
 }
 
 impl Room {
-    /// The room of the plan stream that gives `stream`; `None` for the test stream, which
-    /// never runs out, and when the box records cannot be read, which E-STR-001 reports.
-    fn of(stream: &Alpha, records: &dyn BoxRecords) -> Option<Room> {
+    /// The room of the plan stream that gives `stream` to study `id`; `None` for the test
+    /// stream, which never runs out, and when the box records cannot be read, which E-STR-001
+    /// reports. A member's own slot is not reserved against it.
+    fn of(stream: &Alpha, records: &dyn BoxRecords, id: &str) -> Option<Room> {
         if stream.log != LogName::Plan.as_str() {
             return None;
         }
         Some(Room {
             slots_left: (stream::M + 1).saturating_sub(stream.slot),
-            reserved: records.unopened().ok()?.len() as u64,
+            reserved: family::keep(&records.unopened().ok()?, id, 0),
         })
     }
 }
@@ -331,7 +332,7 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         filled,
         diags,
         estimate: None,
-        room: (stream.as_ref()).and_then(|s| Room::of(s, cc.records.as_ref())),
+        room: (stream.as_ref()).and_then(|s| Room::of(s, cc.records.as_ref(), root_id)),
         family_line: None,
         stream,
         carried: rules::carried(&value, &cc),
