@@ -1,7 +1,7 @@
 //! `report`: the verdicts of a finished study, through the real binary.
 mod common;
 use assert_cmd::Command;
-use common::{Lab, finished_with, instrument, lab, plant, records_of};
+use common::{Lab, edited, finished_with, instrument, lab, plain, plant, records_of, source_spec};
 use serde_json::{Value, json};
 
 fn bin(lab: &Lab) -> Command {
@@ -152,4 +152,176 @@ fn a_hypothesis_without_counts_prints_none() {
     let h2 = t.split("h2:").nth(1).unwrap();
     let h2 = h2.split("h3:").next().unwrap();
     assert!(!h2.contains("clipped"), "{t}");
+}
+
+fn log_path(lab: &Lab, id: &str) -> std::path::PathBuf {
+    lab.home.study_dir(id).join("records.jsonl")
+}
+
+fn refused(lab: &Lab, id: &str, said: &[&str]) {
+    let a = bin(lab).args(["report", id]).assert().code(1);
+    let err = String::from_utf8_lossy(&a.get_output().stderr).into_owned();
+    for s in said {
+        assert!(err.contains(s), "missing {s:?} in {err}");
+    }
+}
+
+fn old_analysis_body() -> Value {
+    json!({
+        "commit": "ef".repeat(32), "box_version": "0.0.1", "estimates": 0, "verdicts": 1,
+        "slot": null, "instrument": { "payload": "", "environment": "", "inputs": [] },
+        "recheck": null,
+    })
+}
+
+#[test]
+fn each_report_appends_one_opened_record() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let first = report_json(&lab, "s1");
+    let second = report_json(&lab, "s1");
+    let all = records_of(&lab, "s1");
+    let tail = &all[all.len() - 2..];
+    for (r, shown) in tail.iter().zip([&first, &second]) {
+        assert_eq!(r.kind, "opened");
+        assert_eq!(shown["opened"]["seq"], r.seq);
+    }
+    bin(&lab)
+        .args(["verify", "--study", "s1"])
+        .assert()
+        .success();
+    assert_eq!(first["records"].as_u64().unwrap() + 1, second["records"]);
+}
+
+#[test]
+fn a_tampered_record_refuses_the_report() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let path = log_path(&lab, "s1");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("\"e_value\":312.4"));
+    std::fs::write(
+        &path,
+        text.replacen("\"e_value\":312.4", "\"e_value\":312.5", 1),
+    )
+    .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    refused(
+        &lab,
+        "s1",
+        &["cannot report s1: record ", "hash does not match"],
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn a_cut_last_line_refuses_the_report() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let path = log_path(&lab, "s1");
+    let mut bytes = std::fs::read(&path).unwrap();
+    let lines = bytes.iter().filter(|b| **b == b'\n').count();
+    bytes.truncate(bytes.len() - 1 - 10);
+    std::fs::write(&path, &bytes).unwrap();
+    refused(
+        &lab,
+        "s1",
+        &[&format!("line {lines} is not a whole record")],
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
+#[test]
+fn an_unfinished_study_refuses_blind_or_not() {
+    let lab = lab();
+    for (id, blind) in [("u1", false), ("u2", true)] {
+        if blind {
+            edited(
+                &lab,
+                id,
+                |t| t.replace("blind = false", "blind = true"),
+                common::PAYLOAD,
+            );
+        } else {
+            plain(&lab, id);
+        }
+        let before = std::fs::read(log_path(&lab, id)).unwrap();
+        refused(
+            &lab,
+            id,
+            &[&format!(
+                "study {id} is not finished; status shows its progress"
+            )],
+        );
+        assert_eq!(std::fs::read(log_path(&lab, id)).unwrap(), before);
+    }
+}
+
+#[test]
+fn a_blind_finished_study_shows_everything() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let dir = lab.home.study_dir("s2");
+    std::fs::create_dir_all(&dir).unwrap();
+    let blind = source_spec(&[]).replace("blind = false", "blind = true");
+    assert!(blind.contains("blind = true"));
+    std::fs::write(dir.join("spec.toml"), blind).unwrap();
+    plant(&lab.home, "s2", &finished_study(&three(), &[]));
+    let open = report_json(&lab, "s1");
+    let shut = report_json(&lab, "s2");
+    assert_eq!(open["hypotheses"], shut["hypotheses"]);
+    assert_eq!(open["records"], shut["records"]);
+}
+
+#[test]
+fn a_stopped_study_refuses_with_its_reason() {
+    let lab = lab();
+    plain(&lab, "s1");
+    plant(&lab.home, "s1", &[("stop", json!({ "why": "budget" }))]);
+    refused(
+        &lab,
+        "s1",
+        &["study s1 is stopped: budget; it has no report"],
+    );
+}
+
+#[test]
+fn an_old_analysis_record_reports_without_counts() {
+    let lab = lab();
+    let mut bodies = finished_study(&three()[..1], &[]);
+    bodies.iter_mut().find(|(k, _)| *k == "analysis").unwrap().1 = old_analysis_body();
+    plant(&lab.home, "s1", &bodies);
+    let r = report_json(&lab, "s1");
+    assert_eq!(r["hypotheses"][0]["clipped"], Value::Null);
+    let a = bin(&lab).args(["report", "s1"]).assert().success();
+    assert!(!text(&a).contains("clipped"));
+}
+
+#[test]
+fn no_study_and_not_registered_refuse() {
+    let lab = lab();
+    refused(&lab, "Bad_Id", &["is not a study id"]);
+    refused(&lab, "ghost", &["is not registered"]);
+}
+
+#[test]
+fn a_second_verdict_for_a_hypothesis_is_not_printed() {
+    let lab = lab();
+    let first = verdict(
+        "h1",
+        "pass",
+        "test",
+        json!(312.4),
+        json!(0.005),
+        Value::Null,
+    );
+    let second = verdict("h1", "fail", "test", json!(0.0), json!(0.005), Value::Null);
+    let mut bodies = finished_study(&[first], &[]);
+    bodies.push(("verdict", second));
+    plant(&lab.home, "s1", &bodies);
+    let r = report_json(&lab, "s1");
+    let shown = r["hypotheses"].as_array().unwrap();
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0]["verdict"], "pass");
+    assert_eq!(shown[0]["e_value"], 312.4);
 }

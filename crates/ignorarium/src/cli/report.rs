@@ -1,12 +1,13 @@
 //! `report`: the verdicts of a finished study, with the clip counts of its mean claims.
 //! Appends one `opened` record, so a reader of the log sees that the results were read.
 use super::check::HomeRecords;
-use super::{CliError, Ctx, Done, Run, located, not_registered, out};
+use super::{CliError, Ctx, Done, Run, located, not_registered, out, stopped_why};
 use crate::derived::{Analysis, ESTIMATE, GroupClip, OPENED, Register, StudyState, Verdict};
 use crate::records::{self, Record, RecordDraft, RecordError};
 use crate::rules::BoxRecords;
 use crate::stream::{self, Log, LogName};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 
 /// What stops the append: a refusal of this verb, or the log's own fault.
 enum Stop {
@@ -26,8 +27,8 @@ impl From<CliError> for Stop {
     }
 }
 
-/// The time the results were complete: the close of the study's stream slot when it holds
-/// one, else its last estimate or verdict record.
+/// The time the results were complete: the later of the study's last estimate or verdict
+/// record and, when it holds a stream slot, the close of that slot.
 fn finished_at(
     ctx: &Ctx,
     key: &ed25519_dalek::VerifyingKey,
@@ -37,6 +38,11 @@ fn finished_at(
     after: &[Record],
 ) -> Result<String, CliError> {
     let io = |e: &dyn std::fmt::Display| CliError::usage(format!("cannot read the stream: {e}"));
+    let last = after
+        .iter()
+        .rfind(|r| r.kind == ESTIMATE || r.kind == crate::derived::VERDICT)
+        .map(|r| r.ts.clone())
+        .unwrap_or_default();
     if let (Some(slot), Some(alpha)) = (analysis.slot, &register.alpha) {
         let name = LogName::parse(&alpha.log).map_err(|e| io(&e))?;
         let path = Log::of(ctx.home()?, name).path().to_path_buf();
@@ -45,13 +51,10 @@ fn finished_at(
             .iter()
             .find(|r| r.kind == stream::CLOSE && r.body["study"] == id && r.body["slot"] == slot);
         if let Some(r) = close {
-            return Ok(r.ts.clone());
+            return Ok(last.max(r.ts.clone()));
         }
     }
-    let last = after
-        .iter()
-        .rfind(|r| r.kind == ESTIMATE || r.kind == crate::derived::VERDICT);
-    Ok(last.map(|r| r.ts.clone()).unwrap_or_default())
+    Ok(last)
 }
 
 fn clips(analysis: &Analysis, h: &str) -> Value {
@@ -83,6 +86,12 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
             ))
             .into());
         }
+        if let Some(why) = stopped_why(all) {
+            return Err(CliError::refuse(format!(
+                "study {id} is stopped: {why}; it has no report"
+            ))
+            .into());
+        }
         let register = (all.iter().find_map(Register::of)).ok_or_else(|| not_registered(id))?;
         let box_records = HomeRecords {
             home: home.clone(),
@@ -93,12 +102,17 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
         })
         .map_err(|e| CliError::usage(format!("cannot report {id}: {e}")))?;
         let StudyState::Finished(after) = state else {
-            return Err(CliError::refuse(format!("cannot report {id}: not finished")).into());
+            return Err(CliError::refuse(format!(
+                "study {id} is not finished; status shows its progress"
+            ))
+            .into());
         };
         let analysis = (all.iter().find_map(Analysis::of)).ok_or_else(|| not_registered(id))?;
+        let mut seen = BTreeSet::new();
         let hypotheses: Vec<Value> = after
             .iter()
             .filter_map(Verdict::of)
+            .filter(|v| seen.insert(v.hypothesis.clone()))
             .map(|v| {
                 json!({
                     "hypothesis": v.hypothesis, "verdict": v.verdict, "basis": v.basis,
@@ -134,8 +148,7 @@ fn num(v: &Value, places: usize) -> Option<String> {
 fn text(r: &Value) -> String {
     let id = r["study"].as_str().unwrap_or_default();
     let mut s = format!(
-        "study {id}: finished {}, {} records verified
-",
+        "study {id}: finished {}, {} records verified\n",
         r["finished_at"].as_str().unwrap_or_default(),
         r["records"]
     );
@@ -162,8 +175,7 @@ fn text(r: &Value) -> String {
                 Some(x) => x,
             };
             s.push_str(&format!(
-                "  clipped in {stratum}: {} below lo, {} above hi, of {} units
-",
+                "  clipped in {stratum}: {} below lo, {} above hi, of {} units\n",
                 c["below"], c["above"], c["units"]
             ));
         }
@@ -174,9 +186,7 @@ fn text(r: &Value) -> String {
 pub fn run(ctx: &Ctx, id: &str, json: bool) -> Run {
     let r = report(ctx, id)?;
     let shown = if json {
-        serde_json::to_string_pretty(&r).map_err(|e| CliError::usage(e.to_string()))?
-            + "
-"
+        serde_json::to_string_pretty(&r).map_err(|e| CliError::usage(e.to_string()))? + "\n"
     } else {
         text(&r)
     };
