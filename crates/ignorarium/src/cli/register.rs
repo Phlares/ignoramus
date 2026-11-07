@@ -506,15 +506,15 @@ fn hold_inputs<'a>(
 /// Re-read the spec and check both log tails, stage and publish the study folder, then open
 /// the stream slot of a confirmatory plan at no lower level than `checked`, leaving the slots
 /// reserved for family members free, and append the plan leaf, a root's family leaf and the
-/// `register` record. Another process can register the same id between the
-/// check and the publish; the rename refuses it, before any slot opens or leaf is appended.
-/// The slot opens under the stream's lock, or nothing is written to the stream and the folder
-/// goes back to staging, so the id stays free. A fault in a later append leaves a folder
-/// without a record. The log appends are not atomic with the earlier-use lookup in `check`;
-/// v0 accepts that. The slots to keep free are read before the stream's lock, so an outsider
-/// that registers between a root's slot opening and its register record landing can take a
-/// slot a member needs; v0 accepts that too. `check_tails` runs before `append` takes its lock. Returns the leaf and
-/// the slot.
+/// `register` record. Another process can register the same id between the check and the
+/// publish; the rename refuses it, before any slot opens or leaf is appended. The slot opens
+/// under the stream's lock, or nothing is written to the stream and the folder goes back to
+/// staging, so the id stays free. A fault in a later append leaves a folder without a record.
+/// The log appends are not atomic with the earlier-use lookup in `check`; v0 accepts that.
+/// The slots to keep free are read before the stream's lock, so an outsider that registers
+/// between a root's slot opening and its register record landing can take a slot a member
+/// needs; v0 accepts that too. `check_tails` runs before `append` takes its lock. Returns the
+/// leaf and the slot.
 fn store(
     spec_path: &Path,
     home: &Home,

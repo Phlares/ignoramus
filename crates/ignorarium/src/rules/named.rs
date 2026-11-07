@@ -365,7 +365,7 @@ fn data_fresh(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     };
     let mut out = vec![];
     for (path, input, _) in with_parent(spec, pat) {
-        if !is_cluster(input) || role(input) == Some("selection") {
+        if !matches!(role(input), Some("confirmation" | "reserve")) {
             continue;
         }
         let Some((exact, normalized)) = input_hashes(ctx, input) else {
