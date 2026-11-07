@@ -17,7 +17,7 @@ use crate::store::Store;
 use crate::stream::{self, Log, LogName, Next, StreamError};
 use ed25519_dalek::VerifyingKey;
 use serde_json::{Value, json};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 /// Everything a check finds about one spec file.
 pub struct Assessed {
@@ -33,7 +33,7 @@ pub struct Assessed {
     pub estimate: Option<Estimate>,
     /// `(path, (exact, normalized) SHA-256)` of each input, read once here; `None`
     /// when the file is absent or its path is unsafe. `register` stores these.
-    pub input_hashes: Vec<(String, Option<(String, String)>)>,
+    pub input_hashes: inputs::InputHashes,
     /// What the rules read, the box's records among them; `register` resolves from it.
     pub ctx: CheckCtx,
     /// For a confirmatory plan, the slot and level the stream would give it now.
@@ -277,87 +277,6 @@ impl HomeRecords {
     }
 }
 
-/// Hash every input the spec lists, from the store when the pin names a stored object.
-/// This is the one read `register` relies on.
-pub fn input_hashes(
-    store: &Store,
-    root: &Path,
-    spec: &Value,
-) -> Vec<(String, Option<(String, String)>)> {
-    let list = spec["inputs"].as_array().map_or(&[][..], Vec::as_slice);
-    list.iter()
-        .filter_map(|i| Some((i["path"].as_str()?, i["sha256"].as_str().unwrap_or(""))))
-        .map(|(p, sha)| {
-            let found = inputs::resolve(store, root, p, sha);
-            (p.to_string(), inputs::hashes(&found))
-        })
-        .collect()
-}
-
-/// The file whose presence marks a study root.
-pub const ROOT_MARKER: &str = "ignorarium.toml";
-
-/// The folder every study path is relative to: the nearest folder at or above the spec's
-/// own folder that holds a regular `ignorarium.toml` (a link or folder of that name does
-/// not count; the content is not read). The walk checks the first folder that holds a
-/// `.git` entry and goes no further. It never uses a marker in the user's home folder or
-/// the filesystem root. Without a marker, the spec's folder.
-pub fn study_root(spec_path: &Path) -> PathBuf {
-    study_root_in(spec_path, std::env::home_dir().as_deref())
-}
-
-/// `study_root` for a given home folder.
-pub fn study_root_in(spec_path: &Path, home: Option<&Path>) -> PathBuf {
-    let spec = std::path::absolute(spec_path).unwrap_or_else(|_| spec_path.to_path_buf());
-    let spec = fold_dots(&spec);
-    let folder = spec
-        .parent()
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    root_at(&folder, home)
-}
-
-/// The study root a `run` or `resume` reads late inputs from: `study_root`'s walk from the
-/// current folder, which is the root itself when no marker is found.
-pub fn current_root() -> std::io::Result<PathBuf> {
-    Ok(root_at(
-        &std::env::current_dir()?,
-        std::env::home_dir().as_deref(),
-    ))
-}
-
-/// The walk of `study_root` from the absolute folder `folder`.
-fn root_at(folder: &Path, home: Option<&Path>) -> PathBuf {
-    for dir in folder.ancestors() {
-        if dir.parent().is_none() || Some(dir) == home {
-            break;
-        }
-        let has = |name: &str| dir.join(name).symlink_metadata();
-        if has(ROOT_MARKER).is_ok_and(|m| m.is_file()) {
-            return dir.to_path_buf();
-        }
-        if has(".git").is_ok() {
-            break;
-        }
-    }
-    folder.to_path_buf()
-}
-
-/// Drop `.` and fold `..` against the segment before it, without touching the disk, so the
-/// walk climbs real parents only.
-fn fold_dots(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for c in path.components() {
-        match c {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other),
-        }
-    }
-    out
-}
-
 pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
     let home = ctx.home()?;
     let shown = spec_path.display();
@@ -377,7 +296,7 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
     let store = Store {
         root: home.root.join("store"),
     };
-    let root = study_root(spec_path);
+    let root = inputs::study_root(spec_path);
     let mut cc = CheckCtx {
         members: family::load(&root, &raw.value, &store),
         root,
@@ -406,7 +325,7 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
     let mut a = Assessed {
         root: cc.root.clone(),
         hash: raw.hash,
-        input_hashes: input_hashes(&cc.store, &cc.root, &value),
+        input_hashes: inputs::spec_hashes(&cc.store, &cc.root, &value),
         filled,
         diags,
         estimate: None,

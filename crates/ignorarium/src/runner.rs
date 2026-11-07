@@ -13,7 +13,7 @@ use crate::estimate::{apply_defaults, estimate};
 use crate::events::{self, Event};
 use crate::family;
 use crate::home::Home;
-use crate::inputs::{self, Found};
+use crate::inputs::{self, Found, InputHashes};
 use crate::machine::{self, Machine};
 use crate::payload::{self, PayloadError};
 use crate::planlog::store::{Leaf, LogError, PlanLog};
@@ -96,10 +96,6 @@ pub struct RunPlan {
     /// backend's message reaches the records through it.
     pub redact: Redact,
 }
-
-/// Each input path with its `(exact, normalized)` hashes, in spec order; `None` while the
-/// input is absent.
-pub type InputHashes = Vec<(String, Option<(String, String)>)>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunStatus {
@@ -326,7 +322,7 @@ pub fn up_to(backends: Vec<Box<dyn Backend>>, max: u8) -> Vec<Box<dyn Backend>> 
 /// The first prepare that gets this far signs an `inputs` record of every input's digest,
 /// or its absence; a later one whose inputs differ is refused before anything changes, so
 /// every row of a study runs on the same bytes. `root` is the study root found where the
-/// run started (`check::current_root`); only an input absent at registration is read from
+/// run started (`inputs::current_root`); only an input absent at registration is read from
 /// it, and only when its identity is the register record's.
 pub fn prepare_with(
     home: &Home,

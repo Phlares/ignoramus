@@ -1,8 +1,9 @@
 mod common;
 
 use assert_cmd::Command;
-use ignorarium::cli::check::{self, HomeRecords};
+use ignorarium::cli::check::HomeRecords;
 use ignorarium::home::Home;
+use ignorarium::inputs;
 use ignorarium::keys;
 use ignorarium::rules::BoxRecords;
 use ignorarium::stream::{self, LogName};
@@ -603,7 +604,7 @@ fn mark(dir: &Path) {
 fn no_marker_keeps_the_spec_folder() {
     let dir = repo();
     let spec = dir.path().join("a/b/s.toml");
-    assert_eq!(check::study_root(&spec), dir.path().join("a/b"));
+    assert_eq!(inputs::study_root(&spec), dir.path().join("a/b"));
 }
 
 #[test]
@@ -633,11 +634,11 @@ fn the_nearest_marker_above_the_spec_wins() {
     std::fs::create_dir_all(inner.join("deep")).unwrap();
     mark(&dir.path().join("outer"));
     let spec = inner.join("deep/s.toml");
-    assert_eq!(check::study_root(&spec), dir.path().join("outer"));
+    assert_eq!(inputs::study_root(&spec), dir.path().join("outer"));
     mark(&inner);
-    assert_eq!(check::study_root(&spec), inner);
+    assert_eq!(inputs::study_root(&spec), inner);
     mark(&inner.join("deep"));
-    assert_eq!(check::study_root(&spec), inner.join("deep"));
+    assert_eq!(inputs::study_root(&spec), inner.join("deep"));
 }
 
 #[test]
@@ -646,7 +647,7 @@ fn a_marker_that_is_a_folder_or_a_link_is_not_a_marker() {
     let folder = dir.path().join("f");
     std::fs::create_dir_all(folder.join("spec/ignorarium.toml")).unwrap();
     assert_eq!(
-        check::study_root(&folder.join("spec/s.toml")),
+        inputs::study_root(&folder.join("spec/s.toml")),
         folder.join("spec")
     );
     #[cfg(unix)]
@@ -657,7 +658,7 @@ fn a_marker_that_is_a_folder_or_a_link_is_not_a_marker() {
         std::os::unix::fs::symlink(linked.join("real.toml"), linked.join("ignorarium.toml"))
             .unwrap();
         assert_eq!(
-            check::study_root(&linked.join("spec/s.toml")),
+            inputs::study_root(&linked.join("spec/s.toml")),
             linked.join("spec")
         );
     }
@@ -672,10 +673,10 @@ fn the_search_stops_at_the_repo_root_but_checks_it() {
     std::fs::create_dir_all(repo.join("sub/spec")).unwrap();
     let spec = repo.join("sub/spec/s.toml");
     // The marker above the repo is out of reach.
-    assert_eq!(check::study_root(&spec), repo.join("sub/spec"));
+    assert_eq!(inputs::study_root(&spec), repo.join("sub/spec"));
     // A marker in the repo root itself counts.
     mark(&repo);
-    assert_eq!(check::study_root(&spec), repo);
+    assert_eq!(inputs::study_root(&spec), repo);
 }
 
 #[test]
@@ -684,8 +685,11 @@ fn the_search_never_uses_a_marker_in_the_home_folder() {
     let home = dir.path().join("home");
     mark(&home);
     let spec = home.join("study/s.toml");
-    assert_eq!(check::study_root_in(&spec, Some(&home)), home.join("study"));
-    assert_eq!(check::study_root_in(&spec, None), home);
+    assert_eq!(
+        inputs::study_root_in(&spec, Some(&home)),
+        home.join("study")
+    );
+    assert_eq!(inputs::study_root_in(&spec, None), home);
 }
 
 #[test]
@@ -694,7 +698,7 @@ fn dotdot_in_the_spec_argument_is_folded_before_the_walk() {
     mark(&dir.path().join("a"));
     std::fs::create_dir_all(dir.path().join("b")).unwrap();
     let spec = dir.path().join("a/../b/s.toml");
-    assert_eq!(check::study_root(&spec), dir.path().join("b"));
+    assert_eq!(inputs::study_root(&spec), dir.path().join("b"));
 }
 
 #[test]

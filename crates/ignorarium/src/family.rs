@@ -3,14 +3,13 @@
 //! checks each with every rule, builds the lock the root's `register` signs, and finds the
 //! registered family of a member.
 use crate::canon::{canonical_of, sha256_hex};
-use crate::cli::check::{PENDING, input_hashes, scheduled, study_root};
+use crate::cli::check::{PENDING, scheduled};
 use crate::derived::Register;
 use crate::diag::{Diagnostic, Severity, printable};
-use crate::inputs::{input_path, regular_file};
+use crate::inputs::{InputHashes, input_path, regular_file, spec_hashes, study_root};
 use crate::planlog::store::Leaf;
 use crate::prior::{NoPriorUse, same_data};
 use crate::rules::{self, CheckCtx, NoRecords};
-use crate::runner::InputHashes;
 use crate::spec::model::{Role, Spec};
 use crate::spec::{self, RawSpec};
 use crate::store::Store;
@@ -203,7 +202,7 @@ pub struct MemberSpec {
     pub raw: RawSpec,
     /// The member's own study root, found from its spec's folder.
     pub root: PathBuf,
-    /// Its inputs' hashes, as `check::input_hashes` gives them from the member's root.
+    /// Its inputs' hashes, as `inputs::spec_hashes` gives them from the member's root.
     pub input_hashes: InputHashes,
 }
 
@@ -237,7 +236,7 @@ pub fn load(root: &Path, spec: &Value, store: &Store) -> Vec<Result<MemberSpec, 
             let bytes = std::fs::read(&file).map_err(|e| unread(e.to_string()))?;
             let raw = spec::parse(&bytes).map_err(|e| unread(e.to_string()))?;
             let root = study_root(&file);
-            let input_hashes = input_hashes(store, &root, &raw.value);
+            let input_hashes = spec_hashes(store, &root, &raw.value);
             Ok(MemberSpec {
                 index,
                 path: path.to_string(),
@@ -250,7 +249,7 @@ pub fn load(root: &Path, spec: &Value, store: &Store) -> Vec<Result<MemberSpec, 
 }
 
 /// Each input of `spec` that has a path, as its spec path, its table and its data's hashes;
-/// `hashes` is `check::input_hashes` of the same spec, which lists the same inputs.
+/// `hashes` is `inputs::spec_hashes` of the same spec, which lists the same inputs.
 pub fn inputs<'a>(
     spec: &'a Value,
     hashes: &'a InputHashes,

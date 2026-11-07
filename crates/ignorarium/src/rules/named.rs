@@ -275,9 +275,7 @@ fn is_reserve(input: &Value) -> bool {
 /// The input's `(exact, normalized)` hashes, from the store first; `None` when there is no
 /// file to read or its path is unsafe.
 fn input_hashes(ctx: &CheckCtx, input: &Value) -> Option<(String, String)> {
-    let path = input.get("path")?.as_str()?;
-    let sha = input.get("sha256").and_then(Value::as_str).unwrap_or("");
-    inputs::hashes(&inputs::resolve(&ctx.store, &ctx.root, path, sha))
+    inputs::hashes_of(&ctx.store, &ctx.root, input)
 }
 
 fn input_path_safe(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
@@ -392,7 +390,7 @@ fn data_fresh(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
 /// E-END-002's and E-PTH-001's. Each spec is read once per route, so a cycle ends.
 fn follow_on_shares(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     let held = |value: &Value| {
-        let hashes = crate::cli::check::input_hashes(&ctx.store, &ctx.root, value);
+        let hashes = inputs::spec_hashes(&ctx.store, &ctx.root, value);
         fam::data(value, &hashes, &["confirmation", "reserve"])
     };
     let mine = held(spec);

@@ -3906,7 +3906,7 @@ fn a_stored_input_passes_without_its_file() {
     write(dir.path(), "data/a.txt", b"other bytes");
     assert!(named(&spec, dir.path()).is_empty());
     let store = ignorarium::store::Store::open(dir.path()).unwrap();
-    let got = ignorarium::cli::check::input_hashes(&store, dir.path(), &spec);
+    let got = ignorarium::inputs::spec_hashes(&store, dir.path(), &spec);
     assert_eq!(
         got[0],
         (
@@ -4003,7 +4003,7 @@ fn a_stored_input_whose_blob_is_gone_or_changed_is_not_held() {
     std::fs::write(&blob, b"abc").unwrap();
     assert_eq!(codes_paths(&named(&spec, dir.path())), hsh);
     assert_eq!(
-        ignorarium::cli::check::input_hashes(&store, dir.path(), &spec)[0].1,
+        ignorarium::inputs::spec_hashes(&store, dir.path(), &spec)[0].1,
         None
     );
     std::fs::remove_file(&blob).unwrap();
