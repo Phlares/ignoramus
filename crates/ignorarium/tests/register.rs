@@ -692,11 +692,11 @@ fn a_slot_lost_at_the_prompt_is_refused_before_the_plan_leaf() {
     let key = keys::load_or_create(&f.home).unwrap();
     let log = Log::of(&f.home, LogName::Plan);
     for i in 1..=9 {
-        log.open(&key, &format!("s{i}"), 0.0).unwrap();
+        log.open(&key, &format!("s{i}"), 0.0, 0).unwrap();
     }
     // The check shows slot 10; another study takes it while the person reads the prompt.
     let (r, out) = at_prompt(&f, &spec, || {
-        log.open(&key, "rival", 0.0).unwrap();
+        log.open(&key, "rival", 0.0, 0).unwrap();
     });
     assert!(out.contains("\nstream: slot 10, level 0.005\n"), "{out}");
     let e = r.unwrap_err();
@@ -753,7 +753,7 @@ fn a_level_that_rose_since_the_check_is_spent_and_said() {
     common::pilot(&f.home, vec![common::arm_a()]);
     let key = keys::load_or_create(&f.home).unwrap();
     let log = Log::of(&f.home, LogName::Plan);
-    log.open(&key, "other", 0.0).unwrap();
+    log.open(&key, "other", 0.0, 0).unwrap();
     // The check shows slot 2 at 0.005; slot 1 closes as a discovery at the prompt.
     let (r, out) = at_prompt(&f, &spec, || {
         assert!(log.close(&key, "other", 1, 200.0).unwrap());

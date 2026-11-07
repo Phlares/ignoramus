@@ -71,6 +71,7 @@ fn records(spec: &Spec, role: Role, value: impl Fn(&Cluster) -> f64) -> Vec<Reco
         resolved: vec![],
         deviations: vec![],
         carries: None,
+        family: None,
         alpha: Some(derived::Alpha {
             log: "planlog".into(),
             slot: 0,

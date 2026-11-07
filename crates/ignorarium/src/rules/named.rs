@@ -116,6 +116,7 @@ const NAMED: &[(&str, NamedFn)] = &[
     ("family-members", family_members),
     ("family-pinned", family_pinned),
     ("family-selection", family_selection),
+    ("family-room", family_room),
     ("units-declared", units_declared),
     ("row-cap", row_cap),
     ("selection-stage", selection_stage),
@@ -422,8 +423,9 @@ fn family_confirmatory(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
 }
 
 /// E-FAM-002: a member that cannot be read, has the id of this study or of an earlier member,
-/// is registered, declares its own family, or lies under another study root. A box whose
-/// records cannot be read, and a context that did not read the members, fail closed.
+/// is registered, is locked in a registered family, declares its own family, or lies under
+/// another study root. A box whose records cannot be read, and a context that did not read the
+/// members, fail closed.
 fn family_members(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     // A member path that is mistyped or unsafe is the generic rules' to report.
     let safe = |entry: &Value| entry.as_str().and_then(|rel| input_path(&ctx.root, rel));
@@ -435,6 +437,7 @@ fn family_members(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
             .collect();
     };
     let own = text(spec, "study.id");
+    let unread = |e: &String| format!("The box records cannot be read: {e}.");
     let mut ids: Vec<(String, &str)> = vec![];
     let mut out = vec![];
     for (path, entry, m) in members {
@@ -453,10 +456,15 @@ fn family_members(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
             } else if let Some((first, _)) = ids.iter().find(|(_, x)| *x == id) {
                 why.push(format!("It has the study id of {first}."));
             } else {
-                match ctx.records.study(id) {
-                    Ok(None) => {}
-                    Ok(Some(_)) => why.push("It is already registered.".into()),
-                    Err(e) => why.push(format!("The box records cannot be read: {e}.")),
+                let registered = ctx.records.study(id).map(|r| r.is_some());
+                match (registered, ctx.records.unopened()) {
+                    (Err(e), _) => why.push(unread(&e)),
+                    (Ok(true), _) => why.push("It is already registered.".into()),
+                    (Ok(false), Err(e)) => why.push(unread(&e)),
+                    (Ok(false), Ok(l)) if l.iter().any(|u| u == id) => {
+                        why.push("It is already locked in a registered family.".into())
+                    }
+                    (Ok(false), Ok(_)) => {}
                 }
             }
             ids.push((path.clone(), id));
@@ -534,6 +542,43 @@ fn family_selection(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
         }
     }
     out
+}
+
+/// The plan slots that must stay free after the one this plan would open, `members` more for
+/// the family it declares: `family::keep` of the box's members not yet registered.
+fn kept(spec: &Value, ctx: &CheckCtx, members: usize) -> Result<u64, String> {
+    let own = text(spec, "study.id").unwrap_or_default();
+    Ok(fam::keep(&ctx.records.unopened()?, own, members))
+}
+
+/// E-FAM-005 at `family` of a confirmatory plan in the plan log: the slot it would open leaves
+/// fewer slots after it than its members and the slots already reserved need. A stream that
+/// gives no level or cannot be read is E-STR-001's; box records that cannot be read fail
+/// closed.
+fn family_room(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let Some(members) = list(spec, "family.members").map(Vec::len) else {
+        return vec![];
+    };
+    let Ok(Some(a)) = granted(spec, ctx) else {
+        return vec![];
+    };
+    if a.log != LogName::Plan.as_str() || a.level <= 0.0 {
+        return vec![];
+    }
+    let detail = match kept(spec, ctx, members) {
+        Ok(keep) if stream::leaves_room(a.slot, keep) => return vec![],
+        Ok(keep) => format!(
+            "Slot {} leaves {} after it, fewer than the {} needed: {members} for this family's members and {} already reserved.",
+            a.slot,
+            stream::slots(stream::M.saturating_sub(a.slot)),
+            stream::slots(keep),
+            keep - members as u64
+        ),
+        Err(e) => format!("The box records cannot be read: {e}."),
+    };
+    (nodes(spec, pat).into_iter())
+        .map(|(path, _)| at(&path, detail.clone()))
+        .collect()
 }
 
 // ---- design ----
@@ -741,11 +786,23 @@ pub fn granted(spec: &Value, ctx: &CheckCtx) -> Result<Option<Alpha>, String> {
 }
 
 /// E-STR-001 at `study.mode` of a confirmatory plan: the stream of its log gives level 0 (a
-/// slot beyond the plan stream's last), or cannot be read or trusted.
+/// slot beyond the plan stream's last), or cannot be read or trusted, or a plan slot leaves
+/// fewer slots after it than family members not yet registered need, the plan's own slot
+/// apart when it is one of them. Box records that cannot be read fail closed.
 fn stream_level(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     let detail = match granted(spec, ctx) {
         Ok(None) => return vec![],
-        Ok(Some(a)) if a.level > 0.0 => return vec![],
+        Ok(Some(a)) if a.level > 0.0 && a.log != LogName::Plan.as_str() => return vec![],
+        Ok(Some(a)) if a.level > 0.0 => match kept(spec, ctx, 0) {
+            Ok(keep) if stream::leaves_room(a.slot, keep) => return vec![],
+            Ok(keep) => format!(
+                "Slot {} leaves {} after it, fewer than the {} reserved for family members not yet registered.",
+                a.slot,
+                stream::slots(stream::M.saturating_sub(a.slot)),
+                stream::slots(keep)
+            ),
+            Err(e) => format!("The box records cannot be read: {e}."),
+        },
         Ok(Some(a)) => format!(
             "Slot {} is beyond the {} slots of the {} stream.",
             a.slot,

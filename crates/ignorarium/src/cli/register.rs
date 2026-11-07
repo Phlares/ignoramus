@@ -1,12 +1,13 @@
 //! `register`: a person approves a checked plan; the box stores it, its payload and its
 //! inputs, and logs it.
-use super::check::{self, Assessed, PENDING};
+use super::check::{self, Assessed, HomeRecords, PENDING};
 use super::{CliError, Ctx, Done};
 use crate::backend::output::file_digest;
 use crate::canon::to_canonical;
 use crate::derived::{Alpha, Carried, PinDeviated, REGISTER, Register, Resolved};
 use crate::diag::{printable, render_human};
 use crate::estimate::defaults_json;
+use crate::family::{self, Lock};
 use crate::files::{self, WriteOnceError, write_once};
 use crate::home::Home;
 use crate::inputs::{self, Found};
@@ -14,7 +15,7 @@ use crate::payload::{self, PayloadError};
 use crate::planlog::store::{Leaf, PlanLog};
 use crate::planlog::{commitment, shape};
 use crate::records::{self, RecordDraft};
-use crate::rules::{self, Lookup, Taken};
+use crate::rules::{self, BoxRecords, Lookup, Taken};
 use crate::spec::model::{Condition, Param, PinDeviation, Spec, param_path};
 use crate::spec::{self};
 use crate::store::Store;
@@ -72,7 +73,8 @@ fn put(dir: &Path, name: &str, bytes: &[u8], mode: u32) -> Result<(), CliError> 
 
 /// What `register` freezes besides the spec: the identity of the study root, the payload
 /// folder's hash, the digest of the stored copy of each input present, the values taken
-/// from other studies, the deviations from their code, and the determinism check it carries.
+/// from other studies, the deviations from their code, the determinism check it carries, and
+/// a root's lock on its members.
 struct Frozen {
     root_id: String,
     payload: String,
@@ -80,6 +82,7 @@ struct Frozen {
     resolved: Vec<Resolved>,
     deviations: Vec<PinDeviated>,
     carries: Option<Carried>,
+    family: Option<Lock>,
 }
 
 /// The body of the `register` record. A confirmatory plan holds the stream slot `alpha`, and
@@ -103,6 +106,7 @@ fn record_body(
         resolved: frozen.resolved.clone(),
         deviations: frozen.deviations.clone(),
         carries: frozen.carries.clone(),
+        family: frozen.family.clone(),
         timestamp: alpha.is_some().then(|| "pending".into()),
         alpha,
     })
@@ -129,10 +133,10 @@ pub fn run_stdio(ctx: &Ctx, spec_path: &Path) -> Result<Done, CliError> {
 /// Nothing named `studies/<id>` exists until every local write has succeeded. Every check
 /// that can refuse comes first: the rules, the values taken from other studies, the deviations
 /// from their code, the stream level, the payload hash and its pin, the approval, the input
-/// imports, the spec re-read and the log tails. Then the study is staged under a temporary
-/// name and published by one rename. A confirmatory plan's stream slot opens next; a refusal
-/// there moves the folder back to staging. Only the plan leaf and the `register` record are
-/// appended after it.
+/// imports (a root's members' too), the spec re-read and the log tails. Then the study is
+/// staged under a temporary name and published by one rename. A confirmatory plan's stream
+/// slot opens next; a refusal there moves the folder back to staging. Only the plan leaf, a
+/// root's family leaf and the `register` record are appended after it.
 pub fn run(
     spec_path: &Path,
     home: &Home,
@@ -198,7 +202,17 @@ pub fn run(
     }
     let key = keys::load_or_create(home).map_err(|e| io("box key", e))?;
     let blobs = Store::open(&home.root).map_err(|e| io("store", e))?;
-    let inputs = hold_inputs(&blobs, &key, &spec, &a)?;
+    let source = format!("register {id}");
+    let pins = spec.inputs.iter().map(|i| i.sha256.as_str());
+    let inputs = hold_inputs(&blobs, &key, &source, &a.root, pins, &a.input_hashes)?;
+    let family = (spec.family.as_ref())
+        .map(|_| Lock::of(&a.ctx.members, &payload).map_err(|e| io("family", e)))
+        .transpose()?;
+    let members = family.iter().flat_map(|l| &l.members);
+    for (locked, m) in members.zip(a.ctx.members.iter().flatten()) {
+        let pins = locked.inputs.iter().map(|i| i.sha256.as_str());
+        hold_inputs(&blobs, &key, &source, &m.root, pins, &m.input_hashes)?;
+    }
     let frozen = Frozen {
         root_id: Register::root_id(&key, &a.root).map_err(|e| io("study root", e))?,
         payload,
@@ -206,6 +220,7 @@ pub fn run(
         resolved,
         deviations,
         carries: a.carried.clone(),
+        family,
     };
     let (leaf, alpha) = store(spec_path, home, &spec, &a, checked, &key, &frozen)?;
     if let (Some(approved), Some(spent)) = (checked, &alpha)
@@ -437,31 +452,33 @@ fn payload_hash(a: &Assessed, pin: &str) -> Result<String, CliError> {
     Ok(hash)
 }
 
-/// Bring every input into the store, and check that each still holds the bytes the check
-/// hashed. A pin the store knows names a blob, which is hashed again in full, once. Any
-/// other input is the regular file under the root, imported in one streamed read and signed
-/// the first time the store sees it. A store fault is an I/O error, not a changed input.
-/// Returns the path and digest of each input present.
-fn hold_inputs(
+/// Bring every input of one spec into the store, and check that each still holds the bytes
+/// the check hashed. `pins` is each input's `sha256` and `hashes` its path and checked hashes,
+/// in spec order. A pin the store knows names a blob, which is hashed again in full, once.
+/// Any other input is the regular file under `root`, imported in one streamed read and signed
+/// with `source` the first time the store sees it. A store fault is an I/O error, not a
+/// changed input. Returns the path and digest of each input present.
+fn hold_inputs<'a>(
     store: &Store,
     key: &SigningKey,
-    spec: &Spec,
-    a: &Assessed,
+    source: &str,
+    root: &Path,
+    pins: impl Iterator<Item = &'a str>,
+    hashes: &[(String, Option<(String, String)>)],
 ) -> Result<Vec<(String, String)>, CliError> {
-    let source = format!("register {}", spec.study.id);
     let mut held = Vec::new();
-    for (input, (path, checked)) in spec.inputs.iter().zip(&a.input_hashes) {
-        let now = match inputs::stored(store, &input.sha256) {
+    for (pin, (path, checked)) in pins.zip(hashes) {
+        let now = match inputs::stored(store, pin) {
             Some(Found::Stored { digest, meta }) => {
                 let blob = store.path(&digest).map_err(|e| io("store", e))?;
                 let same = file_digest(&blob).ok().flatten().as_ref() == Some(&digest);
                 same.then_some((digest, meta.normalized_sha256))
             }
             Some(_) => None,
-            None => match inputs::regular_file(&a.root, path) {
+            None => match inputs::regular_file(root, path) {
                 Some(file) => {
                     let (digest, meta) = store
-                        .import_signed(&file, key, &source)
+                        .import_signed(&file, key, source)
                         .map_err(|e| io("store", e))?;
                     Some((digest, meta.normalized_sha256))
                 }
@@ -483,8 +500,9 @@ fn hold_inputs(
 }
 
 /// Re-read the spec and check both log tails, stage and publish the study folder, then open
-/// the stream slot of a confirmatory plan at no lower level than `checked`, and append the
-/// plan leaf and the `register` record. Another process can register the same id between the
+/// the stream slot of a confirmatory plan at no lower level than `checked`, leaving the slots
+/// reserved for family members free, and append the plan leaf, a root's family leaf and the
+/// `register` record. Another process can register the same id between the
 /// check and the publish; the rename refuses it, before any slot opens or leaf is appended.
 /// The slot opens under the stream's lock, or nothing is written to the stream and the folder
 /// goes back to staging, so the id stays free. A fault in a later append leaves a folder
@@ -513,6 +531,10 @@ fn store(
     let plan_log = PlanLog::open(&home.root.join(log))
         .and_then(|l| l.check_tails().map(|()| l))
         .map_err(|e| io(log, e))?;
+    let keep = match checked {
+        Some(_) => keep_for(home, key, id, frozen.family.as_ref())?,
+        None => 0,
+    };
     let dir = home.study_dir(id);
     let (staged, salt) = stage(&dir, a, &bytes, &canon, frozen)?;
     std::fs::rename(&staged, &dir).map_err(|e| {
@@ -527,11 +549,18 @@ fn store(
         None => None,
         Some(checked) => {
             let next = Log::of(home, name)
-                .open(key, id, checked.level)
+                .open(key, id, checked.level, keep)
                 .map_err(|e| {
-                    let mut r = match e {
-                        StreamError::Lower { .. } => refusal("E-STR-001", &e.to_string()),
-                        e => io("stream", e),
+                    let code = match (&e, &frozen.family) {
+                        (StreamError::Reserved { .. }, Some(_)) => Some("E-FAM-005"),
+                        (StreamError::Lower { .. } | StreamError::Reserved { .. }, _) => {
+                            Some("E-STR-001")
+                        }
+                        _ => None,
+                    };
+                    let mut r = match code {
+                        Some(code) => refusal(code, &e.to_string()),
+                        None => io("stream", e),
                     };
                     r.msg = format!("{}; {}", r.msg, take_back(&dir, &staged));
                     r
@@ -562,6 +591,18 @@ fn store(
             key,
         )
         .map_err(|e| io(log, e))?;
+    if let Some(lock) = &frozen.family {
+        let leaf = Leaf {
+            kind: family::LEAF_KIND.into(),
+            commitment: Some(lock.hash()),
+            shape: None,
+            mode: None,
+            data_hashes: family::locked_data(&a.ctx.members),
+            label: family::leaf_label(id),
+            ts: time::now_rfc3339(),
+        };
+        plan_log.append(leaf, key).map_err(|e| io(log, e))?;
+    }
     let body = record_body(&a.hash, leaf, log, &a.filled, frozen, alpha.clone())?;
     records::append(
         &dir.join("records.jsonl"),
@@ -570,6 +611,21 @@ fn store(
     )
     .map_err(|e| io("records.jsonl", e))?;
     Ok((leaf, alpha))
+}
+
+/// The plan slots that must stay free after the one study `id` opens, from the box's register
+/// records as they are now: `family::keep`, with the members of `lock` when `id` is a root.
+fn keep_for(home: &Home, key: &SigningKey, id: &str, lock: Option<&Lock>) -> Result<u64, CliError> {
+    let records = HomeRecords {
+        home: home.clone(),
+        key: Ok(Some(key.verifying_key())),
+    };
+    let unopened = records.unopened().map_err(|e| io("box records", e))?;
+    Ok(family::keep(
+        &unopened,
+        id,
+        lock.map_or(0, |l| l.members.len()),
+    ))
 }
 
 /// Move the published study folder `dir` back to `staged`, which frees the id, and say so.
@@ -663,6 +719,7 @@ mod tests {
                 study: "pilot".into(),
                 record: "ab".repeat(32),
             }),
+            family: None,
         };
         let exp = record_body("sha256:ab", 3, "planlog", &filled, &frozen, None).unwrap();
         assert_eq!(
@@ -734,6 +791,7 @@ mod tests {
             input_hashes: vec![],
             ctx: rules::CheckCtx::empty(root),
             stream: None,
+            room: None,
             carried: None,
             rechecks: None,
         }

@@ -1,16 +1,110 @@
 //! Families: confirmatory studies declared together in the first one's `[family]` table, which
-//! may share confirmation and reserve data. This module reads the member specs a root lists
-//! and checks each with every rule.
+//! may share confirmation and reserve data. This module reads the member specs a root lists,
+//! checks each with every rule, and builds the lock the root's `register` signs.
+use crate::canon::{canonical_of, sha256_hex};
 use crate::cli::check::{PENDING, input_hashes, scheduled, study_root};
 use crate::diag::{Diagnostic, Severity, printable};
 use crate::inputs::{input_path, regular_file};
 use crate::prior::{NoPriorUse, same_data};
 use crate::rules::{self, CheckCtx, NoRecords};
 use crate::runner::InputHashes;
+use crate::spec::model::{Role, Spec};
 use crate::spec::{self, RawSpec};
 use crate::store::Store;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+
+/// The kind of the plan-log leaf that a root's `register` appends after its plan leaf.
+pub const LEAF_KIND: &str = "family";
+
+/// The label of the family leaf of root `root`. No study id holds `:`, so it names no study's
+/// leaves, and no `release` frees data from it.
+pub fn leaf_label(root: &str) -> String {
+    format!("family:{root}")
+}
+
+/// What a root's `register` fixes about each member. A member registers later only as
+/// locked here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Lock {
+    pub members: Vec<Member>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Member {
+    pub id: String,
+    /// The path the root lists, from the study root.
+    pub spec: String,
+    pub spec_hash: String,
+    /// The tree hash of the payload folder the member shares with its root.
+    pub payload: String,
+    pub inputs: Vec<LockedInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LockedInput {
+    pub path: String,
+    pub role: Role,
+    pub sha256: String,
+}
+
+impl Lock {
+    /// `sha256:` and the hex digest of the lock's canonical JSON: the family leaf's commitment.
+    pub fn hash(&self) -> String {
+        let canon = canonical_of(self).expect("a lock holds only strings");
+        format!("sha256:{}", sha256_hex(&canon))
+    }
+
+    /// The lock of `members`, as the root's check read them, each sharing the payload whose
+    /// tree hash is `payload`. Every member must have been read and fit the typed model.
+    pub fn of(members: &[Result<MemberSpec, String>], payload: &str) -> Result<Lock, String> {
+        let member = |m: &Result<MemberSpec, String>| {
+            let m = m.as_ref().map_err(Clone::clone)?;
+            let spec = m.typed()?;
+            let inputs = (spec.inputs.iter())
+                .map(|i| LockedInput {
+                    path: i.path.clone(),
+                    role: i.role,
+                    sha256: i.sha256.clone(),
+                })
+                .collect();
+            Ok(Member {
+                id: spec.study.id,
+                spec: m.path.clone(),
+                spec_hash: m.raw.hash.clone(),
+                payload: payload.to_string(),
+                inputs,
+            })
+        };
+        let members = members.iter().map(member).collect::<Result<_, String>>()?;
+        Ok(Lock { members })
+    }
+}
+
+/// The confirmation and reserve data of every member in `members` that was read, once each:
+/// the family leaf's data hashes.
+pub fn locked_data(members: &[Result<MemberSpec, String>]) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = vec![];
+    for m in members.iter().flatten() {
+        for (_, h) in data(&m.raw.value, &m.input_hashes, &["confirmation", "reserve"]) {
+            if !out.contains(&h) {
+                out.push(h);
+            }
+        }
+    }
+    out
+}
+
+/// The plan slots that must stay free after the one `study` opens: one per member not yet
+/// registered of every registered family (`unopened`), less `study`'s own when it is one, and
+/// `members`, the members of the family `study` declares.
+pub fn keep(unopened: &[String], study: &str, members: usize) -> u64 {
+    (unopened.iter().filter(|u| *u != study).count() + members) as u64
+}
 
 /// The code a member's `PENDING` diagnostic takes in its root's check.
 pub const WAITS: &str = "W-FAM-001";
@@ -34,6 +128,14 @@ impl MemberSpec {
     /// check reads it.
     pub fn nested(&self) -> bool {
         self.raw.value.get("family").is_some()
+    }
+
+    /// The member's typed spec, with defaults filled, as its check read it.
+    pub fn typed(&self) -> Result<Spec, String> {
+        let mut value = self.raw.value.clone();
+        crate::estimate::apply_defaults(&mut value);
+        let shown = printable(&self.path);
+        Spec::from_value(&value).map_err(|e| format!("member {shown} does not fit the schema: {e}"))
     }
 }
 

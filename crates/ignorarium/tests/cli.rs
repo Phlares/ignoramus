@@ -1529,7 +1529,9 @@ fn check_shows_the_slot_and_level_the_stream_would_give() {
     common::pilot(&box_home, vec![common::arm_a()]);
     let out = check_out(&home, &spec, 0);
     assert!(
-        out.contains("\nstream: slot 1, level 0.005\nspec: "),
+        out.contains(
+            "\nstream: slot 1, level 0.005\nplan stream: slots left 10, reserved 0\nspec: "
+        ),
         "{out}"
     );
     let v = check_json(&home, &spec, 0);
@@ -1542,7 +1544,7 @@ fn check_shows_the_slot_and_level_the_stream_would_give() {
     // Once a study holds slot 1, the next is slot 2; the review page shows it too.
     let key = keys::load_or_create(&box_home).unwrap();
     stream::Log::of(&box_home, LogName::Plan)
-        .open(&key, "other", 0.0)
+        .open(&key, "other", 0.0, 0)
         .unwrap();
     assert!(check_out(&home, &spec, 0).contains("\nstream: slot 2, level 0.005\n"));
     let page = stdout(&bin(&home).arg("review").arg(&spec).assert().code(0));
@@ -1645,7 +1647,7 @@ fn check_refuses_a_plan_beyond_the_tenth_slot() {
     let key = keys::load_or_create(&box_home).unwrap();
     let log = stream::Log::of(&box_home, LogName::Plan);
     for i in 1..=10 {
-        log.open(&key, &format!("s{i:02}"), 0.0).unwrap();
+        log.open(&key, &format!("s{i:02}"), 0.0, 0).unwrap();
     }
     let v = check_json(&home, &spec, 1);
     let errors: Vec<&Value> = (v["diagnostics"].as_array().unwrap().iter())

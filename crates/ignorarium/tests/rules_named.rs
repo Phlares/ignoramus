@@ -1543,6 +1543,10 @@ impl BoxRecords for Planned {
     fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String> {
         self.studies.stream_closed(log, study, slot)
     }
+
+    fn unopened(&self) -> Result<Vec<String>, String> {
+        self.studies.unopened()
+    }
 }
 
 /// The plan of a measured `pilot`: the template, with H1 on `arm-a` in stratum fiction by
@@ -2478,6 +2482,7 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
         "E-FAM-002",
         "E-FAM-003",
         "E-FAM-004",
+        "E-FAM-005",
         "E-REF-001",
         "E-BUD-001",
         "E-END-001",
@@ -2509,7 +2514,8 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
     .collect();
     assert_eq!(in_file, want);
     // E-CNF-005 and E-HSH-001 read files and E-STR-001 the stream; their tests are below.
-    // E-SEC-001 is in tests/scan.rs. E-FAM-003 and E-FAM-004 read member specs: tests/family.rs.
+    // E-SEC-001 is in tests/scan.rs. E-FAM-003 and E-FAM-004 read member specs, and E-FAM-005
+    // the stream and the box records: tests/family.rs.
     let in_rows: BTreeSet<String> = faults()
         .iter()
         .flat_map(|r| r.want.iter().map(|w| w.0.to_string()))
@@ -2519,7 +2525,13 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
         .filter(|c| {
             !matches!(
                 c.as_str(),
-                "E-CNF-005" | "E-HSH-001" | "E-SEC-001" | "E-STR-001" | "E-FAM-003" | "E-FAM-004"
+                "E-CNF-005"
+                    | "E-HSH-001"
+                    | "E-SEC-001"
+                    | "E-STR-001"
+                    | "E-FAM-003"
+                    | "E-FAM-004"
+                    | "E-FAM-005"
             )
         })
         .collect();
@@ -2775,6 +2787,10 @@ impl BoxRecords for Torn {
     fn stream_closed(&self, _: &str, _: &str, _: u64) -> Result<bool, String> {
         Ok(false)
     }
+
+    fn unopened(&self) -> Result<Vec<String>, String> {
+        self.studies.unopened()
+    }
 }
 
 /// A box that counts the reads of a study's records.
@@ -2799,6 +2815,10 @@ impl BoxRecords for Counted {
 
     fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String> {
         self.studies.stream_closed(log, study, slot)
+    }
+
+    fn unopened(&self) -> Result<Vec<String>, String> {
+        self.studies.unopened()
     }
 }
 
@@ -2881,6 +2901,10 @@ impl BoxRecords for Slots {
     fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String> {
         assert_eq!((log, study, slot), ("planlog", "pilot", 3));
         self.0.clone()
+    }
+
+    fn unopened(&self) -> Result<Vec<String>, String> {
+        Ok(vec![])
     }
 }
 

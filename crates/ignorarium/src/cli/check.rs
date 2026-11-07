@@ -38,12 +38,36 @@ pub struct Assessed {
     pub ctx: CheckCtx,
     /// For a confirmatory plan, the slot and level the stream would give it now.
     pub stream: Option<Alpha>,
+    /// For a confirmatory plan in the plan log, the plan stream's slots left and reserved.
+    pub room: Option<Room>,
     /// The passed determinism check the plan takes from a study that ran its code; `register`
     /// freezes it.
     pub carried: Option<Carried>,
     /// For a plan that declares `pins.deterministic` and has an estimate, the recheck copies
     /// its schedule holds.
     pub rechecks: Option<usize>,
+}
+
+/// The plan stream as `check` shows it: the slots no study has opened, and the slots reserved
+/// for family members not yet registered.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct Room {
+    pub slots_left: u64,
+    pub reserved: u64,
+}
+
+impl Room {
+    /// The room of the plan stream that gives `stream`; `None` for the test stream, which
+    /// never runs out, and when the box records cannot be read, which E-STR-001 reports.
+    fn of(stream: &Alpha, records: &dyn BoxRecords) -> Option<Room> {
+        if stream.log != LogName::Plan.as_str() {
+            return None;
+        }
+        Some(Room {
+            slots_left: (stream::M + 1).saturating_sub(stream.slot),
+            reserved: records.unopened().ok()?.len() as u64,
+        })
+    }
 }
 
 /// The code of a value that waits on a study that has not finished.
@@ -150,12 +174,23 @@ impl BoxRecords for HomeRecords {
             Some(key) => stream.closed(key, study, slot).map_err(|e| e.to_string()),
         }
     }
+
+    fn unopened(&self) -> Result<Vec<String>, String> {
+        let registers = self.registers()?;
+        let locked = (registers.iter())
+            .filter_map(|(_, r)| r.family.as_ref())
+            .flat_map(|lock| &lock.members);
+        Ok(locked
+            .filter(|m| registers.iter().all(|(id, _)| *id != m.id))
+            .map(|m| m.id.clone())
+            .collect())
+    }
 }
 
 impl HomeRecords {
-    /// The stream slot each study of the box holds, by study, from the `register` record that
-    /// opens its log. Only that first line is read and checked.
-    fn held(&self) -> Result<Vec<(String, Alpha)>, String> {
+    /// The `register` record that opens each study's log, by study. Only that first line is
+    /// read and checked.
+    fn registers(&self) -> Result<Vec<(String, Register)>, String> {
         let mut out = Vec::new();
         for (id, log) in records::logs(&self.home).map_err(|e| e.to_string())? {
             let fault = |e: String| format!("study {id}: {e}");
@@ -163,12 +198,21 @@ impl HomeRecords {
                 continue;
             };
             let first = records::first(&log, key).map_err(|e| fault(e.to_string()))?;
-            let alpha = first.as_ref().and_then(Register::of).and_then(|r| r.alpha);
-            if let (Some(r), Some(alpha)) = (first, alpha) {
-                out.push((r.study, alpha));
+            if let Some(r) = first
+                && let Some(reg) = Register::of(&r)
+            {
+                out.push((r.study, reg));
             }
         }
         Ok(out)
+    }
+
+    /// The stream slot each study of the box holds, by study.
+    fn held(&self) -> Result<Vec<(String, Alpha)>, String> {
+        let registers = self.registers()?.into_iter();
+        Ok(registers
+            .filter_map(|(id, r)| Some((id, r.alpha?)))
+            .collect())
     }
 
     /// The key that verifies the log at `path`; `None` when there is no log. Only a log that
@@ -306,6 +350,7 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
     };
     let (value, filled, mut diags) = rules::check_all(&raw.value, rules::builtin(), &cc);
     diags.extend(family::check(&mut cc));
+    let stream = rules::granted(&value, &cc).ok().flatten();
     let mut a = Assessed {
         root: cc.root.clone(),
         hash: raw.hash,
@@ -313,7 +358,8 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         filled,
         diags,
         estimate: None,
-        stream: rules::granted(&value, &cc).ok().flatten(),
+        room: (stream.as_ref()).and_then(|s| Room::of(s, cc.records.as_ref())),
+        stream,
         carried: rules::carried(&value, &cc),
         rechecks: None,
         value,
@@ -404,6 +450,12 @@ fn render(a: &Assessed) -> String {
     if let Some(granted) = &a.stream {
         s.push_str(&format!("{}\n", stream_line(granted)));
     }
+    if let Some(r) = &a.room {
+        let (left, reserved) = (r.slots_left, r.reserved);
+        s.push_str(&format!(
+            "plan stream: slots left {left}, reserved {reserved}\n"
+        ));
+    }
     s.push_str(&format!("spec: {}\n", a.hash));
     s
 }
@@ -453,6 +505,7 @@ fn render_json(a: &Assessed) -> Result<String, CliError> {
         "pending": a.pending(),
         "power": power,
         "stream": a.stream,
+        "plan_stream": a.room,
         "recheck": recheck,
         "estimate": estimate,
         "defaults": defaults_json(&a.filled),

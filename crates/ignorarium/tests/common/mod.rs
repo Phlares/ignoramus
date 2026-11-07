@@ -556,6 +556,7 @@ pub fn finished_with(
         resolved: vec![],
         deviations: vec![],
         carries: None,
+        family: None,
         alpha: None,
         timestamp: None,
     };
@@ -646,6 +647,11 @@ impl BoxRecords for Studies {
     fn stream_closed(&self, _: &str, _: &str, _: u64) -> Result<bool, String> {
         Ok(false)
     }
+
+    /// No study is locked in a family.
+    fn unopened(&self) -> Result<Vec<String>, String> {
+        Ok(vec![])
+    }
 }
 
 /// `Studies` whose stream of `log` gives `next`; another log cannot be read.
@@ -674,6 +680,10 @@ impl BoxRecords for Streamed {
 
     fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String> {
         self.studies.stream_closed(log, study, slot)
+    }
+
+    fn unopened(&self) -> Result<Vec<String>, String> {
+        self.studies.unopened()
     }
 }
 

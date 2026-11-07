@@ -86,6 +86,9 @@ pub struct Register {
     /// field existed. Written as `null`.
     #[serde(default)]
     pub carries: Option<Carried>,
+    /// For a root, the members it locks; `None` for any other study, and left out then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<crate::family::Lock>,
     /// The stream slot a confirmatory plan holds; `None` for an exploratory one. Written as
     /// `null`, never left out.
     #[serde(deserialize_with = "Option::deserialize")]
