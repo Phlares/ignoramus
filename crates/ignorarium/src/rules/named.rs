@@ -457,7 +457,7 @@ fn family_members(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
                 why.push(format!("It has the study id of {first}."));
             } else {
                 let registered = ctx.records.study(id).map(|r| r.is_some());
-                match (registered, ctx.records.unopened()) {
+                match (registered, ctx.records.locked_members()) {
                     (Err(e), _) => why.push(unread(&e)),
                     (Ok(true), _) => why.push("It is already registered.".into()),
                     (Ok(false), Err(e)) => why.push(unread(&e)),

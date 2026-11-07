@@ -175,23 +175,35 @@ impl BoxRecords for HomeRecords {
         }
     }
 
+    fn locked_members(&self) -> Result<Vec<String>, String> {
+        let registers = self.registers()?;
+        Ok(members(registers.iter().map(|(_, r)| r))
+            .map(|m| m.id.clone())
+            .collect())
+    }
+
     /// Only a root that holds a plan slot reserves: the test stream never runs out.
     fn unopened(&self) -> Result<Vec<String>, String> {
         let registers = self.registers()?;
-        let plan = |r: &Register| {
+        let plan = |r: &&Register| {
             r.alpha
                 .as_ref()
                 .is_some_and(|a| a.log == LogName::Plan.as_str())
         };
-        let locked = (registers.iter())
-            .filter(|(_, r)| plan(r))
-            .filter_map(|(_, r)| r.family.as_ref())
-            .flat_map(|lock| &lock.members);
-        Ok(locked
+        Ok(members(registers.iter().map(|(_, r)| r).filter(plan))
             .filter(|m| registers.iter().all(|(id, _)| *id != m.id))
             .map(|m| m.id.clone())
             .collect())
     }
+}
+
+/// Every member the locks of `registers` list.
+fn members<'a>(
+    registers: impl Iterator<Item = &'a Register>,
+) -> impl Iterator<Item = &'a crate::family::Member> {
+    registers
+        .filter_map(|r| r.family.as_ref())
+        .flat_map(|lock| &lock.members)
 }
 
 impl HomeRecords {

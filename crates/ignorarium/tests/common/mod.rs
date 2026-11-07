@@ -649,6 +649,10 @@ impl BoxRecords for Studies {
     }
 
     /// No study is locked in a family.
+    fn locked_members(&self) -> Result<Vec<String>, String> {
+        Ok(vec![])
+    }
+
     fn unopened(&self) -> Result<Vec<String>, String> {
         Ok(vec![])
     }
@@ -680,6 +684,10 @@ impl BoxRecords for Streamed {
 
     fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String> {
         self.studies.stream_closed(log, study, slot)
+    }
+
+    fn locked_members(&self) -> Result<Vec<String>, String> {
+        self.studies.locked_members()
     }
 
     fn unopened(&self) -> Result<Vec<String>, String> {

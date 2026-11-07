@@ -730,3 +730,16 @@ fn a_family_on_the_test_log_reserves_no_plan_slot() {
     assert!(!has(&v, "E-STR-001", "study.mode"), "{v}");
     assert_eq!(code, 0, "{v}");
 }
+
+#[test]
+fn a_study_locked_by_a_test_log_family_cannot_join_a_plan_log_family() {
+    let lab = lab();
+    let root = registered_family_with(&lab, |t| t.replace("test_log = false", "test_log = true"));
+    let text = format!("{}\n[family]\nmembers = [\"spec/b.toml\"]\n", study("fam2"));
+    let (_, v) = check_json(&lab, &put(&root, "spec2.toml", &text));
+    let p = problem_at(&v, "E-FAM-002", "family.members[0]");
+    assert!(
+        p.contains("It is already locked in a registered family."),
+        "{p}"
+    );
+}

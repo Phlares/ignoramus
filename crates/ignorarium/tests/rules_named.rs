@@ -1544,6 +1544,10 @@ impl BoxRecords for Planned {
         self.studies.stream_closed(log, study, slot)
     }
 
+    fn locked_members(&self) -> Result<Vec<String>, String> {
+        self.studies.locked_members()
+    }
+
     fn unopened(&self) -> Result<Vec<String>, String> {
         self.studies.unopened()
     }
@@ -2788,6 +2792,10 @@ impl BoxRecords for Torn {
         Ok(false)
     }
 
+    fn locked_members(&self) -> Result<Vec<String>, String> {
+        self.studies.locked_members()
+    }
+
     fn unopened(&self) -> Result<Vec<String>, String> {
         self.studies.unopened()
     }
@@ -2815,6 +2823,10 @@ impl BoxRecords for Counted {
 
     fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String> {
         self.studies.stream_closed(log, study, slot)
+    }
+
+    fn locked_members(&self) -> Result<Vec<String>, String> {
+        self.studies.locked_members()
     }
 
     fn unopened(&self) -> Result<Vec<String>, String> {
@@ -2901,6 +2913,10 @@ impl BoxRecords for Slots {
     fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String> {
         assert_eq!((log, study, slot), ("planlog", "pilot", 3));
         self.0.clone()
+    }
+
+    fn locked_members(&self) -> Result<Vec<String>, String> {
+        Ok(vec![])
     }
 
     fn unopened(&self) -> Result<Vec<String>, String> {

@@ -25,6 +25,9 @@ pub trait BoxRecords {
     fn stream_next(&self, log: &str) -> Result<Next, String>;
     /// True when slot `slot` of the stream of `log` was opened by study `study` and is closed.
     fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String>;
+    /// The id of each member that a registered root's lock lists, whatever log the root
+    /// registered in: the studies that may join no other family.
+    fn locked_members(&self) -> Result<Vec<String>, String>;
     /// The id of each member that the lock of a root registered in the plan log lists and that
     /// holds no register record: the members whose plan slots are reserved.
     fn unopened(&self) -> Result<Vec<String>, String>;
@@ -52,16 +55,22 @@ impl BoxRecords for NoRecords {
         Ok(false)
     }
 
+    fn locked_members(&self) -> Result<Vec<String>, String> {
+        Ok(vec![])
+    }
+
     fn unopened(&self) -> Result<Vec<String>, String> {
         Ok(vec![])
     }
 }
 
-/// `B`, with each stream and the unopened members read once and the answer kept, so every
-/// rule of one check sees one slot and level and one reservation, or one error.
+/// `B`, with each stream, the locked members and the unopened members read once and the answer
+/// kept, so every rule of one check sees one slot and level, one membership and one
+/// reservation, or one error.
 pub struct ReadOnce<B> {
     inner: B,
     streams: std::cell::RefCell<std::collections::BTreeMap<String, Result<Next, String>>>,
+    locked: std::cell::OnceCell<Result<Vec<String>, String>>,
     unopened: std::cell::OnceCell<Result<Vec<String>, String>>,
 }
 
@@ -70,6 +79,7 @@ impl<B> ReadOnce<B> {
         ReadOnce {
             inner,
             streams: Default::default(),
+            locked: Default::default(),
             unopened: Default::default(),
         }
     }
@@ -94,6 +104,12 @@ impl<B: BoxRecords> BoxRecords for ReadOnce<B> {
 
     fn stream_closed(&self, log: &str, study: &str, slot: u64) -> Result<bool, String> {
         self.inner.stream_closed(log, study, slot)
+    }
+
+    fn locked_members(&self) -> Result<Vec<String>, String> {
+        self.locked
+            .get_or_init(|| self.inner.locked_members())
+            .clone()
     }
 
     fn unopened(&self) -> Result<Vec<String>, String> {
