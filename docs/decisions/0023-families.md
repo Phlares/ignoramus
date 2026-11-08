@@ -11,7 +11,7 @@ Decision:
   - E-FAM-003: every input of every member, of every role, is pinned by SHA-256. Its data is at the study root or in the store. Every selection input of the root is there too.
   - E-FAM-004: no member's confirmation or reserve data holds the data of a selection input of any family study, root included. Exact and normalized hashes are compared.
   - E-FAM-005: the plan stream holds a free slot for the root and every member.
-  - W-FAM-001: a member value that waits on an unfinished study is allowed and listed. It resolves at the member's own registration (0014).
+  - W-FAM-001: a member value that waits on an unfinished study is allowed at `check` and listed. `register` on the root refuses it while the study is outside the family. A wait on the root or on another member is allowed, because it can end only after the root registers. It resolves at the member's own registration (0014).
   - W-FAM-002: a spec reachable through `follow_on` shares confirmation or reserve data with the study and is not in its family. The warning comes while the family option is still open.
 - **Register on the root.** `register` imports every member input into the store, as it imports its own. It signs one plan-log leaf of kind `family`, labelled `family:<root id>`, after the root's plan leaf. The root's register record holds the lock: per member, the study id, spec path, spec hash, payload tree hash, and each input's role and SHA-256. It lists no absolute path (0012). The leaf commits to the lock's hash.
 - **The lock.** After the root registers, a member registers and checks only as locked: its spec hash, payload tree hash and input pins equal the locked ones (E-FAM-006). A locked member registers only as locked, in every mode. The check-time lock rule runs for confirmatory plans, and `register` enforces it for every mode. To change a member, register the changed study under a new id, as a study outside the family.
@@ -53,7 +53,7 @@ Cost:
 - A family takes several of the plan stream's 10 slots at once, and keeps them whether or not its members run.
 - A claim tested on data another claim used reaches "confirmed", never "replicated" (Junk and Lyons).
 - One payload folder serves a whole family, so one payload fix after the root registers removes every member.
-- A member gate that can run only at the member's own registration, because its values wait on an unfinished study, is a risk the lock accepts. A member that fails a gate then is refused and never opens its slot, which stays reserved and unused. Size its reserves generously.
+- A family registers only after every study outside it that its members borrow from has finished, so each member gate that can run before the lock has run. A member gate that needs the root or another member can still fail at the member's own registration. That member is refused and never opens its slot, which stays reserved and unused. Size its reserves generously.
 
 Sources:
 

@@ -291,8 +291,9 @@ pub fn shared<'a>(
 /// Every rule on each member in `ctx.members` that declares no family of its own, with the
 /// root's prior use, records, store and machine, then, as a standalone check does, the typed
 /// model and the schedule when no rule failed, each told the family of root `root_id`;
-/// diagnostics as `report` gives them.
-pub fn check(ctx: &mut CheckCtx, root_id: &str) -> Vec<Diagnostic> {
+/// diagnostics as `report` gives them, and each study outside the family that a member's value
+/// waits on, once, in the order found.
+pub fn check(ctx: &mut CheckCtx, root_id: &str) -> (Vec<Diagnostic>, Vec<String>) {
     let members = std::mem::take(&mut ctx.members);
     let ids = (members.iter().flatten())
         .filter_map(MemberSpec::id)
@@ -311,6 +312,7 @@ pub fn check(ctx: &mut CheckCtx, root_id: &str) -> Vec<Diagnostic> {
         ..CheckCtx::empty(&ctx.root)
     };
     let mut out = vec![];
+    let mut waits: Vec<String> = vec![];
     for m in members.iter().flatten().filter(|m| !m.nested()) {
         each.root.clone_from(&m.root);
         each.spec_text.clone_from(&m.raw.text);
@@ -323,12 +325,20 @@ pub fn check(ctx: &mut CheckCtx, root_id: &str) -> Vec<Diagnostic> {
         if clean && schedule::of_value(&value, &m.raw.hash, carried).is_none() {
             diags.push(rules::schema_fault());
         }
+        let outside = (diags.iter().filter(|d| d.code == PENDING))
+            .filter_map(|d| rules::waited_on(&m.raw.value, &d.path))
+            .filter(|s| !each.family_ids.iter().any(|id| id == s));
+        for study in outside {
+            if !waits.iter().any(|w| w == study) {
+                waits.push(study.to_string());
+            }
+        }
         out.extend(report(m, diags));
     }
     ctx.prior = each.prior;
     ctx.records = each.records;
     ctx.members = members;
-    out
+    (out, waits)
 }
 
 /// Member `m`'s diagnostics as its root reports them: at `family.members[<i>]:<path>`, the

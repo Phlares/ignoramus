@@ -27,6 +27,10 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+/// The code of a family member's pending value, which refuses a root that has no pending value
+/// of its own.
+const MEMBER_WAITS: &str = "W-FAM-001";
+
 const PROMPT: &str = "Type the first 8 characters of the spec hash to approve:";
 
 /// True when `typed` is exactly the first 8 lowercase hex characters after `sha256:`.
@@ -244,7 +248,8 @@ pub fn run(
 /// confirmatory plan, the sd and icc per group and the estimate records they come from; for
 /// each condition param that names a study, the condition that study selected and its
 /// `selection` record. A value still pending refuses, naming the study to wait for, and so
-/// does one the box no longer finds as the check found it.
+/// does a root's member whose value waits on a study outside the family, and one the box no
+/// longer finds as the check found it.
 fn resolve(a: &Assessed, conditions: &[Condition]) -> Result<Vec<Resolved>, CliError> {
     let hypotheses = a.value["question"]["hypotheses"]
         .as_array()
@@ -276,9 +281,21 @@ fn resolve(a: &Assessed, conditions: &[Condition]) -> Result<Vec<Resolved>, CliE
             waits.push(wait);
         }
     }
-    if !pending.is_empty() {
+    let own = !pending.is_empty();
+    for study in &a.member_waits {
+        let wait = format!("register after {study} finishes");
+        if !waits.contains(&wait) {
+            waits.push(wait);
+        }
+    }
+    if !waits.is_empty() {
+        let (code, whose) = if own {
+            (PENDING, "a value")
+        } else {
+            (MEMBER_WAITS, "a family member's value")
+        };
         return Err(CliError::refuse(format!(
-            "{PENDING}: a value waits on a study that has not finished; {}. See docs/rules/{PENDING}.md",
+            "{code}: {whose} waits on a study that has not finished; {}. See docs/rules/{code}.md",
             waits.join("; ")
         )));
     }
@@ -791,6 +808,7 @@ mod tests {
             value,
             filled: vec![],
             diags: vec![],
+            member_waits: vec![],
             estimate: None,
             input_hashes: vec![],
             ctx: rules::CheckCtx::empty(root),

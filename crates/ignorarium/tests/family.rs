@@ -1228,40 +1228,47 @@ fn plant_chooser(lab: &Lab, records: &[(&str, Value)]) {
 
 #[test]
 fn a_member_cannot_confirm_on_the_data_that_picked_its_condition() {
-    // x registers after the lock; or before it, with its selection data absent until its run.
-    for before_lock in [false, true] {
-        let lab = lab();
-        let (root, b) = lone_member(&lab, taking_from("x"));
-        let picked = std::fs::read_to_string(root.join("data/confirm.txt")).unwrap();
-        let records = chooser_records(&lab, &picked);
-        let (now, later) = records.split_at(if before_lock { 1 } else { 0 });
-        plant_chooser(&lab, now);
-        let spec = root_spec(&root, &study("fam"), &["spec/b.toml"]);
-        let (_, v) = check_json(&lab, &spec);
-        assert!(has(&v, "W-FAM-001", B), "{v}");
-        register(&lab, &spec);
-        plant_chooser(&lab, later);
-        let (code, v) = check_json(&lab, &b);
-        let p = problem_at(&v, "E-CNF-007", TAKES);
-        assert!(
-            p.contains("Its input inputs[1] holds the data of selection input"),
-            "{p}"
-        );
-        assert!(p.ends_with("of study x."), "{p}");
-        assert_eq!(code, 1, "{v}");
-        let (code, out) = try_register(&lab, &b);
-        assert_eq!(code, 1, "{out}");
-        assert!(out.contains("E-CNF-007"), "{out}");
-        assert!(!lab.home.study_dir("b").exists());
-    }
+    // The root registers only after x has finished, so the root's check already refuses.
+    let lab = lab();
+    let (root, b) = lone_member(&lab, taking_from("x"));
+    let spec = root_spec(&root, &study("fam"), &["spec/b.toml"]);
+    let (_, v) = check_json(&lab, &spec);
+    assert!(has(&v, "W-FAM-001", B), "{v}");
+    let (code, out) = try_register(&lab, &spec);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("register after x finishes"), "{out}");
+    let picked = std::fs::read_to_string(root.join("data/confirm.txt")).unwrap();
+    plant_chooser(&lab, &chooser_records(&lab, &picked));
+    let (code, v) = check_json(&lab, &spec);
+    let p = problem_at(&v, "E-CNF-007", B);
+    assert!(
+        p.contains("Its input inputs[1] holds the data of selection input"),
+        "{p}"
+    );
+    assert_eq!(code, 1, "{v}");
+    let (code, out) = try_register(&lab, &spec);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("E-CNF-007"), "{out}");
+    assert!(!lab.home.study_dir("fam").exists());
+    let (code, out) = try_register(&lab, &b);
+    assert_eq!(code, 1, "{out}");
+    assert!(!lab.home.study_dir("b").exists());
 }
 
 #[test]
 fn a_member_whose_condition_was_picked_on_other_data_registers() {
+    // x finishes first: the root waits for it.
     let lab = lab();
     let (root, b) = lone_member(&lab, taking_from("x"));
+    plant_chooser(
+        &lab,
+        &chooser_records(
+            &lab,
+            "other data
+",
+        ),
+    );
     register(&lab, &root_spec(&root, &study("fam"), &["spec/b.toml"]));
-    plant_chooser(&lab, &chooser_records(&lab, "other data\n"));
     let (code, v) = check_json(&lab, &b);
     assert_eq!((code, errors(&v)), (0, vec![]), "{v}");
     register(&lab, &b);
@@ -1751,4 +1758,107 @@ fn a_root_report_ignores_a_broken_log_of_an_unrelated_study() {
     std::fs::write(&log, bytes).unwrap();
     let r = reported(&lab, "fam");
     assert_eq!(r["family"]["root"], "fam", "{r}");
+}
+
+// ---- a root registers only when no member waits on a study outside the family ----
+
+/// Root `fam` with member `spec/b.toml`; `edit_root` and `edit_member` change their texts.
+fn waiting_root(
+    lab: &Lab,
+    edit_root: impl Fn(String) -> String,
+    edit_member: impl Fn(String) -> String,
+) -> (PathBuf, PathBuf) {
+    let root = family_root(lab);
+    put(
+        &root,
+        "spec/b.toml",
+        &pinned(&root, &edit_member(study("b"))),
+    );
+    let spec = root_spec(&root, &edit_root(study("fam")), &["spec/b.toml"]);
+    (root, spec)
+}
+
+fn finish(lab: &Lab, id: &str) {
+    common::plant(&lab.home, id, &common::finished(vec![common::arm_a()]));
+}
+
+fn waits_on(study: &str) -> impl Fn(String) -> String + '_ {
+    move |t| t.replace("my-pilot", study)
+}
+
+#[test]
+fn a_root_whose_member_waits_on_an_unfinished_study_is_refused() {
+    let lab = lab();
+    let (root, spec) = waiting_root(&lab, |t| t, waits_on("later-pilot"));
+    let (code, v) = check_json(&lab, &spec);
+    assert!((code, has(&v, "W-FAM-001", B)) == (0, true), "{v}");
+    let leaves = plan_leaves(&lab).len();
+    let (code, out) = try_register(&lab, &spec);
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains(
+            "W-FAM-001: a family member's value waits on a study that has not finished; \
+             register after later-pilot finishes. See docs/rules/W-FAM-001.md"
+        ),
+        "{out}"
+    );
+    assert_eq!(plan_leaves(&lab).len(), leaves);
+    assert!(!lab.home.study_dir("fam").exists());
+    let store = ignorarium::store::Store::open(&lab.home.root).unwrap();
+    for i in inputs_of(&root, "spec/b.toml") {
+        let pin = i["sha256"].as_str().unwrap();
+        assert!(
+            !matches!(
+                inputs::stored(&store, pin),
+                Some(inputs::Found::Stored { .. })
+            ),
+            "{pin}"
+        );
+    }
+    // Once the study finishes, the same root registers and locks the member.
+    finish(&lab, "later-pilot");
+    register(&lab, &spec);
+    let lock = register_of(&lab, "fam").family.unwrap();
+    assert_eq!(lock.members[0].id, "b");
+}
+
+#[test]
+fn a_root_and_a_member_that_wait_are_refused_once_for_each_study() {
+    let lab = lab();
+    let (_, spec) = waiting_root(&lab, waits_on("root-pilot"), waits_on("later-pilot"));
+    let (code, out) = try_register(&lab, &spec);
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("register after root-pilot finishes; register after later-pilot finishes."),
+        "{out}"
+    );
+    assert_eq!(
+        out.matches("register after later-pilot").count(),
+        1,
+        "{out}"
+    );
+    assert_eq!(out.matches("register after root-pilot").count(), 1, "{out}");
+}
+
+#[test]
+fn a_member_waiting_on_the_root_or_on_another_member_does_not_hold_the_root() {
+    let lab = lab();
+    // b takes its condition from the root.
+    let (_, spec) = waiting_root(&lab, |t| t, taking_from("fam"));
+    let (code, v) = check_json(&lab, &spec);
+    assert!((code, has(&v, "W-FAM-001", B)) == (0, true), "{v}");
+    register(&lab, &spec);
+    // b takes its estimates from member c.
+    let lab = self::lab();
+    let root = family_root(&lab);
+    put(
+        &root,
+        "spec/b.toml",
+        &pinned(&root, &waits_on("c")(study("b"))),
+    );
+    put(&root, "spec/c.toml", &pinned(&root, &study("c")));
+    let spec = root_spec(&root, &study("fam"), &["spec/b.toml", "spec/c.toml"]);
+    let (code, v) = check_json(&lab, &spec);
+    assert!((code, has(&v, "W-FAM-001", B)) == (0, true), "{v}");
+    register(&lab, &spec);
 }
