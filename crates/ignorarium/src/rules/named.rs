@@ -1726,6 +1726,16 @@ fn shown(name: &str) -> &str {
     if safe_key(name) { name } else { "<name>" }
 }
 
+/// The study named by the reference at `path`, a concrete path as a diagnostic gives it
+/// (`question.hypotheses[0].estimates`, `design.conditions[1].params.bits`).
+pub fn waited_on<'a>(spec: &'a Value, path: &str) -> Option<&'a str> {
+    let pointer = format!(
+        "/{}",
+        path.replace('[', ".").replace(']', "").replace('.', "/")
+    );
+    spec.pointer(&pointer)?.get("from")?.as_str()
+}
+
 /// The study an `estimates` table names. `None` when it is not a table, its `from` is not a
 /// study id, or it names this study: the generic rules and E-REF-002 report those.
 fn study_ref<'a>(spec: &Value, reference: &'a Value) -> Option<&'a str> {

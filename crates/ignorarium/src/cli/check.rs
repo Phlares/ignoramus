@@ -30,6 +30,8 @@ pub struct Assessed {
     pub value: Value,
     pub filled: Vec<(String, Value)>,
     pub diags: Vec<Diagnostic>,
+    /// The studies outside its family that a root's members wait on, once each.
+    pub member_waits: Vec<String>,
     /// Present only when the plan has no errors.
     pub estimate: Option<Estimate>,
     /// `(path, (exact, normalized) SHA-256)` of each input, read once here; `None`
@@ -401,7 +403,8 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
     let (value, filled, mut diags) = rules::check_all(&raw.value, rules::builtin(), &cc);
     let root_id = raw.value.pointer("/study/id").and_then(Value::as_str);
     let root_id = root_id.unwrap_or_default();
-    diags.extend(family::check(&mut cc, root_id));
+    let (members, member_waits) = family::check(&mut cc, root_id);
+    diags.extend(members);
     let stream = rules::granted(&value, &cc).ok().flatten();
     let mut a = Assessed {
         root: cc.root.clone(),
@@ -409,6 +412,7 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         input_hashes: inputs::spec_hashes(&cc.store, &cc.root, &value),
         filled,
         diags,
+        member_waits,
         estimate: None,
         room: (stream.as_ref()).and_then(|s| Room::of(s, cc.records.as_ref(), root_id)),
         family_line: None,
