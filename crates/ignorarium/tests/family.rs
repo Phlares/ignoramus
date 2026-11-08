@@ -1252,6 +1252,7 @@ fn a_member_cannot_confirm_on_the_data_that_picked_its_condition() {
     assert!(!lab.home.study_dir("fam").exists());
     let (code, out) = try_register(&lab, &b);
     assert_eq!(code, 1, "{out}");
+    assert!(out.contains("E-CNF-007"), "{out}");
     assert!(!lab.home.study_dir("b").exists());
 }
 
@@ -1861,4 +1862,32 @@ fn a_member_waiting_on_the_root_or_on_another_member_does_not_hold_the_root() {
     let (code, v) = check_json(&lab, &spec);
     assert!((code, has(&v, "W-FAM-001", B)) == (0, true), "{v}");
     register(&lab, &spec);
+}
+
+#[test]
+fn waited_on_reads_a_reference_by_its_diagnostic_path() {
+    let spec = json!({
+        "question": { "hypotheses": [{}, { "estimates": { "from": "p" } }] },
+        "design": { "conditions": [{}, { "params": { "bits": { "from": "q" } } }] },
+    });
+    let at = |p: &str| ignorarium::rules::waited_on(&spec, p);
+    assert_eq!(at("question.hypotheses[1].estimates"), Some("p"));
+    assert_eq!(at("design.conditions[1].params.bits"), Some("q"));
+    assert_eq!(at("question.hypotheses[0].estimates"), None);
+    assert_eq!(at("design.conditions[1].params.<name>"), None);
+}
+
+#[test]
+fn a_wait_the_box_cannot_trace_is_kept_not_dropped() {
+    let spec = json!({ "question": { "hypotheses": [{ "estimates": { "from": "root" } }] } });
+    let ids = ["root".to_string(), "b".to_string()];
+    let wait = |path: &str| {
+        let d = ignorarium::rules::raised("W-REF-001", path.into(), None);
+        family::outside_waits(&spec, "spec/b.toml", &ids, &[d])
+    };
+    assert!(wait("question.hypotheses[0].estimates").is_empty());
+    assert_eq!(
+        wait("question.hypotheses[3].estimates"),
+        ["the study named at question.hypotheses[3].estimates of spec/b.toml"]
+    );
 }

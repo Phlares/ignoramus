@@ -27,10 +27,6 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-/// The code of a family member's pending value, which refuses a root that has no pending value
-/// of its own.
-const MEMBER_WAITS: &str = "W-FAM-001";
-
 const PROMPT: &str = "Type the first 8 characters of the spec hash to approve:";
 
 /// True when `typed` is exactly the first 8 lowercase hex characters after `sha256:`.
@@ -288,11 +284,11 @@ fn resolve(a: &Assessed, conditions: &[Condition]) -> Result<Vec<Resolved>, CliE
             waits.push(wait);
         }
     }
-    if !waits.is_empty() {
+    if own || !a.member_waits.is_empty() {
         let (code, whose) = if own {
             (PENDING, "a value")
         } else {
-            (MEMBER_WAITS, "a family member's value")
+            (family::WAITS, "a family member's value")
         };
         return Err(CliError::refuse(format!(
             "{code}: {whose} waits on a study that has not finished; {}. See docs/rules/{code}.md",

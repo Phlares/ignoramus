@@ -18,7 +18,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// The code a member's `PENDING` diagnostic takes in its root's check.
-const WAITS: &str = "W-FAM-001";
+pub(crate) const WAITS: &str = "W-FAM-001";
 
 /// The kind of the plan-log leaf that a root's `register` appends after its plan leaf.
 pub const LEAF_KIND: &str = "family";
@@ -325,12 +325,9 @@ pub fn check(ctx: &mut CheckCtx, root_id: &str) -> (Vec<Diagnostic>, Vec<String>
         if clean && schedule::of_value(&value, &m.raw.hash, carried).is_none() {
             diags.push(rules::schema_fault());
         }
-        let outside = (diags.iter().filter(|d| d.code == PENDING))
-            .filter_map(|d| rules::waited_on(&m.raw.value, &d.path))
-            .filter(|s| !each.family_ids.iter().any(|id| id == s));
-        for study in outside {
-            if !waits.iter().any(|w| w == study) {
-                waits.push(study.to_string());
+        for study in outside_waits(&m.raw.value, &m.path, &each.family_ids, &diags) {
+            if !waits.contains(&study) {
+                waits.push(study);
             }
         }
         out.extend(report(m, diags));
@@ -339,6 +336,32 @@ pub fn check(ctx: &mut CheckCtx, root_id: &str) -> (Vec<Diagnostic>, Vec<String>
     ctx.records = each.records;
     ctx.members = members;
     (out, waits)
+}
+
+/// The studies outside the family `ids` that the pending values in `diags` of the member spec
+/// `spec` at `path` wait on. A wait the box cannot trace to a study is kept, named by where it
+/// is, so the root refuses rather than lock a member it cannot vouch for.
+pub fn outside_waits(
+    spec: &Value,
+    path: &str,
+    ids: &[String],
+    diags: &[Diagnostic],
+) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for d in diags.iter().filter(|d| d.code == PENDING) {
+        let study = rules::waited_on(spec, &d.path);
+        if study.is_some_and(|s| ids.iter().any(|id| id == s)) {
+            continue;
+        }
+        let study = study.map_or_else(
+            || format!("the study named at {} of {}", d.path, printable(path)),
+            str::to_string,
+        );
+        if !out.contains(&study) {
+            out.push(study);
+        }
+    }
+    out
 }
 
 /// Member `m`'s diagnostics as its root reports them: at `family.members[<i>]:<path>`, the
