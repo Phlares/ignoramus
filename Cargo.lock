@@ -477,6 +477,8 @@ name = "litmus"
 version = "0.0.1"
 dependencies = [
  "hex",
+ "libc",
+ "serde_json",
  "sha2",
  "tempfile",
 ]

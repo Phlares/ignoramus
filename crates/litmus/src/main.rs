@@ -1,49 +1,86 @@
-use litmus::{Shape, generate};
+use litmus::{Flags, Shape, generate, payload, verify};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: litmus gen --seed <s> --out <dir> [--pilot N] [--first N] [--reserve N] [--units N] [--work-ms N] [--mem-mib N] [--min-isolation N] [--environment <hash>]";
+const USAGE: &str = "usage:
+  litmus gen --seed <s> --out <dir> [--pilot N] [--first N] [--reserve N] [--units N] [--work-ms N] [--mem-mib N] [--min-isolation N] [--environment <hash>]
+  litmus verify --report <report.json> --expected <expected.json>
+  litmus --condition <c> --unit <path>#<index> --repeat <n>
+    (the payload: reads IGNORARIUM_IN, IGNORARIUM_OUT and IGNORARIUM_PARAMS)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.split_first() {
-        Some((cmd, rest)) if cmd == "gen" => match gen_cmd(rest) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("litmus gen: {e}");
-                ExitCode::FAILURE
-            }
-        },
-        _ => {
-            eprintln!("{USAGE}");
+    let result = match args.split_first() {
+        None => Err(vec![USAGE.to_string()]),
+        Some((cmd, rest)) if cmd == "gen" => gen_cmd(rest),
+        Some((cmd, rest)) if cmd == "verify" => verify_cmd(rest),
+        Some(_) => payload_cmd(&args),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(lines) => {
+            lines.iter().for_each(|l| eprintln!("{l}"));
             ExitCode::FAILURE
         }
     }
 }
 
-fn gen_cmd(args: &[String]) -> Result<(), String> {
-    let mut shape = Shape::default();
-    let mut out = None;
-    let mut it = args.iter();
-    while let Some(flag) = it.next() {
-        let val = it.next().ok_or(format!("{flag} needs a value"))?;
-        let num = || val.parse::<u32>().map_err(|e| format!("{flag}: {e}"));
-        match flag.as_str() {
-            "--seed" => shape.seed = val.clone(),
-            "--out" => out = Some(PathBuf::from(val)),
-            "--environment" => shape.environment = val.clone(),
-            "--pilot" => shape.pilot = num()?,
-            "--first" => shape.first = num()?,
-            "--reserve" => shape.reserve = num()?,
-            "--units" => shape.units = num()?,
-            "--work-ms" => shape.work_ms = num()?,
-            "--mem-mib" => shape.mem_mib = num()?,
-            "--min-isolation" => {
-                shape.min_isolation = val.parse().map_err(|e| format!("{flag}: {e}"))?
-            }
-            _ => return Err(format!("unknown flag {flag}")),
-        }
+fn gen_cmd(args: &[String]) -> Result<(), Vec<String>> {
+    (|| {
+        let mut f = Flags::parse(args)?;
+        let d = Shape::default();
+        let shape = Shape {
+            seed: f.take("--seed").unwrap_or_default(),
+            pilot: f.number("--pilot", d.pilot)?,
+            first: f.number("--first", d.first)?,
+            reserve: f.number("--reserve", d.reserve)?,
+            units: f.number("--units", d.units)?,
+            work_ms: f.number("--work-ms", d.work_ms)?,
+            mem_mib: f.number("--mem-mib", d.mem_mib)?,
+            min_isolation: f.number("--min-isolation", d.min_isolation)?,
+            environment: f.take("--environment").unwrap_or_default(),
+        };
+        let out = PathBuf::from(f.require("--out")?);
+        f.done()?;
+        generate(&shape, &out).map_err(|e| e.to_string())
+    })()
+    .map_err(|e| vec![format!("litmus gen: {e}")])
+}
+
+fn verify_cmd(args: &[String]) -> Result<(), Vec<String>> {
+    let mut f = Flags::parse(args).map_err(|e| vec![format!("litmus verify: {e}")])?;
+    let mut read = |flag| -> Result<String, String> {
+        let path = f.require(flag)?;
+        std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))
+    };
+    let (report, expected) = (read("--report"), read("--expected"));
+    f.done().map_err(|e| vec![format!("litmus verify: {e}")])?;
+    match (report, expected) {
+        (Ok(r), Ok(e)) => verify(&r, &e),
+        (r, e) => Err([r, e]
+            .into_iter()
+            .filter_map(Result::err)
+            .map(|e| format!("litmus verify: {e}"))
+            .collect()),
     }
-    let out = out.ok_or("--out is required")?;
-    generate(&shape, &out).map_err(|e| e.to_string())
+}
+
+fn payload_cmd(args: &[String]) -> Result<(), Vec<String>> {
+    (|| {
+        let mut f = Flags::parse(args)?;
+        let condition = f.require("--condition")?;
+        let unit = f.require("--unit")?;
+        f.number("--repeat", 0u32)?;
+        f.done()?;
+        let var = |name: &str| std::env::var_os(name).ok_or(format!("{name} is not set"));
+        let params = std::env::var("IGNORARIUM_PARAMS").unwrap_or_else(|_| "{}".into());
+        payload(
+            &condition,
+            &unit,
+            &PathBuf::from(var("IGNORARIUM_IN")?),
+            &PathBuf::from(var("IGNORARIUM_OUT")?),
+            &params,
+        )
+    })()
+    .map_err(|e| vec![format!("litmus: {e}")])
 }
