@@ -78,6 +78,7 @@ fn records(spec: &Spec, role: Role, value: impl Fn(&Cluster) -> f64) -> Vec<Reco
             level: LEVEL,
         }),
         timestamp: None,
+        gate: vec![],
     };
     let mut bodies = vec![("register", serde_json::to_value(register).unwrap())];
     bodies.extend(rows(spec, role, value));

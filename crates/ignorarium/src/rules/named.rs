@@ -7,8 +7,8 @@ use super::{BoxRecords, Check, NoRecords, Rule, has_format, is_study_id};
 use crate::analysis::Source;
 use crate::backend::PINNED_LEVEL;
 use crate::derived::{
-    ANALYSIS, Alpha, Analysis, Carried, Estimate, Inputs, Instrument, Selection, StudyState,
-    contrast_key,
+    ANALYSIS, Alpha, Analysis, Carried, Estimate, GatePrediction, Inputs, Instrument,
+    PredictedGroup, Selection, StudyState, contrast_key,
 };
 use crate::diag::{Diagnostic, printable};
 use crate::family::{self as fam, MemberSpec};
@@ -1006,7 +1006,8 @@ pub const CURVE: [f64; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
 
 /// The gate's power with the true value of the statistic `fraction` of the way from
 /// `power_at` to the margin, at `mean`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CurvePoint {
     pub fraction: f64,
     pub mean: f64,
@@ -1015,7 +1016,8 @@ pub struct CurvePoint {
 
 /// The gate's power on the way from `power_at` to one margin, at each of [`CURVE`]. It
 /// describes the plan; no rule reads it.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Curve {
     pub margin: f64,
     pub points: Vec<CurvePoint>,
@@ -1076,12 +1078,37 @@ pub fn power(spec: &Value, ctx: &CheckCtx) -> Vec<Power> {
         .collect()
 }
 
-/// The power curves of each confirmatory hypothesis the gate simulates, by path, in the
-/// order of [`power`]: one per margin. A curve whose plan the simulation refuses at some
-/// point is left out.
-pub fn power_curves(spec: &Value, ctx: &CheckCtx) -> Vec<(String, Vec<Curve>)> {
+/// The power of each confirmatory hypothesis the gate simulates, in order, with its power
+/// curves: one per margin. A curve whose plan the simulation refuses at some point is left
+/// out.
+pub fn powers(spec: &Value, ctx: &CheckCtx) -> Vec<(Power, Vec<Curve>)> {
     (simulated(spec, ctx).into_iter())
-        .map(|(path, _, s)| (path, s.curves()))
+        .map(|(_, p, s)| (p, s.curves()))
+        .collect()
+}
+
+/// What the gate predicts for each confirmatory hypothesis it simulates, in order: what
+/// `register` records of a confirmatory plan.
+pub fn predictions(spec: &Value, ctx: &CheckCtx) -> Vec<GatePrediction> {
+    (simulated(spec, ctx).into_iter())
+        .map(|(hypothesis, p, s)| {
+            let (bounds, level) = s.shape();
+            GatePrediction {
+                hypothesis,
+                id: p.hypothesis,
+                power: p.power,
+                target: p.target,
+                level,
+                reps: REPS,
+                seed_label: s.label.clone(),
+                power_at: s.at,
+                margins: bounds.iter().map(|b| b.margin).collect(),
+                resized: p.resized,
+                needed: p.needed,
+                curve: s.curves(),
+                groups: s.groups,
+            }
+        })
         .collect()
 }
 
@@ -1098,7 +1125,7 @@ fn simulated(spec: &Value, ctx: &CheckCtx) -> Vec<(String, Power, Simulation)> {
         .filter(|(_, h)| has_claim(h))
         .filter_map(
             |(path, h)| match ctx.gates.of(spec, &path, || gate(spec, ctx, h, design))? {
-                Gate::Simulated(p, s) => Some((path, p, s)),
+                Gate::Simulated(p, s) => Some((path, p, *s)),
                 _ => None,
             },
         )
@@ -1189,7 +1216,7 @@ fn stream_level(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
 enum Gate {
     /// The z floor fails in these groups: (stratum, clusters, clusters a z-test needs).
     Floor(Vec<(String, u64, u64)>),
-    Simulated(Power, Simulation),
+    Simulated(Power, Box<Simulation>),
     /// The simulation refused its plan; the text says why.
     Fault(String),
 }
@@ -1202,15 +1229,25 @@ enum Model {
 }
 
 /// What the gate simulated with: the plan, whose level is the stream's x `alpha_share`, the
-/// seed of its replicates and `power_at`.
+/// seed of its replicates and its label, `power_at`, and the groups as the plan holds them.
 #[derive(Clone)]
 struct Simulation {
     model: Model,
     seed: [u8; 32],
+    label: String,
     at: f64,
+    groups: Vec<PredictedGroup>,
 }
 
 impl Simulation {
+    /// The bounds the claim is tested at, and the level of each test.
+    fn shape(&self) -> (&[Bound], f64) {
+        match &self.model {
+            Model::Fixed(plan) => (&plan.bounds, plan.level),
+            Model::Staged(plan) => (&plan.bounds, plan.level),
+        }
+    }
+
     /// The power with the true value of the statistic at `mean` in place of `power_at`, from
     /// the gate's own seed, so each truth draws the same replicates. Only the units' mean
     /// moves: a re-size still sizes at `power_at`, and no count of clusters changes.
@@ -1235,11 +1272,7 @@ impl Simulation {
 
     /// One [`Curve`] per margin, in the order of the claim's bounds.
     fn curves(&self) -> Vec<Curve> {
-        let bounds = match &self.model {
-            Model::Fixed(plan) => &plan.bounds,
-            Model::Staged(plan) => &plan.bounds,
-        };
-        (bounds.iter())
+        (self.shape().0.iter())
             .filter_map(|b| {
                 let points = (CURVE.iter())
                     .map(|&fraction| {
@@ -1358,9 +1391,24 @@ fn gate(spec: &Value, ctx: &CheckCtx, h: &Value, design: (f64, f64, u64)) -> Opt
         return None;
     }
     let id = h.get("id").and_then(Value::as_str).unwrap_or_default();
-    let seed = seed(&ctx.spec_hash, &format!("power/{id}"));
+    let label = format!("power/{id}");
+    let seed = seed(&ctx.spec_hash, &label);
+    let reserve = if resized {
+        clusters_of(spec, ctx, "reserve", per)
+    } else {
+        vec![]
+    };
+    let predicted: Vec<PredictedGroup> = (groups.iter())
+        .map(|(g, first)| PredictedGroup {
+            stratum: g.stratum.clone(),
+            sd: g.sd,
+            icc: g.icc,
+            from_pooled: g.pooled,
+            clusters: first.clone(),
+            reserve: units_in(&reserve, &g.stratum),
+        })
+        .collect();
     let (found, model) = if resized {
-        let reserve = clusters_of(spec, ctx, "reserve", per);
         let strata: Vec<StagedStratum> = (groups.iter())
             .map(|(g, first)| StagedStratum {
                 first: first.clone(),
@@ -1429,11 +1477,13 @@ fn gate(spec: &Value, ctx: &CheckCtx, h: &Value, design: (f64, f64, u64)) -> Opt
                 needed,
                 resized,
             },
-            Simulation {
+            Box::new(Simulation {
                 model,
                 seed,
+                label,
                 at: sized.at,
-            },
+                groups: predicted,
+            }),
         ),
     })
 }

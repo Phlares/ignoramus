@@ -4,7 +4,7 @@ use super::check::{self, Assessed, HomeRecords};
 use super::{CliError, Ctx, Done};
 use crate::backend::output::file_digest;
 use crate::canon::to_canonical;
-use crate::derived::{Alpha, Carried, PinDeviated, REGISTER, Register, Resolved};
+use crate::derived::{Alpha, Carried, GatePrediction, PinDeviated, REGISTER, Register, Resolved};
 use crate::diag::{printable, render_human};
 use crate::estimate::defaults_json;
 use crate::family::{self, Lock};
@@ -94,6 +94,7 @@ fn record_body(
     filled: &[(String, Value)],
     frozen: &Frozen,
     alpha: Option<Alpha>,
+    gate: Vec<GatePrediction>,
 ) -> Result<Value, CliError> {
     serde_json::to_value(Register {
         spec_hash: hash.into(),
@@ -109,6 +110,7 @@ fn record_body(
         family: frozen.family.clone(),
         timestamp: alpha.is_some().then(|| "pending".into()),
         alpha,
+        gate,
     })
     .map_err(|e| io("register record", e))
 }
@@ -622,7 +624,9 @@ fn store(
         };
         plan_log.append(leaf, key).map_err(|e| io(log, e))?;
     }
-    let body = record_body(&a.hash, leaf, log, &a.filled, frozen, alpha.clone())?;
+    // The memo of `assess` holds the simulation, so nothing runs twice.
+    let gate = rules::predictions(&a.value, &a.ctx);
+    let body = record_body(&a.hash, leaf, log, &a.filled, frozen, alpha.clone(), gate)?;
     records::append(
         &dir.join("records.jsonl"),
         key,
@@ -738,7 +742,7 @@ mod tests {
             }),
             family: None,
         };
-        let exp = record_body("sha256:ab", 3, "planlog", &filled, &frozen, None).unwrap();
+        let exp = record_body("sha256:ab", 3, "planlog", &filled, &frozen, None, vec![]).unwrap();
         assert_eq!(
             exp,
             json!({"spec_hash": "sha256:ab", "leaf": 3, "log": "planlog",
@@ -758,7 +762,16 @@ mod tests {
             slot: 2,
             level: 0.01,
         };
-        let conf = record_body("sha256:ab", 3, "testlog", &filled, &frozen, Some(slot)).unwrap();
+        let conf = record_body(
+            "sha256:ab",
+            3,
+            "testlog",
+            &filled,
+            &frozen,
+            Some(slot),
+            vec![],
+        )
+        .unwrap();
         assert_eq!(conf["timestamp"], "pending");
         assert_eq!(conf["log"], "testlog");
         assert_eq!(

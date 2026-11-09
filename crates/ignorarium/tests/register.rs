@@ -1300,3 +1300,84 @@ fn an_exploratory_plan_with_a_deviation_is_refused() {
     assert!(!out.contains(PROMPT), "{out}");
     assert!(!f.home.study_dir("my-study").exists());
 }
+
+/// `check --json` of the plan, as the box prints it.
+fn checked(f: &Fixture, spec: &Path) -> Value {
+    let out = assert_cmd::Command::cargo_bin("ignorarium")
+        .unwrap()
+        .env("IGNORARIUM_HOME", &f.home.root)
+        .arg("check")
+        .arg(spec)
+        .arg("--json")
+        .output()
+        .unwrap();
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+#[test]
+fn a_confirmatory_register_record_holds_the_gates_prediction() {
+    let (f, spec) = setup("numeric-ablation", common::confirmatory);
+    common::pilot(&f.home, vec![common::arm_a()]);
+    let shown = checked(&f, &spec);
+    let (r, out) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap().code, 0, "{out}");
+    // The prediction is the part of the record the gate adds; the output is as before.
+    assert!(!out.contains("curve") && !out.contains("seed"), "{out}");
+    let body = body_of(&f);
+    let gate = body["gate"].as_array().expect("a gate prediction");
+    assert_eq!(gate.len(), 1, "{body}");
+    let g = &gate[0];
+    let p = &shown["power"][0];
+    assert_eq!(g["hypothesis"], "question.hypotheses[0]");
+    assert_eq!(g["id"], p["hypothesis"]);
+    assert_eq!(g["power"], p["power"]);
+    assert_eq!(g["target"], p["target"]);
+    assert_eq!(g["curve"], p["curve"]);
+    assert_eq!(g["level"], body["alpha"]["level"]);
+    assert_eq!(g["reps"], 4000);
+    assert_eq!(g["seed_label"], "power/H1");
+    assert_eq!(g["power_at"], -20.0);
+    assert_eq!(g["margins"], json!([0.0]));
+    assert_eq!(g["resized"], false);
+    assert_eq!(g["needed"], Value::Null);
+    // The groups hold the values the plan takes from the pilot, and the clusters it tests.
+    let taken = &body["resolved"][0]["value"][""];
+    let group = &g["groups"][0];
+    assert_eq!(group["stratum"], "");
+    assert_eq!(group["sd"], taken["sd"]);
+    assert_eq!(group["icc"], taken["icc"]);
+    assert_eq!(group["from_pooled"], false);
+    assert_eq!(group["clusters"].as_array().unwrap().len(), 15);
+    assert_eq!(group["reserve"], json!([]));
+}
+
+#[test]
+fn an_exploratory_register_record_is_unchanged() {
+    let (f, spec) = setup("numeric-ablation", same);
+    let (r, out) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap().code, 0, "{out}");
+    assert!(body_of(&f).get("gate").is_none());
+    // A claim in an exploratory plan is not gated either.
+    let (g, spec) = setup("numeric-ablation", common::with_claim);
+    let (r, out) = go(&g, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap().code, 0, "{out}");
+    assert!(body_of(&g).get("gate").is_none());
+}
+
+#[test]
+fn a_resized_plans_record_holds_its_reserve_and_one_curve_per_margin() {
+    let (f, spec) = setup("numeric-ablation", common::resize_plan(30));
+    for (path, text) in common::reserve_files(30) {
+        std::fs::write(spec.parent().unwrap().join(path), text).unwrap();
+    }
+    common::resize_pilot(&f.home);
+    let shown = checked(&f, &spec);
+    let (r, out) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap().code, 0, "{out}");
+    let body = body_of(&f);
+    let g = &body["gate"][0];
+    assert_eq!(g["resized"], true);
+    assert_eq!(g["power"], shown["power"][0]["power"]);
+    assert_eq!(g["curve"], shown["power"][0]["curve"]);
+    assert_eq!(g["groups"][0]["reserve"].as_array().unwrap().len(), 30);
+}

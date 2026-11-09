@@ -2,7 +2,7 @@
 //! version of them must read, hash and verify the same under the next.
 use ed25519_dalek::SigningKey;
 use ignorarium::canon::{canonical_line, canonical_of, sha256_hex};
-use ignorarium::derived::Analysis;
+use ignorarium::derived::{Analysis, Register};
 use ignorarium::keys::{sign_hex, verify_hex};
 use ignorarium::records::{self, Record};
 use ignorarium::spec;
@@ -270,4 +270,27 @@ fn every_toml_file_parses_as_before() {
 fn toml_edge_cases_parse_as_before() {
     let got = changed(EDGES, |text| spec::parse(text.as_bytes()));
     assert!(got.is_empty(), "{}", got.join("\n"));
+}
+
+fn old_register() -> Record {
+    Record {
+        kind: "register".into(),
+        body: json!({
+            "spec_hash": "sha256:ab", "leaf": 3, "log": "planlog", "defaults": [],
+            "root_id": "12".repeat(32), "payload": "ab".repeat(32),
+            "inputs": [["data/x.txt", "cd".repeat(32)]], "resolved": [],
+            "deviations": [], "carries": null,
+            "alpha": { "log": "planlog", "slot": 1, "level": 0.005 },
+            "timestamp": "pending",
+        }),
+        ..old_record()
+    }
+}
+
+#[test]
+fn a_register_record_written_before_the_field_still_reads() {
+    let r = Register::of(&old_register()).unwrap();
+    assert!(r.gate.is_empty());
+    // Written again, it holds the fields it held: none was added.
+    assert_eq!(serde_json::to_value(&r).unwrap(), old_register().body);
 }

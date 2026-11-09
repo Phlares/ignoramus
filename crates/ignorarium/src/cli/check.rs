@@ -579,9 +579,8 @@ fn render_json(a: &Assessed) -> Result<String, CliError> {
             "long_job": e.is_long_job,
         })
     });
-    let curves = rules::power_curves(&a.value, &a.ctx);
-    let power: Vec<Value> = (rules::power(&a.value, &a.ctx).into_iter().zip(curves))
-        .map(|(p, (_, curve))| {
+    let power: Vec<Value> = (rules::powers(&a.value, &a.ctx).into_iter())
+        .map(|(p, curve)| {
             let clusters: serde_json::Map<String, Value> = (p.clusters.into_iter())
                 .map(|(stratum, n)| (stratum, json!(n)))
                 .collect();

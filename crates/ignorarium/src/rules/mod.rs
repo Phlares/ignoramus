@@ -12,7 +12,7 @@ pub use generic::{check_generic, safe_key};
 pub use named::{
     Borrowed, CAP, CURVE, CheckCtx, Curve, CurvePoint, Gates, Lookup, Power, REPS, StratumInput,
     Taken, borrowed, carried, check_named, differs_from_lock, estimate_inputs, granted, power,
-    power_curves, selected_by, selection_data, waited_on,
+    powers, predictions, selected_by, selection_data, waited_on,
 };
 
 /// The records of a box, by study. An `Err` is a log that cannot be read or trusted.
