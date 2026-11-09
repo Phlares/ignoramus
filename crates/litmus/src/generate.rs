@@ -75,6 +75,12 @@ fn write(out: &Path, path: &str, bytes: &[u8]) -> io::Result<()> {
 
 /// Writes a complete study under `out`: data, payload, two specs and the expected verdicts.
 pub fn generate(shape: &Shape, out: &Path) -> io::Result<()> {
+    if !is_study_id(&shape.seed) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "seed must be lowercase letters and digits joined by single hyphens",
+        ));
+    }
     if [shape.pilot, shape.first, shape.reserve, shape.units].contains(&0) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -102,6 +108,15 @@ pub fn generate(shape: &Shape, out: &Path) -> io::Result<()> {
         br#"{"good":"pass","bad":"fail","edge":"fail"}"#,
     )?;
     copy_payload(&out.join("payload/run"))
+}
+
+/// The box's id pattern `^[a-z0-9]+(-[a-z0-9]+)*$`. The seed is part of both study ids.
+fn is_study_id(s: &str) -> bool {
+    s.split('-').all(|p| {
+        !p.is_empty()
+            && p.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    })
 }
 
 fn copy_payload(to: &Path) -> io::Result<()> {

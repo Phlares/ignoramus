@@ -145,3 +145,116 @@ fn zero_clusters_refused() {
     };
     assert!(generate(&s, d.path()).is_err());
 }
+
+fn spec_text(d: &Path, name: &str) -> String {
+    fs::read_to_string(d.join(name)).unwrap()
+}
+
+const SPECS: [&str; 2] = ["spec/pilot.toml", "spec/litmus.toml"];
+
+#[test]
+fn bad_seed_refused() {
+    for seed in [
+        "", "A", "a_b", "a b", "a/b", "-a", "a-", "a--b", "a\"b", "a\nb",
+    ] {
+        let d = tempfile::tempdir().unwrap();
+        assert!(generate(&shape(seed), d.path()).is_err(), "{seed:?}");
+        assert_eq!(fs::read_dir(d.path()).unwrap().count(), 0, "{seed:?}");
+    }
+    let d = tempfile::tempdir().unwrap();
+    generate(&shape("a-1"), d.path()).unwrap();
+}
+
+#[test]
+fn expected_verdicts() {
+    let d = tempfile::tempdir().unwrap();
+    generate(&shape("a"), d.path()).unwrap();
+    assert_eq!(
+        spec_text(d.path(), "expected.json"),
+        r#"{"good":"pass","bad":"fail","edge":"fail"}"#
+    );
+}
+
+#[test]
+fn payload_is_executable() {
+    let d = tempfile::tempdir().unwrap();
+    generate(&shape("a"), d.path()).unwrap();
+    let meta = fs::metadata(d.path().join("payload/run")).unwrap();
+    assert!(meta.len() > 0);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_ne!(meta.permissions().mode() & 0o111, 0);
+    }
+}
+
+#[test]
+fn environment_reaches_both_specs() {
+    for env in ["", &"ab".repeat(32)] {
+        let d = tempfile::tempdir().unwrap();
+        let s = Shape {
+            environment: env.into(),
+            ..shape("a")
+        };
+        generate(&s, d.path()).unwrap();
+        for spec in SPECS {
+            let line = format!("environment = \"{env}\"\n");
+            assert!(spec_text(d.path(), spec).contains(&line), "{spec} {env}");
+        }
+    }
+}
+
+#[test]
+fn params_only_when_non_zero() {
+    let d = tempfile::tempdir().unwrap();
+    generate(&shape("a"), d.path()).unwrap();
+    assert!(!spec_text(d.path(), "spec/litmus.toml").contains("params"));
+
+    let s = Shape {
+        work_ms: 7,
+        mem_mib: 9,
+        ..shape("a")
+    };
+    generate(&s, d.path()).unwrap();
+    for spec in SPECS {
+        let text = spec_text(d.path(), spec);
+        assert_eq!(
+            text.matches("params = { work_ms = 7, mem_mib = 9 }")
+                .count(),
+            4
+        );
+        assert_eq!(text.matches("[[design.conditions]]").count(), 4);
+    }
+}
+
+#[test]
+fn deviation_only_without_environment() {
+    let marker = "[[pins.deviations]]";
+    let d = tempfile::tempdir().unwrap();
+    generate(&shape("a"), d.path()).unwrap();
+    assert!(spec_text(d.path(), "spec/litmus.toml").contains(marker));
+    assert!(!spec_text(d.path(), "spec/pilot.toml").contains(marker));
+
+    let s = Shape {
+        environment: "ab".repeat(32),
+        ..shape("a")
+    };
+    generate(&s, d.path()).unwrap();
+    assert!(!spec_text(d.path(), "spec/litmus.toml").contains(marker));
+}
+
+#[test]
+fn environment_flag_reaches_spec() {
+    let d = tempfile::tempdir().unwrap();
+    let env = "cd".repeat(32);
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_litmus"))
+        .args(["gen", "--seed", "a", "--environment", &env, "--out"])
+        .arg(d.path().join("study"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    for spec in SPECS {
+        let text = spec_text(&d.path().join("study"), spec);
+        assert!(text.contains(&format!("environment = \"{env}\"")));
+    }
+}
