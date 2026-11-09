@@ -1,6 +1,7 @@
 //! Host readings that a row record keeps for later study. They are observation only: no
 //! decision, hash, charge or comparison reads them. A reading that cannot be had is recorded
 //! with its reason, never raised as an error.
+use crate::backend::cgroup::CgroupCounters;
 use crate::canon::sha256_hex;
 use crate::sys;
 use serde::{Serialize, Serializer};
@@ -109,22 +110,28 @@ pub fn record(
     host: &Reading<HostCpu>,
     start: &Reading<CpuTicks>,
     end: &Reading<CpuTicks>,
+    cgroup: &Reading<CgroupCounters>,
     why: &dyn Fn(&str) -> String,
 ) -> Value {
-    let gone = |w: &str| json!({ "unavailable": why(w) });
-    let host = match host {
-        Reading::Read(h) => json!(h),
-        Reading::Unavailable(w) => gone(w),
-    };
     let ticks = match (start, end) {
         (Reading::Read(s), Reading::Read(e)) => {
-            json!({ "user_hz": s.user_hz, "start": s.ticks, "end": e.ticks })
+            Reading::Read(json!({ "user_hz": s.user_hz, "start": s.ticks, "end": e.ticks }))
         }
-        (Reading::Unavailable(w), _) | (_, Reading::Unavailable(w)) => gone(w),
+        (Reading::Unavailable(w), _) | (_, Reading::Unavailable(w)) => {
+            Reading::Unavailable(w.clone())
+        }
     };
     json!({
-        "host_cpu": host,
-        "cpu_ticks": ticks,
-        "cgroup": gone("not read yet"),
+        "host_cpu": shown(host, why),
+        "cpu_ticks": shown(&ticks, why),
+        "cgroup": shown(cgroup, why),
     })
+}
+
+/// `r` as its value, or as its reason rewritten by `why`.
+fn shown<T: Serialize>(r: &Reading<T>, why: &dyn Fn(&str) -> String) -> Value {
+    match r {
+        Reading::Read(v) => json!(v),
+        Reading::Unavailable(w) => json!({ "unavailable": why(w) }),
+    }
 }

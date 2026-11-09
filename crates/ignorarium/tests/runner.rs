@@ -3,6 +3,7 @@ mod common;
 use common::{
     Lab, PAYLOAD, events_of, indices, kind_of, lab, named, plain, register_study, rows_of,
 };
+use ignorarium::backend::cgroup::rows_parent;
 use ignorarium::backend::level0::Level0;
 use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome, Watch};
 use ignorarium::budget::{Cost, FakeMeter, MeterError};
@@ -17,7 +18,7 @@ use ignorarium::prior::{PriorUse, file_hashes};
 use ignorarium::runner::{RunError, RunPlan, RunStatus, prepare, prepare_with, run, up_to};
 use ignorarium::spec::model::Role;
 use ignorarium::stream::{Log, LogName};
-use ignorarium::telemetry::host_cpu_of;
+use ignorarium::telemetry::{Reading, host_cpu_of};
 use ignorarium::{analysis, estimate, keys, records, schedule, spec, view};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -3386,6 +3387,10 @@ fn run_start_names_the_isolation_and_the_launcher() {
     assert_eq!(starts[0]["attrs"]["isolation"], 0);
     assert_eq!(starts[0]["attrs"]["launcher"], "process");
     assert_eq!(starts[0]["attrs"].get("agent_sha256"), None);
+    let row_cgroup = rows_parent()
+        .as_ref()
+        .map_or_else(Clone::clone, |_| "available".into());
+    assert_eq!(starts[0]["attrs"]["row_cgroup"], row_cgroup);
 }
 
 #[test]
@@ -3438,6 +3443,7 @@ fn outcome(cpu: f64, wall: f64, ended: bool, unknown: bool) -> RowOutcome {
         ended,
         output_links: Vec::new(),
         box_cpu_seconds: 0.0,
+        cgroup: Reading::Unavailable("stub".into()),
     }
 }
 
@@ -5202,10 +5208,7 @@ fn every_row_record_holds_telemetry() {
         let grew = |(i, (s, e)): (usize, (&u64, &u64))| i == 4 || e >= s;
         assert!(start.iter().zip(&end).enumerate().all(grew));
         assert_eq!(t["host_cpu"], serde_json::json!(host_cpu_of(&cpuinfo)));
-        assert_eq!(
-            t["cgroup"],
-            serde_json::json!({ "unavailable": "not read yet" })
-        );
+        assert!(t["cgroup"].is_object());
     }
 }
 
@@ -5241,5 +5244,27 @@ fn telemetry_never_enters_the_output_hash_or_the_recheck() {
         // The wait4 meter charges the row; telemetry makes no bound of it.
         assert_eq!(copy.body.get("cpu_bound"), None);
         assert!(copy.body["cpu_seconds"].as_f64().unwrap() >= 0.0);
+    }
+}
+
+#[test]
+fn a_row_without_a_delegated_cgroup_records_why_and_runs_as_before() {
+    let lab = lab();
+    common::with_payload(&lab, "no-leaf", FIXED);
+    assert_eq!(run(&plan_of(&lab, "no-leaf")).unwrap(), RunStatus::Done);
+    let rows = rows_of(&lab, "no-leaf");
+    assert_eq!(rows.len(), 6);
+    for r in &rows {
+        assert_eq!(r.body["exit"], "ok");
+        assert_eq!(r.body["output_hash"], FIXED_HASH);
+        let cgroup = &r.body["telemetry"]["cgroup"];
+        match rows_parent() {
+            Err(why) => {
+                assert!(!why.is_empty());
+                assert_eq!(cgroup, &serde_json::json!({ "unavailable": why }));
+            }
+            // In a delegated scope the row has its own cgroup.
+            Ok(_) => assert!(cgroup["memory_peak"].as_u64().unwrap() > 0, "{cgroup}"),
+        }
     }
 }

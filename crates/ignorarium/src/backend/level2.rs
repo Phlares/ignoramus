@@ -2,10 +2,12 @@
 //! `ignorarium_guest::host::run_row`. The environment, the inputs and the payload's folder
 //! reach the guest as read-only disks; the outputs come back as a pack. Cloud Hypervisor:
 //! <https://github.com/cloud-hypervisor/cloud-hypervisor>.
+use super::cgroup::IN_MACHINE;
 use super::rootfs;
 use super::selftest::{Call, SelfTest};
 use super::{Backend, Exit, Probe, RowJob, RowOutcome, TIMEOUT_CODE, Watch};
 use crate::files::temp_beside;
+use crate::telemetry::Reading;
 use ignorarium_guest::agent::steps::meminfo_kb;
 pub use ignorarium_guest::host::GUEST_MIB;
 use ignorarium_guest::host::{self, HostJob, Timings, Vm, VmError, VmOutcome};
@@ -365,8 +367,15 @@ impl Backend for Level2 {
         })
     }
 
+    fn row_cgroup(&self) -> Result<(), String> {
+        Err(IN_MACHINE.into())
+    }
+
     fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> io::Result<RowOutcome> {
-        Ok(self.run_timed(job, watch).0)
+        Ok(RowOutcome {
+            cgroup: Reading::Unavailable(IN_MACHINE.into()),
+            ..self.run_timed(job, watch).0
+        })
     }
 }
 
@@ -496,15 +505,12 @@ pub fn outcome_of(res: Result<VmOutcome, VmError>, wall_seconds: f64, cpus: u32)
         (String::new(), Vec::new())
     };
     RowOutcome {
-        exit,
         cpu_seconds: r.cpu_seconds,
-        wall_seconds,
         output_hash,
         selftest: Some(selftest),
-        cpu_unknown: None,
         ended,
         output_links,
-        box_cpu_seconds: 0.0,
+        ..RowOutcome::failed(exit, wall_seconds)
     }
 }
 

@@ -2,6 +2,7 @@ mod common;
 use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome, Watch, level0::Level0};
 use ignorarium::files::replace_atomic;
 use ignorarium::machine::{self, Machine};
+use ignorarium::telemetry::Reading;
 
 /// What `ignorarium probe` does: ask the backends, then measure.
 fn probe(home: &std::path::Path, b: &[Box<dyn Backend>]) -> Result<Machine, machine::MachineError> {
@@ -37,6 +38,7 @@ impl Backend for Fake {
             ended: false,
             output_links: Vec::new(),
             box_cpu_seconds: 0.0,
+            cgroup: Reading::Unavailable("stub".into()),
         })
     }
 }

@@ -1048,10 +1048,13 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
     State::Running
         .write(&plan.home, &plan.study_id)
         .map_err(io)?;
+    let row_cgroup = (plan.backend.row_cgroup())
+        .map_or_else(|why| plan.redact.text(&why), |()| "available".into());
     let mut launch = json!({
         "isolation": plan.backend.level(),
         "launcher": plan.backend.launcher(),
         "environment": plan.environment,
+        "row_cgroup": row_cgroup,
     });
     agent(&mut launch, plan);
     let resumed = all.iter().any(|r| r.kind == "row" || r.kind == "spend");
@@ -1831,7 +1834,9 @@ fn attempt_row(
     box_cpu(&mut body, &outcome);
     let (start, end) = &ticks;
     body["telemetry"] =
-        telemetry::record(telemetry::host_cpu(), start, end, &|w| plan.redact.text(w));
+        telemetry::record(telemetry::host_cpu(), start, end, &outcome.cgroup, &|w| {
+            plan.redact.text(w)
+        });
     records::append(
         log,
         &plan.key,

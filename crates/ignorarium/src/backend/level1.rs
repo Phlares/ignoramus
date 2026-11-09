@@ -2,12 +2,14 @@
 //! IPC, UTS and cgroup namespaces, an empty read-only root with read-only binds of the
 //! environment, the input folder and the payload, one writable output folder, and a
 //! seccomp filter. See the bubblewrap manual: <https://github.com/containers/bubblewrap>.
+use super::cgroup::RowCgroup;
 use super::rootfs::{self, KEPT};
 use super::selftest::SelfTest;
 use super::{
     Backend, Exit, Probe, RowJob, RowOutcome, TIMEOUT_CODE, Watch, host_cpus, outcome, supervise,
 };
 use crate::sys;
+use crate::telemetry::Reading;
 use rustix::pipe::{PipeFlags, pipe_with};
 use rustix::process::{getpid, set_child_subreaper};
 use std::cell::Cell;
@@ -155,7 +157,7 @@ impl Level1 {
             ..RowJob::default()
         };
         match self
-            .launch(&smoke, &job, Instant::now(), &|| true, false)
+            .launch(&smoke, &job, Instant::now(), &|| true, false, None)
             .exit
         {
             Exit::Ok => None,
@@ -169,7 +171,8 @@ impl Level1 {
     /// of its stderr. A stop, the wall timeout and a fault of the box's own stand as they
     /// are. The CPU count includes the sandbox's PID 1 and every process it reaped. With
     /// `capture`, the command's standard output comes back in `stdout`; otherwise it goes
-    /// to nowhere.
+    /// to nowhere. bubblewrap enters `leaf`, when given, before it execs, so the sandbox's
+    /// processes start there and its cgroup namespace is rooted there.
     fn launch(
         &self,
         sandbox: &Sandbox,
@@ -177,6 +180,7 @@ impl Level1 {
         start: Instant,
         watch: &dyn Watch,
         capture: bool,
+        leaf: Option<&RowCgroup>,
     ) -> Launched {
         // bubblewrap exits without reaping the sandbox's PID 1, so its CPU time, and the
         // payload's, never reach bubblewrap's own count. As a subreaper the box inherits
@@ -200,6 +204,9 @@ impl Level1 {
         sys::inherit_only(&mut cmd, inherited);
         // bubblewrap runs under the cap too; it starts within 256 KiB, below the 1 MiB floor.
         sys::limit_data(&mut cmd, job.data_limit());
+        if let Some(leaf) = leaf {
+            leaf.enter(&mut cmd);
+        }
         let started = Started {
             held: Cell::new(Some((pipes.filter, pipes.status_w))),
             inner: watch,
@@ -264,7 +271,7 @@ impl Level1 {
             wall_timeout: limit,
             ..RowJob::default()
         };
-        let l = self.launch(&sandbox, &probe_job, start, watch, true);
+        let l = self.launch(&sandbox, &probe_job, start, watch, true, None);
         let found = serde_json::from_str::<SelfTest>(l.stdout.trim()).ok();
         let result = match (&found, &l.exit) {
             (Some(t), Exit::Ok) if t.ok() => Ok(*t),
@@ -397,28 +404,45 @@ impl Backend for Level1 {
     }
 
     fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> io::Result<RowOutcome> {
+        Ok(self.run_in(job, watch, RowCgroup::make))
+    }
+}
+
+impl Level1 {
+    /// Run `job`, its payload sandbox in the cgroup `leaf` makes, or in the box's own when it
+    /// gives a reason. The self-test runs in the box's own: the leaf counts the payload's
+    /// sandbox only. A row that fails before its payload makes no leaf.
+    pub fn run_in(
+        &self,
+        job: &RowJob,
+        watch: &dyn Watch,
+        leaf: impl FnOnce() -> Result<RowCgroup, String>,
+    ) -> RowOutcome {
         let start = Instant::now();
         let sandbox = match row_args(job) {
             Ok(s) => s,
-            Err(why) => return Ok(outcome(job, start, Exit::Infra(why), 0.0, false)),
+            Err(why) => return outcome(job, start, Exit::Infra(why), 0.0, false),
         };
         let checked = self.self_test(job, start, watch);
         let selftest = match checked.result {
             Ok(t) => Some(t),
             Err((exit, found)) => {
-                return Ok(RowOutcome {
+                return RowOutcome {
                     selftest: found,
                     cpu_unknown: checked.cpu_unknown,
                     ..outcome(job, start, exit, checked.cpu, checked.ended)
-                });
+                };
             }
         };
-        let l = self.launch(&sandbox, job, start, watch, false);
-        Ok(RowOutcome {
+        let leaf = leaf();
+        let l = self.launch(&sandbox, job, start, watch, false, leaf.as_ref().ok());
+        let o = outcome(job, start, l.exit, checked.cpu + l.cpu, l.ended);
+        RowOutcome {
             selftest,
             cpu_unknown: l.cpu_unknown.or(checked.cpu_unknown),
-            ..outcome(job, start, l.exit, checked.cpu + l.cpu, l.ended)
-        })
+            cgroup: leaf.map_or_else(Reading::Unavailable, RowCgroup::finish),
+            ..o
+        }
     }
 }
 

@@ -92,6 +92,30 @@ pub fn inherit_only(cmd: &mut std::process::Command, keep: [i32; 2]) {
     unsafe { cmd.pre_exec(hook) };
 }
 
+/// Make the child that `cmd` starts write `0` (itself) to `procs`, a `cgroup.procs` file,
+/// before it execs, which moves it into that cgroup. Every error is ignored: the child then
+/// runs where the box runs, and the box finds the missed move in the cgroup's counters. A
+/// telemetry fault must not fail the spawn.
+pub fn enter_cgroup(cmd: &mut std::process::Command, procs: std::ffi::CString) {
+    use std::os::unix::process::CommandExt;
+    let hook = move || -> io::Result<()> {
+        // SAFETY: `procs` is a live NUL-terminated string that open only reads.
+        let fd = unsafe { libc::open(procs.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
+        if fd >= 0 {
+            // SAFETY: write reads one byte of a static buffer; `fd` is open and this hook's
+            // own, and close ends it.
+            unsafe {
+                libc::write(fd, b"0".as_ptr().cast(), 1);
+                libc::close(fd);
+            }
+        }
+        Ok(())
+    };
+    // SAFETY: `hook` runs in the child between fork and exec. It makes only the
+    // async-signal-safe open, write and close calls, allocates nothing, and always returns Ok.
+    unsafe { cmd.pre_exec(hook) };
+}
+
 /// Mark every descriptor from `first` to `last` close-on-exec. Fails with `EINVAL` or
 /// `ENOSYS` before Linux 5.11.
 pub fn close_range_cloexec(first: libc::c_uint, last: libc::c_uint) -> io::Result<()> {

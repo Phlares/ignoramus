@@ -327,6 +327,21 @@ pub fn skip_level1() -> bool {
     true
 }
 
+/// Set to `1` to make a host without a delegated cgroup fail the row cgroup tests.
+pub const REQUIRE_CGROUP: &str = "IGNORARIUM_REQUIRE_CGROUP";
+
+/// True, once the reason is printed, when the box cannot give rows a cgroup here, so the
+/// test returns early. With `REQUIRE_CGROUP=1` such a host fails the test instead.
+pub fn skip_cgroup() -> bool {
+    let Err(why) = ignorarium::backend::cgroup::rows_parent() else {
+        return false;
+    };
+    let required = std::env::var_os(REQUIRE_CGROUP).is_some_and(|v| v == "1");
+    assert!(!required, "a row cgroup is required here, but: {why}");
+    println!("skip cgroup: {why}");
+    true
+}
+
 /// Where binfmt_misc handlers are registered.
 pub const BINFMT: &str = "/proc/sys/fs/binfmt_misc";
 
