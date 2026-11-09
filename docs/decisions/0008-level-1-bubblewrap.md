@@ -32,7 +32,7 @@ Limits:
 
 - No Landlock. bubblewrap has no Landlock option, and a Landlock ruleset set before bubblewrap starts would forbid bubblewrap's own mounts. The write fence at level 1 is the read-only root and binds with one writable `/out`. Landlock returns with the launcher evaluation.
 - A sandbox shares the host kernel. A kernel bug can break the sandbox; level 2 runs a separate kernel per row (0010).
-- No CPU or memory caps beyond the row's wall time. The CPU of a row killed at timeout or stop, and of any process still running when the payload exits, is lost: the kernel reaps the killed sandbox's processes without adding their time to any count the box reads. A cgroup reading is on issue #2.
+- No CPU or memory caps beyond the row's wall time. The CPU of a row killed at timeout or stop, and of any process still running when the payload exits, is lost: the kernel reaps the killed sandbox's processes without adding their time to any count the box reads. Each row's cgroup now records its CPU time, killed processes included, as observation only (0026); charging that time is on issue #2.
 - Stale temp folders after a crash stay in the store; their cleanup is on issue #2.
 - AppArmor: Ubuntu restricts unprivileged user namespaces through AppArmor (added in 23.10, on by default since 24.04), so bubblewrap fails there without a profile. On a long-lived host, give bubblewrap a per-binary AppArmor profile that allows user namespaces. Turn the restriction off with `sysctl kernel.apparmor_restrict_unprivileged_userns=0` only on a throwaway machine; CI runners do this.
 
