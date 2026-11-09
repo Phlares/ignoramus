@@ -207,6 +207,8 @@ pub fn run(
     if !approve(&typed, &a.hash) {
         return Err(CliError::refuse("approval not given; nothing was written"));
     }
+    // The curves simulate afresh, so they come before the first write, the box key included.
+    let gate = rules::predictions(&a.value, &a.ctx);
     let key = keys::load_or_create(home).map_err(|e| io("box key", e))?;
     let blobs = Store::open(&home.root).map_err(|e| io("store", e))?;
     let source = format!("register {id}");
@@ -221,8 +223,7 @@ pub fn run(
         hold_inputs(&blobs, &key, &source, &m.root, pins, &m.input_hashes)?;
     }
     let frozen = Frozen {
-        // The curves simulate afresh, so they come before the first write.
-        gate: rules::predictions(&a.value, &a.ctx),
+        gate,
         root_id: Register::root_id(&key, &a.root).map_err(|e| io("study root", e))?,
         payload,
         inputs,
