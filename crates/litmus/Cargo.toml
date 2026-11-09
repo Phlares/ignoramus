@@ -1,0 +1,10 @@
+[package]
+name = "litmus"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.89"
+license = "Apache-2.0"
+description = "A synthetic study with known answers, to test the box."
+
+[dependencies]
+sha2 = "0.11"
