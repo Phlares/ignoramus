@@ -1438,6 +1438,14 @@ fn an_unfinished_study_is_pending_and_check_exits_3() {
     assert_eq!(v["pending"], json!(["question.hypotheses[0].estimates"]));
 }
 
+/// A `curve` entry of `check --json`: from `at` toward `margin`, with these powers.
+fn curve(margin: f64, at: f64, powers: [f64; 5]) -> Value {
+    let points: Vec<Value> = ([0.0, 0.25, 0.5, 0.75, 1.0].into_iter().zip(powers))
+        .map(|(f, power)| json!({ "fraction": f, "mean": at + f * (margin - at), "power": power }))
+        .collect();
+    json!({ "margin": margin, "points": points })
+}
+
 #[test]
 fn the_gate_gives_the_same_verdict_on_every_check() {
     // The median claim sized 3 below the margin: about 93% of units lie at or below it, so
@@ -1459,7 +1467,7 @@ fn the_gate_gives_the_same_verdict_on_every_check() {
         first,
         json!([{
             "hypothesis": "H1", "power": 0.6405, "target": 0.8, "clusters": { "": 15 },
-            "needed": 20
+            "needed": 20, "curve": [curve(0.0, -3.0, [0.6405, 0.33525, 0.09475, 0.01225, 0.00025])]
         }])
     );
     assert_eq!(power(1), first);
@@ -1496,7 +1504,7 @@ fn the_gate_gives_the_same_verdict_on_every_check() {
         power(0),
         json!([{
             "hypothesis": "H1", "power": 1.0, "target": 0.8, "clusters": { "": 15 },
-            "needed": null
+            "needed": null, "curve": [curve(0.0, -20.0, [1.0, 1.0, 1.0, 0.97225, 0.0005])]
         }])
     );
     let page = stdout(&bin(&home).arg("review").arg(&spec).assert().code(0));
@@ -1517,6 +1525,152 @@ fn the_gate_gives_the_same_verdict_on_every_check() {
         check_out(&home, &spec, 1).contains("; 16384 clusters do not reach 0.80."),
         "{beyond}"
     );
+}
+
+/// No power on `points` rises: without a re-size, each point draws the gate's own replicates,
+/// so a truth nearer the margin passes no replicate that a truth further from it fails.
+fn falls(points: &[[f64; 3]]) -> bool {
+    points.windows(2).all(|w| w[1][2] <= w[0][2])
+}
+
+/// The power curves `check --json` gives one hypothesis, as (margin, [fraction, mean, power]),
+/// after checking what every curve holds: the fractions 0 to 1 by quarters, means moved from
+/// `at` toward the margin, a first power equal to the gate's to the bit, and a last power at
+/// the margin of at most `level` + 0.02.
+fn curves_of(p: &Value, at: f64, level: f64) -> Vec<(f64, Vec<[f64; 3]>)> {
+    let curves: Vec<(f64, Vec<[f64; 3]>)> = (p["curve"].as_array().expect("a curve").iter())
+        .map(|c| {
+            let points = (c["points"].as_array().unwrap().iter())
+                .map(|q| ["fraction", "mean", "power"].map(|k| q[k].as_f64().unwrap()))
+                .collect();
+            (c["margin"].as_f64().unwrap(), points)
+        })
+        .collect();
+    for (margin, points) in &curves {
+        let fractions: Vec<f64> = points.iter().map(|q| q[0]).collect();
+        assert_eq!(fractions, [0.0, 0.25, 0.5, 0.75, 1.0], "{p}");
+        for [f, mean, _] in points {
+            assert_eq!(*mean, at + f * (margin - at), "{p}");
+        }
+        assert_eq!(points[0][2], p["power"].as_f64().unwrap(), "{p}");
+        assert!(points[4][2] <= level + 0.02, "{p}");
+    }
+    curves
+}
+
+#[test]
+fn the_curve_starts_at_the_gates_power_and_falls_toward_the_margin() {
+    let near = |t: String| common::confirmatory(t).replace("power_at = -20.0", "power_at = -3.0");
+    let (_d, home, spec) = setup(near);
+    common::pilot(&Home::open_at(&home).unwrap(), vec![common::arm_a()]);
+    let v = json_out(&bin(&home).arg("check").arg(&spec).arg("--json").assert());
+    let level = v["stream"]["level"].as_f64().unwrap();
+    let curves = curves_of(&v["power"][0], -3.0, level);
+    assert_eq!(curves.iter().map(|c| c.0).collect::<Vec<_>>(), [0.0]);
+    assert!(falls(&curves[0].1), "{v}");
+    // The review shows the curve under the hypothesis, with powers as the sentence shows them.
+    let page = stdout(&bin(&home).arg("review").arg(&spec).assert());
+    let sentence =
+        "Simulated power 0.64 with 15 clusters in the pooled group; about 20 clusters reach 0.80.";
+    let line = format!("- H1: {sentence}\n  - toward margin 0: 0.64, ");
+    let start = page.find(&line).unwrap_or_else(|| panic!("{page}"));
+    let rest = &page[start + line.len()..];
+    let end = rest.find('\n').unwrap();
+    assert!(
+        rest[..end].ends_with(" at 0, 25, 50, 75 and 100%"),
+        "{page}"
+    );
+    // A quantile other than the median: on every point, as in the gate, the units' mean is
+    // the truth - sd z(q).
+    let text = std::fs::read_to_string(&spec).unwrap();
+    std::fs::write(
+        &spec,
+        text.replace("{ quantile = 0.5 }", "{ quantile = 0.25 }"),
+    )
+    .unwrap();
+    let v = json_out(&bin(&home).arg("check").arg(&spec).arg("--json").assert());
+    let curves = curves_of(&v["power"][0], -3.0, level);
+    assert!(falls(&curves[0].1), "{v}");
+}
+
+#[test]
+fn a_within_claim_has_one_curve_per_margin() {
+    let within = |t: String| {
+        common::confirmatory(t)
+            .replace(
+                "claim = { below = 0.0 }",
+                "claim = { within = [-6.0, 6.0] }",
+            )
+            .replace("power_at = -20.0", "power_at = 0.5")
+    };
+    let (_d, home, spec) = setup(within);
+    common::pilot(&Home::open_at(&home).unwrap(), vec![common::arm_a()]);
+    let v = json_out(&bin(&home).arg("check").arg(&spec).arg("--json").assert());
+    let level = v["stream"]["level"].as_f64().unwrap();
+    let curves = curves_of(&v["power"][0], 0.5, level);
+    assert_eq!(curves.iter().map(|c| c.0).collect::<Vec<_>>(), [-6.0, 6.0]);
+    assert!(curves.iter().all(|c| falls(&c.1)), "{v}");
+    let page = stdout(&bin(&home).arg("review").arg(&spec).assert());
+    for m in ["-6", "6"] {
+        assert!(
+            page.contains(&format!("\n  - toward margin {m}: ")),
+            "{page}"
+        );
+    }
+}
+
+#[test]
+fn a_resized_design_moves_the_truth_not_the_sizing() {
+    use evidence::claim::{Bound, Statistic};
+    use evidence::power::{Staged, StagedStratum, staged, staged_detail};
+    // The re-size study with 30 reserve clusters and a unit sd of 1, so its power lies between
+    // 0 and 1 and the re-size count depends on where it sizes.
+    let (_d, home, spec) = setup(common::resize_plan(30));
+    let pilot = common::estimate(&[("arm-a", 1.0, json!({}))], "", 1.0, Some(0.1));
+    common::pilot(&Home::open_at(&home).unwrap(), vec![pilot]);
+    let v = json_out(&bin(&home).arg("check").arg(&spec).arg("--json").assert());
+    let level = v["stream"]["level"].as_f64().unwrap();
+    let curves = curves_of(&v["power"][0], -1.0, level);
+    let [(0.0, points)] = &curves[..] else {
+        panic!("{v}")
+    };
+    let hash = ignorarium::spec::hash_bytes(v["hash"].as_str().unwrap()).unwrap();
+    let seed = ignorarium::seed::seed(&hash, "power/H1");
+    let plan = |unit_mean: f64, size_at: f64| Staged {
+        stat: Statistic::Mean { lo: -2.0, hi: 2.0 },
+        bounds: vec![Bound {
+            tail: evidence::Tail::Lower,
+            margin: 0.0,
+        }],
+        strata: vec![StagedStratum {
+            first: vec![1; 15],
+            reserve: vec![1; 30],
+            sd: 1.0,
+            icc: 0.1,
+            unit_mean,
+            size_at,
+        }],
+        level,
+        target_each: 0.8,
+    };
+    let power =
+        |unit_mean, size_at| staged(&plan(unit_mean, size_at), ignorarium::rules::REPS, seed).ok();
+    // Each point draws its units about the moved mean; the re-size still sizes at power_at.
+    for [_, mean, p] in points {
+        assert_eq!(power(*mean, -1.0), Some(*p), "{v}");
+    }
+    // Sizing at the moved mean too would give another curve.
+    assert!(
+        (points[1..4].iter()).any(|[_, mean, p]| power(*mean, *mean) != Some(*p)),
+        "{v}"
+    );
+    // A re-sized curve can rise. Its blinded spread grows with the distance from the margin,
+    // so at power_at the re-size asks for more clusters than the reserve holds and stops more
+    // often than a quarter of the way on.
+    let stop =
+        |mean| (staged_detail(&plan(mean, -1.0), ignorarium::rules::REPS, seed).unwrap()).stop;
+    assert!(points[1][2] > points[0][2], "{v}");
+    assert!(stop(points[0][1]) > stop(points[1][1]), "{v}");
 }
 
 #[test]
@@ -2192,7 +2346,8 @@ fn a_resize_shortfall_states_no_needed_count() {
         v["power"],
         json!([{
             "hypothesis": "H1", "power": 0.0, "target": 0.8,
-            "clusters": { "fiction": 2, "news": 2 }, "needed": null
+            "clusters": { "fiction": 2, "news": 2 }, "needed": null,
+            "curve": [curve(0.0, -1.0, [0.0; 5])]
         }])
     );
     let out = check_out(&home, &spec, 1);
