@@ -258,3 +258,22 @@ fn environment_flag_reaches_spec() {
         assert!(text.contains(&format!("environment = \"{env}\"")));
     }
 }
+
+#[test]
+fn bad_environment_refused() {
+    for env in [
+        "AB".repeat(32),
+        "a".repeat(63),
+        "a".repeat(65),
+        format!("{}\"", "a".repeat(63)),
+        format!("{}\n", "a".repeat(63)),
+    ] {
+        let d = tempfile::tempdir().unwrap();
+        let s = Shape {
+            environment: env.clone(),
+            ..shape("a")
+        };
+        assert!(generate(&s, d.path()).is_err(), "{env:?}");
+        assert_eq!(fs::read_dir(d.path()).unwrap().count(), 0, "{env:?}");
+    }
+}

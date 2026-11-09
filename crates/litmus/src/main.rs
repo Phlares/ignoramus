@@ -44,9 +44,6 @@ fn gen_cmd(args: &[String]) -> Result<(), String> {
             _ => return Err(format!("unknown flag {flag}")),
         }
     }
-    if shape.seed.is_empty() {
-        return Err("--seed is required".into());
-    }
     let out = out.ok_or("--out is required")?;
     generate(&shape, &out).map_err(|e| e.to_string())
 }

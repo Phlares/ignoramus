@@ -87,6 +87,15 @@ pub fn generate(shape: &Shape, out: &Path) -> io::Result<()> {
             "pilot, first, reserve and units must each be at least 1",
         ));
     }
+    let env = &shape.environment;
+    if !env.is_empty()
+        && !(env.len() == 64 && env.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "environment must be empty or 64 lowercase hex characters",
+        ));
+    }
     let pilot = batch(shape, out, "pilot", shape.pilot, "confirmation")?;
     let mut litmus = batch(shape, out, "first", shape.first, "confirmation")?;
     litmus.extend(batch(shape, out, "reserve", shape.reserve, "reserve")?);
