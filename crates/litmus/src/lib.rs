@@ -39,3 +39,6 @@ pub fn value(cluster: &[u8], unit: u32, condition: &str) -> Option<f64> {
     let u = bits as f64 / 2f64.powi(64);
     Some(mean + (u - 0.5) * 2.0 * SPREAD)
 }
+
+mod generate;
+pub use generate::{Shape, generate};
