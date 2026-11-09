@@ -17,6 +17,7 @@ use ignorarium::prior::{PriorUse, file_hashes};
 use ignorarium::runner::{RunError, RunPlan, RunStatus, prepare, prepare_with, run, up_to};
 use ignorarium::spec::model::Role;
 use ignorarium::stream::{Log, LogName};
+use ignorarium::telemetry::host_cpu_of;
 use ignorarium::{analysis, estimate, keys, records, schedule, spec, view};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -5177,20 +5178,12 @@ fn a_trigger_fires_at_its_stop_and_never_on_nan() {
 
 // ---- every row record holds host telemetry ----
 
-/// The first value of `key` in the host's `/proc/cpuinfo`.
-fn cpuinfo_value(key: &str) -> Option<String> {
-    let text = std::fs::read_to_string("/proc/cpuinfo").ok()?;
-    (text.lines())
-        .filter_map(|l| l.split_once(':'))
-        .find(|(k, _)| k.trim() == key)
-        .map(|(_, v)| v.trim().to_string())
-}
-
 #[test]
 fn every_row_record_holds_telemetry() {
     let lab = lab();
     plain(&lab, "tele");
     assert_eq!(run(&plan_of(&lab, "tele")).unwrap(), RunStatus::Done);
+    let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
     let rows = rows_of(&lab, "tele");
     assert_eq!(rows.len(), 6);
     for r in &rows {
@@ -5205,11 +5198,10 @@ fn every_row_record_holds_telemetry() {
         assert!(ticks["user_hz"].as_u64().unwrap() > 0);
         assert!(start.len() >= 7);
         assert_eq!(start.len(), end.len());
-        assert!(start.iter().zip(&end).all(|(s, e)| e >= s));
-        match cpuinfo_value("model name") {
-            Some(model) => assert_eq!(t["host_cpu"]["model"], model.as_str()),
-            None => assert!(t["host_cpu"]["unavailable"].is_string()),
-        }
+        // Index 4 is iowait, which proc(5) says may decrease.
+        let grew = |(i, (s, e)): (usize, (&u64, &u64))| i == 4 || e >= s;
+        assert!(start.iter().zip(&end).enumerate().all(grew));
+        assert_eq!(t["host_cpu"], serde_json::json!(host_cpu_of(&cpuinfo)));
         assert_eq!(
             t["cgroup"],
             serde_json::json!({ "unavailable": "not read yet" })

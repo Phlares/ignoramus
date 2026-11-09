@@ -103,8 +103,8 @@ pub fn cpu_ticks() -> Reading<CpuTicks> {
 }
 
 /// The `telemetry` key of a row record. `why` rewrites every reason, as for any text that
-/// reaches the records. Two tick reads that disagree on a rate or a length are kept as they
-/// are; the reader compares.
+/// reaches the records. Two tick reads that disagree on a length are kept as they are;
+/// the reader compares.
 pub fn record(
     host: &Reading<HostCpu>,
     start: &Reading<CpuTicks>,
