@@ -157,6 +157,7 @@ pub struct GatePrediction {
     pub margins: Vec<f64>,
     pub resized: bool,
     /// The count of clusters per group that would reach the target; see `Power::needed`.
+    /// A registered plan meets its power target, so this is null there; the field keeps the gate's shape.
     pub needed: Option<u32>,
     pub groups: Vec<PredictedGroup>,
     pub curve: Vec<crate::rules::Curve>,
