@@ -1243,7 +1243,7 @@ impl Simulation {
             .filter_map(|b| {
                 let points = (CURVE.iter())
                     .map(|&fraction| {
-                        let mean = self.at + fraction * (b.margin - self.at);
+                        let mean = (1.0 - fraction) * self.at + fraction * b.margin;
                         let power = self.power_at(mean)?;
                         Ok(CurvePoint {
                             fraction,

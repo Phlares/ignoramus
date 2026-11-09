@@ -1441,7 +1441,7 @@ fn an_unfinished_study_is_pending_and_check_exits_3() {
 /// A `curve` entry of `check --json`: from `at` toward `margin`, with these powers.
 fn curve(margin: f64, at: f64, powers: [f64; 5]) -> Value {
     let points: Vec<Value> = ([0.0, 0.25, 0.5, 0.75, 1.0].into_iter().zip(powers))
-        .map(|(f, power)| json!({ "fraction": f, "mean": at + f * (margin - at), "power": power }))
+        .map(|(f, power)| json!({ "fraction": f, "mean": (1.0 - f) * at + f * margin, "power": power }))
         .collect();
     json!({ "margin": margin, "points": points })
 }
@@ -1527,8 +1527,10 @@ fn the_gate_gives_the_same_verdict_on_every_check() {
     );
 }
 
-/// No power on `points` rises: without a re-size, each point draws the gate's own replicates,
-/// so a truth nearer the margin passes no replicate that a truth further from it fails.
+/// No power on `points` rises. Without a re-size every point reuses the gate's seed; in a
+/// single-group design, as in these fixtures, every point draws the same random numbers and
+/// the curve falls in practice. A stratified design shares draws only until a stratum fails,
+/// so there a small rise is simulation noise.
 fn falls(points: &[[f64; 3]]) -> bool {
     points.windows(2).all(|w| w[1][2] <= w[0][2])
 }
@@ -1550,7 +1552,7 @@ fn curves_of(p: &Value, at: f64, level: f64) -> Vec<(f64, Vec<[f64; 3]>)> {
         let fractions: Vec<f64> = points.iter().map(|q| q[0]).collect();
         assert_eq!(fractions, [0.0, 0.25, 0.5, 0.75, 1.0], "{p}");
         for [f, mean, _] in points {
-            assert_eq!(*mean, at + f * (margin - at), "{p}");
+            assert_eq!(*mean, (1.0 - f) * at + f * margin, "{p}");
         }
         assert_eq!(points[0][2], p["power"].as_f64().unwrap(), "{p}");
         assert!(points[4][2] <= level + 0.02, "{p}");
@@ -1664,9 +1666,9 @@ fn a_resized_design_moves_the_truth_not_the_sizing() {
         (points[1..4].iter()).any(|[_, mean, p]| power(*mean, *mean) != Some(*p)),
         "{v}"
     );
-    // A re-sized curve can rise. Its blinded spread grows with the distance from the margin,
-    // so at power_at the re-size asks for more clusters than the reserve holds and stops more
-    // often than a quarter of the way on.
+    // A re-sized curve can rise. The blinded spread is taken about 0, so it grows with the
+    // true mean's distance from 0. At power_at the re-size asks for more clusters than the
+    // reserve holds more often than a quarter of the way on, and each such run stops.
     let stop =
         |mean| (staged_detail(&plan(mean, -1.0), ignorarium::rules::REPS, seed).unwrap()).stop;
     assert!(points[1][2] > points[0][2], "{v}");
