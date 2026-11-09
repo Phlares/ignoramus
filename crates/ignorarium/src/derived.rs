@@ -146,11 +146,13 @@ pub struct GatePrediction {
     pub power: f64,
     /// `design.power`.
     pub target: f64,
-    /// The stream's level times the hypothesis's `alpha_share`.
+    /// The level the gate simulated at, as the check found it: the stream's level then times
+    /// `alpha_share`. It is below `alpha.level` times `alpha_share` when the stream rose
+    /// before `register`.
     pub level: f64,
+    /// The hypothesis's `alpha_share`.
+    pub alpha_share: f64,
     pub reps: u32,
-    /// The label of the seed under the spec hash: `power/<id>`.
-    pub seed_label: String,
     pub power_at: f64,
     pub margins: Vec<f64>,
     pub resized: bool,

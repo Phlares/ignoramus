@@ -886,6 +886,20 @@ fn register_freezes_the_estimate_records_it_used() {
             }
         }])
     );
+    // The prediction holds each group by name, with the pooled flag and the clusters' units.
+    let groups = &body_of(&f)["gate"][0]["groups"];
+    let seen: Vec<(&Value, &Value, &Value, &Value)> = (groups.as_array().unwrap().iter())
+        .map(|g| (&g["stratum"], &g["sd"], &g["from_pooled"], &g["clusters"]))
+        .collect();
+    let units = json!(vec![1; 15]);
+    assert_eq!(
+        seen,
+        [
+            (&json!("fiction"), &json!(3.0), &json!(false), &units),
+            (&json!("code"), &json!(2.0), &json!(true), &units),
+            (&json!("article"), &json!(2.0), &json!(true), &units),
+        ],
+    );
     // An exploratory plan takes nothing from another study, claim or not.
     let (g, spec) = setup("numeric-ablation", common::with_claim);
     let (r, out) = go(&g, &spec, &answer(&spec), true);
@@ -1335,7 +1349,7 @@ fn a_confirmatory_register_record_holds_the_gates_prediction() {
     assert_eq!(g["curve"], p["curve"]);
     assert_eq!(g["level"], body["alpha"]["level"]);
     assert_eq!(g["reps"], 4000);
-    assert_eq!(g["seed_label"], "power/H1");
+    assert_eq!(g["alpha_share"], 1.0);
     assert_eq!(g["power_at"], -20.0);
     assert_eq!(g["margins"], json!([0.0]));
     assert_eq!(g["resized"], false);
@@ -1347,7 +1361,7 @@ fn a_confirmatory_register_record_holds_the_gates_prediction() {
     assert_eq!(group["sd"], taken["sd"]);
     assert_eq!(group["icc"], taken["icc"]);
     assert_eq!(group["from_pooled"], false);
-    assert_eq!(group["clusters"].as_array().unwrap().len(), 15);
+    assert_eq!(group["clusters"], json!(vec![1; 15]));
     assert_eq!(group["reserve"], json!([]));
 }
 

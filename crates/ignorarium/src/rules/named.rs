@@ -1100,7 +1100,7 @@ pub fn predictions(spec: &Value, ctx: &CheckCtx) -> Vec<GatePrediction> {
                 target: p.target,
                 level,
                 reps: REPS,
-                seed_label: s.label.clone(),
+                alpha_share: s.share,
                 power_at: s.at,
                 margins: bounds.iter().map(|b| b.margin).collect(),
                 resized: p.resized,
@@ -1229,12 +1229,12 @@ enum Model {
 }
 
 /// What the gate simulated with: the plan, whose level is the stream's x `alpha_share`, the
-/// seed of its replicates and its label, `power_at`, and the groups as the plan holds them.
+/// seed of its replicates, `alpha_share`, `power_at`, and the groups as the plan holds them.
 #[derive(Clone)]
 struct Simulation {
     model: Model,
     seed: [u8; 32],
-    label: String,
+    share: f64,
     at: f64,
     groups: Vec<PredictedGroup>,
 }
@@ -1391,8 +1391,7 @@ fn gate(spec: &Value, ctx: &CheckCtx, h: &Value, design: (f64, f64, u64)) -> Opt
         return None;
     }
     let id = h.get("id").and_then(Value::as_str).unwrap_or_default();
-    let label = format!("power/{id}");
-    let seed = seed(&ctx.spec_hash, &label);
+    let seed = seed(&ctx.spec_hash, &format!("power/{id}"));
     let reserve = if resized {
         clusters_of(spec, ctx, "reserve", per)
     } else {
@@ -1480,7 +1479,7 @@ fn gate(spec: &Value, ctx: &CheckCtx, h: &Value, design: (f64, f64, u64)) -> Opt
             Box::new(Simulation {
                 model,
                 seed,
-                label,
+                share: sized.share,
                 at: sized.at,
                 groups: predicted,
             }),

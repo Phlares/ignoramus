@@ -83,6 +83,7 @@ struct Frozen {
     deviations: Vec<PinDeviated>,
     carries: Option<Carried>,
     family: Option<Lock>,
+    gate: Vec<GatePrediction>,
 }
 
 /// The body of the `register` record. A confirmatory plan holds the stream slot `alpha`, and
@@ -220,6 +221,8 @@ pub fn run(
         hold_inputs(&blobs, &key, &source, &m.root, pins, &m.input_hashes)?;
     }
     let frozen = Frozen {
+        // The curves simulate afresh, so they come before the first write.
+        gate: rules::predictions(&a.value, &a.ctx),
         root_id: Register::root_id(&key, &a.root).map_err(|e| io("study root", e))?,
         payload,
         inputs,
@@ -624,9 +627,15 @@ fn store(
         };
         plan_log.append(leaf, key).map_err(|e| io(log, e))?;
     }
-    // The memo of `assess` holds the simulation, so nothing runs twice.
-    let gate = rules::predictions(&a.value, &a.ctx);
-    let body = record_body(&a.hash, leaf, log, &a.filled, frozen, alpha.clone(), gate)?;
+    let body = record_body(
+        &a.hash,
+        leaf,
+        log,
+        &a.filled,
+        frozen,
+        alpha.clone(),
+        frozen.gate.clone(),
+    )?;
     records::append(
         &dir.join("records.jsonl"),
         key,
@@ -741,6 +750,7 @@ mod tests {
                 record: "ab".repeat(32),
             }),
             family: None,
+            gate: vec![],
         };
         let exp = record_body("sha256:ab", 3, "planlog", &filled, &frozen, None, vec![]).unwrap();
         assert_eq!(
