@@ -43,7 +43,10 @@ pub fn payload(
     let _held = touch(mem_mib)?;
     burn(work_ms);
     let text = serde_json::json!({ "y": y }).to_string();
-    fs::write(out_dir.join("values.json"), text).map_err(|e| format!("values.json: {e}"))
+    let tmp = out_dir.join("values.json.tmp");
+    fs::write(&tmp, text)
+        .and_then(|()| fs::rename(&tmp, out_dir.join("values.json")))
+        .map_err(|e| format!("values.json: {e}"))
 }
 
 fn param(params: &Value, key: &str) -> Result<u64, String> {
@@ -63,15 +66,8 @@ fn burn(ms: u64) {
 
 /// The CPU time this process has used. Off Unix, the time since the first call.
 #[cfg(unix)]
-#[allow(unsafe_code)]
 fn cpu_time() -> Duration {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: `ts` is a valid, writable timespec for the call.
-    let rc = unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut ts) };
-    assert_eq!(rc, 0, "the process CPU clock is unavailable");
+    let ts = rustix::time::clock_gettime(rustix::time::ClockId::ProcessCPUTime);
     Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
 }
 

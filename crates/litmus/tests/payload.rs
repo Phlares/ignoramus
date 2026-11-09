@@ -188,3 +188,24 @@ fn mem_param_touches_memory() {
     assert!(usage(&lab, "{}").1 < 32 * 1024);
     assert!(usage(&lab, r#"{"mem_mib":64}"#).1 >= 64 * 1024);
 }
+
+#[test]
+fn success_leaves_no_temp_file() {
+    let lab = Lab::new();
+    assert!(lab.run("good", "data/first-0001.txt#0").status.success());
+    let mut names: Vec<_> = fs::read_dir(lab.out())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["values.json"]);
+}
+
+#[test]
+fn failed_rename_leaves_no_values_file() {
+    let lab = Lab::new();
+    fs::create_dir(lab.out().join("values.json")).unwrap();
+    let out = lab.run("good", "data/first-0001.txt#0");
+    assert!(!out.status.success(), "{out:?}");
+    assert!(!lab.out().join("values.json").is_file());
+}

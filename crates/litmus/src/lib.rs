@@ -1,5 +1,5 @@
 //! A synthetic study with known answers, to test the box.
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 use sha2::{Digest, Sha256};
 
 /// Half-width of the noise around each condition's mean.
