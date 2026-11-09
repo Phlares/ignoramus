@@ -34,6 +34,7 @@ pub mod spec;
 pub mod store;
 pub mod stream;
 pub mod sys;
+pub mod telemetry;
 pub mod time;
 pub mod units;
 pub mod values;

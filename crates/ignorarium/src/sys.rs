@@ -112,6 +112,13 @@ pub fn close_range_cloexec(first: libc::c_uint, last: libc::c_uint) -> io::Resul
     }
 }
 
+/// Kernel clock ticks per second, the unit of `/proc/stat`. `None` when the system cannot say.
+pub fn clock_ticks() -> Option<u64> {
+    // SAFETY: sysconf takes one integer and reads and writes no memory.
+    let n = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    u64::try_from(n).ok().filter(|&n| n > 0)
+}
+
 /// Send SIGKILL to the process group led by `pid`. A group already gone is fine.
 pub fn kill_group(pid: u32) -> io::Result<()> {
     use rustix::process::{Pid, Signal, kill_process_group};

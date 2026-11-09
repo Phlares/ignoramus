@@ -5174,3 +5174,80 @@ fn a_trigger_fires_at_its_stop_and_never_on_nan() {
     assert!(!fires(f64::NAN, 12.25));
     assert!(!fires(f64::INFINITY, f64::NAN));
 }
+
+// ---- every row record holds host telemetry ----
+
+/// The first value of `key` in the host's `/proc/cpuinfo`.
+fn cpuinfo_value(key: &str) -> Option<String> {
+    let text = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+    (text.lines())
+        .filter_map(|l| l.split_once(':'))
+        .find(|(k, _)| k.trim() == key)
+        .map(|(_, v)| v.trim().to_string())
+}
+
+#[test]
+fn every_row_record_holds_telemetry() {
+    let lab = lab();
+    plain(&lab, "tele");
+    assert_eq!(run(&plan_of(&lab, "tele")).unwrap(), RunStatus::Done);
+    let rows = rows_of(&lab, "tele");
+    assert_eq!(rows.len(), 6);
+    for r in &rows {
+        let t = &r.body["telemetry"];
+        let ticks = &t["cpu_ticks"];
+        let nums = |k: &str| -> Vec<u64> {
+            (ticks[k].as_array().unwrap().iter())
+                .map(|n| n.as_u64().unwrap())
+                .collect()
+        };
+        let (start, end) = (nums("start"), nums("end"));
+        assert!(ticks["user_hz"].as_u64().unwrap() > 0);
+        assert!(start.len() >= 7);
+        assert_eq!(start.len(), end.len());
+        assert!(start.iter().zip(&end).all(|(s, e)| e >= s));
+        match cpuinfo_value("model name") {
+            Some(model) => assert_eq!(t["host_cpu"]["model"], model.as_str()),
+            None => assert!(t["host_cpu"]["unavailable"].is_string()),
+        }
+        assert_eq!(
+            t["cgroup"],
+            serde_json::json!({ "unavailable": "not read yet" })
+        );
+    }
+}
+
+/// Writes only the template's measure, so the output hash is the same on every host.
+const FIXED: &str = "#!/bin/sh
+printf '{\"ppl\": 1.5}' > \"$IGNORARIUM_OUT/values.json\"
+";
+
+/// The output hash of `FIXED` before row telemetry existed.
+const FIXED_HASH: &str = "e96f1290e9a17d0b0307a90817c476772f7f0a38a1bda51c70e3143c2765f6ab";
+
+#[test]
+fn telemetry_never_enters_the_output_hash_or_the_recheck() {
+    let lab = lab();
+    common::edited(&lab, "tele-same", deterministic, FIXED);
+    let plan = plan_of(&lab, "tele-same");
+    let pairs = copies(&plan);
+    assert_eq!(pairs.len(), 2);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    for &(c, o) in &pairs {
+        let (copy, original) = (
+            row_record(&lab, "tele-same", c),
+            row_record(&lab, "tele-same", o),
+        );
+        // Each record carries its own telemetry, and the comparison ignores it.
+        assert!(copy.body["telemetry"].is_object());
+        assert!(original.body["telemetry"].is_object());
+        assert_eq!(copy.body["same"], true);
+        assert_eq!(copy.body["output_hash"], FIXED_HASH);
+        assert_eq!(original.body["output_hash"], FIXED_HASH);
+        assert_eq!(copy.body["attempts"], 1);
+        assert_eq!(original.body["attempts"], 1);
+        // The wait4 meter charges the row; telemetry makes no bound of it.
+        assert_eq!(copy.body.get("cpu_bound"), None);
+        assert!(copy.body["cpu_seconds"].as_f64().unwrap() >= 0.0);
+    }
+}
