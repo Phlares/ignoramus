@@ -36,6 +36,12 @@ Limits:
 - A run started outside a delegated scope, from a plain shell or tmux, records every row as unavailable. Check `row_cgroup` in the first event before leaving a run.
 - A scope under `user@<uid>.service` ends when the user manager stops, which happens when the user's last session ends unless linger is on. Turn linger on before a long run.
 - A box that dies mid-row leaves its leaf behind. The next run ignores it.
+- `row_cgroup: "available"` on `run.start` means the parent cgroup is set up. It does not mean every row entered its leaf. A row that did not enter records `the row did not enter its cgroup`.
+- An EBUSY refusal happens after the box moved itself into `ignorarium-box`. The box stays there for the rest of the run.
+- A removed leaf can stay in the kernel as a dying memory cgroup until its page cache is reclaimed. Across thousands of rows this can add up to hundreds of MB of reclaimable memory. The operator watches `nr_dying_descendants` in the scope's `cgroup.stat`.
+- Level 0 has no cgroup namespace, so a payload sees its per-row path in `/proc/self/cgroup`. A payload that prints it changes its output hash.
+- Level 2 rows run in a machine and record the cgroup as unavailable. Per-row cgroup readings cover levels 0 and 1 only.
+- The ownership check does not prove `Delegate=yes`. The operator starts the run with `systemd-run --user --scope -p Delegate=yes`.
 
 Case against: a scope ties the run's life to the systemd user manager, which a run from a plain shell does not depend on.
 
