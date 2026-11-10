@@ -7,7 +7,8 @@ If `good` fails or `bad` passes, the box or its setup is wrong, and no real stud
 
 ## What it holds
 
-`litmus gen` writes a study folder:
+`litmus gen` writes a study folder. It refuses an `--out` folder that already holds files.
+The study folder holds:
 
 - `data/`: one text file per cluster, one line per unit. Each line holds the seed, so two seeds share no file.
 - `payload/run`: a copy of the `litmus` program that ran `gen`. It is the payload of every row.

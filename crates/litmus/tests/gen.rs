@@ -1,3 +1,4 @@
+use ignorarium::spec::model::{Role, Spec};
 use litmus::{Shape, generate};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -37,34 +38,28 @@ fn shape(seed: &str) -> Shape {
     }
 }
 
-/// The `[[inputs]]` blocks of a spec as (path, sha256, role, units).
-fn inputs(spec: &str) -> Vec<(String, String, String, u32)> {
-    let mut out: Vec<(String, String, String, u32)> = Vec::new();
-    let mut inside = false;
-    for line in spec.lines() {
-        if line.starts_with('[') {
-            inside = line == "[[inputs]]";
-            if inside {
-                out.push(Default::default());
-            }
-        } else if let (true, Some((k, v))) = (inside, line.split_once(" = ")) {
-            let last = out.last_mut().unwrap();
-            let s = v.trim_matches('"').to_string();
-            match k {
-                "path" => last.0 = s,
-                "sha256" => last.1 = s,
-                "role" => last.2 = s,
-                "units" => last.3 = s.parse().unwrap(),
-                _ => {}
-            }
-        }
-    }
-    out
+/// Generates `shape` in a new folder.
+fn generated(shape: &Shape) -> tempfile::TempDir {
+    let d = tempfile::tempdir().unwrap();
+    generate(shape, d.path()).unwrap();
+    d
+}
+
+/// The spec `name` under `d` as the JSON the box hashes.
+fn raw(d: &Path, name: &str) -> serde_json::Value {
+    ignorarium::spec::load(&d.join(name)).unwrap().value
+}
+
+/// The spec `name` under `d`, as the box parses it.
+fn spec(d: &Path, name: &str) -> Spec {
+    serde_json::from_value(raw(d, name)).unwrap()
 }
 
 fn digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
+
+const SPECS: [&str; 2] = ["spec/pilot.toml", "spec/litmus.toml"];
 
 #[test]
 fn defaults() {
@@ -74,9 +69,7 @@ fn defaults() {
 
 #[test]
 fn same_seed_same_bytes() {
-    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    generate(&shape("a"), a.path()).unwrap();
-    generate(&shape("a"), b.path()).unwrap();
+    let (a, b) = (generated(&shape("a")), generated(&shape("a")));
     let t = tree(a.path());
     assert!(t.contains_key("spec/litmus.toml"));
     assert_eq!(t, tree(b.path()));
@@ -84,9 +77,7 @@ fn same_seed_same_bytes() {
 
 #[test]
 fn two_seeds_share_no_hash() {
-    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    generate(&shape("a"), a.path()).unwrap();
-    generate(&shape("b"), b.path()).unwrap();
+    let (a, b) = (generated(&shape("a")), generated(&shape("b")));
     let hashes = |d: &Path| -> Vec<String> {
         tree(d)
             .iter()
@@ -102,18 +93,14 @@ fn two_seeds_share_no_hash() {
 #[test]
 fn pins_match_files() {
     let s = shape("a");
-    let d = tempfile::tempdir().unwrap();
-    generate(&s, d.path()).unwrap();
-    for spec in ["spec/pilot.toml", "spec/litmus.toml"] {
-        let list = inputs(&fs::read_to_string(d.path().join(spec)).unwrap());
-        assert!(!list.is_empty());
-        for (path, sha, _, units) in list {
-            assert_eq!(
-                sha,
-                digest(&fs::read(d.path().join(&path)).unwrap()),
-                "{path}"
-            );
-            assert_eq!(units, s.units);
+    let d = generated(&s);
+    for name in SPECS {
+        let inputs = spec(d.path(), name).inputs;
+        assert!(!inputs.is_empty());
+        for i in inputs {
+            let file = fs::read(d.path().join(&i.path)).unwrap();
+            assert_eq!(i.sha256, digest(&file), "{}", i.path);
+            assert_eq!(i.units, Some(s.units));
         }
     }
 }
@@ -121,19 +108,24 @@ fn pins_match_files() {
 #[test]
 fn roles_and_counts() {
     let s = shape("a");
-    let d = tempfile::tempdir().unwrap();
-    generate(&s, d.path()).unwrap();
-    let read = |f: &str| inputs(&fs::read_to_string(d.path().join(f)).unwrap());
-    let count = |l: &[(String, String, String, u32)], role: &str| {
-        l.iter().filter(|i| i.2 == role).count() as u32
+    let d = generated(&s);
+    let (pilot, litmus) = (
+        spec(d.path(), "spec/pilot.toml").inputs,
+        spec(d.path(), "spec/litmus.toml").inputs,
+    );
+    let count = |l: &[ignorarium::spec::model::Input], role| {
+        l.iter().filter(|i| i.role == role).count() as u32
     };
-    let (pilot, litmus) = (read("spec/pilot.toml"), read("spec/litmus.toml"));
     assert_eq!(pilot.len() as u32, s.pilot);
-    assert_eq!(count(&pilot, "confirmation"), s.pilot);
-    assert_eq!(count(&litmus, "confirmation"), s.first);
-    assert_eq!(count(&litmus, "reserve"), s.reserve);
+    assert_eq!(count(&pilot, Role::Confirmation), s.pilot);
+    assert_eq!(count(&litmus, Role::Confirmation), s.first);
+    assert_eq!(count(&litmus, Role::Reserve), s.reserve);
     assert_eq!(litmus.len() as u32, s.first + s.reserve);
-    assert!(pilot.iter().all(|p| litmus.iter().all(|l| l.0 != p.0)));
+    assert!(
+        pilot
+            .iter()
+            .all(|p| litmus.iter().all(|l| l.path != p.path))
+    );
 }
 
 #[test]
@@ -146,12 +138,6 @@ fn zero_clusters_refused() {
     assert!(generate(&s, d.path()).is_err());
 }
 
-fn spec_text(d: &Path, name: &str) -> String {
-    fs::read_to_string(d.join(name)).unwrap()
-}
-
-const SPECS: [&str; 2] = ["spec/pilot.toml", "spec/litmus.toml"];
-
 #[test]
 fn bad_seed_refused() {
     for seed in [
@@ -161,24 +147,29 @@ fn bad_seed_refused() {
         assert!(generate(&shape(seed), d.path()).is_err(), "{seed:?}");
         assert_eq!(fs::read_dir(d.path()).unwrap().count(), 0, "{seed:?}");
     }
+    generated(&shape("a-1"));
+}
+
+#[test]
+fn occupied_out_refused() {
     let d = tempfile::tempdir().unwrap();
-    generate(&shape("a-1"), d.path()).unwrap();
+    fs::write(d.path().join("stale.txt"), "x").unwrap();
+    assert!(generate(&shape("a"), d.path()).is_err());
+    assert_eq!(fs::read_dir(d.path()).unwrap().count(), 1);
 }
 
 #[test]
 fn expected_verdicts() {
-    let d = tempfile::tempdir().unwrap();
-    generate(&shape("a"), d.path()).unwrap();
+    let d = generated(&shape("a"));
     assert_eq!(
-        spec_text(d.path(), "expected.json"),
+        fs::read_to_string(d.path().join("expected.json")).unwrap(),
         r#"{"good":"pass","bad":"fail","edge":"fail"}"#
     );
 }
 
 #[test]
 fn payload_is_executable() {
-    let d = tempfile::tempdir().unwrap();
-    generate(&shape("a"), d.path()).unwrap();
+    let d = generated(&shape("a"));
     let meta = fs::metadata(d.path().join("payload/run")).unwrap();
     assert!(meta.len() > 0);
     #[cfg(unix)]
@@ -191,56 +182,50 @@ fn payload_is_executable() {
 #[test]
 fn environment_reaches_both_specs() {
     for env in ["", &"ab".repeat(32)] {
-        let d = tempfile::tempdir().unwrap();
-        let s = Shape {
+        let d = generated(&Shape {
             environment: env.into(),
             ..shape("a")
-        };
-        generate(&s, d.path()).unwrap();
-        for spec in SPECS {
-            let line = format!("environment = \"{env}\"\n");
-            assert!(spec_text(d.path(), spec).contains(&line), "{spec} {env}");
+        });
+        for name in SPECS {
+            assert_eq!(spec(d.path(), name).pins.environment, env, "{name}");
         }
     }
 }
 
 #[test]
 fn params_only_when_non_zero() {
-    let d = tempfile::tempdir().unwrap();
-    generate(&shape("a"), d.path()).unwrap();
-    assert!(!spec_text(d.path(), "spec/litmus.toml").contains("params"));
-
-    let s = Shape {
-        work_ms: 7,
-        mem_mib: 9,
-        ..shape("a")
+    let at = |work_ms, mem_mib| -> Vec<Option<serde_json::Value>> {
+        let d = generated(&Shape {
+            work_ms,
+            mem_mib,
+            ..shape("a")
+        });
+        let mut all = Vec::new();
+        for name in SPECS {
+            let raw = raw(d.path(), name);
+            let conditions = raw["design"]["conditions"].as_array().unwrap();
+            assert_eq!(conditions.len(), 4, "{name}");
+            all.extend(conditions.iter().map(|c| c.get("params").cloned()));
+        }
+        all
     };
-    generate(&s, d.path()).unwrap();
-    for spec in SPECS {
-        let text = spec_text(d.path(), spec);
-        assert_eq!(
-            text.matches("params = { work_ms = 7, mem_mib = 9 }")
-                .count(),
-            4
-        );
-        assert_eq!(text.matches("[[design.conditions]]").count(), 4);
-    }
+    let both = serde_json::json!({ "work_ms": 7, "mem_mib": 9 });
+    assert!(at(0, 0).iter().all(Option::is_none));
+    assert!(at(7, 9).iter().all(|p| p.as_ref() == Some(&both)));
 }
 
 #[test]
 fn deviation_only_without_environment() {
-    let marker = "[[pins.deviations]]";
-    let d = tempfile::tempdir().unwrap();
-    generate(&shape("a"), d.path()).unwrap();
-    assert!(spec_text(d.path(), "spec/litmus.toml").contains(marker));
-    assert!(!spec_text(d.path(), "spec/pilot.toml").contains(marker));
-
-    let s = Shape {
-        environment: "ab".repeat(32),
-        ..shape("a")
+    let deviations = |environment: String, name| {
+        let d = generated(&Shape {
+            environment,
+            ..shape("a")
+        });
+        spec(d.path(), name).pins.deviations.len()
     };
-    generate(&s, d.path()).unwrap();
-    assert!(!spec_text(d.path(), "spec/litmus.toml").contains(marker));
+    assert_eq!(deviations(String::new(), "spec/litmus.toml"), 1);
+    assert_eq!(deviations(String::new(), "spec/pilot.toml"), 0);
+    assert_eq!(deviations("ab".repeat(32), "spec/litmus.toml"), 0);
 }
 
 #[test]
@@ -253,9 +238,9 @@ fn environment_flag_reaches_spec() {
         .output()
         .unwrap();
     assert!(out.status.success(), "{out:?}");
-    for spec in SPECS {
-        let text = spec_text(&d.path().join("study"), spec);
-        assert!(text.contains(&format!("environment = \"{env}\"")));
+    for name in SPECS {
+        let pinned = spec(&d.path().join("study"), name).pins.environment;
+        assert_eq!(pinned, env, "{name}");
     }
 }
 

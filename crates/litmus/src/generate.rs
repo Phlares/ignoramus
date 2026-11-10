@@ -1,5 +1,4 @@
 use sha2::{Digest, Sha256};
-use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -75,26 +74,8 @@ fn write(out: &Path, path: &str, bytes: &[u8]) -> io::Result<()> {
 
 /// Writes a complete study under `out`: data, payload, two specs and the expected verdicts.
 pub fn generate(shape: &Shape, out: &Path) -> io::Result<()> {
-    if !is_study_id(&shape.seed) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "seed must be lowercase letters and digits joined by single hyphens",
-        ));
-    }
-    if [shape.pilot, shape.first, shape.reserve, shape.units].contains(&0) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "pilot, first, reserve and units must each be at least 1",
-        ));
-    }
-    let env = &shape.environment;
-    if !env.is_empty()
-        && !(env.len() == 64 && env.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "environment must be empty or 64 lowercase hex characters",
-        ));
+    if let Some(why) = refusal(shape, out) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, why));
     }
     let pilot = batch(shape, out, "pilot", shape.pilot, "confirmation")?;
     let mut litmus = batch(shape, out, "first", shape.first, "confirmation")?;
@@ -119,6 +100,24 @@ pub fn generate(shape: &Shape, out: &Path) -> io::Result<()> {
     copy_payload(&out.join("payload/run"))
 }
 
+/// Why `generate` refuses `shape` or `out`, before it writes anything. A study in an occupied
+/// folder could sit beside stale files from an earlier, larger study.
+fn refusal(shape: &Shape, out: &Path) -> Option<&'static str> {
+    let env = &shape.environment;
+    let hex = env.len() == 64 && env.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    if !is_study_id(&shape.seed) {
+        Some("seed must be lowercase letters and digits joined by single hyphens")
+    } else if [shape.pilot, shape.first, shape.reserve, shape.units].contains(&0) {
+        Some("pilot, first, reserve and units must each be at least 1")
+    } else if !env.is_empty() && !hex {
+        Some("environment must be empty or 64 lowercase hex characters")
+    } else if fs::read_dir(out).is_ok_and(|mut d| d.next().is_some()) {
+        Some("out must be absent or an empty folder")
+    } else {
+        None
+    }
+}
+
 /// The box's id pattern `^[a-z0-9]+(-[a-z0-9]+)*$`. The seed is part of both study ids.
 fn is_study_id(s: &str) -> bool {
     s.split('-').all(|p| {
@@ -141,88 +140,158 @@ fn copy_payload(to: &Path) -> io::Result<()> {
 
 /// One spec. The pilot is exploratory and makes no claim. The litmus study is confirmatory.
 fn spec(shape: &Shape, confirmatory: bool, inputs: &[Input]) -> String {
-    let seed = &shape.seed;
+    let Shape {
+        seed,
+        units,
+        min_isolation,
+        environment,
+        ..
+    } = shape;
     let (id, mode, label) = if confirmatory {
         (format!("litmus-{seed}"), "confirmatory", "confirmed")
     } else {
         (format!("litmus-pilot-{seed}"), "exploratory", "signal")
     };
-    let mut s = String::new();
-    let w = &mut s;
-    let _ = writeln!(
-        w,
-        "[study]\nid = \"{id}\"\ntemplate = \"numeric-ablation\"\nmode = \"{mode}\"\nlabel = \"{label}\"\ntest_log = true\n"
-    );
-    let _ = writeln!(
-        w,
-        "[question]\npopulation = \"\"\nintervention = \"\"\ncomparator = \"\"\nnegative_control = \"\""
-    );
-    for (name, share) in CONDITIONS[1..].iter().zip(ALPHA_SHARES) {
-        let _ = writeln!(
-            w,
-            "[[question.hypotheses]]\nid = \"{name}\"\nstatement = \"\"\nrival = \"\"\noutcome = \"y\"\ncontrast = {{ {name} = 1.0 }}\nstrata = []"
-        );
-        if confirmatory {
-            let _ = writeln!(
-                w,
-                "claim = {{ below = 0.0 }}\nstatistic = {{ mean = [-1.0, 1.0] }}\npower_at = -0.6\nestimates = {{ from = \"litmus-pilot-{seed}\" }}\nalpha_share = {share}"
-            );
-        }
-    }
-    let _ = writeln!(
-        w,
-        "\n[[outcomes]]\nid = \"y\"\nunit = \"score\"\ndirection = \"lower\"\nmeasure = \"y\"\npaired = \"difference\"\nregistered = true\n"
-    );
-    let _ = writeln!(
-        w,
-        "[scope]\nmin_isolation = {}\nstop_rule = \"budget-only\"\n[scope.budget]\ncpu_hours = 1.0\nwall_hours = 1.0\nmoney_usd = 0.0\n[scope.end_of_run]\nroute = \"report\"\nfollow_on = []\n",
-        shape.min_isolation
-    );
-    let _ = writeln!(
-        w,
-        "[design]\nunit = \"line\"\ncluster = \"file\"\nstratum = \"\"\nreference = \"ref\"\nrepeats = 1\nrow_seconds = 1.0\npower = 0.8\nunits_per_cluster = {}\npick = \"first\"",
-        shape.units
-    );
+    let hypotheses: String = (CONDITIONS[1..].iter().zip(ALPHA_SHARES))
+        .map(|(name, share)| {
+            let claim = if confirmatory {
+                format!(
+                    r#"claim = {{ below = 0.0 }}
+statistic = {{ mean = [-1.0, 1.0] }}
+power_at = -0.6
+estimates = {{ from = "litmus-pilot-{seed}" }}
+alpha_share = {share}
+"#
+                )
+            } else {
+                String::new()
+            };
+            format!(
+                r#"[[question.hypotheses]]
+id = "{name}"
+statement = ""
+rival = ""
+outcome = "y"
+contrast = {{ {name} = 1.0 }}
+strata = []
+{claim}"#
+            )
+        })
+        .collect();
     let params: Vec<String> = [("work_ms", shape.work_ms), ("mem_mib", shape.mem_mib)]
         .iter()
         .filter(|(_, v)| *v != 0)
         .map(|(k, v)| format!("{k} = {v}"))
         .collect();
-    for c in CONDITIONS {
-        let _ = writeln!(w, "[[design.conditions]]\nid = \"{c}\"");
-        if !params.is_empty() {
-            let _ = writeln!(w, "params = {{ {} }}", params.join(", "));
-        }
-    }
-    let _ = writeln!(
-        w,
-        "[design.confirmation]\nconditions = [\"good\", \"bad\", \"edge\"]"
-    );
-    if confirmatory {
-        let _ = writeln!(w, "[design.resize]\nrule = \"blinded-once\"");
-    }
-    let _ = writeln!(w);
-    for i in inputs {
-        let _ = writeln!(
-            w,
-            "[[inputs]]\npath = \"{}\"\nsha256 = \"{}\"\nrole = \"{}\"\nunits = {}\n[inputs.licence]\nspdx = \"CC0-1.0\"\ntype = \"common\"\nsource = \"\"\ncreators = []\n",
-            i.path, i.sha256, i.role, shape.units
-        );
-    }
-    let _ = writeln!(
-        w,
-        "[pins]\nenvironment = \"{}\"\npayload = \"\"\nrule_base = \"\"\ndeterministic = true",
-        shape.environment
-    );
-    if confirmatory && shape.environment.is_empty() {
-        let _ = writeln!(
-            w,
-            "[[pins.deviations]]\nfrom = \"litmus-pilot-{seed}\"\nreason = \"the pilot ran on the host, which names no image\"\ntiming = \"before-collection\""
-        );
-    }
-    let _ = writeln!(
-        w,
-        "\n[mutations]\ndepth_cap = 2\noperators = []\ntriggers = []\n[mutations.seeds]\nspawn = \"spawn/\"\nreport = \"report/\"\n\n[access]\nblind = {confirmatory}\n\n[report]\nlicence_code = \"Apache-2.0\"\nlicence_data = \"CC0-1.0\"\npublish = \"none\""
-    );
-    s
+    let params = if params.is_empty() {
+        String::new()
+    } else {
+        format!("params = {{ {} }}\n", params.join(", "))
+    };
+    let conditions: String = (CONDITIONS.iter())
+        .map(|c| format!("[[design.conditions]]\nid = \"{c}\"\n{params}"))
+        .collect();
+    let resize = if confirmatory {
+        "[design.resize]\nrule = \"blinded-once\"\n"
+    } else {
+        ""
+    };
+    let inputs: String = (inputs.iter())
+        .map(|Input { path, sha256, role }| {
+            format!(
+                r#"[[inputs]]
+path = "{path}"
+sha256 = "{sha256}"
+role = "{role}"
+units = {units}
+[inputs.licence]
+spdx = "CC0-1.0"
+type = "common"
+source = ""
+creators = []
+
+"#
+            )
+        })
+        .collect();
+    let deviation = if confirmatory && environment.is_empty() {
+        format!(
+            r#"[[pins.deviations]]
+from = "litmus-pilot-{seed}"
+reason = "the pilot ran on the host, which names no image"
+timing = "before-collection"
+"#
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        r#"[study]
+id = "{id}"
+template = "numeric-ablation"
+mode = "{mode}"
+label = "{label}"
+test_log = true
+
+[question]
+population = ""
+intervention = ""
+comparator = ""
+negative_control = ""
+{hypotheses}
+[[outcomes]]
+id = "y"
+unit = "score"
+direction = "lower"
+measure = "y"
+paired = "difference"
+registered = true
+
+[scope]
+min_isolation = {min_isolation}
+stop_rule = "budget-only"
+[scope.budget]
+cpu_hours = 1.0
+wall_hours = 1.0
+money_usd = 0.0
+[scope.end_of_run]
+route = "report"
+follow_on = []
+
+[design]
+unit = "line"
+cluster = "file"
+stratum = ""
+reference = "ref"
+repeats = 1
+row_seconds = 1.0
+power = 0.8
+units_per_cluster = {units}
+pick = "first"
+{conditions}[design.confirmation]
+conditions = ["good", "bad", "edge"]
+{resize}
+{inputs}[pins]
+environment = "{environment}"
+payload = ""
+rule_base = ""
+deterministic = true
+{deviation}
+[mutations]
+depth_cap = 2
+operators = []
+triggers = []
+[mutations.seeds]
+spawn = "spawn/"
+report = "report/"
+
+[access]
+blind = {confirmatory}
+
+[report]
+licence_code = "Apache-2.0"
+licence_data = "CC0-1.0"
+publish = "none"
+"#
+    )
 }
