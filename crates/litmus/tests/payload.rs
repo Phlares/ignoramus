@@ -76,6 +76,13 @@ fn unit_past_end_fails() {
 }
 
 #[test]
+fn blank_line_is_not_a_unit() {
+    let lab = Lab::new();
+    fs::write(lab.dir.path().join("in/data/blank.txt"), "a\n\n").unwrap();
+    lab.assert_fails(&lab.run("good", "data/blank.txt#1"));
+}
+
+#[test]
 fn malformed_unit_fails() {
     let lab = Lab::new();
     for unit in [
@@ -148,8 +155,21 @@ fn unknown_flag_fails() {
     lab.assert_fails(&out);
 }
 
+#[test]
+fn unknown_command_is_named() {
+    for args in [&["foo"][..], &["foo", "--condition"]] {
+        let out = Command::new(env!("CARGO_BIN_EXE_litmus"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.starts_with("litmus: unknown command foo\n"), "{err}");
+    }
+}
+
 /// Runs the payload with `params` and returns its own (CPU seconds, peak resident KiB).
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 // wait4 reaps the child and returns its own usage; Child::wait cannot.
 #[allow(clippy::zombie_processes)]
 fn usage(lab: &Lab, params: &str) -> (f64, i64) {
@@ -171,17 +191,17 @@ fn usage(lab: &Lab, params: &str) -> (f64, i64) {
     (secs(ru.ru_utime) + secs(ru.ru_stime), ru.ru_maxrss)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn work_param_burns_cpu() {
     let lab = Lab::new();
     assert!(usage(&lab, "{}").0 < 0.1);
-    let cpu = usage(&lab, r#"{"work_ms":200}"#).0;
+    let cpu = usage(&lab, r#"{"work_ms":250}"#).0;
     assert!(cpu >= 0.2, "{cpu}");
     assert!(lab.values().is_some());
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn mem_param_touches_memory() {
     let lab = Lab::new();
@@ -208,4 +228,5 @@ fn failed_rename_leaves_no_values_file() {
     let out = lab.run("good", "data/first-0001.txt#0");
     assert!(!out.status.success(), "{out:?}");
     assert!(!lab.out().join("values.json").is_file());
+    assert!(!lab.out().join("values.json.tmp").exists());
 }

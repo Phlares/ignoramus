@@ -32,7 +32,7 @@ pub fn payload(
     let mem_mib = param(&params, "mem_mib")?;
 
     let bytes = fs::read(in_dir.join(path)).map_err(|e| format!("{path}: {e}"))?;
-    let units = String::from_utf8_lossy(&bytes).lines().count();
+    let units = String::from_utf8_lossy(&bytes).lines().filter(|l| !l.is_empty()).count();
     if index as usize >= units {
         return Err(format!(
             "{path} holds {units} units; index {index} is past the end"
@@ -46,7 +46,10 @@ pub fn payload(
     let tmp = out_dir.join("values.json.tmp");
     fs::write(&tmp, text)
         .and_then(|()| fs::rename(&tmp, out_dir.join("values.json")))
-        .map_err(|e| format!("values.json: {e}"))
+        .map_err(|e| {
+            let _ = fs::remove_file(&tmp);
+            format!("values.json: {e}")
+        })
 }
 
 fn param(params: &Value, key: &str) -> Result<u64, String> {

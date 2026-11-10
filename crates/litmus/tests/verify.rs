@@ -91,7 +91,9 @@ fn malformed_input_fails_clearly() {
         let out = verify(r, e);
         assert_eq!(out.status.code(), Some(1), "{r} / {e}");
         let err = stderr(&out);
-        let named = err.starts_with("report: ") || err.starts_with("expected: ");
+        let named = ["litmus verify: report: ", "litmus verify: expected: "]
+            .iter()
+            .any(|n| err.starts_with(n));
         assert!(named && !err.contains("panicked"), "{err}");
     }
 }
