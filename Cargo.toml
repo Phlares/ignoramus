@@ -7,9 +7,8 @@ members = ["crates/ignorarium", "crates/evidence", "crates/ignorarium-guest", "c
 [profile.dev.package.evidence]
 opt-level = 3
 
-# The runner hashes the whole payload folder before every row, and every record append
-# verifies the log's signatures. An unoptimized build hashes about 40 MB/s, so a 14 MB
-# debug payload costs 0.35 s per row.
+# The runner hashes the whole payload folder before every row. An unoptimized build hashes
+# about 40 MB/s, so a 14 MB debug payload costs 0.35 s per row.
 [profile.dev.package.sha2]
 opt-level = 3
 

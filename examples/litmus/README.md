@@ -2,7 +2,8 @@
 
 The litmus is a small synthetic study whose answers are known before it runs.
 One arm must pass, and two arms must not.
-If the box gives other verdicts, the box or its setup is wrong, and no real study on it should be trusted.
+If `good` fails or `bad` passes, the box or its setup is wrong, and no real study on it should be trusted.
+`edge` can pass by chance; see [Reading the result](#reading-the-result).
 
 ## What it holds
 
@@ -25,7 +26,7 @@ Every claim is "mean below 0" on the range [-1, 1].
 | `edge` | 0.0, on the margin | `fail` |
 
 Each value is the arm's mean plus noise within 0.2.
-`edge` sits on the edge of the null, so it passes only by chance, at most at the test's level.
+`edge` sits on the edge of the null, so it passes only by chance.
 
 ## Run it by hand
 
@@ -57,6 +58,19 @@ litmus verify --report report.json --expected expected.json
 
 `litmus verify` exits 0 when every verdict matches. Otherwise it exits 1 and names each hypothesis that differs.
 
+## Reading the result
+
+- `good` fails, or `bad` passes: treat it as a defect of the box or its setup.
+- `edge` passes and the other two match: this is a false alarm of the test, not yet a defect. Run the litmus again with a new seed. If `edge` passes twice in a row, treat it as a defect.
+
+A false alarm on `edge` has a known chance: the level the box gives `edge`.
+That level is 0.33 of the study's stream level (`alpha_share` 0.33).
+In a new box home the litmus takes slot 1 of the test stream, at level 0.005.
+`edge` then passes with chance at most 0.00165, about 1 run in 600.
+The test stream gives its levels in runs of 10 slots.
+Each study that passed earlier in the same run of 10 raises the level by 0.005, up to 0.05 at slot 10.
+So in a home that runs the litmus often, `edge` passes with chance at most 0.0165, about 1 run in 60.
+
 Notes:
 
 - Run `run` from inside the study folder. The box reads the inputs from the folder that holds `ignorarium.toml`.
@@ -72,6 +86,10 @@ The pilot runs 64 rows. The litmus study runs 96 first-batch rows and 8 rows per
 The count of appended clusters depends on the first batch, so another seed may run more or fewer rows.
 
 ## Higher isolation
+
+Levels 1 and 2 need `ignorarium probe` first.
+It measures this machine and writes `machine.toml` in the box home.
+Without that file the box runs level 0 only.
 
 `gen --min-isolation N` sets `scope.min_isolation` in both specs.
 Level 2 runs rows only inside an environment image.
