@@ -13,6 +13,7 @@ Decision:
 - **Test log.** Both specs set `test_log = true`. `check` and `register` read the plan log for earlier use of data, and a confirmatory study takes a stream slot. On the test log, the litmus spends neither real data nor a real stream slot.
 - **Environment.** The litmus spec always declares a deviation from the pilot (0017). A pilot run at level 0 records environment `host`, which no pin matches, even when `--environment` pins a digest. `register` accepts a deviation that differs in nothing and records `differs: []`, so one rule fits every pin and every level. Level 2 refuses an empty environment pin at `run`, so a level 2 litmus needs `--environment` with the store digest of an imported image. The payload must then run inside that image, so it should be a static binary.
 - **Soak.** `--work-ms` and `--mem-mib` make each row burn CPU time and hold memory. A long soak run needs no new code, only larger counts and these flags.
+- **Budget.** Both specs derive their row time and caps from the shape by one rule. `row_seconds` is 1 + `work_ms` / 1000. `cpu_hours` and `wall_hours` are each rows × (max(10 × `row_seconds`, 60) + 30) / 3600, rounded up to 2 decimals. `rows` counts every row the spec schedules: each cluster of every batch, times the units, times the 4 conditions, plus one determinism recheck per condition. The box ends a row at 10 × `row_seconds`, at least 60 s, and a level 2 host deadline adds 30 s (0015). A run that reaches its cap pauses, and no command raises a cap (0006), so the cap sits where row cost alone cannot reach it. It covers every row ending at its timeout once; it does not cover repeated infrastructure faults, and a run where many rows fault pauses at its cap. At the default counts the pilot schedules 68 rows, capped at 1.70 hours, and the litmus study 580 rows, capped at 14.50 hours.
 
 Default counts: a pilot of 8 clusters, a first batch of 12, a reserve of 60, 2 units per cluster.
 
@@ -29,13 +30,15 @@ The power gate (E-CNF-002) accepts these counts. With the pilot of seed `e2e`, a
 
 At a first batch of 12, the gate jumps from power 0.00 to a pass between a reserve of 29 and 30. The runner's re-size below needs 32 clusters in all (12 + 20 appended), yet the gate refuses 12 + 29 = 41 and first accepts 12 + 30 = 42. Its table rounds the count up (0020), so the gate asks for more clusters than the runner appends. The default keeps a reserve of 60, twice the smallest that passes at seed `e2e`, since another seed gives the pilot another sd. Reserve clusters the study does not append are released, so a large reserve costs only files. The sweep below found no seed that needs more.
 
+The power gate and the re-size draw their replicates from seeds made of the spec hash. The gate table above, the 100-seed sweep and the three red changes below ran on an earlier spec text, before the budget rule and the deviation's present reason. Their exact counts may shift with the present text; the 20-seed sweep after the change is below.
+
 Measured. Seed `e2e`, level 0, debug build, one run of `crates/litmus/tests/e2e.rs`:
 
 - The pilot gives a pooled sd of 0.138, 0.118 and 0.112 for `good`, `bad` and `edge`, and an icc of 0, 0.131 and 0.
 - The test stream gives slot 1 at level 0.005.
-- The re-size reads first 12, reserve 60, needed 32, and appends 20. The release frees the other 40.
-- `good` passes with e-value 100,370 at level 0.0017. `bad` fails with e-value 1.0 at level 0.00165. `edge` fails with e-value 0.986 at level 0.00165.
-- The test takes 10 s: 64 pilot rows and 256 litmus rows. Before `sha2` and `curve25519-dalek` were compiled with optimization in debug builds, it took 146 s. The runner hashes the whole payload folder before every row, and a debug `litmus` is 14 MB.
+- The re-size reads first 12, reserve 60, needed 33, and appends 21. The release frees the other 39.
+- `good` passes with e-value 144,520 at level 0.0017. `bad` fails with e-value 1.0 at level 0.00165. `edge` fails with e-value 0.998 at level 0.00165.
+- The test takes 10 s: 68 pilot rows and 268 litmus rows, determinism rechecks included. Before `sha2` and `curve25519-dalek` were compiled with optimization in debug builds, it took 146 s. The runner hashes the whole payload folder before every row, and a debug `litmus` is 14 MB.
 - Three changes each turn the test red, on the verdict they touch: `good` at mean +0.3 fails (e-value 1.0); `bad` at mean −0.6 passes (e-value 236,387); `edge` moved to mean −0.6 in the payload passes (e-value 69,071).
 
 Sweep. A server run uses a fresh seed each time, so the counts must hold for any seed, not only `e2e`. The ignored test `seeds_sweep` runs the whole flow for seeds `sweep-0` to `sweep-(N-1)`, each in a new box home: `LITMUS_SWEEP=100 cargo test -p litmus --test e2e -- --ignored seeds_sweep`. It asserts that every seed registers, that `good` passes and `bad` fails in every seed, and that `needed` is at most first + reserve. It allows at most one `edge` pass, since a pass there is a false positive of the test. One run, N = 100, level 0, debug build, 967 s:

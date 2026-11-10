@@ -179,8 +179,28 @@ fn copy_payload(from: &Path, to: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// The budget cap in hours and `row_seconds` of a spec with `clusters` clusters, as TOML
+/// floats. The box ends a row at 10 times `row_seconds`, at least 60 s (`TIMEOUT_FACTOR` and
+/// `MIN_TIMEOUT` in its `runner.rs`), and a level 2 host deadline adds 30 s (0015). A run that
+/// reaches its cap pauses and no command raises it (0006), so the cap covers every row the
+/// spec schedules, with one determinism recheck per condition, each ending at its timeout once.
+fn cost(shape: &Shape, clusters: usize) -> (String, String) {
+    let row_ms = 1000 + u128::from(shape.work_ms);
+    let worst_ms = (10 * row_ms).max(60_000) + 30_000;
+    let conditions = CONDITIONS.len() as u128;
+    let rows = clusters as u128 * u128::from(shape.units) * conditions + conditions;
+    // Hundredths of an hour, rounded up.
+    let cap = (rows * worst_ms).div_ceil(36_000);
+    let row_seconds = row_ms as f64 / 1000.0;
+    (
+        format!("{}.{:02}", cap / 100, cap % 100),
+        format!("{row_seconds:?}"),
+    )
+}
+
 /// One spec. The pilot is exploratory and makes no claim. The litmus study is confirmatory.
 fn spec(shape: &Shape, confirmatory: bool, inputs: &[Input]) -> String {
+    let (cap, row_seconds) = cost(shape, inputs.len());
     let Shape {
         seed,
         units,
@@ -295,8 +315,8 @@ registered = true
 min_isolation = {min_isolation}
 stop_rule = "budget-only"
 [scope.budget]
-cpu_hours = 1.0
-wall_hours = 1.0
+cpu_hours = {cap}
+wall_hours = {cap}
 money_usd = 0.0
 [scope.end_of_run]
 route = "report"
@@ -308,7 +328,7 @@ cluster = "file"
 stratum = ""
 reference = "ref"
 repeats = 1
-row_seconds = 1.0
+row_seconds = {row_seconds}
 power = 0.8
 units_per_cluster = {units}
 pick = "first"

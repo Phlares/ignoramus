@@ -235,6 +235,55 @@ fn environment_reaches_both_specs() {
     }
 }
 
+/// A shape larger than the default in every count, with `work_ms` per row.
+fn big(work_ms: u32) -> Shape {
+    Shape {
+        work_ms,
+        pilot: 10,
+        first: 20,
+        reserve: 40,
+        units: 3,
+        ..shape("a")
+    }
+}
+
+/// (cpu_hours, wall_hours, row_seconds) of each spec of `s`.
+fn costs(s: &Shape) -> [(f64, f64, f64); 2] {
+    let d = generated(s);
+    SPECS.map(|name| {
+        let v = raw(d.path(), name);
+        let cap = |k: &str| v["scope"]["budget"][k].as_f64().unwrap();
+        let row = v["design"]["row_seconds"].as_f64().unwrap();
+        (cap("cpu_hours"), cap("wall_hours"), row)
+    })
+}
+
+#[test]
+fn budget_follows_the_shape() {
+    assert_eq!(costs(&shape("a")), [(1.7, 1.7, 1.0), (14.5, 14.5, 1.0)]);
+    assert_eq!(costs(&big(2000)), [(3.1, 3.1, 3.0), (18.1, 18.1, 3.0)]);
+    assert_eq!(
+        costs(&big(9000)),
+        [(4.48, 4.48, 10.0), (26.15, 26.15, 10.0)]
+    );
+}
+
+/// The rows the budget counts are the rows the box schedules, determinism rechecks included.
+#[test]
+fn budget_counts_the_box_rows() {
+    for s in [shape("a"), big(2000), big(9000)] {
+        let d = generated(&s);
+        for name in SPECS {
+            let r = ignorarium::spec::load(&d.path().join(name)).unwrap();
+            let (spec, rows) = ignorarium::schedule::of_value(&r.value, &r.hash, false).unwrap();
+            let row = (10.0 * spec.design.row_seconds).max(60.0) + 30.0;
+            let need = rows.len() as f64 * row / 3600.0;
+            let cap = spec.scope.budget.wall_hours;
+            assert!(need <= cap && cap < need + 0.01, "{name}: {cap} for {need}");
+        }
+    }
+}
+
 #[test]
 fn params_only_when_non_zero() {
     let at = |work_ms, mem_mib| -> Vec<Option<serde_json::Value>> {
