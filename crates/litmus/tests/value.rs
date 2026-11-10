@@ -10,7 +10,7 @@ fn values(condition: &str) -> Vec<f64> {
 
 #[test]
 fn ref_is_exactly_zero() {
-    assert_eq!(value(b"x", 0, "ref"), Some(0.0));
+    assert!(values("ref").iter().all(|v| v.to_bits() == 0));
 }
 
 #[test]
@@ -35,9 +35,10 @@ fn arm_mean_matches() {
     }
 }
 
+/// Computed outside this crate: u = the first 8 bytes of
+/// SHA-256(b"cluster\x00\x00\x00\x00\x03\x00bad") as a big-endian u64 / 2^64,
+/// then 0.3 + (u - 0.5) * 2 * 0.2.
 #[test]
-fn deterministic() {
-    let a = value(b"cluster", 3, "bad").unwrap();
-    let b = value(b"cluster", 3, "bad").unwrap();
-    assert_eq!(a.to_bits(), b.to_bits());
+fn known_answer() {
+    assert_eq!(value(b"cluster", 3, "bad"), Some(0.3252671416831579));
 }
