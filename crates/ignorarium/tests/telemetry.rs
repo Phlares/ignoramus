@@ -8,7 +8,9 @@ use ignorarium::backend::level0::Level0;
 use ignorarium::backend::level1::Level1;
 use ignorarium::backend::{Backend, Exit, RowJob, RowOutcome};
 use ignorarium::canon::sha256_hex;
-use ignorarium::telemetry::{CpuTicks, HostCpu, Reading, cpu_ticks_of, host_cpu_of, record};
+use ignorarium::telemetry::{
+    CpuTicks, HostCpu, Reading, cpu_ticks, cpu_ticks_of, host_cpu_of, record,
+};
 use serde_json::json;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -56,6 +58,32 @@ fn cpu_ticks_of_reads_the_aggregate_line() {
         cpu_ticks_of("cpu  1 2 x 4\n", 100),
         Reading::Unavailable(_)
     ));
+    // A cpu line with no counts is unavailable, not an empty read.
+    assert!(matches!(
+        cpu_ticks_of("cpu\n", 100),
+        Reading::Unavailable(_)
+    ));
+}
+
+#[test]
+fn cpu_ticks_reads_this_host_at_its_tick_rate() {
+    // As in the hook test below: no child process before the rows' parent is set up.
+    let _ = rows_parent();
+    let getconf = std::process::Command::new("getconf")
+        .arg("CLK_TCK")
+        .output()
+        .unwrap();
+    let hz: u64 = String::from_utf8(getconf.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let Reading::Read(now) = cpu_ticks() else {
+        panic!("this host gives no CPU counts");
+    };
+    assert_eq!(now.user_hz, hz);
+    // user nice system idle iowait irq softirq, since Linux 2.6.
+    assert!(now.ticks.len() >= 7, "{now:?}");
 }
 
 const X86: &str = "processor\t: 0
@@ -322,6 +350,62 @@ fn prepare_moves_the_box_before_it_enables_memory() {
         Err("the box's cgroup holds other processes; start the box alone in its scope".into())
     );
     assert_eq!(writes(), [moved, enabled]);
+}
+
+#[test]
+fn prepare_says_when_it_cannot_make_the_box_leaf() {
+    let (root, c) = cgroupfs("cpu memory pids\n");
+    let me = std::fs::metadata(c.join("cgroup.procs")).unwrap().uid();
+    if me == 0 {
+        println!("skip: root can make a folder in a read-only one");
+        return;
+    }
+    writes();
+    std::fs::set_permissions(&c, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let refused = prepare(&host(&root, me, in_scope, noted));
+    std::fs::set_permissions(&c, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let why = refused.unwrap_err();
+    assert!(
+        why.contains("cannot make /app.slice/run-1.scope/ignorarium-box: "),
+        "{why}"
+    );
+    assert_eq!(writes(), []);
+}
+
+/// A leaf in a temp folder with these counters. Its files stay in it, so it cannot be removed.
+fn leaf_with(peak: u64, usage: u64) -> (TempDir, RowCgroup) {
+    let d = TempDir::new().unwrap();
+    let leaf = d.path().join("leaf");
+    std::fs::create_dir(&leaf).unwrap();
+    std::fs::write(leaf.join("memory.peak"), format!("{peak}\n")).unwrap();
+    std::fs::write(leaf.join("memory.events"), MEMORY_EVENTS).unwrap();
+    std::fs::write(leaf.join("cpu.stat"), format!("usage_usec {usage}\n")).unwrap();
+    (d, RowCgroup::at(leaf))
+}
+
+#[test]
+fn a_leaf_missed_the_row_only_when_memory_and_cpu_both_read_zero() {
+    let finish = |peak, usage| {
+        let (_d, leaf) = leaf_with(peak, usage);
+        leaf.finish()
+    };
+    assert_eq!(finish(0, 0), Reading::Unavailable(MISSED.into()));
+    for (peak, usage) in [(4096, 0), (0, 12), (4096, 12)] {
+        let Reading::Read(c) = finish(peak, usage) else {
+            panic!("peak {peak}, usage {usage}: unavailable");
+        };
+        assert_eq!((c.memory_peak, c.cpu_stat["usage_usec"]), (peak, usage));
+    }
+}
+
+#[test]
+fn a_leaf_that_cannot_be_removed_says_why() {
+    let (_d, leaf) = leaf_with(4096, 12);
+    let Reading::Read(c) = leaf.finish() else {
+        panic!("unavailable");
+    };
+    let kept = c.kept.unwrap();
+    assert!(kept.starts_with("leaf stays: "), "{kept}");
 }
 
 const LONG: Duration = Duration::from_secs(30);
