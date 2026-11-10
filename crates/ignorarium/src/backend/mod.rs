@@ -1,4 +1,5 @@
 //! Backends run one schedule row in isolation and report what happened.
+pub mod cgroup;
 pub mod level0;
 pub mod level1;
 pub mod level2;
@@ -10,6 +11,8 @@ pub mod selftest;
 pub use output::output_hash;
 
 use crate::sys::{self, Ended};
+use crate::telemetry::Reading;
+use cgroup::CgroupCounters;
 use std::io;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -18,6 +21,8 @@ use std::time::{Duration, Instant};
 
 /// Exit code reported for a row killed at its wall timeout.
 pub const TIMEOUT_CODE: i32 = 124;
+/// Why a row has no cgroup reading when its backend made no leaf for it.
+const NO_LEAF: &str = "the box made no cgroup for the row";
 /// The lowest level that runs rows in the environment `pins.environment` names; level 0 runs
 /// them on the host root.
 pub const PINNED_LEVEL: u8 = 1;
@@ -81,6 +86,8 @@ pub struct RowOutcome {
     /// CPU the box spent on the row outside `cpu_seconds`: level 2's VMM, its boot included.
     /// The host meter and the records count it as the box's spend. Zero at levels 0 and 1.
     pub box_cpu_seconds: f64,
+    /// The row's cgroup counters, or why there are none. Observation only.
+    pub cgroup: Reading<CgroupCounters>,
 }
 
 impl RowOutcome {
@@ -97,6 +104,7 @@ impl RowOutcome {
             ended: false,
             output_links: Vec::new(),
             box_cpu_seconds: 0.0,
+            cgroup: Reading::Unavailable(NO_LEAF.into()),
         }
     }
 }
@@ -132,6 +140,13 @@ pub trait Backend {
     /// it cannot: level 2's machine for such a row must fit in the host's memory.
     fn unfit(&self, _memory_mib: Option<u32>) -> Option<String> {
         None
+    }
+    /// Whether this backend's rows get a cgroup the box reads, or why not.
+    fn row_cgroup(&self) -> Result<(), String> {
+        cgroup::rows_parent()
+            .as_ref()
+            .map(|_| ())
+            .map_err(Clone::clone)
     }
     fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> io::Result<RowOutcome>;
 }
@@ -202,6 +217,7 @@ pub fn outcome(
         ended,
         output_links: Vec::new(),
         box_cpu_seconds: 0.0,
+        cgroup: Reading::Unavailable(NO_LEAF.into()),
     }
 }
 

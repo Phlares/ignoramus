@@ -14,6 +14,7 @@ use ignorarium::backend::{
 };
 use ignorarium::runner::{self, RunError, RunStatus};
 use ignorarium::store::Store;
+use ignorarium::telemetry::Reading;
 use ignorarium_guest::agent::steps;
 use ignorarium_guest::host::{Timings, VmError, VmOutcome};
 use ignorarium_guest::image::{KERNEL, VMM, sha256_file};
@@ -320,6 +321,17 @@ fn launcher_reads_the_hypervisor_version() {
     assert_eq!(launcher().launcher(), "cloud-hypervisor unknown");
     let missing = Level2::with(d.path().join("none"), PathBuf::new(), PathBuf::new());
     assert_eq!(missing.launcher(), "cloud-hypervisor unknown");
+}
+
+#[test]
+fn a_level2_row_records_its_cgroup_as_unavailable() {
+    let b = Level2::with(PathBuf::new(), PathBuf::new(), PathBuf::new());
+    let why = "level 2 rows run in a machine";
+    assert_eq!(b.row_cgroup(), Err(why.into()));
+    // A row that fails before its machine starts records the same reason.
+    let o = b.run_row(&RowJob::default(), &|| true).unwrap();
+    assert!(matches!(o.exit, Exit::Infra(_)), "{:?}", o.exit);
+    assert_eq!(o.cgroup, Reading::Unavailable(why.into()));
 }
 
 #[test]

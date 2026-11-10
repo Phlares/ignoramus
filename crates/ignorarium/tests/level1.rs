@@ -12,6 +12,7 @@ use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome, Watch, outpu
 use ignorarium::control::{self, ControlFile};
 use ignorarium::machine;
 use ignorarium::runner::{self, RunError, RunStatus, prepare, prepare_with};
+use ignorarium::telemetry::Reading;
 use std::cell::Cell;
 use std::ffi::{OsStr, OsString};
 use std::net::Ipv4Addr;
@@ -1049,6 +1050,7 @@ impl Backend for BreakEvents {
             ended: false,
             output_links: Vec::new(),
             box_cpu_seconds: 0.0,
+            cgroup: Reading::Unavailable("stub".into()),
         })
     }
 }
@@ -1180,6 +1182,7 @@ impl Backend for BreakAtRetry {
             ended: false,
             output_links: Vec::new(),
             box_cpu_seconds: 0.0,
+            cgroup: Reading::Unavailable("stub".into()),
         })
     }
 }

@@ -3,6 +3,7 @@ mod common;
 use common::{
     Lab, PAYLOAD, events_of, indices, kind_of, lab, named, plain, register_study, rows_of,
 };
+use ignorarium::backend::cgroup::rows_parent;
 use ignorarium::backend::level0::Level0;
 use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome, Watch};
 use ignorarium::budget::{Cost, FakeMeter, MeterError};
@@ -17,6 +18,7 @@ use ignorarium::prior::{PriorUse, file_hashes};
 use ignorarium::runner::{RunError, RunPlan, RunStatus, prepare, prepare_with, run, up_to};
 use ignorarium::spec::model::Role;
 use ignorarium::stream::{Log, LogName};
+use ignorarium::telemetry::{Reading, host_cpu_of};
 use ignorarium::{analysis, estimate, keys, records, schedule, spec, view};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -3385,6 +3387,10 @@ fn run_start_names_the_isolation_and_the_launcher() {
     assert_eq!(starts[0]["attrs"]["isolation"], 0);
     assert_eq!(starts[0]["attrs"]["launcher"], "process");
     assert_eq!(starts[0]["attrs"].get("agent_sha256"), None);
+    let row_cgroup = rows_parent()
+        .as_ref()
+        .map_or_else(Clone::clone, |_| "available".into());
+    assert_eq!(starts[0]["attrs"]["row_cgroup"], row_cgroup);
 }
 
 #[test]
@@ -3437,6 +3443,7 @@ fn outcome(cpu: f64, wall: f64, ended: bool, unknown: bool) -> RowOutcome {
         ended,
         output_links: Vec::new(),
         box_cpu_seconds: 0.0,
+        cgroup: Reading::Unavailable("stub".into()),
     }
 }
 
@@ -5173,4 +5180,91 @@ fn a_trigger_fires_at_its_stop_and_never_on_nan() {
     assert!(!fires(12.0, 12.25));
     assert!(!fires(f64::NAN, 12.25));
     assert!(!fires(f64::INFINITY, f64::NAN));
+}
+
+// ---- every row record holds host telemetry ----
+
+#[test]
+fn every_row_record_holds_telemetry() {
+    let lab = lab();
+    plain(&lab, "tele");
+    assert_eq!(run(&plan_of(&lab, "tele")).unwrap(), RunStatus::Done);
+    let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+    let rows = rows_of(&lab, "tele");
+    assert_eq!(rows.len(), 6);
+    for r in &rows {
+        let t = &r.body["telemetry"];
+        let ticks = &t["cpu_ticks"];
+        let nums = |k: &str| -> Vec<u64> {
+            (ticks[k].as_array().unwrap().iter())
+                .map(|n| n.as_u64().unwrap())
+                .collect()
+        };
+        let (start, end) = (nums("start"), nums("end"));
+        assert!(ticks["user_hz"].as_u64().unwrap() > 0);
+        assert!(start.len() >= 7);
+        assert_eq!(start.len(), end.len());
+        // Index 4 is iowait, which proc(5) says may decrease.
+        let grew = |(i, (s, e)): (usize, (&u64, &u64))| i == 4 || e >= s;
+        assert!(start.iter().zip(&end).enumerate().all(grew));
+        assert_eq!(t["host_cpu"], serde_json::json!(host_cpu_of(&cpuinfo)));
+        assert!(t["cgroup"].is_object());
+    }
+}
+
+/// Writes only the template's measure, so the output hash is the same on every host.
+const FIXED: &str = "#!/bin/sh
+printf '{\"ppl\": 1.5}' > \"$IGNORARIUM_OUT/values.json\"
+";
+
+/// The output hash of `FIXED` before row telemetry existed.
+const FIXED_HASH: &str = "e96f1290e9a17d0b0307a90817c476772f7f0a38a1bda51c70e3143c2765f6ab";
+
+#[test]
+fn telemetry_never_enters_the_output_hash_or_the_recheck() {
+    let lab = lab();
+    common::edited(&lab, "tele-same", deterministic, FIXED);
+    let plan = plan_of(&lab, "tele-same");
+    let pairs = copies(&plan);
+    assert_eq!(pairs.len(), 2);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    for &(c, o) in &pairs {
+        let (copy, original) = (
+            row_record(&lab, "tele-same", c),
+            row_record(&lab, "tele-same", o),
+        );
+        // Each record carries its own telemetry, and the comparison ignores it.
+        assert!(copy.body["telemetry"].is_object());
+        assert!(original.body["telemetry"].is_object());
+        assert_eq!(copy.body["same"], true);
+        assert_eq!(copy.body["output_hash"], FIXED_HASH);
+        assert_eq!(original.body["output_hash"], FIXED_HASH);
+        assert_eq!(copy.body["attempts"], 1);
+        assert_eq!(original.body["attempts"], 1);
+        // The wait4 meter charges the row; telemetry makes no bound of it.
+        assert_eq!(copy.body.get("cpu_bound"), None);
+        assert!(copy.body["cpu_seconds"].as_f64().unwrap() >= 0.0);
+    }
+}
+
+#[test]
+fn a_row_without_a_delegated_cgroup_records_why_and_runs_as_before() {
+    let lab = lab();
+    common::with_payload(&lab, "no-leaf", FIXED);
+    assert_eq!(run(&plan_of(&lab, "no-leaf")).unwrap(), RunStatus::Done);
+    let rows = rows_of(&lab, "no-leaf");
+    assert_eq!(rows.len(), 6);
+    for r in &rows {
+        assert_eq!(r.body["exit"], "ok");
+        assert_eq!(r.body["output_hash"], FIXED_HASH);
+        let cgroup = &r.body["telemetry"]["cgroup"];
+        match rows_parent() {
+            Err(why) => {
+                assert!(!why.is_empty());
+                assert_eq!(cgroup, &serde_json::json!({ "unavailable": why }));
+            }
+            // In a delegated scope the row has its own cgroup.
+            Ok(_) => assert!(cgroup["memory_peak"].as_u64().unwrap() > 0, "{cgroup}"),
+        }
+    }
 }

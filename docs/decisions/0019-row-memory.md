@@ -48,7 +48,7 @@ Why `RLIMIT_DATA`, not `RLIMIT_AS`: `RLIMIT_AS` counts all address space, a read
 Limits:
 
 - The cap is per process, and a level 2 machine holds one cap. A payload that starts several large processes can run out of memory there and not at levels 0 and 1.
-- Shared writable memory escapes the cap. At levels 0 and 1 only the host bounds it. At level 2 the machine's memory bounds it, and the machine's size holds no room for it, so the guest kernel's out-of-memory killer can end such a payload there (`payload:137`) while levels 0 and 1 run it. A data loader whose worker processes hand batches over in shared memory takes this path. A memory cgroup would count shared memory; the box does not use one.
+- Shared writable memory escapes the cap. At levels 0 and 1 only the host bounds it. At level 2 the machine's memory bounds it, and the machine's size holds no room for it, so the guest kernel's out-of-memory killer can end such a payload there (`payload:137`) while levels 0 and 1 run it. A data loader whose worker processes hand batches over in shared memory takes this path. A memory cgroup counts shared memory. The box reads each row's peak from one (0026) and limits nothing with it.
 - The constants come from one host and the pinned kernel. A guest kernel or agent that grows by more than 25 MiB turns rows near 3 GiB into a named boot refusal.
 - Only a test run by hand checks the large sizes. It needs a host that can back a machine past 4 GiB.
 - `MemTotal` is a static bound, checked once at prepare. Memory that other processes hold when a row starts is not checked: a machine that cannot start is an infrastructure fault, retried.

@@ -13,6 +13,7 @@ use ignorarium::home::Home;
 use ignorarium::keys;
 use ignorarium::records::Record;
 use ignorarium::runner::{self, HEARTBEAT, RunError, RunPlan, RunStatus, prepare_with};
+use ignorarium::telemetry::Reading;
 use serde_json::{Value, json};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
@@ -653,6 +654,7 @@ impl Backend for StopThenFail {
             ended: false,
             output_links: Vec::new(),
             box_cpu_seconds: 0.0,
+            cgroup: Reading::Unavailable("stub".into()),
         })
     }
 }
@@ -1039,6 +1041,7 @@ impl Backend for StopThenBlind {
             ended: false,
             output_links: Vec::new(),
             box_cpu_seconds: 0.0,
+            cgroup: Reading::Unavailable("stub".into()),
         })
     }
 }

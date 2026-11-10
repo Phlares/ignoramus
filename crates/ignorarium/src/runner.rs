@@ -34,7 +34,7 @@ use crate::spec::model::{Mode, Param, Role, SELECTED, Spec, param_path};
 use crate::store::Store;
 use crate::stream::{LogName, StreamError};
 use crate::view::{self, ViewError};
-use crate::{analysis, canon, keys, resize, spawn, spec, sys, units, values};
+use crate::{analysis, canon, keys, resize, spawn, spec, sys, telemetry, units, values};
 use ed25519_dalek::SigningKey;
 use ignorarium_guest::image;
 use serde_json::{Value, json};
@@ -1048,10 +1048,13 @@ fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
     State::Running
         .write(&plan.home, &plan.study_id)
         .map_err(io)?;
+    let row_cgroup = (plan.backend.row_cgroup())
+        .map_or_else(|why| plan.redact.text(&why), |()| "available".into());
     let mut launch = json!({
         "isolation": plan.backend.level(),
         "launcher": plan.backend.launcher(),
         "environment": plan.environment,
+        "row_cgroup": row_cgroup,
     });
     agent(&mut launch, plan);
     let resumed = all.iter().any(|r| r.kind == "row" || r.kind == "spend");
@@ -1670,6 +1673,8 @@ fn attempt_row(
     let mut attempts = 0u32;
     let mut unknown = false;
     let mut bound;
+    // The host CPU counts around the last attempt.
+    let mut ticks;
     let mut out_dir = PathBuf::new();
     let span = watch.row.borrow().1.clone();
     // An attempt's events come after its record, so a failed event write cannot lose the
@@ -1679,10 +1684,12 @@ fn attempt_row(
         attempts += 1;
         let attempt = job_for(plan, row, job, dir)?;
         out_dir.clone_from(&attempt.output_dir);
+        let tick_start = telemetry::cpu_ticks();
         let mut o = plan
             .backend
             .run_row(&attempt, watch)
             .unwrap_or_else(|e| RowOutcome::failed(Exit::Infra(e.to_string()), 0.0));
+        ticks = (tick_start, telemetry::cpu_ticks());
         // Every backend text reaches the records from here.
         redacted(&plan.redact, &mut o);
         // A row the box ended, or whose meter cannot read, is charged a bound. A meter that
@@ -1825,6 +1832,11 @@ fn attempt_row(
         body["cpu_bound"] = json!(true);
     }
     box_cpu(&mut body, &outcome);
+    let (start, end) = &ticks;
+    body["telemetry"] =
+        telemetry::record(telemetry::host_cpu(), start, end, &outcome.cgroup, &|w| {
+            plan.redact.text(w)
+        });
     records::append(
         log,
         &plan.key,
