@@ -1,4 +1,7 @@
-use litmus::{Flags, Shape, generate, payload, verify};
+mod flags;
+
+use flags::Flags;
+use litmus::{Shape, generate, payload, verify};
 use std::path::PathBuf;
 use std::process::ExitCode;
 

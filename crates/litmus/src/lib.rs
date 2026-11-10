@@ -38,11 +38,9 @@ pub fn value(cluster: &[u8], unit: u32, condition: &str) -> Option<f64> {
     Some(mean + (u - 0.5) * 2.0 * spread)
 }
 
-mod flags;
 mod generate;
 mod payload;
 mod verify;
-pub use flags::Flags;
 pub use generate::{Shape, generate};
 pub use payload::payload;
 pub use verify::verify;

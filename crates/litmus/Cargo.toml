@@ -9,8 +9,10 @@ description = "A synthetic study with known answers, to test the box."
 [dependencies]
 sha2 = "0.11"
 hex = "0.4"
-rustix = { version = "1", features = ["time"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["time"] }
 
 [dev-dependencies]
 ignorarium = { path = "../ignorarium" }
