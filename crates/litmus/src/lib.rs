@@ -22,7 +22,8 @@ pub fn arm(condition: &str) -> Option<(f64, f64)> {
 }
 
 /// The outcome for one unit of one cluster under one condition: the arm's mean plus noise in
-/// `[-spread, spread)`, drawn from a hash of the three inputs.
+/// `[-spread, spread]`, drawn from a hash of the three inputs. The upper end is reachable: the
+/// u64 to f64 conversion rounds the top 2^10 values up to 2^64.
 pub fn value(cluster: &[u8], unit: u32, condition: &str) -> Option<f64> {
     let (mean, spread) = arm(condition)?;
     let mut h = Sha256::new();
