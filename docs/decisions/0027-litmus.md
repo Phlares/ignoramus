@@ -38,7 +38,7 @@ Measured. Seed `e2e`, level 0, debug build, one run of `crates/litmus/tests/e2e.
 - The test stream gives slot 1 at level 0.005.
 - The re-size reads first 12, reserve 60, needed 33, and appends 21. The release frees the other 39.
 - `good` passes with e-value 144,520 at level 0.0017. `bad` fails with e-value 1.0 at level 0.00165. `edge` fails with e-value 0.998 at level 0.00165.
-- The test takes 10 s: 68 pilot rows and 268 litmus rows, determinism rechecks included. Before `sha2` and `curve25519-dalek` were compiled with optimization in debug builds, it took 146 s. The runner hashes the whole payload folder before every row, and a debug `litmus` is 14 MB.
+- The test takes 10 s: 68 pilot rows and 268 litmus rows, determinism rechecks included. Before `sha2` and `curve25519-dalek` were compiled with optimization in debug builds, it took 146 s. The runner hashes the whole payload folder before every row, and a debug `litmus` is 14 MB. Without the `curve25519-dalek` entry alone it takes about 33 s: the box signs each record with Ed25519 and checks every signature when it reads a study's records back.
 - Three changes each turn the test red, on the verdict they touch: `good` at mean +0.3 fails (e-value 1.0); `bad` at mean −0.6 passes (e-value 236,387); `edge` moved to mean −0.6 in the payload passes (e-value 69,071).
 
 Sweep. A server run uses a fresh seed each time, so the counts must hold for any seed, not only `e2e`. The ignored test `seeds_sweep` runs the whole flow for seeds `sweep-0` to `sweep-(N-1)`, each in a new box home: `LITMUS_SWEEP=100 cargo test -p litmus --test e2e -- --ignored seeds_sweep`. It asserts that every seed registers, that `good` passes and `bad` fails in every seed, and that `needed` is at most first + reserve. It allows at most one `edge` pass, since a pass there is a false positive of the test. One run, N = 100, level 0, debug build, 967 s:
@@ -62,6 +62,8 @@ The stream level. Each seed ran in a new box home, so each litmus study took the
 - The cost of a higher level is a higher chance that `edge` passes: at most 0.05 × 0.33 = 0.0165, at the top of an epoch.
 
 One run by hand, not a committed test, put 12 seeds in one box home. The stream level rose from 0.005 to 0.05 over slots 1 to 10 and fell back to 0.005 at slot 11. The gate accepted all 12. `needed` fell from 32 at slot 1 to 22 at slot 10. `good` passed and `bad` and `edge` failed in all 12.
+
+Sweep on the present spec text, with the budget rule and the present deviation reason. One run, N = 20, level 0, debug build, 191 s: the gate accepted 20 of 20. `needed` was min 29, median 32, max 34, and `appended` 17 to 22, so 38 to 43 reserve clusters were released. `good` passed in all 20, with e-value 12,622 to 138,559. `bad` failed in all 20, with e-value 1.0. `edge` failed in all 20, with e-value 0.91 to 1.03.
 
 What it does not show:
 
