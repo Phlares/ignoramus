@@ -12,5 +12,8 @@ opt-level = 3
 [profile.dev.package.sha2]
 opt-level = 3
 
+# The box signs every record with Ed25519 and checks every signature each time it reads a
+# study's records back, at a determinism recheck among other points. An unoptimized build makes
+# the litmus end-to-end test about 3 times slower.
 [profile.dev.package.curve25519-dalek]
 opt-level = 3
