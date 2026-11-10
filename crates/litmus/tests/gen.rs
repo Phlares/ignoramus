@@ -185,6 +185,15 @@ fn failure_leaves_out_free_and_names_the_staging_folder() {
 }
 
 #[test]
+fn missing_parents_of_out_are_made() {
+    let d = tempfile::tempdir().unwrap();
+    let out = d.path().join("a/b/study");
+    generate(&shape("a"), PAYLOAD.as_ref(), &out).unwrap();
+    assert!(d.path().join("a/b").is_dir());
+    assert_eq!(tree(&out), tree(generated(&shape("a")).path()));
+}
+
+#[test]
 fn file_out_refused_with_reason() {
     let d = tempfile::tempdir().unwrap();
     let file = d.path().join("study");

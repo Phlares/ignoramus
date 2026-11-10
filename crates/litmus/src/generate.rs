@@ -86,6 +86,7 @@ pub fn generate(shape: &Shape, payload: &Path, out: &Path) -> io::Result<()> {
     let (Some(parent), Some(name)) = (out.parent(), out.file_name()) else {
         return Err(refused("out must end in a folder name".into()));
     };
+    fs::create_dir_all(parent)?;
     let stage = staging(parent, name)?;
     (write_study(shape, payload, &stage))
         .and_then(|()| fs::rename(&stage, parent.join(name)))
