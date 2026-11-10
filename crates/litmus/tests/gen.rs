@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-/// Every file under `dir` as relative path to bytes, without the payload copy.
+/// Every file under `dir` as relative path to bytes.
 fn tree(dir: &Path) -> BTreeMap<String, Vec<u8>> {
     let mut out = BTreeMap::new();
     let mut todo = vec![dir.to_path_buf()];
@@ -21,10 +21,7 @@ fn tree(dir: &Path) -> BTreeMap<String, Vec<u8>> {
                     .iter()
                     .map(|c| c.to_string_lossy())
                     .collect();
-                let rel = parts.join("/");
-                if rel != "payload/run" {
-                    out.insert(rel, fs::read(&p).unwrap());
-                }
+                out.insert(parts.join("/"), fs::read(&p).unwrap());
             }
         }
     }
@@ -41,7 +38,7 @@ fn shape(seed: &str) -> Shape {
 /// Generates `shape` in a new folder.
 fn generated(shape: &Shape) -> tempfile::TempDir {
     let d = tempfile::tempdir().unwrap();
-    generate(shape, d.path()).unwrap();
+    generate(shape, PAYLOAD.as_ref(), d.path()).unwrap();
     d
 }
 
@@ -60,6 +57,7 @@ fn digest(bytes: &[u8]) -> String {
 }
 
 const SPECS: [&str; 2] = ["spec/pilot.toml", "spec/litmus.toml"];
+const PAYLOAD: &str = env!("CARGO_BIN_EXE_litmus");
 
 #[test]
 fn defaults() {
@@ -135,7 +133,7 @@ fn zero_clusters_refused() {
         first: 0,
         ..Shape::default()
     };
-    assert!(generate(&s, d.path()).is_err());
+    assert!(generate(&s, PAYLOAD.as_ref(), d.path()).is_err());
 }
 
 #[test]
@@ -144,7 +142,10 @@ fn bad_seed_refused() {
         "", "A", "a_b", "a b", "a/b", "-a", "a-", "a--b", "a\"b", "a\nb",
     ] {
         let d = tempfile::tempdir().unwrap();
-        assert!(generate(&shape(seed), d.path()).is_err(), "{seed:?}");
+        assert!(
+            generate(&shape(seed), PAYLOAD.as_ref(), d.path()).is_err(),
+            "{seed:?}"
+        );
         assert_eq!(fs::read_dir(d.path()).unwrap().count(), 0, "{seed:?}");
     }
     generated(&shape("a-1"));
@@ -154,7 +155,7 @@ fn bad_seed_refused() {
 fn occupied_out_refused() {
     let d = tempfile::tempdir().unwrap();
     fs::write(d.path().join("stale.txt"), "x").unwrap();
-    assert!(generate(&shape("a"), d.path()).is_err());
+    assert!(generate(&shape("a"), PAYLOAD.as_ref(), d.path()).is_err());
     assert_eq!(fs::read_dir(d.path()).unwrap().count(), 1);
 }
 
@@ -170,8 +171,9 @@ fn expected_verdicts() {
 #[test]
 fn payload_is_executable() {
     let d = generated(&shape("a"));
-    let meta = fs::metadata(d.path().join("payload/run")).unwrap();
-    assert!(meta.len() > 0);
+    let copy = d.path().join("payload/run");
+    assert_eq!(fs::read(&copy).unwrap(), fs::read(PAYLOAD).unwrap());
+    let meta = fs::metadata(copy).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -258,7 +260,7 @@ fn bad_environment_refused() {
             environment: env.clone(),
             ..shape("a")
         };
-        assert!(generate(&s, d.path()).is_err(), "{env:?}");
+        assert!(generate(&s, PAYLOAD.as_ref(), d.path()).is_err(), "{env:?}");
         assert_eq!(fs::read_dir(d.path()).unwrap().count(), 0, "{env:?}");
     }
 }

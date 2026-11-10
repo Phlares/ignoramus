@@ -72,8 +72,9 @@ fn write(out: &Path, path: &str, bytes: &[u8]) -> io::Result<()> {
     fs::write(file, bytes)
 }
 
-/// Writes a complete study under `out`: data, payload, two specs and the expected verdicts.
-pub fn generate(shape: &Shape, out: &Path) -> io::Result<()> {
+/// Writes a complete study under `out`: data, a copy of `payload`, two specs and the expected
+/// verdicts. `payload` is the litmus program, which runs every row.
+pub fn generate(shape: &Shape, payload: &Path, out: &Path) -> io::Result<()> {
     if let Some(why) = refusal(shape, out) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, why));
     }
@@ -97,7 +98,7 @@ pub fn generate(shape: &Shape, out: &Path) -> io::Result<()> {
         "expected.json",
         br#"{"good":"pass","bad":"fail","edge":"fail"}"#,
     )?;
-    copy_payload(&out.join("payload/run"))
+    copy_payload(payload, &out.join("payload/run"))
 }
 
 /// Why `generate` refuses `shape` or `out`, before it writes anything. A study in an occupied
@@ -127,9 +128,9 @@ fn is_study_id(s: &str) -> bool {
     })
 }
 
-fn copy_payload(to: &Path) -> io::Result<()> {
+fn copy_payload(from: &Path, to: &Path) -> io::Result<()> {
     fs::create_dir_all(to.parent().expect("every path has a folder"))?;
-    fs::copy(std::env::current_exe()?, to)?;
+    fs::copy(from, to)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

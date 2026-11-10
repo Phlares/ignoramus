@@ -49,7 +49,8 @@ fn gen_cmd(args: &[String]) -> Result<(), String> {
     };
     let out = PathBuf::from(f.require("--out")?);
     f.done()?;
-    generate(&shape, &out).map_err(|e| e.to_string())
+    let payload = std::env::current_exe().map_err(|e| format!("cannot find this program: {e}"))?;
+    generate(&shape, &payload, &out).map_err(|e| e.to_string())
 }
 
 fn verify_cmd(args: &[String]) -> Result<(), Vec<String>> {
