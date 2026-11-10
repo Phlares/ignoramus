@@ -144,6 +144,30 @@ fn bad_params_fail() {
 }
 
 #[test]
+fn unset_params_are_empty() {
+    let lab = Lab::new();
+    let mut c = lab.command("good", "data/first-0001.txt#0");
+    c.env_remove("IGNORARIUM_PARAMS");
+    assert!(c.output().unwrap().status.success());
+    assert!(lab.values().is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_params_fail() {
+    use std::os::unix::ffi::OsStrExt;
+    let lab = Lab::new();
+    let out = lab
+        .command("good", "data/first-0001.txt#0")
+        .env("IGNORARIUM_PARAMS", std::ffi::OsStr::from_bytes(b"{}\xff"))
+        .output()
+        .unwrap();
+    lab.assert_fails(&out);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(err, "litmus: IGNORARIUM_PARAMS is not UTF-8\n");
+}
+
+#[test]
 fn unknown_flag_fails() {
     let lab = Lab::new();
     let out = lab

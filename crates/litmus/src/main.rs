@@ -80,7 +80,13 @@ fn payload_cmd(args: &[String]) -> Result<(), String> {
     f.number("--repeat", 0u32)?;
     f.done()?;
     let var = |name: &str| std::env::var_os(name).ok_or(format!("{name} is not set"));
-    let params = std::env::var("IGNORARIUM_PARAMS").unwrap_or_else(|_| "{}".into());
+    let params = match std::env::var("IGNORARIUM_PARAMS") {
+        Ok(p) => p,
+        Err(std::env::VarError::NotPresent) => "{}".into(),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err("IGNORARIUM_PARAMS is not UTF-8".into());
+        }
+    };
     payload(
         &condition,
         &unit,
