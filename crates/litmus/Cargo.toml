@@ -13,5 +13,6 @@ rustix = { version = "1", features = ["time"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [dev-dependencies]
+ignorarium = { path = "../ignorarium" }
 tempfile = "3"
 libc = "0.2"
