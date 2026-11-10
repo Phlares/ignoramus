@@ -93,7 +93,7 @@ Notes:
 
 ## Time
 
-At level 0, the end-to-end test (`crates/litmus/tests/e2e.rs`, seed `e2e`) runs both studies in about 10 s in a debug build.
+At level 0, the end-to-end test (`crates/litmus/tests/e2e.rs`, seed `e2e`) runs both studies in about 11 s in a debug build.
 The pilot runs 64 rows and 4 determinism rechecks, one per condition. The litmus study runs 96 first-batch rows, 4 rechecks, and 8 rows per reserve cluster it appends; seed `e2e` appends 21, for 268 rows.
 The count of appended clusters depends on the first batch, so another seed may run more or fewer rows.
 
@@ -118,7 +118,7 @@ Two flags make each row cost more, so a long run needs no new code:
 - `--mem-mib N`: each row writes N MiB of memory and holds it until the row ends.
 
 Raise `--first` and `--reserve` to run more rows.
-`check` refuses counts too small for the power gate (E-CNF-002). At seed `e2e`, a first batch of 12 needed a reserve of at least 30 when last measured (decision 0027).
+`check` refuses counts too small for the power gate (E-CNF-002). At seed `e2e`, a first batch of 12 needs a reserve of at least 30.
 
 `gen` sets each spec's `row_seconds` to 1 + N / 1000 for `--work-ms N`.
 It sets each budget cap to cover every row the spec schedules, each ending at its timeout: 10 × `row_seconds`, at least 60 s, plus 30 s.

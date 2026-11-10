@@ -17,7 +17,7 @@ Decision:
 
 Default counts: a pilot of 8 clusters, a first batch of 12, a reserve of 60, 2 units per cluster.
 
-The power gate (E-CNF-002) accepts these counts. With the pilot of seed `e2e`, a first batch of 12 needs a reserve of at least 30:
+The power gate (E-CNF-002) accepts these counts. With the pilot of seed `e2e`, a first batch of 12 needs a reserve of at least 30, and a first batch of 8 a reserve of at least 34:
 
 | First | Reserve | Gate |
 |---|---|---|
@@ -25,12 +25,13 @@ The power gate (E-CNF-002) accepts these counts. With the pilot of seed `e2e`, a
 | 12 | 30 | accepts |
 | 12 | 29 | refuses all three hypotheses: "reaches power 0.00 of 0.80" |
 | 12 | 20 | refuses all three: power 0.00 |
-| 8 | 34 | refuses `edge`: power 0.00 |
+| 8 | 34 | accepts |
+| 8 | 33 | refuses all three: power 0.00 |
 | 8 | 30 | refuses all three: power 0.00 |
 
-At a first batch of 12, the gate jumps from power 0.00 to a pass between a reserve of 29 and 30. The runner's re-size below needs 32 clusters in all (12 + 20 appended), yet the gate refuses 12 + 29 = 41 and first accepts 12 + 30 = 42. Its table rounds the count up (0020), so the gate asks for more clusters than the runner appends. The default keeps a reserve of 60, twice the smallest that passes at seed `e2e`, since another seed gives the pilot another sd. Reserve clusters the study does not append are released, so a large reserve costs only files. The sweep below found no seed that needs more.
+At a first batch of 12, the gate jumps from power 0.00 to a pass between a reserve of 29 and 30. The runner's re-size below needs 33 clusters in all (12 + 21 appended), yet the gate refuses 12 + 29 = 41 and first accepts 12 + 30 = 42. At a first batch of 8 it first accepts 8 + 34 = 42, the same total. Its table rounds the count up (0020), so the gate asks for more clusters than the runner appends. The default keeps a reserve of 60, twice the smallest that passes at seed `e2e`, since another seed gives the pilot another sd. Reserve clusters the study does not append are released, so a large reserve costs only files. The sweep below found no seed that needs more.
 
-The power gate and the re-size draw their replicates from seeds made of the spec hash. The gate table above, the 100-seed sweep and the three red changes below ran on an earlier spec text, before the budget rule and the deviation's present reason. Their exact counts may shift with the present text; the 20-seed sweep after the change is below.
+The power gate and the re-size draw their replicates from seeds made of the spec hash, so their counts belong to one spec text. The gate table above, the run of seed `e2e` and the 100-seed sweep below ran on the present text. The three red changes below and the one-home run by hand ran on an earlier text, before the budget rule and the deviation's present reason.
 
 Measured. Seed `e2e`, level 0, debug build, one run of `crates/litmus/tests/e2e.rs`:
 
@@ -38,20 +39,20 @@ Measured. Seed `e2e`, level 0, debug build, one run of `crates/litmus/tests/e2e.
 - The test stream gives slot 1 at level 0.005.
 - The re-size reads first 12, reserve 60, needed 33, and appends 21. The release frees the other 39.
 - `good` passes with e-value 144,520 at level 0.0017. `bad` fails with e-value 1.0 at level 0.00165. `edge` fails with e-value 0.998 at level 0.00165.
-- The test takes 10 s: 68 pilot rows and 268 litmus rows, determinism rechecks included. Before `sha2` and `curve25519-dalek` were compiled with optimization in debug builds, it took 146 s. The runner hashes the whole payload folder before every row, and a debug `litmus` is 14 MB. Without the `curve25519-dalek` entry alone it takes about 33 s: the box signs each record with Ed25519 and checks every signature when it reads a study's records back.
+- The test takes about 11 s: 68 pilot rows and 268 litmus rows, determinism rechecks included. Before `sha2` and `curve25519-dalek` were compiled with optimization in debug builds, it took 146 s. The runner hashes the whole payload folder before every row, and a debug `litmus` is 14 MB. Without the `curve25519-dalek` entry alone it takes about 33 s: the box signs each record with Ed25519 and checks every signature when it reads a study's records back.
 - Three changes each turn the test red, on the verdict they touch: `good` at mean +0.3 fails (e-value 1.0); `bad` at mean −0.6 passes (e-value 236,387); `edge` moved to mean −0.6 in the payload passes (e-value 69,071).
 
-Sweep. A server run uses a fresh seed each time, so the counts must hold for any seed, not only `e2e`. The ignored test `seeds_sweep` runs the whole flow for seeds `sweep-0` to `sweep-(N-1)`, each in a new box home: `LITMUS_SWEEP=100 cargo test -p litmus --test e2e -- --ignored seeds_sweep`. It asserts that every seed registers, that `good` passes and `bad` fails in every seed, and that `needed` is at most first + reserve. It allows at most one `edge` pass, since a pass there is a false positive of the test. One run, N = 100, level 0, debug build, 967 s:
+Sweep. A server run uses a fresh seed each time, so the counts must hold for any seed, not only `e2e`. The ignored test `seeds_sweep` runs the whole flow for seeds `sweep-0` to `sweep-(N-1)`, each in a new box home: `LITMUS_SWEEP=100 cargo test --locked -p litmus --test e2e -- --ignored --nocapture seeds_sweep`. It asserts that every seed registers, that `good` passes and `bad` fails in every seed, and that `needed` is at most first + reserve. It allows at most one `edge` pass, since a pass there is a false positive of the test. One run, N = 100, level 0, debug build, 976 s:
 
 | Measure | Result |
 |---|---|
 | Gate accepts | 100 of 100 |
-| `needed` (first + appended) | min 28, median 32, max 35, of 12 + 60 = 72 on hand |
-| `appended` | min 16, median 20, max 23 |
+| `needed` (first + appended) | min 28, median 31, max 35, of 12 + 60 = 72 on hand |
+| `appended` | min 16, median 19, max 23 |
 | Reserve clusters released | 37 to 44 |
-| `good` | pass 100; e-value 13,855 to 314,127, against 1 / 0.0017 = 588 |
+| `good` | pass 100; e-value 12,622 to 326,430, against 1 / 0.0017 = 588 |
 | `bad` | fail 100; e-value 1.0 in each |
-| `edge` | fail 100; e-value 0.91 to 1.31, against 1 / 0.00165 = 606 |
+| `edge` | fail 100, no pass; e-value 0.89 to 1.31, against 1 / 0.00165 = 606 |
 
 The default counts stay at pilot 8, first 12, reserve 60, 2 units: every seed passed the gate, and the largest `needed` used 23 of the 60 reserve clusters.
 
@@ -62,8 +63,6 @@ The stream level. Each seed ran in a new box home, so each litmus study took the
 - The cost of a higher level is a higher chance that `edge` passes: at most 0.05 × 0.33 = 0.0165, at the top of an epoch.
 
 One run by hand, not a committed test, put 12 seeds in one box home. The stream level rose from 0.005 to 0.05 over slots 1 to 10 and fell back to 0.005 at slot 11. The gate accepted all 12. `needed` fell from 32 at slot 1 to 22 at slot 10. `good` passed and `bad` and `edge` failed in all 12.
-
-Sweep on the present spec text, with the budget rule and the present deviation reason. One run, N = 20, level 0, debug build, 191 s: the gate accepted 20 of 20. `needed` was min 29, median 32, max 34, and `appended` 17 to 22, so 38 to 43 reserve clusters were released. `good` passed in all 20, with e-value 12,622 to 138,559. `bad` failed in all 20, with e-value 1.0. `edge` failed in all 20, with e-value 0.91 to 1.03.
 
 What it does not show:
 
@@ -82,7 +81,7 @@ Why:
 - Compare a version with itself before trusting comparisons, and again when the environment changes (A/A tests in cloud benchmarks, Chalmers).
 - Fixed checks that tell good from bad, run on a schedule, catch silent degradation (Anthropic postmortem).
 - A cheap first tier keeps retries off the costly tier (arXiv 2606.30111). This is one system's design choice, not a measured comparison.
-- Artifact review takes "very few hours", and more time hints at a problem (ACM SIGIR artifact badging, a secondary source). The litmus runs in about 10 s at level 0 in a debug build. Its times at levels 1 and 2 are not yet measured.
+- Artifact review takes "very few hours", and more time hints at a problem (ACM SIGIR artifact badging, a secondary source). The litmus runs in about 11 s at level 0 in a debug build. Its times at levels 1 and 2 are not yet measured.
 
 Case against:
 
