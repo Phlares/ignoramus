@@ -40,6 +40,8 @@ cargo build --release -p ignorarium -p litmus
 export PATH="$PWD/target/release:$PATH"
 ```
 
+`litmus --help` prints every command and flag.
+
 Use a box home made for the litmus, so its studies stay apart from real ones:
 
 ```sh

@@ -6,11 +6,16 @@ const USAGE: &str = "usage:
   litmus gen --seed <s> --out <dir> [--pilot N] [--first N] [--reserve N] [--units N] [--work-ms N] [--mem-mib N] [--min-isolation N] [--environment <hash>]
   litmus verify --report <report.json> --expected <expected.json>
   litmus --condition <c> --unit <path>#<index> --repeat <n>
-    (the payload: reads IGNORARIUM_IN, IGNORARIUM_OUT and IGNORARIUM_PARAMS)";
+    (the payload: reads IGNORARIUM_IN, IGNORARIUM_OUT and IGNORARIUM_PARAMS)
+  litmus --help | -h";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (name, result) = match args.split_first() {
+        Some((cmd, _)) if cmd == "--help" || cmd == "-h" => {
+            println!("{USAGE}");
+            return ExitCode::SUCCESS;
+        }
         Some((cmd, rest)) if cmd == "gen" => ("litmus gen", gen_cmd(rest).map_err(|e| vec![e])),
         Some((cmd, rest)) if cmd == "verify" => ("litmus verify", verify_cmd(rest)),
         Some((cmd, _)) if cmd.starts_with("--") => {

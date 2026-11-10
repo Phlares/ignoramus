@@ -168,6 +168,20 @@ fn unknown_command_is_named() {
     }
 }
 
+#[test]
+fn help_prints_usage() {
+    for flag in ["--help", "-h"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_litmus"))
+            .arg(flag)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{flag}: {out:?}");
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(said.starts_with("usage:\n  litmus gen "), "{flag}: {said}");
+        assert!(out.stderr.is_empty(), "{flag}: {out:?}");
+    }
+}
+
 /// Runs the payload with `params` and returns its own (CPU seconds, peak resident KiB).
 #[cfg(target_os = "linux")]
 // wait4 reaps the child and returns its own usage; Child::wait cannot.
