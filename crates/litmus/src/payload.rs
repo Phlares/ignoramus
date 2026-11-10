@@ -32,7 +32,10 @@ pub fn payload(
     let mem_mib = param(&params, "mem_mib")?;
 
     let bytes = fs::read(in_dir.join(path)).map_err(|e| format!("{path}: {e}"))?;
-    let units = String::from_utf8_lossy(&bytes).lines().filter(|l| !l.is_empty()).count();
+    let units = String::from_utf8_lossy(&bytes)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .count();
     if index as usize >= units {
         return Err(format!(
             "{path} holds {units} units; index {index} is past the end"
