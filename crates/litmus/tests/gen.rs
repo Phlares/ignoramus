@@ -160,6 +160,31 @@ fn occupied_out_refused() {
 }
 
 #[test]
+fn failure_leaves_out_free_and_names_the_staging_folder() {
+    for made in [false, true] {
+        let d = tempfile::tempdir().unwrap();
+        let out = d.path().join("study");
+        if made {
+            fs::create_dir(&out).unwrap();
+        }
+        let e = generate(&shape("a"), &d.path().join("missing"), &out).unwrap_err();
+        assert!(!out.exists() || fs::read_dir(&out).unwrap().count() == 0);
+        let beside = |d: &Path| -> Vec<std::path::PathBuf> {
+            let all = fs::read_dir(d).unwrap().map(|e| e.unwrap().path());
+            all.filter(|p| *p != out).collect()
+        };
+        let staged = beside(d.path());
+        assert_eq!(staged.len(), 1, "{staged:?}");
+        assert!(e.to_string().contains(&*staged[0].to_string_lossy()), "{e}");
+        assert!(staged[0].join("spec/litmus.toml").is_file());
+
+        generate(&shape("a"), PAYLOAD.as_ref(), &out).unwrap();
+        assert_eq!(tree(&out), tree(generated(&shape("a")).path()));
+        assert_eq!(beside(d.path()), staged);
+    }
+}
+
+#[test]
 fn file_out_refused_with_reason() {
     let d = tempfile::tempdir().unwrap();
     let file = d.path().join("study");

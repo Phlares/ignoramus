@@ -8,6 +8,8 @@ If `good` fails or `bad` passes, the box or its setup is wrong, and no real stud
 ## What it holds
 
 `litmus gen` writes a study folder. It refuses an `--out` folder that already holds files.
+It writes the study into a new folder beside `--out`, then renames that folder to `--out`.
+A failure leaves `--out` as it was, and the error names the folder that holds what was written.
 The study folder holds:
 
 - `data/`: one text file per cluster, one line per unit. Each line holds the seed, so two seeds share no file.

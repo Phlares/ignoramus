@@ -1,7 +1,8 @@
 use sha2::{Digest, Sha256};
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The size and settings of a generated study.
 pub struct Shape {
@@ -74,10 +75,46 @@ fn write(out: &Path, path: &str, bytes: &[u8]) -> io::Result<()> {
 
 /// Writes a complete study under `out`: data, a copy of `payload`, two specs and the expected
 /// verdicts. `payload` is the litmus program, which runs every row.
+/// The study is written into a new folder beside `out`, then renamed to `out`, so a failure
+/// leaves `out` as it was. The folder of a failed attempt stays, and the error names it.
 pub fn generate(shape: &Shape, payload: &Path, out: &Path) -> io::Result<()> {
+    let refused = |why: String| io::Error::new(io::ErrorKind::InvalidInput, why);
     if let Some(why) = refusal(shape, out) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, why));
+        return Err(refused(why));
     }
+    let out = std::path::absolute(out)?;
+    let (Some(parent), Some(name)) = (out.parent(), out.file_name()) else {
+        return Err(refused("out must end in a folder name".into()));
+    };
+    let stage = staging(parent, name)?;
+    (write_study(shape, payload, &stage))
+        .and_then(|()| fs::rename(&stage, parent.join(name)))
+        .map_err(|e| {
+            let at = stage.display();
+            io::Error::new(
+                e.kind(),
+                format!("{e}; the study written so far is in {at}"),
+            )
+        })
+}
+
+/// A new, empty folder `.<name>.<pid>.<n>.tmp` in `parent`. The leading dot and the suffix keep
+/// it apart from any study folder.
+fn staging(parent: &Path, name: &OsStr) -> io::Result<PathBuf> {
+    for n in 0u32.. {
+        let mut file = OsString::from(".");
+        file.push(name);
+        file.push(format!(".{}.{n}.tmp", std::process::id()));
+        let stage = parent.join(file);
+        match fs::create_dir(&stage) {
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            done => return done.map(|()| stage),
+        }
+    }
+    Err(io::Error::other("no free staging folder name"))
+}
+
+fn write_study(shape: &Shape, payload: &Path, out: &Path) -> io::Result<()> {
     let pilot = batch(shape, out, "pilot", shape.pilot, "confirmation")?;
     let mut litmus = batch(shape, out, "first", shape.first, "confirmation")?;
     litmus.extend(batch(shape, out, "reserve", shape.reserve, "reserve")?);
