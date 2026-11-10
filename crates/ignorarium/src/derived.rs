@@ -128,6 +128,56 @@ pub struct Register {
     pub alpha: Option<Alpha>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
+    /// What the power gate predicted for each hypothesis it simulates, as `register` read it.
+    /// Empty, and left out, for an exploratory plan and in a record written before the field
+    /// existed. An older box reads a record that holds it as no register.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gate: Vec<GatePrediction>,
+}
+
+/// The power gate's finding for one hypothesis, and what it simulated with.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GatePrediction {
+    /// The hypothesis's path in the plan.
+    pub hypothesis: String,
+    /// The hypothesis id; `<name>` when it is not safe to print.
+    pub id: String,
+    pub power: f64,
+    /// `design.power`.
+    pub target: f64,
+    /// The level the gate simulated at, as the check found it: the stream's level then times
+    /// `alpha_share`. It is below `alpha.level` times `alpha_share` when the stream rose
+    /// before `register`.
+    pub level: f64,
+    /// The hypothesis's `alpha_share`.
+    pub alpha_share: f64,
+    pub reps: u32,
+    pub power_at: f64,
+    pub margins: Vec<f64>,
+    pub resized: bool,
+    /// The count of clusters per group that would reach the target; see `Power::needed`.
+    /// A registered plan meets its power target, so this is null there; the field keeps the gate's shape.
+    pub needed: Option<u32>,
+    pub groups: Vec<PredictedGroup>,
+    pub curve: Vec<crate::rules::Curve>,
+}
+
+/// One group the gate simulated: the sd and icc it used and the units of each cluster.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PredictedGroup {
+    /// `""` for the pooled group.
+    pub stratum: String,
+    pub sd: f64,
+    pub icc: f64,
+    /// The sd and icc are the pooled estimate's.
+    pub from_pooled: bool,
+    /// The units of each confirmation cluster.
+    pub clusters: Vec<u32>,
+    /// The units of each reserve cluster, in the order a re-size appends them; empty when the
+    /// plan does not re-size.
+    pub reserve: Vec<u32>,
 }
 
 /// A slot of the stream of `log` and the level it gives the study that holds it.

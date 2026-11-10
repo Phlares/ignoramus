@@ -4,7 +4,7 @@ use super::check::{self, Assessed, HomeRecords};
 use super::{CliError, Ctx, Done};
 use crate::backend::output::file_digest;
 use crate::canon::to_canonical;
-use crate::derived::{Alpha, Carried, PinDeviated, REGISTER, Register, Resolved};
+use crate::derived::{Alpha, Carried, GatePrediction, PinDeviated, REGISTER, Register, Resolved};
 use crate::diag::{printable, render_human};
 use crate::estimate::defaults_json;
 use crate::family::{self, Lock};
@@ -83,6 +83,7 @@ struct Frozen {
     deviations: Vec<PinDeviated>,
     carries: Option<Carried>,
     family: Option<Lock>,
+    gate: Vec<GatePrediction>,
 }
 
 /// The body of the `register` record. A confirmatory plan holds the stream slot `alpha`, and
@@ -109,6 +110,7 @@ fn record_body(
         family: frozen.family.clone(),
         timestamp: alpha.is_some().then(|| "pending".into()),
         alpha,
+        gate: frozen.gate.clone(),
     })
     .map_err(|e| io("register record", e))
 }
@@ -204,6 +206,8 @@ pub fn run(
     if !approve(&typed, &a.hash) {
         return Err(CliError::refuse("approval not given; nothing was written"));
     }
+    // The curves simulate afresh, so they come before the first write, the box key included.
+    let gate = rules::predictions(&a.value, &a.ctx);
     let key = keys::load_or_create(home).map_err(|e| io("box key", e))?;
     let blobs = Store::open(&home.root).map_err(|e| io("store", e))?;
     let source = format!("register {id}");
@@ -218,6 +222,7 @@ pub fn run(
         hold_inputs(&blobs, &key, &source, &m.root, pins, &m.input_hashes)?;
     }
     let frozen = Frozen {
+        gate,
         root_id: Register::root_id(&key, &a.root).map_err(|e| io("study root", e))?,
         payload,
         inputs,
@@ -737,6 +742,7 @@ mod tests {
                 record: "ab".repeat(32),
             }),
             family: None,
+            gate: vec![],
         };
         let exp = record_body("sha256:ab", 3, "planlog", &filled, &frozen, None).unwrap();
         assert_eq!(

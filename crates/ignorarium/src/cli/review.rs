@@ -243,9 +243,12 @@ fn page(a: &Assessed) -> String {
     s.push_str(&est.map_or(NO_ESTIMATE.into(), |e| bullets(check::figure_lines(e))));
     let level = a.stream.iter().map(check::stream_line);
     s.push_str(&format!("\n## Level\n\n{}", bullets(level)));
-    let power = rules::power(&a.value, &a.ctx)
-        .into_iter()
-        .map(|p| format!("{}: {}", p.hypothesis, p.sentence()));
+    let power = (rules::powers(&a.value, &a.ctx).into_iter()).map(|(p, curves)| {
+        let under: String = (curves.iter())
+            .map(|c| format!("\n  - {}", c.line()))
+            .collect();
+        format!("{}: {}{under}", p.hypothesis, p.sentence())
+    });
     s.push_str(&format!("\n## Power\n\n{}", bullets(power)));
     s.push_str(&format!(
         "\n## Claim label\n\n{}",
