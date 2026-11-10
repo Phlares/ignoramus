@@ -70,6 +70,13 @@ In a new box home the litmus takes slot 1 of the test stream, at level 0.005.
 The test stream gives its levels in runs of 10 slots.
 Each study that passed earlier in the same run of 10 raises the level by 0.005, up to 0.05 at slot 10.
 So in a home that runs the litmus often, `edge` passes with chance at most 0.0165, about 1 run in 60.
+Both numbers are bounds read from the stream's level rule, not measured rates.
+
+Run each litmus in a new box home: set `IGNORARIUM_HOME` to a folder that does not exist yet, and the box creates it.
+The litmus then takes slot 1, and the chance that `edge` passes stays at most 0.00165.
+A new home has no `machine.toml` and an empty content store.
+Before a run at level 1 or 2 in it, run `ignorarium probe`.
+Before a run at level 2, also import the environment image into it with `ignorarium import <image> --source <text>`.
 
 Notes:
 

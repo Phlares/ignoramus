@@ -52,11 +52,19 @@ Sweep. A server run uses a fresh seed each time, so the counts must hold for any
 
 The default counts stay at pilot 8, first 12, reserve 60, 2 units: every seed passed the gate, and the largest `needed` used 23 of the 60 reserve clusters.
 
+The stream level. Each seed ran in a new box home, so each litmus study took the first slot of the test stream, at stream level 0.005. `alpha_share` splits it: 0.0017 for `good`, 0.00165 for `bad` and `edge`. The power gate and the re-size count both depend on that level. What follows is a reading of the code, not a measurement:
+
+- The stream gives slot t of an epoch the level 0.05 × 1/10 × (D + 1), where D counts the discoveries closed in that epoch before the slot opened. The test stream starts a fresh epoch after every 10 slots. So 0.005 is the smallest level the test stream gives, and the level only rises within an epoch. Each passing litmus is a discovery, since its `good` passes.
+- A higher level lowers the bar 1 / level. The gate and the re-size draw their replicates from seeds made of the spec hash and the hypothesis, not the level, so a replicate's e-value is the same at any level. A count's simulated power can then only rise, so the gate accepts the same counts and the re-size needs no more clusters. This is not a proof for every seed: the count search assumes power rises with the count, and the gate's simulation re-sizes inside each replicate.
+- The cost of a higher level is a higher chance that `edge` passes: at most 0.05 × 0.33 = 0.0165, at the top of an epoch.
+
+One run by hand, not a committed test, put 12 seeds in one box home. The stream level rose from 0.005 to 0.05 over slots 1 to 10 and fell back to 0.005 at slot 11. The gate accepted all 12. `needed` fell from 32 at slot 1 to 22 at slot 10. `good` passed and `bad` and `edge` failed in all 12.
+
 What it does not show:
 
 - The sweep ran at level 0, on one machine, over 100 seeds. A seed whose pilot spread is rarer than 1 in 100 could still need more than the reserve; the gate would then refuse it at `register`, before any litmus row runs.
 - At level 0.00165 per seed, 100 seeds expect 0.165 `edge` passes. The sweep cannot measure that rate; it only shows no excess.
-
+- The sweep ran the default counts at the first slot's level only. No committed test runs a home with earlier test-log studies.
 - It shows that the box tells a clearly true claim from a clearly false one, on one synthetic design. It does not show the error rate at the margin; the null simulations of 0020 and 0022 test that.
 - It runs the end-to-end test at level 0 only. Levels 1 and 2 need a host that has them.
 - The payload is trivial. It says nothing about a real payload's faults, its run time, or a run of hours.

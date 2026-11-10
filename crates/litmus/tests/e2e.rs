@@ -177,6 +177,10 @@ fn seeds(runs: &[Swept], keep: impl Fn(&Swept) -> bool) -> Vec<&str> {
 #[ignore = "runs the litmus once per seed; LITMUS_SWEEP sets the count, 20 by default"]
 fn seeds_sweep() {
     let n: usize = std::env::var("LITMUS_SWEEP").map_or(20, |v| v.parse().unwrap());
+    assert!(
+        n >= 1,
+        "LITMUS_SWEEP must be at least 1, so the sweep runs a seed"
+    );
     let mut refused = Vec::new();
     let mut runs: Vec<Swept> = Vec::new();
     for i in 0..n {
