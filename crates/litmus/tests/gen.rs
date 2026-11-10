@@ -258,17 +258,19 @@ fn params_only_when_non_zero() {
 }
 
 #[test]
-fn deviation_only_without_environment() {
-    let deviations = |environment: String, name| {
+fn deviation_always_there() {
+    for environment in [String::new(), "ab".repeat(32)] {
         let d = generated(&Shape {
-            environment,
+            environment: environment.clone(),
             ..shape("a")
         });
-        spec(d.path(), name).pins.deviations.len()
-    };
-    assert_eq!(deviations(String::new(), "spec/litmus.toml"), 1);
-    assert_eq!(deviations(String::new(), "spec/pilot.toml"), 0);
-    assert_eq!(deviations("ab".repeat(32), "spec/litmus.toml"), 0);
+        let litmus = spec(d.path(), "spec/litmus.toml").pins.deviations;
+        let from: Vec<&str> = litmus.iter().map(|x| x.from.as_str()).collect();
+        assert_eq!(from, ["litmus-pilot-a"], "{environment:?}");
+        assert!(!litmus[0].reason.is_empty());
+        let pilot = spec(d.path(), "spec/pilot.toml").pins.deviations;
+        assert!(pilot.is_empty(), "{environment:?}");
+    }
 }
 
 #[test]

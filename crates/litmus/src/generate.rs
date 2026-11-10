@@ -255,11 +255,14 @@ creators = []
             )
         })
         .collect();
-    let deviation = if confirmatory && environment.is_empty() {
+    // A pilot run at level 0 records environment `host`, which no pin matches, whatever
+    // `environment` says. `register` accepts a deviation that differs in nothing, so the
+    // litmus study always declares one.
+    let deviation = if confirmatory {
         format!(
             r#"[[pins.deviations]]
 from = "litmus-pilot-{seed}"
-reason = "the pilot ran on the host, which names no image"
+reason = "a pilot run on the host names no image, so no environment pin matches it"
 timing = "before-collection"
 "#
         )

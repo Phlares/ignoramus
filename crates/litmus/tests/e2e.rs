@@ -60,12 +60,15 @@ impl Litmus {
     }
 }
 
-/// Generate the litmus of `seed` in a new box home, then register and run its pilot and its
-/// study at level 0. `Err` holds what registration printed when it refused a plan.
-fn litmus_run(seed: &str) -> Result<Litmus, String> {
+/// Generate the litmus of `seed` with `--environment environment` in a new box home, then
+/// register and run its pilot and its study at level 0. `Err` holds what registration printed
+/// when it refused a plan.
+fn litmus_run(seed: &str, environment: &str) -> Result<Litmus, String> {
     let tmp = tempfile::tempdir().unwrap();
     let study = tmp.path().join("study");
-    let made = (litmus().args(["gen", "--seed", seed, "--out"]).arg(&study))
+    let made = (litmus().args(["gen", "--seed", seed, "--environment", environment]))
+        .arg("--out")
+        .arg(&study)
         .output()
         .unwrap();
     assert!(made.status.success(), "{made:?}");
@@ -124,7 +127,7 @@ fn litmus_run(seed: &str) -> Result<Litmus, String> {
 
 #[test]
 fn litmus_tells_true_from_false() {
-    let r = litmus_run("e2e").unwrap_or_else(|why| panic!("refused: {why}"));
+    let r = litmus_run("e2e", "").unwrap_or_else(|why| panic!("refused: {why}"));
     for v in r.verdicts.values() {
         println!(
             "{}: {} e = {:?} level = {:?} reason = {:?}",
@@ -156,6 +159,16 @@ fn litmus_tells_true_from_false() {
     assert!(checked.status.success(), "{checked:?}");
 }
 
+/// A level 0 run records environment `host`, which no pin matches, so the study registers only
+/// through its deviation from the pilot. The pinned image need not exist at level 0.
+#[test]
+fn pinned_environment_runs_at_level_0() {
+    let r = litmus_run("e2e", &"ab".repeat(32)).unwrap_or_else(|why| panic!("refused: {why}"));
+    assert_eq!(r.verdict("good"), "pass");
+    assert_eq!(r.verdict("bad"), "fail");
+    assert_eq!(r.verdict("edge"), "fail");
+}
+
 /// The least, median and greatest of `v`.
 fn spread(mut v: Vec<u64>) -> (u64, u64, u64) {
     v.sort_unstable();
@@ -185,7 +198,7 @@ fn seeds_sweep() {
     let mut runs: Vec<Swept> = Vec::new();
     for i in 0..n {
         let seed = format!("sweep-{i}");
-        let r = match litmus_run(&seed) {
+        let r = match litmus_run(&seed, "") {
             Ok(r) => r,
             Err(why) => {
                 println!("{seed}: refused: {why}");

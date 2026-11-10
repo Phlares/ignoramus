@@ -107,7 +107,8 @@ Without that file the box runs level 0 only.
 Level 2 runs rows only inside an environment image.
 Import the saved image with `ignorarium import <image> --source <text>`, then pass its store digest: `litmus gen --environment <digest>`.
 The payload then runs inside the image, so build `litmus` as a static binary before `gen`.
-Without `--environment`, the litmus spec declares a deviation from the pilot's environment: a pilot on the host names no image.
+The litmus spec always declares a deviation from the pilot's environment: a pilot at level 0 runs on the host, which names no image.
+When the pilot ran in the pinned image, `register` shows the deviation as `deviates from litmus-pilot-<seed> in nothing`.
 
 ## Soak runs
 
