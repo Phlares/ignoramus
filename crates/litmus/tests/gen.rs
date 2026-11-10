@@ -160,6 +160,22 @@ fn occupied_out_refused() {
 }
 
 #[test]
+fn file_out_refused_with_reason() {
+    let d = tempfile::tempdir().unwrap();
+    let file = d.path().join("study");
+    fs::write(&file, "x").unwrap();
+    let e = generate(&shape("a"), PAYLOAD.as_ref(), &file).unwrap_err();
+    let said = e.to_string();
+    assert!(
+        said.starts_with("out must be absent or an empty folder: "),
+        "{said}"
+    );
+    assert!(said.len() > "out must be absent or an empty folder: ".len());
+    assert_eq!(fs::read(&file).unwrap(), b"x");
+    assert_eq!(fs::read_dir(d.path()).unwrap().count(), 1);
+}
+
+#[test]
 fn expected_verdicts() {
     let d = generated(&shape("a"));
     assert_eq!(

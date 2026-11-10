@@ -103,19 +103,22 @@ pub fn generate(shape: &Shape, payload: &Path, out: &Path) -> io::Result<()> {
 
 /// Why `generate` refuses `shape` or `out`, before it writes anything. A study in an occupied
 /// folder could sit beside stale files from an earlier, larger study.
-fn refusal(shape: &Shape, out: &Path) -> Option<&'static str> {
+fn refusal(shape: &Shape, out: &Path) -> Option<String> {
     let env = &shape.environment;
     let hex = env.len() == 64 && env.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    let occupied = "out must be absent or an empty folder";
     if !is_study_id(&shape.seed) {
-        Some("seed must be lowercase letters and digits joined by single hyphens")
+        Some("seed must be lowercase letters and digits joined by single hyphens".into())
     } else if [shape.pilot, shape.first, shape.reserve, shape.units].contains(&0) {
-        Some("pilot, first, reserve and units must each be at least 1")
+        Some("pilot, first, reserve and units must each be at least 1".into())
     } else if !env.is_empty() && !hex {
-        Some("environment must be empty or 64 lowercase hex characters")
-    } else if fs::read_dir(out).is_ok_and(|mut d| d.next().is_some()) {
-        Some("out must be absent or an empty folder")
+        Some("environment must be empty or 64 lowercase hex characters".into())
     } else {
-        None
+        match fs::read_dir(out) {
+            Ok(mut d) => d.next().is_some().then(|| occupied.into()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => Some(format!("{occupied}: {e}")),
+        }
     }
 }
 
