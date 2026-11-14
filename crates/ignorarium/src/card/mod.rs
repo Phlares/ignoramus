@@ -396,6 +396,7 @@ pub fn build(
         .map_err(|e| CliError::usage(format!("cannot report {id}: its plan: {e}")))?;
     let source = Source::read(&text, all, log.data_hashes.as_ref()).map_err(refuse)?;
     let intervals = source.intervals(&verdicts).map_err(refuse)?;
+    let forced = sidecar::forced(&verdicts);
     let hypotheses: Vec<HypothesisCard> = (verdicts.into_iter())
         .map(|v| HypothesisCard {
             clipped: clips(&analysis, &v.hypothesis),
@@ -449,7 +450,7 @@ pub fn build(
         results: sections::results(&after, spec, &intervals),
         sensitivity: sections::sensitivity(&own, &after, spec),
         setup,
-        observations: sidecars.observations_card(&hypotheses),
+        observations: sidecars.observations_card(forced),
         surprises: sections::surprises(log),
         recipe,
         citation,

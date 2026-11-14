@@ -633,6 +633,18 @@ const PASS: &str = "pass";
 const NONE: &str = "none";
 /// The start of the reason of a verdict a stop forced to fail.
 const STOPPED: &str = "stopped: ";
+/// The start of the reason of a tested verdict whose claim the test refuses.
+const UNTESTABLE: &str = "the claim cannot be tested: ";
+/// The start of the reason of a tested verdict with an incomplete unit in scope.
+const INCOMPLETE: &str = "incomplete units in scope: ";
+
+/// Why the e-value of `v` was forced to 0, when it was: a stop, a claim the test refuses, or an
+/// incomplete unit in scope. A reason of another kind leaves the e-value as the test gave it.
+pub(crate) fn forced_reason(v: &Verdict) -> Option<&str> {
+    let reason = v.reason.as_deref()?;
+    let forcing = [STOPPED, UNTESTABLE, INCOMPLETE];
+    (v.e_value == Some(0.0) && forcing.iter().any(|p| reason.starts_with(p))).then_some(reason)
+}
 const TEST: &str = "test";
 
 /// The verdict on `h` of `spec` before the level is split: a claim fails until the tree passes
@@ -665,7 +677,7 @@ fn judge(
     let results = match held(h, &claim, &scopes, spec_hash, tested) {
         Ok(results) => results,
         Err(e) => {
-            v.reason = Some(format!("the claim cannot be tested: {e}"));
+            v.reason = Some(format!("{UNTESTABLE}{e}"));
             v.e_value = tested.then_some(0.0);
             return v;
         }
@@ -673,7 +685,7 @@ fn judge(
     let holds = results.iter().all(|(_, holds)| *holds);
     v.bounds = results.into_iter().map(|(b, _)| b).collect();
     if tested && incomplete > 0 {
-        v.reason = Some(format!("incomplete units in scope: {incomplete}"));
+        v.reason = Some(format!("{INCOMPLETE}{incomplete}"));
         v.e_value = Some(0.0);
     } else if tested {
         let least = v.bounds.iter().filter_map(|b| b.value).reduce(f64::min);

@@ -1,9 +1,9 @@
 //! The files `report --card` writes beside the card: the signed input list and the observations
 //! the tests read. The card keeps their counts and hashes.
-use super::HypothesisCard;
 use super::recipe::{list_sha256, list_text, plain};
-use crate::analysis::{Observed, Source};
+use crate::analysis::{Observed, Source, forced_reason};
 use crate::derived::Inputs;
+use crate::derived::Verdict;
 use crate::home::Home;
 use crate::records::Log;
 use crate::view;
@@ -94,6 +94,18 @@ fn csv(rows: &[Observed]) -> String {
     rows.iter().fold(HEADER.to_string(), |s, o| s + &row(o))
 }
 
+/// The verdicts of `verdicts` whose e-value was forced to 0 (`analysis::forced_reason`).
+pub fn forced(verdicts: &[Verdict]) -> Vec<Forced> {
+    (verdicts.iter())
+        .filter_map(|v| {
+            Some(Forced {
+                hypothesis: v.hypothesis.clone(),
+                reason: forced_reason(v)?.to_string(),
+            })
+        })
+        .collect()
+}
+
 impl Sidecars {
     /// The sidecars of the study `id` whose records are `log`, read against the plan its folder
     /// stores.
@@ -126,18 +138,8 @@ impl Sidecars {
         }
     }
 
-    /// The observations entry of the card whose verdicts are `verdicts`.
-    pub fn observations_card(&self, verdicts: &[HypothesisCard]) -> Observations {
-        let forced = (verdicts.iter())
-            .filter(|v| v.basis == "test" && v.e_value == Some(0.0))
-            .filter_map(|v| {
-                let reason = v.reason.clone()?;
-                Some(Forced {
-                    hypothesis: v.hypothesis.clone(),
-                    reason,
-                })
-            })
-            .collect();
+    /// The observations entry of the card; `forced` is `forced` of its verdicts.
+    pub fn observations_card(&self, forced: Vec<Forced>) -> Observations {
         Observations {
             rows: self.rows,
             sha256: crate::canon::sha256_hex(self.observations.as_bytes()),

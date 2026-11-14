@@ -1111,6 +1111,14 @@ fn a_forced_verdict_is_marked_beside_the_observations() {
 }
 
 #[test]
+fn a_real_zero_with_a_tree_split_reason_is_not_marked_forced() {
+    let lab = forced_lab("the study's level does not split over its claims: no share");
+    let card = card_of(&lab);
+    assert!(card.observations.forced.is_empty());
+    assert!(!card::render::markdown(&card).contains("raw observations"));
+}
+
+#[test]
 fn an_unforced_verdict_is_not_marked() {
     let lab = lab();
     fixture(&lab, MEAN, rows_on_level_2());

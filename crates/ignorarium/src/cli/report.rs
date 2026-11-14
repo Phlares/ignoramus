@@ -233,7 +233,7 @@ fn plan_card(home: &Home, card: &Card, log: &Log, dir: &Path) -> Result<Parts, C
     let sidecars = Sidecars::of(home, &card.study, log).map_err(usage)?;
     let unchanged = sha256_hex(manifest.as_bytes()) == card.recipe.manifest.list_sha256
         && sidecars.data_list() == card.setup.data
-        && sidecars.observations_card(&card.hypotheses) == card.observations;
+        && sidecars.observations_card(card.observations.forced.clone()) == card.observations;
     if !unchanged {
         return Err(usage(
             "the study folder changed while the card was built".into(),
