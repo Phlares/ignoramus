@@ -137,12 +137,12 @@ pub fn manifest_lines(study_dir: &Path) -> Result<Vec<String>, String> {
 }
 
 /// The recipe of study `id`, whose folder is `dir`, whose rows hold `levels` and whose
-/// analyses name `box_version`.
+/// analysis, the one the card reads, names `box_version`.
 pub fn recipe(
     dir: &Path,
     id: &str,
     mut levels: Vec<u8>,
-    box_version: Option<String>,
+    box_version: &str,
 ) -> Result<Recipe, String> {
     let (lines, missing) = walk(dir)?;
     levels.sort();
@@ -157,9 +157,8 @@ pub fn recipe(
         isolation_levels: levels,
         requires: REQUIRES.map(String::from).to_vec(),
         box_binary_sha256: Field::Missing { link: None },
-        box_version: match box_version {
-            Some(value) => Field::Recorded { value },
-            None => Field::Missing { link: None },
+        box_version: Field::Recorded {
+            value: box_version.into(),
         },
         bundle_doi: Field::Missing { link: None },
         manifest: Manifest {

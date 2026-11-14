@@ -423,8 +423,8 @@ pub fn build(home: &Home, id: &str, log: &Log) -> Result<Card, CliError> {
                 .and_then(|n| u8::try_from(n).ok())
         })
         .collect();
-    let recipe = recipe::recipe(&dir, id, levels, surprises.box_versions.first().cloned())
-        .map_err(CliError::usage)?;
+    let recipe =
+        recipe::recipe(&dir, id, levels, &analysis.box_version).map_err(CliError::usage)?;
     let citation = recipe::citation(&dir, id).map_err(CliError::usage)?;
     Ok(Card {
         header: sections::header(log, spec),

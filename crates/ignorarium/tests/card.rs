@@ -506,6 +506,25 @@ fn recipe_lists_missing_binary_hash() {
 }
 
 #[test]
+fn recipe_box_version_is_the_read_analysis() {
+    let lab = lab();
+    let mut all = bodies(&lab, MEAN, rows_on_level_2());
+    let mut later = all
+        .iter()
+        .find(|(k, _)| *k == "analysis")
+        .unwrap()
+        .1
+        .clone();
+    // Sorts before the read analysis's "0.1.0".
+    later["box_version"] = json!("0.0.1");
+    all.push(("analysis", later));
+    plant(&lab.home, ID, &all);
+    let card = card_of(&lab);
+    assert_eq!(card.surprises.box_versions, ["0.0.1", "0.1.0"]);
+    assert_eq!(card.recipe.box_version, recorded("0.1.0".to_string()));
+}
+
+#[test]
 fn recipe_level_comes_from_the_rows() {
     let lab = lab();
     fixture(
@@ -654,7 +673,7 @@ fn citation_refuses_what_it_cannot_read() {
 }
 
 fn manifest_in(dir: &std::path::Path) -> card::recipe::Manifest {
-    card::recipe::recipe(dir, ID, vec![2], None)
+    card::recipe::recipe(dir, ID, vec![2], "0.1.0")
         .unwrap()
         .manifest
 }
