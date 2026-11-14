@@ -21,11 +21,13 @@ pub const FILE: &str = "readings.md";
 
 const HEADER: &str = "<!-- card sha256: ";
 
-fn is_header(line: &str) -> bool {
+/// The card hash in the first line of `text`, when that line is the header.
+pub fn header_hash(text: &str) -> Option<&str> {
+    let line = text.lines().next()?;
     (line
         .strip_prefix(HEADER)
         .and_then(|r| r.strip_suffix(" -->")))
-    .is_some_and(|h| !h.is_empty() && h.bytes().all(|b| b.is_ascii_hexdigit()))
+    .filter(|h| !h.is_empty() && h.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// The heading of a slot, without its marker.
@@ -37,38 +39,58 @@ fn is_slot_heading(line: &str) -> bool {
     slot_name(line).is_some_and(|n| n == "TL;DR" || n.starts_with("Reading: "))
 }
 
-/// Whether `line` holds an ASCII digit outside a card reference and a link target.
-fn has_digit(line: &str) -> bool {
+fn is_reference(body: &str) -> bool {
+    let word = |c: char, extra: &str| c.is_ascii_alphanumeric() || extra.contains(c);
+    body.split_once(':').is_some_and(|(id, pointer)| {
+        !id.is_empty()
+            && id.chars().all(|c| word(c, "._-"))
+            && pointer.starts_with('/')
+            && pointer.chars().all(|c| c == '/' || word(c, "._~-"))
+    })
+}
+
+/// Whether `line` breaks the slot grammar: a digit outside a reference and a link target, a
+/// reference that is not exactly `{{card:<id>:<pointer>}}`, or a link target with whitespace.
+/// A `](` opens a link target whether or not a `[` precedes it.
+fn is_bad(line: &str) -> bool {
     let mut rest = line;
     while let Some(c) = rest.chars().next() {
-        let skip = [("{{card:", "}}"), ("](", ")")]
-            .iter()
-            .find_map(|(open, close)| {
-                let tail = rest.strip_prefix(open)?;
-                Some(open.len() + tail.find(close)? + close.len())
-            });
-        match skip {
-            Some(n) => rest = &rest[n..],
-            None if c.is_ascii_digit() => return true,
-            None => rest = &rest[c.len_utf8()..],
+        if let Some(tail) = rest.strip_prefix("{{card:") {
+            let Some(end) = tail.find("}}") else {
+                return true;
+            };
+            if !is_reference(&tail[..end]) {
+                return true;
+            }
+            rest = &tail[end + 2..];
+        } else if let Some(tail) = rest.strip_prefix("](") {
+            match tail.find(')') {
+                Some(end) if tail[..end].contains(char::is_whitespace) => return true,
+                Some(end) => rest = &tail[end + 1..],
+                None => rest = tail,
+            }
+        } else if c.is_ascii_digit() {
+            return true;
+        } else {
+            rest = &rest[c.len_utf8()..];
         }
     }
     false
 }
 
-/// Every line of `text` that holds a digit the author typed. The first line is exempt when it
+/// Every line of `text` that breaks the slot grammar (see `is_bad`). The first line is exempt when it
 /// is the card-hash header, and so is each slot heading.
 pub fn check(text: &str) -> Vec<SlotError> {
     let mut slot = String::new();
     let mut errors = vec![];
     for (i, line) in text.lines().enumerate() {
-        if i == 0 && is_header(line) {
+        if i == 0 && header_hash(text).is_some() {
             continue;
         }
         if let Some(n) = slot_name(line) {
             slot = n.to_string();
         }
-        if !is_slot_heading(line) && has_digit(line) {
+        if !is_slot_heading(line) && is_bad(line) {
             errors.push(SlotError {
                 slot: slot.clone(),
                 line: u32::try_from(i + 1).unwrap_or(u32::MAX),
@@ -122,7 +144,7 @@ pub fn read_slots(text: &str) -> Vec<(String, String)> {
 /// `## Reading: <hypothesis>/<stratum>` per results row.
 pub fn template(card: &Card) -> String {
     let note = format!(
-        "<!-- Prose only. Write a number as {{{{card:{}:<json-pointer>}}}}. -->\n",
+        "<!-- Prose only. Write a number as a reference, for example {{{{card:{}:/results/0/estimate}}}}. -->\n",
         card.study
     );
     let mut s = format!("{HEADER}{} -->\n\n## TL;DR\n\n{note}", card.sha256());

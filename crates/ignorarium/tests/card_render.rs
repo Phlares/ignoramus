@@ -380,3 +380,33 @@ fn figures_are_one_file_per_claim_and_collisions_name_both() {
     let err = render::figures(&dup).unwrap_err();
     assert!(err.contains("H1") && err.contains("h1"), "{err}");
 }
+
+#[test]
+fn slot_grammar_is_closed() {
+    let bad = |line: &str| readings::check(&format!("## TL;DR\n\n{line}\n")).len();
+    for line in [
+        "{{card:e1: 7 points}}",
+        "{{card:e1:results/0}}",
+        "{{card::/a}}",
+        "{{card:e 1:/a}}",
+        "{{card:e1:/a b}}",
+        "{{card:e1:/a",
+        r#"[a](u "5 things")"#,
+        r#"[a](u "things")"#,
+        "[a](u 5)",
+    ] {
+        assert_eq!(bad(line), 1, "{line}");
+    }
+    for line in [
+        "{{card:e1.v-2_x:/results/0/estimate}} and {{card:e1:/a~1/b/}}",
+        "{{card:e1:/}}",
+        "[a](https://x.org/a/2) and [b](7)",
+        "foo](7)",
+        "bare ( 7 ) is not a target",
+    ] {
+        let want = usize::from(line.starts_with("bare"));
+        assert_eq!(bad(line), want, "{line}");
+    }
+    // Digits in a reading heading stay allowed.
+    assert_eq!(readings::check("## Reading: H1/code\n\nok\n"), vec![]);
+}

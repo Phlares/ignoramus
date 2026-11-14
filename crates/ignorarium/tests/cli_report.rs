@@ -696,3 +696,71 @@ fn card_conflicts_with_format_and_needs_out() {
         bin(&lab).args(["report", "s1"]).args(args).assert().code(2);
     }
 }
+
+fn stderr_of(a: &assert_cmd::assert::Assert) -> String {
+    String::from_utf8_lossy(&a.get_output().stderr).into_owned()
+}
+
+fn no_opened(lab: &Lab) {
+    let kinds: Vec<String> = records_of(lab, "s1").into_iter().map(|r| r.kind).collect();
+    assert!(!kinds.contains(&"opened".to_string()), "{kinds:?}");
+}
+
+#[test]
+fn card_out_refuses_a_foreign_file_in_a_nested_folder() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let out = lab.root.join("card");
+    std::fs::create_dir_all(out.join("tex/sub")).unwrap();
+    std::fs::write(out.join("tex/sub/x.txt"), "x").unwrap();
+    let a = card_out(&lab, &out).code(2);
+    assert!(stderr_of(&a).contains("sub"), "{}", stderr_of(&a));
+    no_opened(&lab);
+}
+
+#[cfg(unix)]
+#[test]
+fn card_out_refuses_symlinks() {
+    use std::os::unix::fs::symlink;
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let elsewhere = lab.root.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(elsewhere.join("f"), "x").unwrap();
+    for (name, target) in [
+        ("card.json", elsewhere.join("f")),
+        ("tex", elsewhere.clone()),
+    ] {
+        let out = lab.root.join(format!("card-{name}"));
+        std::fs::create_dir_all(&out).unwrap();
+        symlink(&target, out.join(name)).unwrap();
+        let a = card_out(&lab, &out).code(2);
+        assert!(stderr_of(&a).contains("symlink"), "{}", stderr_of(&a));
+    }
+    no_opened(&lab);
+    assert_eq!(std::fs::read(elsewhere.join("f")).unwrap(), b"x");
+}
+
+#[test]
+fn readings_are_flagged_not_blocked_or_rewritten() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let out = lab.root.join("card");
+    let a = card_out(&lab, &out).success();
+    assert_eq!(stderr_of(&a), "", "a fresh template draws no flag");
+    // Second run: the card changes (new opened record), so the header is stale. One slot has a digit.
+    let path = out.join("readings.md");
+    let old = std::fs::read_to_string(&path).unwrap();
+    let mine = old.replacen("## TL;DR\n", "## TL;DR\n\nIt moved 5 points.\n", 1);
+    std::fs::write(&path, &mine).unwrap();
+    let a = card_out(&lab, &out).success();
+    let err = stderr_of(&a);
+    let new = ignorarium::canon::sha256_hex(&std::fs::read(out.join("card.json")).unwrap());
+    let stale = old.lines().next().unwrap();
+    let stale = stale
+        .trim_start_matches("<!-- card sha256: ")
+        .trim_end_matches(" -->");
+    assert!(err.contains(stale) && err.contains(&new), "{err}");
+    assert!(err.contains("It moved 5 points."), "{err}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), mine);
+}

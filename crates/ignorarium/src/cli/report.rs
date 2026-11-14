@@ -172,30 +172,45 @@ struct Parts {
     manifest: String,
 }
 
-/// Refuses an `--out` folder that holds a file this command does not write.
+/// Refuses an `--out` folder that holds a symlink, a file this command does not write, or
+/// anything `read_dir` cannot list. Checked at every depth with `symlink_metadata`.
 fn check_folder(dir: &Path, parts: &Parts) -> Result<(), CliError> {
-    if dir.exists() && !dir.is_dir() {
-        return Err(CliError::usage(format!("{}: not a folder", dir.display())));
-    }
+    let refuse = |at: &Path, why: &str| {
+        CliError::usage(format!(
+            "report: {}: {why}; use an empty folder",
+            at.display()
+        ))
+    };
     let listed = |files: &[(String, String)], name: &str| files.iter().any(|(n, _)| n == name);
-    for (top, at) in [(true, dir.to_path_buf()), (false, dir.join("tex"))] {
-        let Ok(entries) = std::fs::read_dir(&at) else {
-            continue;
-        };
-        for e in entries.flatten() {
+    match std::fs::symlink_metadata(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(refuse(dir, &e.to_string())),
+        Ok(m) if m.file_type().is_symlink() => return Err(refuse(dir, "a symlink")),
+        Ok(m) if !m.is_dir() => return Err(refuse(dir, "not a folder")),
+        Ok(_) => {}
+    }
+    let mut pending = vec![(dir.to_path_buf(), 0)];
+    while let Some((at, depth)) = pending.pop() {
+        let entries = std::fs::read_dir(&at).map_err(|e| refuse(&at, &e.to_string()))?;
+        for e in entries {
+            let e = e.map_err(|e| refuse(&at, &e.to_string()))?;
+            let path = e.path();
             let name = e.file_name().to_string_lossy().into_owned();
-            let known = if top {
-                CARD_FILES.contains(&name.as_str())
-                    || name == "tex"
-                    || listed(&parts.figures, &name)
-            } else {
-                listed(&parts.tex, &name)
+            let kind = (std::fs::symlink_metadata(&path))
+                .map_err(|e| refuse(&path, &e.to_string()))?
+                .file_type();
+            let known = match (depth, kind.is_dir()) {
+                _ if kind.is_symlink() => return Err(refuse(&path, "a symlink")),
+                (0, true) => name == "tex",
+                (0, false) => CARD_FILES.contains(&name.as_str()) || listed(&parts.figures, &name),
+                (_, true) => false,
+                (_, false) => listed(&parts.tex, &name),
             };
             if !known {
-                return Err(CliError::usage(format!(
-                    "report: {} holds a file --card does not write; use an empty folder",
-                    e.path().display()
-                )));
+                return Err(refuse(&path, "a file --card does not write"));
+            }
+            if kind.is_dir() {
+                pending.push((path, depth + 1));
             }
         }
     }
@@ -243,9 +258,33 @@ fn write_card(card: &Card, parts: &Parts, dir: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Prints a flag on stderr for each way the existing `readings.md` does not fit the new card.
+fn flag_readings(old: &[u8], card: &Card) {
+    let text = String::from_utf8_lossy(old);
+    let now = card.sha256();
+    match readings::header_hash(&text) {
+        Some(h) if h == now => {}
+        found => eprintln!(
+            "report: {} names card {}, but the new card is {now}",
+            readings::FILE,
+            found.unwrap_or("none")
+        ),
+    }
+    for e in readings::check(&text) {
+        eprintln!(
+            "report: {} line {} ({}): {}",
+            readings::FILE,
+            e.line,
+            e.slot,
+            e.excerpt
+        );
+    }
+}
+
 fn run_card(ctx: &Ctx, id: &str, dir: &Path) -> Run {
     let home = ctx.home()?;
     let (card, parts) = report_with(ctx, id, |card| plan_card(home, card, dir))?;
+    let old = std::fs::read(dir.join(readings::FILE)).ok();
     write_card(&card, &parts, dir).map_err(|e| {
         CliError::usage(format!(
             "{}: {e}; the opened record (seq {}) was appended",
@@ -253,7 +292,14 @@ fn run_card(ctx: &Ctx, id: &str, dir: &Path) -> Run {
             card.opened.seq
         ))
     })?;
-    out(&format!("wrote the card of {id} to {}\n", dir.display()))?;
+    if let Some(old) = old {
+        flag_readings(&old, &card);
+    }
+    out(&format!(
+        "wrote the card of {id} to {}
+",
+        dir.display()
+    ))?;
     Ok(Done::exit(0))
 }
 
