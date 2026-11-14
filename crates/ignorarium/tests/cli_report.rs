@@ -699,7 +699,19 @@ fn card_out_writes_the_frozen_card_and_keeps_readings() {
         std::fs::read_to_string(out.join("readings.md")).unwrap(),
         "mine\n"
     );
-    assert_ne!(std::fs::read(out.join("card.json")).unwrap(), bytes);
+    let again = std::fs::read(out.join("card.json")).unwrap();
+    assert_ne!(again, bytes);
+    let frozen = |bytes: &[u8]| {
+        let mut card: Value = serde_json::from_slice(bytes).unwrap();
+        card["opened"] = Value::Null;
+        card["records"] = Value::Null;
+        serde_json::to_vec_pretty(&card).unwrap()
+    };
+    assert_eq!(
+        String::from_utf8(frozen(&again)).unwrap(),
+        String::from_utf8(frozen(&bytes)).unwrap(),
+        "only opened and records may change"
+    );
 }
 
 #[test]
