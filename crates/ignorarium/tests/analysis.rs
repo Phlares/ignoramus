@@ -978,8 +978,10 @@ fn intervals_match_verdict_order() {
     );
     let inverted = |obs: &[f64]| {
         let samples: Vec<&[f64]> = obs.iter().map(std::slice::from_ref).collect();
+        // Anchored on the margin, 0: the last step at or below the estimate.
+        let estimate = obs.iter().sum::<f64>() / obs.len() as f64;
         let grid = Grid {
-            from: obs.iter().sum::<f64>() / obs.len() as f64,
+            from: (estimate / INTERVAL_STEP).floor() * INTERVAL_STEP,
             to: 1.0,
             step: INTERVAL_STEP,
         };
@@ -994,7 +996,7 @@ fn intervals_match_verdict_order() {
             hypothesis: "H1".into(),
             stratum: "code".into(),
             side: "below".into(),
-            estimate: want.grid.from,
+            estimate: drawn.iter().sum::<f64>() / drawn.len() as f64,
             inversion: want,
         }]
     );
@@ -1050,6 +1052,43 @@ fn only_a_tested_mean_claim_with_a_level_gets_an_interval() {
     );
     let (vs, _) = decided(&quantile, &p, &clusters, Some(LEVEL));
     assert_eq!(intervals(&quantile, &p, &clusters, &HASH, &vs).unwrap(), []);
+}
+
+#[test]
+fn a_claim_that_passes_at_its_margin_gets_a_bound_at_or_inside_it() {
+    // A margin off the 1e-4 lattice through 0; `sign` -1 mirrors the claim to `above -M`.
+    const M: f64 = 0.012_37;
+    for (sign, side) in [(1.0, "below"), (-1.0, "above")] {
+        let spec = claimed(
+            "confirmatory",
+            &[],
+            json!({ side: sign * M }),
+            json!({ "mean": [-1.0, 1.0] }),
+        );
+        // 40 clusters, mean -0.15615 (mirrored, +0.15615): off the lattice through M.
+        let groups: Vec<Group> = (0..40)
+            .map(|i| {
+                let x = if i % 2 == 0 { -0.4123 } else { 0.1 };
+                group(&format!("c{i}"), "", &[sign * x])
+            })
+            .collect();
+        let (p, clusters) = data(&spec, &groups);
+        let e0 = decided(&spec, &p, &clusters, Some(LEVEL)).0[0]
+            .e_value
+            .unwrap();
+        // A level the test passes at the margin by a hair.
+        let level = 1.0 / (e0 * (1.0 - 1e-9));
+        let (vs, _) = decided(&spec, &p, &clusters, Some(level));
+        assert_eq!(vs[0].verdict, "pass", "{side}");
+        let found = intervals(&spec, &p, &clusters, &HASH, &vs).unwrap();
+        let r = &found[0];
+        assert!(sign * (r.estimate - r.inversion.grid.from) >= 0.0, "{r:?}");
+        let inside = sign * (M - sign * r.inversion.margin.unwrap());
+        assert!(
+            inside >= -1e-12,
+            "{side}: the bound lies past the margin: {r:?}"
+        );
+    }
 }
 
 #[test]

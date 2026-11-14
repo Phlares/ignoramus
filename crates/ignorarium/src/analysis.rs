@@ -764,10 +764,25 @@ pub struct IntervalResult {
     pub inversion: Inversion,
 }
 
+/// The margins tried for bound `b`: steps of `INTERVAL_STEP` from the registered margin, so
+/// a margin that passed is on the grid. The grid starts at the last step at or behind
+/// `estimate` and runs to the end of the range on the claimed side (`hi` below, `lo` above).
+fn anchored(b: &Bound, estimate: f64, (lo, hi): (f64, f64)) -> Grid {
+    let steps = (estimate - b.margin) / INTERVAL_STEP;
+    let (steps, to) = match b.tail {
+        Tail::Lower => (steps.floor(), hi),
+        _ => (steps.ceil(), lo),
+    };
+    Grid {
+        from: b.margin + steps * INTERVAL_STEP,
+        to,
+        step: INTERVAL_STEP,
+    }
+}
+
 /// Per verdict of `verdicts` with a level, on a claim on a mean, per stratum and bound: the
 /// registered test, rerun over the same observations in the same order (`ordered`) at each
-/// margin from the estimate to the end of the range on the claimed side (`hi` below, `lo`
-/// above), against 1 / level. None for a verdict with an incomplete unit, whose test gives 0
+/// margin of `anchored`'s grid, against 1 / level. None for a verdict with an incomplete unit, whose test gives 0
 /// at every margin; for a verdict a stop forced to fail (`verdicts`), whose test never ran to
 /// its size; for a quantile claim, whose margin has no declared range; or for a stratum
 /// with no cluster, which has no estimate. `Err` names a bound whose test cannot be inverted.
@@ -801,11 +816,7 @@ pub fn intervals(
                     .map(|xs| claim::observation(&stat, &b, xs))
                     .collect::<Result<Vec<f64>, _>>()?;
                 let estimate = obs.iter().sum::<f64>() / obs.len() as f64;
-                let grid = Grid {
-                    from: estimate,
-                    to: if b.tail == Tail::Lower { hi } else { lo },
-                    step: INTERVAL_STEP,
-                };
+                let grid = anchored(&b, estimate, (lo, hi));
                 Ok(IntervalResult {
                     hypothesis: h.id.clone(),
                     stratum: scope.stratum.to_string(),
