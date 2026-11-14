@@ -15,11 +15,12 @@ use crate::schedule::{self, Row, SELECTION_STAGE};
 use crate::seed::seed;
 use crate::spec;
 use crate::spec::model::{
-    Claim, Direction, Hypothesis, Mode, Paired as Rule, Role, SELECTED, Spec,
+    Claim, Direction, Hypothesis, Mode, Paired as Rule, Role, SELECTED, Spec, StatisticSpec,
 };
 use crate::stream::{Log, LogName};
 use crate::units::{self, Cluster};
 use crate::{resize, spawn};
+use evidence::claim::{Bound, Grid, Inversion};
 use evidence::rng::Rng;
 use evidence::{Tail, claim, tree};
 use serde::{Deserialize, Serialize};
@@ -266,7 +267,8 @@ fn samples(clusters: &[Cluster], h: &Hypothesis, stratum: &str, paired: &Paired)
 /// registration and its signed records. It gives the unit values its estimates were fitted
 /// from, so a later plan can fit them as its own test reads them.
 pub struct Source {
-    spec: Spec,
+    pub(crate) spec: Spec,
+    pub(crate) hash: [u8; 32],
     pairs: Paired,
     clusters: Vec<Cluster>,
 }
@@ -286,10 +288,11 @@ pub struct Refit {
 impl Source {
     /// The study of `records` whose stored plan is `text`. Its clusters are those `finish`
     /// measured: the data of each input comes from the `inputs` record and the rows
-    /// (`held_by`), and the reserve clusters that ran from the `resize` record. `Err` (why)
-    /// when the text does not parse, is not the plan the register record names, or a record
-    /// the clusters need is missing or does not parse.
-    pub fn read(text: &[u8], records: &[Record]) -> Result<Source, String> {
+    /// (`held_by`, a row without its own list holding `shared`), and the reserve clusters
+    /// that ran from the `resize` record. `Err` (why) when the text does not parse, is not
+    /// the plan the register record names, or a record the clusters need is missing or does
+    /// not parse.
+    pub fn read(text: &[u8], records: &[Record], shared: Option<&Value>) -> Result<Source, String> {
         let register =
             (records.iter().find_map(Register::of)).ok_or("it has no register record")?;
         let unparsed = "its stored plan does not parse";
@@ -298,15 +301,27 @@ impl Source {
             return Err("its stored plan is not the one the study registered".into());
         }
         let (spec, _, hash, _) = typed(raw).map_err(|_| unparsed)?;
-        let all = distinct_clusters(units::clusters(&spec, &hash), &held_by(records)?);
+        let all = distinct_clusters(units::clusters(&spec, &hash), &held_by(records, shared)?);
         let resize = resize::recorded(records).map_err(|_| "its resize record does not parse")?;
         let ran = resize::ran(&spec, &all, resize.as_ref());
         let clusters = measured(&spec, &all, &ran);
         Ok(Source {
             pairs: paired(&spec, records),
             spec,
+            hash,
             clusters,
         })
+    }
+
+    /// The `intervals` of `verdicts` over the clusters the study measured.
+    pub fn intervals(&self, verdicts: &[Verdict]) -> Vec<IntervalResult> {
+        intervals(
+            &self.spec,
+            &self.pairs,
+            &self.clusters,
+            &self.hash,
+            verdicts,
+        )
     }
 
     /// The fit `estimates` gives hypothesis `id` in group `stratum`, over the unit values,
@@ -338,19 +353,22 @@ impl Source {
 /// Each input of a study, in spec order, with the (exact, normalized) hashes of the data its
 /// rows ran on. The `inputs` record names each input's exact hash, or none for one that was
 /// absent, and every row names the pair of each input present, in the same order; all rows
-/// name the same. A study with no row names no data, and each input stands alone
+/// name the same. A row without its own list names `shared`, the list a `records::Log` keeps
+/// once. A study with no row names no data, and each input stands alone
 /// (`distinct_clusters`).
-fn held_by(records: &[Record]) -> Result<InputHashes, String> {
+fn held_by(records: &[Record], shared: Option<&Value>) -> Result<InputHashes, String> {
+    fn list<'a>(r: &'a Record, shared: Option<&'a Value>) -> &'a Value {
+        (r.body.get("data_hashes").or(shared)).unwrap_or(&Value::Null)
+    }
     let Some(row) = own_rows(records).next() else {
         return Ok(vec![]);
     };
     let frozen = (records.iter().find_map(Inputs::of)).ok_or("it has rows and no inputs record")?;
     let other = "its rows and its inputs record name other data";
-    if own_rows(records).any(|r| r.body["data_hashes"] != row.body["data_hashes"]) {
+    if own_rows(records).any(|r| list(r, shared) != list(row, shared)) {
         return Err(other.into());
     }
-    let named =
-        Vec::<(String, String)>::deserialize(&row.body["data_hashes"]).map_err(|_| other)?;
+    let named = Vec::<(String, String)>::deserialize(list(row, shared)).map_err(|_| other)?;
     let mut named = named.into_iter();
     let mut out = Vec::new();
     for (path, exact) in frozen.inputs {
@@ -686,16 +704,8 @@ fn held(
         .ok_or(evidence::Error::Parameter("statistic"))?
         .to_evidence();
     let mut out = Vec::new();
-    for Scope {
-        stratum,
-        first,
-        appended,
-        ..
-    } in scopes
-    {
-        let path = format!("test/{}/{stratum}", h.id);
-        let order = claim::order(first.len(), &mut Rng::from_seed(seed(spec_hash, &path)));
-        let samples: Vec<&Vec<f64>> = (order.iter().map(|&i| &first[i])).chain(appended).collect();
+    for scope in scopes {
+        let samples = ordered(h, scope, spec_hash);
         for b in claim.bounds() {
             let obs = (samples.iter())
                 .map(|xs| claim::observation(&stat, &b, xs))
@@ -705,14 +715,9 @@ fn held(
             } else {
                 (!obs.is_empty()).then(|| obs.iter().sum::<f64>() / obs.len() as f64)
             };
-            let side = if b.tail == Tail::Lower {
-                "below"
-            } else {
-                "above"
-            };
             let result = BoundResult {
-                stratum: stratum.to_string(),
-                side: side.into(),
+                stratum: scope.stratum.to_string(),
+                side: side(&b).into(),
                 margin: b.margin,
                 clusters: obs.len() as u64,
                 value,
@@ -721,6 +726,91 @@ fn held(
         }
     }
     Ok(out)
+}
+
+/// The values of `scope` in the order the test of `h` reads them: the first batch in its
+/// seeded order, then the appended clusters.
+fn ordered<'a>(h: &Hypothesis, scope: &'a Scope<'_>, spec_hash: &[u8; 32]) -> Vec<&'a Vec<f64>> {
+    let path = format!("test/{}/{}", h.id, scope.stratum);
+    let rng = &mut Rng::from_seed(seed(spec_hash, &path));
+    let order = claim::order(scope.first.len(), rng);
+    (order.iter().map(|&i| &scope.first[i]))
+        .chain(&scope.appended)
+        .collect()
+}
+
+fn side(b: &Bound) -> &'static str {
+    if b.tail == Tail::Lower {
+        "below"
+    } else {
+        "above"
+    }
+}
+
+/// The step of the margins `intervals` tries, in the statistic's units.
+pub const INTERVAL_STEP: f64 = 1e-4;
+
+/// One bound of a claim in one stratum, its registered test inverted (`claim::tightest`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct IntervalResult {
+    pub hypothesis: String,
+    pub stratum: String,
+    /// `below` or `above`, as the bound's `BoundResult`.
+    pub side: String,
+    /// The mean of the cluster observations.
+    pub estimate: f64,
+    pub inversion: Inversion,
+}
+
+/// Per verdict of `verdicts` with a level, on a claim on a mean, per stratum and bound: the
+/// registered test, rerun over the same observations in the same order (`ordered`) at each
+/// margin from the estimate to the end of the range on the claimed side (`hi` below, `lo`
+/// above), against 1 / level. None for a verdict with an incomplete unit, whose test gives 0
+/// at every margin; for a quantile claim, whose margin has no declared range; or for a stratum
+/// with no cluster, which has no estimate.
+pub fn intervals(
+    spec: &Spec,
+    paired: &Paired,
+    clusters: &[Cluster],
+    spec_hash: &[u8; 32],
+    verdicts: &[Verdict],
+) -> Vec<IntervalResult> {
+    let mut out = Vec::new();
+    for v in verdicts.iter().filter(|v| v.incomplete_units == 0) {
+        let h = (spec.question.hypotheses.iter()).find(|h| h.id == v.hypothesis);
+        let Some((h, level)) = h.zip(v.level) else {
+            continue;
+        };
+        let (Some(claim), Some(StatisticSpec::Mean([lo, hi]))) = (h.claim, h.statistic) else {
+            continue;
+        };
+        let stat = claim::Statistic::Mean { lo, hi };
+        for scope in scopes(spec, h, paired, clusters) {
+            let samples: Vec<&[f64]> = (ordered(h, &scope, spec_hash).into_iter())
+                .map(Vec::as_slice)
+                .collect();
+            let interval = |b: Bound| -> Result<IntervalResult, evidence::Error> {
+                let obs = (samples.iter())
+                    .map(|xs| claim::observation(&stat, &b, xs))
+                    .collect::<Result<Vec<f64>, _>>()?;
+                let estimate = obs.iter().sum::<f64>() / obs.len() as f64;
+                let grid = Grid {
+                    from: estimate,
+                    to: if b.tail == Tail::Lower { hi } else { lo },
+                    step: INTERVAL_STEP,
+                };
+                Ok(IntervalResult {
+                    hypothesis: h.id.clone(),
+                    stratum: scope.stratum.to_string(),
+                    side: side(&b).into(),
+                    estimate,
+                    inversion: claim::tightest(&stat, b.tail, &samples, 1.0 / level, grid)?,
+                })
+            };
+            out.extend(claim.bounds().into_iter().filter_map(|b| interval(b).ok()));
+        }
+    }
+    out
 }
 
 /// `e` kept finite: above the largest float it is that float, and NaN is 0, so it fails.

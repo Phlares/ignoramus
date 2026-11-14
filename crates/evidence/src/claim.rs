@@ -148,6 +148,77 @@ pub fn holds(stat: &Statistic, bound: &Bound, obs: &[f64]) -> Result<bool, Error
     Ok(on_side(mean(obs.iter().copied()), point, tail))
 }
 
+/// Candidate margins: `from + k * step` for k = 1, 2, ..., each strictly between `from` and
+/// `to`, nearest `from` first; `to` may lie on either side of `from`. Both ends are left out:
+/// a mean's test refuses a margin at an end of its range, and `from` may be one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Grid {
+    pub from: f64,
+    pub to: f64,
+    pub step: f64,
+}
+
+impl Grid {
+    fn points(self) -> Result<impl Iterator<Item = f64>, Error> {
+        let Grid { from, to, step } = self;
+        if !(from.is_finite() && to.is_finite() && step.is_finite() && step > 0.0) {
+            return Err(Error::Parameter("grid"));
+        }
+        let dir = (to - from).signum();
+        Ok((1u64..)
+            .map(move |k| from + dir * k as f64 * step)
+            .take_while(move |&m| (to - m) * dir > 0.0))
+    }
+}
+
+/// What `tightest` found over `grid` at `threshold`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Inversion {
+    /// The first grid margin whose e-value reaches the threshold; `None` when none does.
+    pub margin: Option<f64>,
+    /// False when a grid margin past `margin` falls short of the threshold: the margins that
+    /// pass are then no interval.
+    pub contiguous: bool,
+    pub grid: Grid,
+    pub threshold: f64,
+}
+
+/// The test of a `tail` claim inverted over `grid`: at each margin, the e-value of the bound
+/// over `samples` (one per cluster, in the order the test reads them), against `threshold`.
+/// The bet reads the margin, so each margin reruns the whole e-process. The margins that pass
+/// need not be contiguous, so the scan runs on past the first pass until one fails.
+pub fn tightest(
+    stat: &Statistic,
+    tail: Tail,
+    samples: &[&[f64]],
+    threshold: f64,
+    grid: Grid,
+) -> Result<Inversion, Error> {
+    claimed_side(&Bound { tail, margin: 0.0 })?;
+    let mut found = Inversion {
+        margin: None,
+        contiguous: true,
+        grid,
+        threshold,
+    };
+    for margin in grid.points()? {
+        let bound = Bound { tail, margin };
+        let obs = (samples.iter())
+            .map(|xs| observation(stat, &bound, xs))
+            .collect::<Result<Vec<f64>, _>>()?;
+        let passes = e_value(stat, &bound, &obs)? >= threshold;
+        match (found.margin, passes) {
+            (None, true) => found.margin = Some(margin),
+            (Some(_), false) => {
+                found.contiguous = false;
+                break;
+            }
+            _ => {}
+        }
+    }
+    Ok(found)
+}
+
 /// A seeded order of `0..n`: `Rng::sample`'s forward Fisher-Yates shuffle of all n.
 pub fn order(n: usize, rng: &mut Rng) -> Vec<usize> {
     let n = n as u64;

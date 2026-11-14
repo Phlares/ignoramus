@@ -1761,7 +1761,7 @@ fn estimates_of(spec: &Value, hyp: &Value, ctx: &CheckCtx) -> Option<Lookup> {
         Some(Ok(Some(clip))) => {
             let read = (ctx.records.spec(from))
                 .and_then(|text| text.ok_or_else(|| "it holds no plan of the study".into()))
-                .and_then(|text| Source::read(&text, &kept));
+                .and_then(|text| Source::read(&text, &kept, None));
             match read {
                 Ok(source) => Some((source, clip)),
                 Err(why) => return unreadable(why),

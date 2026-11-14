@@ -1,5 +1,6 @@
 //! The study card: everything `report` says about a finished study, as one structure.
 //! Each output format renders this structure; none reads the log on its own.
+use crate::analysis::{IntervalResult, Source};
 use crate::cli::check::HomeRecords;
 use crate::cli::status::{relabelled, shown_labels};
 use crate::cli::{CliError, not_registered, stopped_why};
@@ -9,7 +10,6 @@ use crate::derived::{
 use crate::home::Home;
 use crate::records::{Log, Record};
 use crate::rules::BoxRecords;
-use crate::runner::stored_spec;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -35,6 +35,55 @@ pub struct HypothesisCard {
     pub level: Option<f64>,
     pub reason: Option<String>,
     pub clipped: Option<Vec<Clip>>,
+    pub intervals: Vec<Interval>,
+}
+
+/// The method every `Interval` names.
+pub const INTERVAL_METHOD: &str = "inverted registered e-process";
+
+/// One bound of a claim in one stratum, its registered test inverted over a grid of margins
+/// (`analysis::intervals`). The method was chosen after the results were known, so it is
+/// never registered.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Interval {
+    pub stratum: String,
+    pub side: String,
+    pub estimate: f64,
+    /// The tightest margin the test shows; `None` when no grid margin passes, or when the
+    /// margins that pass are no interval (`contiguous` false).
+    pub bound: Option<f64>,
+    pub method: String,
+    pub grid: IntervalGrid,
+    pub contiguous: bool,
+    pub registered: bool,
+}
+
+/// The margins tried: from `from` toward `to` in steps of `step`, both ends left out.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct IntervalGrid {
+    pub from: f64,
+    pub to: f64,
+    pub step: f64,
+}
+
+impl From<&IntervalResult> for Interval {
+    fn from(r: &IntervalResult) -> Interval {
+        let i = &r.inversion;
+        Interval {
+            stratum: r.stratum.clone(),
+            side: r.side.clone(),
+            estimate: r.estimate,
+            bound: i.margin.filter(|_| i.contiguous),
+            method: INTERVAL_METHOD.into(),
+            grid: IntervalGrid {
+                from: i.grid.from,
+                to: i.grid.to,
+                step: i.grid.step,
+            },
+            contiguous: i.contiguous,
+            registered: false,
+        }
+    }
 }
 
 /// How many units of one stratum a mean claim clipped.
@@ -192,12 +241,20 @@ pub fn build(home: &Home, id: &str, log: &Log) -> Result<Card, CliError> {
     };
     let analysis = Analysis::of(analysed).ok_or_else(|| not_registered(id))?;
     let mut seen = BTreeSet::new();
-    let hypotheses: Vec<HypothesisCard> = after
-        .iter()
-        .filter_map(Verdict::of)
+    let verdicts: Vec<Verdict> = (after.iter().filter_map(Verdict::of))
         .filter(|v| seen.insert(v.hypothesis.clone()))
+        .collect();
+    let text = std::fs::read(home.study_dir(id).join("spec.toml"))
+        .map_err(|e| CliError::usage(format!("cannot report {id}: its plan: {e}")))?;
+    let source = Source::read(&text, all, log.data_hashes.as_ref()).map_err(refuse)?;
+    let intervals = source.intervals(&verdicts);
+    let hypotheses: Vec<HypothesisCard> = (verdicts.into_iter())
         .map(|v| HypothesisCard {
             clipped: clips(&analysis, &v.hypothesis),
+            intervals: (intervals.iter())
+                .filter(|r| r.hypothesis == v.hypothesis)
+                .map(Interval::from)
+                .collect(),
             hypothesis: v.hypothesis,
             verdict: v.verdict,
             basis: v.basis,
@@ -213,9 +270,7 @@ pub fn build(home: &Home, id: &str, log: &Log) -> Result<Card, CliError> {
     let shown = if kids.is_empty() {
         vec![]
     } else {
-        let (spec, _, hash, _) = stored_spec(&home.study_dir(id))
-            .map_err(|e| CliError::usage(format!("cannot report {id}: {e}")))?;
-        shown_labels(&spec, &hash)
+        shown_labels(&source.spec, &source.hash)
     };
     let stopped: BTreeSet<String> = (all.iter().filter_map(SpawnStop::of))
         .flat_map(|s| s.children)
@@ -242,4 +297,33 @@ pub fn build(home: &Home, id: &str, log: &Log) -> Result<Card, CliError> {
         children,
         family,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use evidence::claim::{Grid, Inversion};
+
+    #[test]
+    fn a_gap_in_the_passing_margins_prints_no_bound() {
+        let result = |contiguous| IntervalResult {
+            hypothesis: "H1".into(),
+            stratum: String::new(),
+            side: "below".into(),
+            estimate: 0.0,
+            inversion: Inversion {
+                margin: Some(0.5),
+                contiguous,
+                grid: Grid {
+                    from: 0.0,
+                    to: 1.0,
+                    step: 0.5,
+                },
+                threshold: 2.0,
+            },
+        };
+        assert_eq!(Interval::from(&result(true)).bound, Some(0.5));
+        let gap = Interval::from(&result(false));
+        assert_eq!((gap.bound, gap.contiguous), (None, false));
+    }
 }

@@ -1,11 +1,11 @@
 mod common;
 
-use evidence::claim::{Bound, Statistic, e_value, order};
+use evidence::claim::{Bound, Grid, Statistic, e_value, order, tightest};
 use evidence::rng::Rng;
 use evidence::{Tail, tree};
 use ignorarium::analysis::{
-    Paired, Source, clip_counts, distinct_clusters, estimates, instrument, paired, select,
-    study_e_value, verdicts,
+    INTERVAL_STEP, IntervalResult, Paired, Source, clip_counts, distinct_clusters, estimates,
+    instrument, intervals, paired, select, study_e_value, verdicts,
 };
 use ignorarium::backend::level0::Level0;
 use ignorarium::canon::sha256_hex;
@@ -947,6 +947,105 @@ fn reserve_clusters_follow_the_first_batch_in_the_order_given() {
     );
 }
 
+#[test]
+fn intervals_match_verdict_order() {
+    let spec = below_zero("confirmatory", &["code"]);
+    // Values with exact binary forms, so the paired differences keep every bit.
+    let xs = [
+        -0.5, 0.25, -0.25, 0.5, -0.75, -0.625, 0.125, -0.875, -0.375, 0.1875, -0.8125, -0.4375,
+    ];
+    let ys = [-1.0, 0.75, -0.5];
+    let first: Vec<Group> = (xs.iter().enumerate())
+        .map(|(i, x)| group(&format!("c{i}"), "code", &[*x]))
+        .collect();
+    let reserve: Vec<Group> = (ys.iter().enumerate())
+        .map(|(i, y)| group(&format!("r{i}"), "code", &[*y]))
+        .collect();
+    let (p, mut all) = data(&spec, &[first, reserve].concat());
+    for c in &mut all[xs.len()..] {
+        c.role = Role::Reserve;
+    }
+    let level = 0.1;
+    let (vs, _) = decided(&spec, &p, &all, Some(level));
+    // The order `held` reads: the first batch in its seeded order, then the reserve.
+    let drawn: Vec<f64> = (seeded_order("H1", "code", xs.len()).into_iter())
+        .map(|i| xs[i])
+        .chain(ys)
+        .collect();
+    assert_eq!(
+        vs[0].bounds[0].value,
+        Some(e_value(&MEAN, &BELOW_ZERO, &drawn).unwrap())
+    );
+    let inverted = |obs: &[f64]| {
+        let samples: Vec<&[f64]> = obs.iter().map(std::slice::from_ref).collect();
+        let grid = Grid {
+            from: obs.iter().sum::<f64>() / obs.len() as f64,
+            to: 1.0,
+            step: INTERVAL_STEP,
+        };
+        tightest(&MEAN, Tail::Lower, &samples, 1.0 / level, grid).unwrap()
+    };
+    let want = inverted(&drawn);
+    assert!(want.margin.is_some());
+    let found = intervals(&spec, &p, &all, &HASH, &vs);
+    assert_eq!(
+        found,
+        [IntervalResult {
+            hypothesis: "H1".into(),
+            stratum: "code".into(),
+            side: "below".into(),
+            estimate: want.grid.from,
+            inversion: want,
+        }]
+    );
+    // Another order gives another margin.
+    let listed: Vec<f64> = xs.iter().chain(&ys).copied().collect();
+    assert_ne!(inverted(&listed).margin, want.margin);
+}
+
+#[test]
+fn only_a_tested_mean_claim_with_a_level_gets_an_interval() {
+    let within = claimed(
+        "confirmatory",
+        &[],
+        json!({ "within": [-0.5, 0.5] }),
+        json!({ "mean": [-1.0, 1.0] }),
+    );
+    let groups = same("c", "", 6, 0.0);
+    let (p, clusters) = data(&within, &groups);
+    let (vs, _) = decided(&within, &p, &clusters, Some(LEVEL));
+    let found = intervals(&within, &p, &clusters, &HASH, &vs);
+    // One per bound: up from the estimate to hi below, down to lo above.
+    let ends: Vec<(&str, f64, f64)> = (found.iter())
+        .map(|r| (r.side.as_str(), r.inversion.grid.from, r.inversion.grid.to))
+        .collect();
+    assert_eq!(ends, [("above", 0.0, -1.0), ("below", 0.0, 1.0)]);
+    assert!(found.iter().all(|r| r.inversion.threshold == 1.0 / LEVEL));
+    // No level, no interval: an exploratory study, or a level the tree did not give.
+    let exploratory = below_zero("exploratory", &[]);
+    let (vs, _) = decided(&exploratory, &p, &clusters, Some(LEVEL));
+    assert_eq!(intervals(&exploratory, &p, &clusters, &HASH, &vs), []);
+    let tested = below_zero("confirmatory", &[]);
+    let (mut vs, _) = decided(&tested, &p, &clusters, Some(LEVEL));
+    assert_eq!(intervals(&tested, &p, &clusters, &HASH, &vs).len(), 1);
+    vs[0].level = None;
+    assert_eq!(intervals(&tested, &p, &clusters, &HASH, &vs), []);
+    // A unit with no paired value: the test gives 0 at every margin.
+    let mut short = clusters.clone();
+    short[0].picked.push(1);
+    let (vs, _) = decided(&tested, &p, &short, Some(LEVEL));
+    assert_eq!(intervals(&tested, &p, &short, &HASH, &vs), []);
+    // A quantile claim has no declared range to search.
+    let quantile = claimed(
+        "confirmatory",
+        &[],
+        json!({ "below": 0.0 }),
+        json!({ "quantile": 0.5 }),
+    );
+    let (vs, _) = decided(&quantile, &p, &clusters, Some(LEVEL));
+    assert_eq!(intervals(&quantile, &p, &clusters, &HASH, &vs), []);
+}
+
 fn clip(stratum: &str, below: u64, above: u64, units: u64) -> GroupClip {
     GroupClip {
         hypothesis: "H1".into(),
@@ -1675,7 +1774,7 @@ fn a_refit_without_a_clip_gives_the_estimate_record_bit_for_bit() {
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
     let all = common::records_of(&lab, "refit");
     let text = std::fs::read(lab.home.study_dir("refit").join("spec.toml")).unwrap();
-    let source = Source::read(&text, &all).unwrap();
+    let source = Source::read(&text, &all, None).unwrap();
     let held: Vec<Estimate> = all.iter().filter_map(Estimate::of).collect();
     assert_eq!(held.len(), 1);
     let e = &held[0];

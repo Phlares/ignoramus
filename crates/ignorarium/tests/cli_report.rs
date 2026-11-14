@@ -64,11 +64,12 @@ fn a_finished_study_reports_each_verdict() {
     assert_eq!(r["records"], bodies.len());
     let want = json!([
         { "hypothesis": "h1", "verdict": "pass", "basis": "test", "e_value": 312.4,
-          "level": 0.005, "reason": null, "clipped": null },
+          "level": 0.005, "reason": null, "clipped": null, "intervals": [] },
         { "hypothesis": "h2", "verdict": "fail", "basis": "test", "e_value": 0.0,
-          "level": 0.005, "reason": "incomplete units in scope: 2", "clipped": null },
+          "level": 0.005, "reason": "incomplete units in scope: 2", "clipped": null,
+          "intervals": [] },
         { "hypothesis": "h3", "verdict": "none", "basis": "none", "e_value": null,
-          "level": null, "reason": null, "clipped": null },
+          "level": null, "reason": null, "clipped": null, "intervals": [] },
     ]);
     assert_eq!(r["hypotheses"], want);
     let opened = records_of(&lab, "s1").pop().unwrap();
@@ -265,6 +266,15 @@ fn an_unfinished_study_refuses_blind_or_not() {
     }
 }
 
+/// `bodies` with a register record that names the plan `text`, which a test writes in place
+/// of the planted one.
+fn registered_as(mut bodies: Vec<(&'static str, Value)>, text: &str) -> Vec<(&'static str, Value)> {
+    let hash = ignorarium::spec::parse(text.as_bytes()).unwrap().hash;
+    let register = bodies.iter_mut().find(|(k, _)| *k == "register").unwrap();
+    register.1["spec_hash"] = json!(hash);
+    bodies
+}
+
 #[test]
 fn a_blind_finished_study_shows_everything() {
     let lab = lab();
@@ -273,8 +283,12 @@ fn a_blind_finished_study_shows_everything() {
     std::fs::create_dir_all(&dir).unwrap();
     let blind = source_spec(&[]).replace("blind = false", "blind = true");
     assert!(blind.contains("blind = true"));
-    std::fs::write(dir.join("spec.toml"), blind).unwrap();
-    plant(&lab.home, "s2", &finished_study(&three(), &[]));
+    std::fs::write(dir.join("spec.toml"), &blind).unwrap();
+    plant(
+        &lab.home,
+        "s2",
+        &registered_as(finished_study(&three(), &[]), &blind),
+    );
     let open = report_json(&lab, "s1");
     let shut = report_json(&lab, "s2");
     assert_eq!(open["hypotheses"], shut["hypotheses"]);
@@ -487,9 +501,13 @@ fn a_blind_report_shows_children_by_the_blind_label_of_their_condition() {
     let dir = lab.home.study_dir("s1");
     std::fs::create_dir_all(&dir).unwrap();
     let blind = source_spec(&["fiction".to_string()]).replace("blind = false", "blind = true");
-    std::fs::write(dir.join("spec.toml"), blind).unwrap();
+    std::fs::write(dir.join("spec.toml"), &blind).unwrap();
     let kids = [child_estimate("arm-a~window_tokens=64", 64, -12.5)];
-    plant(&lab.home, "s1", &with_children(&kids));
+    plant(
+        &lab.home,
+        "s1",
+        &registered_as(with_children(&kids), &blind),
+    );
     let r = report_json(&lab, "s1");
     let child = r["children"][0]["child"].as_str().unwrap();
     let parent = r["children"][0]["parent"].as_str().unwrap();
@@ -540,4 +558,51 @@ fn formats_not_built_yet_are_refused() {
     }
     let kinds: Vec<String> = records_of(&lab, "s1").into_iter().map(|r| r.kind).collect();
     assert!(!kinds.contains(&"opened".to_string()), "{kinds:?}");
+}
+
+/// A payload whose `arm-a` value is 6 against the reference's 8: every unit pairs to -25 %.
+const MINUS_25: &str = "#!/bin/sh\ncase \"$2\" in exact) v=8;; *) v=6;; esac\nprintf '{\"ppl\": %s}' \"$v\" > \"$IGNORARIUM_OUT/values.json\"\n";
+
+#[test]
+fn card_marks_interval_post_hoc() {
+    use evidence::claim::{Grid, Statistic, tightest};
+    use ignorarium::backend::level0::Level0;
+    use ignorarium::runner::{RunStatus, prepare_with, run};
+    let lab = lab();
+    // `common::confirmatory`, one unit per cluster, on a mean in [-30, 30] sized at -25.
+    common::pilot(&lab.home, vec![common::arm_a()]);
+    let edit = |t: String| {
+        common::confirmatory(t)
+            .replace("units = 3", "units = 1")
+            .replace("{ quantile = 0.5 }", "{ mean = [-30.0, 30.0] }")
+            .replace("power_at = -20.0", "power_at = -25.0")
+    };
+    common::register_study(&lab, "mean", edit, &[], MINUS_25);
+    let work = common::work(&lab, "mean");
+    let plan = prepare_with(&lab.home, "mean", &work, vec![Box::new(Level0)]).unwrap();
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let r = report_json(&lab, "mean");
+    let h = &r["hypotheses"][0];
+    assert_eq!(h["verdict"], "pass");
+    let level = h["level"].as_f64().unwrap();
+    // 15 clusters at -25: the same e-process at each margin from -25 up to 30.
+    let grid = Grid {
+        from: -25.0,
+        to: 30.0,
+        step: 1e-4,
+    };
+    let samples: Vec<&[f64]> = vec![&[-25.0]; 15];
+    let mean = Statistic::Mean {
+        lo: -30.0,
+        hi: 30.0,
+    };
+    let found = tightest(&mean, evidence::Tail::Lower, &samples, 1.0 / level, grid).unwrap();
+    assert!(found.margin.unwrap() < 0.0);
+    let want = json!([{
+        "stratum": "", "side": "below", "estimate": -25.0, "bound": found.margin,
+        "method": "inverted registered e-process",
+        "grid": { "from": -25.0, "to": 30.0, "step": 1e-4 },
+        "contiguous": true, "registered": false,
+    }]);
+    assert_eq!(h["intervals"], want);
 }
