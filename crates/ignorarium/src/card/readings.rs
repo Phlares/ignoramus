@@ -51,9 +51,11 @@ fn is_reference(body: &str) -> bool {
 
 /// Whether `line` breaks the slot grammar: a digit outside a reference and a link target, a
 /// reference that is not exactly `{{card:<id>:<pointer>}}`, or a link target with whitespace.
-/// A `](` opens a link target whether or not a `[` precedes it.
+/// A `](` opens a link target only after link text `[...]` on the same line; elsewhere it is plain text.
 fn is_bad(line: &str) -> bool {
     let mut rest = line;
+    // Whether a `[` opened link text that no `]` has closed.
+    let mut in_text = false;
     while let Some(c) = rest.chars().next() {
         if let Some(tail) = rest.strip_prefix("{{card:") {
             let Some(end) = tail.find("}}") else {
@@ -63,7 +65,8 @@ fn is_bad(line: &str) -> bool {
                 return true;
             }
             rest = &tail[end + 2..];
-        } else if let Some(tail) = rest.strip_prefix("](") {
+        } else if let Some(tail) = rest.strip_prefix("](").filter(|_| in_text) {
+            in_text = false;
             match tail.find(')') {
                 Some(end) if tail[..end].contains(char::is_whitespace) => return true,
                 Some(end) => rest = &tail[end + 1..],
@@ -72,6 +75,11 @@ fn is_bad(line: &str) -> bool {
         } else if c.is_ascii_digit() {
             return true;
         } else {
+            match c {
+                '[' => in_text = true,
+                ']' => in_text = false,
+                _ => {}
+            }
             rest = &rest[c.len_utf8()..];
         }
     }

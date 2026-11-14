@@ -764,3 +764,35 @@ fn readings_are_flagged_not_blocked_or_rewritten() {
     assert!(err.contains("It moved 5 points."), "{err}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), mine);
 }
+
+#[test]
+fn flags_escape_the_authors_text_and_cut_it() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let out = lab.root.join("card");
+    card_out(&lab, &out).success();
+    let long = "x".repeat(200);
+    let text = format!("## TL;DR\n\n\u{1b}[31m5 red {long}\n");
+    std::fs::write(out.join("readings.md"), text).unwrap();
+    let err = stderr_of(&card_out(&lab, &out).success());
+    assert!(!err.contains('\u{1b}'), "{err:?}");
+    assert!(err.contains("\\u{1b}[31m5 red"), "{err:?}");
+    assert!(!err.contains(&"x".repeat(81)), "{err:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_readings_file_is_flagged() {
+    use std::os::unix::fs::PermissionsExt;
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let out = lab.root.join("card");
+    card_out(&lab, &out).success();
+    let path = out.join("readings.md");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let readable = std::fs::read(&path).is_ok();
+    let err = stderr_of(&card_out(&lab, &out).success());
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    // A root user reads the file anyway; the flag then has nothing to say.
+    assert!(readable || err.contains("cannot read readings.md"), "{err}");
+}

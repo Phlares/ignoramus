@@ -394,6 +394,9 @@ fn slot_grammar_is_closed() {
         r#"[a](u "5 things")"#,
         r#"[a](u "things")"#,
         "[a](u 5)",
+        "foo](7)",
+        "costs ](4) percent",
+        "[a]x](7)",
     ] {
         assert_eq!(bad(line), 1, "{line}");
     }
@@ -401,7 +404,7 @@ fn slot_grammar_is_closed() {
         "{{card:e1.v-2_x:/results/0/estimate}} and {{card:e1:/a~1/b/}}",
         "{{card:e1:/}}",
         "[a](https://x.org/a/2) and [b](7)",
-        "foo](7)",
+        "[a](u7)",
         "bare ( 7 ) is not a target",
     ] {
         let want = usize::from(line.starts_with("bare"));

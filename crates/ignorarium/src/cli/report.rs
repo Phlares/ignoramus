@@ -270,13 +270,15 @@ fn flag_readings(old: &[u8], card: &Card) {
             found.unwrap_or("none")
         ),
     }
+    // Text from `readings.md` is the author's: escaped and cut before it reaches a terminal.
+    let shown = |t: &str| printable(&t.chars().take(80).collect::<String>());
     for e in readings::check(&text) {
         eprintln!(
             "report: {} line {} ({}): {}",
             readings::FILE,
             e.line,
-            e.slot,
-            e.excerpt
+            shown(&e.slot),
+            shown(&e.excerpt)
         );
     }
 }
@@ -284,7 +286,14 @@ fn flag_readings(old: &[u8], card: &Card) {
 fn run_card(ctx: &Ctx, id: &str, dir: &Path) -> Run {
     let home = ctx.home()?;
     let (card, parts) = report_with(ctx, id, |card| plan_card(home, card, dir))?;
-    let old = std::fs::read(dir.join(readings::FILE)).ok();
+    let old = match std::fs::read(dir.join(readings::FILE)) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            eprintln!("report: cannot read {} to check it: {e}", readings::FILE);
+            None
+        }
+    };
     write_card(&card, &parts, dir).map_err(|e| {
         CliError::usage(format!(
             "{}: {e}; the opened record (seq {}) was appended",
