@@ -1046,6 +1046,23 @@ fn only_a_tested_mean_claim_with_a_level_gets_an_interval() {
     assert_eq!(intervals(&quantile, &p, &clusters, &HASH, &vs), []);
 }
 
+#[test]
+fn a_stopped_study_gets_no_interval() {
+    let spec = below_zero("confirmatory", &[]);
+    // 15 clusters at -1 pass at 1 / 0.005 (`strong`): the full study shows a bound.
+    let (p, clusters) = data(&spec, &same("c", "", 15, -1.0));
+    let go = verdicts(&spec, &p, &clusters, &HASH, Some(LEVEL), None);
+    let shown = intervals(&spec, &p, &clusters, &HASH, &go);
+    assert!(shown.len() == 1 && shown[0].inversion.margin.is_some());
+    // The stop forces the claim to fail with e-value 0, and keeps its level.
+    let stopped = verdicts(&spec, &p, &clusters, &HASH, Some(LEVEL), Some("why"));
+    assert_eq!(
+        (stopped[0].e_value, stopped[0].level),
+        (Some(0.0), Some(LEVEL))
+    );
+    assert_eq!(intervals(&spec, &p, &clusters, &HASH, &stopped), []);
+}
+
 fn clip(stratum: &str, below: u64, above: u64, units: u64) -> GroupClip {
     GroupClip {
         hypothesis: "H1".into(),

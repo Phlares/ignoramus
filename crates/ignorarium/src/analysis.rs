@@ -510,7 +510,7 @@ pub fn verdicts(
         for v in out.iter_mut().filter(|v| v.basis != NONE) {
             v.verdict = "fail".into();
             v.e_value = v.e_value.map(|_| 0.0);
-            v.reason = Some(format!("stopped: {why}"));
+            v.reason = Some(format!("{STOPPED}{why}"));
         }
     }
     if spec.study.mode != Mode::Confirmatory {
@@ -565,6 +565,8 @@ fn tree_of(
 
 const PASS: &str = "pass";
 const NONE: &str = "none";
+/// The start of the reason of a verdict a stop forced to fail.
+const STOPPED: &str = "stopped: ";
 const TEST: &str = "test";
 
 /// The verdict on `h` of `spec` before the level is split: a claim fails until the tree passes
@@ -766,7 +768,8 @@ pub struct IntervalResult {
 /// registered test, rerun over the same observations in the same order (`ordered`) at each
 /// margin from the estimate to the end of the range on the claimed side (`hi` below, `lo`
 /// above), against 1 / level. None for a verdict with an incomplete unit, whose test gives 0
-/// at every margin; for a quantile claim, whose margin has no declared range; or for a stratum
+/// at every margin; for a verdict a stop forced to fail (`verdicts`), whose test never ran to
+/// its size; for a quantile claim, whose margin has no declared range; or for a stratum
 /// with no cluster, which has no estimate.
 pub fn intervals(
     spec: &Spec,
@@ -776,7 +779,8 @@ pub fn intervals(
     verdicts: &[Verdict],
 ) -> Vec<IntervalResult> {
     let mut out = Vec::new();
-    for v in verdicts.iter().filter(|v| v.incomplete_units == 0) {
+    let forced = |v: &Verdict| (v.reason.as_deref()).is_some_and(|r| r.starts_with(STOPPED));
+    for v in (verdicts.iter()).filter(|v| v.incomplete_units == 0 && !forced(v)) {
         let h = (spec.question.hypotheses.iter()).find(|h| h.id == v.hypothesis);
         let Some((h, level)) = h.zip(v.level) else {
             continue;
