@@ -4,8 +4,9 @@
 use crate::backend::cgroup::CgroupCounters;
 use crate::canon::sha256_hex;
 use crate::sys;
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{Value, json};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 /// A value read from the host, or the reason it could not be.
@@ -133,5 +134,96 @@ fn shown<T: Serialize>(r: &Reading<T>, why: &dyn Fn(&str) -> String) -> Value {
     match r {
         Reading::Read(v) => json!(v),
         Reading::Unavailable(w) => json!({ "unavailable": why(w) }),
+    }
+}
+
+/// The kernel's names of the `cpu ` line fields of `/proc/stat`, in order.
+pub const CPU_TICK_FIELDS: [&str; 10] = [
+    "user",
+    "nice",
+    "system",
+    "idle",
+    "iowait",
+    "irq",
+    "softirq",
+    "steal",
+    "guest",
+    "guest_nice",
+];
+
+/// One reading over many row records: how many held it, how many held its reason instead,
+/// and what the read ones give together.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Summed<T> {
+    pub read: u64,
+    pub unavailable: u64,
+    pub value: T,
+}
+
+/// The `telemetry` keys of row records, added up. A reason never counts as zero.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Totals {
+    /// Row records, and those that hold a `telemetry` key.
+    pub rows: u64,
+    pub recorded: u64,
+    /// Each host CPU model the rows name.
+    pub host_cpu: Summed<Vec<String>>,
+    /// Seconds of each `CPU_TICK_FIELDS` field, end minus start. The counts are host-wide, so
+    /// rows that ran at the same time count the same seconds.
+    pub cpu_ticks: Summed<BTreeMap<String, f64>>,
+    /// Each `cpu_stat.<line>` (microseconds) and `memory_events.<line>`, summed.
+    pub cgroup: Summed<BTreeMap<String, f64>>,
+    /// The largest `memory_peak`, in bytes.
+    pub memory_peak_max: Option<u64>,
+}
+
+/// `key` of `telemetry`, counted in `into`; `None` when it is absent or a reason.
+fn reading<'v, T>(into: &mut Summed<T>, telemetry: &'v Value, key: &str) -> Option<&'v Value> {
+    let v = telemetry.get(key)?;
+    if v.get("unavailable").is_some() {
+        into.unavailable += 1;
+        return None;
+    }
+    into.read += 1;
+    Some(v)
+}
+
+impl Totals {
+    /// The totals over the row record bodies `rows`.
+    pub fn of<'a>(rows: impl IntoIterator<Item = &'a Value>) -> Totals {
+        let mut t = Totals::default();
+        let mut models = BTreeSet::new();
+        for body in rows {
+            t.rows += 1;
+            let Some(telemetry) = body.get("telemetry") else {
+                continue;
+            };
+            t.recorded += 1;
+            if let Some(h) = reading(&mut t.host_cpu, telemetry, "host_cpu") {
+                models.extend(h["model"].as_str().map(str::to_string));
+            }
+            if let Some(c) = reading(&mut t.cpu_ticks, telemetry, "cpu_ticks") {
+                let counts =
+                    |k: &str| (c[k].as_array().into_iter().flatten()).filter_map(Value::as_u64);
+                let pairs = counts("start").zip(counts("end"));
+                if let Some(hz) = c["user_hz"].as_u64().filter(|h| *h > 0) {
+                    for (name, (s, e)) in CPU_TICK_FIELDS.iter().zip(pairs) {
+                        let seconds = t.cpu_ticks.value.entry(name.to_string()).or_default();
+                        *seconds += e.saturating_sub(s) as f64 / hz as f64;
+                    }
+                }
+            }
+            if let Some(g) = reading(&mut t.cgroup, telemetry, "cgroup") {
+                for part in ["cpu_stat", "memory_events"] {
+                    for (k, v) in g[part].as_object().into_iter().flatten() {
+                        let total = t.cgroup.value.entry(format!("{part}.{k}")).or_default();
+                        *total += v.as_f64().unwrap_or_default();
+                    }
+                }
+                t.memory_peak_max = t.memory_peak_max.max(g["memory_peak"].as_u64());
+            }
+        }
+        t.host_cpu.value = models.into_iter().collect();
+        t
     }
 }

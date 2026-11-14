@@ -10,6 +10,7 @@ use crate::records::{Log, Record};
 use crate::rules::{Curve, CurvePoint};
 use crate::runner::Tally;
 use crate::spec::model::{Budget, Claim, Mode, Paired, Spec, StatisticSpec};
+use crate::telemetry::Totals;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -18,6 +19,14 @@ use std::path::Path;
 
 /// What a renderer prints for a field no record holds.
 pub const NOT_IN_RECORDS: &str = "not in the records";
+/// What a renderer prints for a field that has no value in this study.
+pub const NOT_APPLICABLE: &str = "not applicable";
+/// The fixed line under the list of runs.
+pub const UNRECORDED: &str = "Executions recorded nowhere cannot be listed.";
+/// How a row's seed derives from the plan hash (`seed::row_hex`).
+pub const ROW_SEED: &str = "SHA-256(plan hash bytes || \"row/<index>\"); a recheck copy keeps the seed of the row it repeats";
+/// Only the level 2 backend runs an agent beside the payload.
+const AGENT_LEVEL: u8 = 2;
 /// The claim label line until the box computes labels (audit G1).
 pub const LABEL_NOT_COMPUTED: &str = "label not computed";
 /// The results note of a quantile claim (ruling R8).
@@ -56,9 +65,9 @@ impl Outside {
     }
 }
 
-/// A card value: from the records, or missing from them.
+/// A card value: from the records, missing from them, or with no value in this study.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "lowercase")]
+#[serde(tag = "state", rename_all = "kebab-case")]
 pub enum Field<T> {
     Recorded {
         value: T,
@@ -67,6 +76,7 @@ pub enum Field<T> {
     Missing {
         link: Option<Outside>,
     },
+    NotApplicable,
 }
 
 impl<T> Field<T> {
@@ -79,26 +89,37 @@ impl<T> Field<T> {
         }
     }
 
-    /// The value as `show` prints it, or `NOT_IN_RECORDS`.
+    /// The value as `show` prints it, `NOT_IN_RECORDS` or `NOT_APPLICABLE`.
     pub fn shown(&self, show: impl FnOnce(&T) -> String) -> String {
         match self {
             Field::Recorded { value } => show(value),
             Field::Missing { .. } => NOT_IN_RECORDS.into(),
+            Field::NotApplicable => NOT_APPLICABLE.into(),
         }
     }
 }
 
-/// The listed files present in `study_dir`, and the path of the author slots.
+/// A `LISTED` file; `sha256` is `None` when the study folder does not hold it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Listed {
+    pub path: String,
+    pub sha256: Option<String>,
+}
+
+/// Every `LISTED` file, and the path of the author slots.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutsideFiles {
-    pub files: Vec<Outside>,
+    pub files: Vec<Listed>,
     pub readings: String,
 }
 
 pub fn outside(study_dir: &Path) -> Result<OutsideFiles, String> {
     let mut files = vec![];
     for name in LISTED {
-        files.extend(Outside::of(study_dir, name)?);
+        files.push(Listed {
+            path: name.into(),
+            sha256: Outside::of(study_dir, name)?.map(|o| o.sha256),
+        });
     }
     Ok(OutsideFiles {
         files,
@@ -110,10 +131,11 @@ fn register(log: &Log) -> Option<(&Record, Register)> {
     (log.records.iter()).find_map(|r| Register::of(r).map(|reg| (r, reg)))
 }
 
-/// The first estimate of each hypothesis, contrast and stratum, as `report` counts them.
-fn estimates(log: &Log) -> Vec<Estimate> {
+/// The first estimate of each hypothesis, contrast and stratum in `after`, as `report`
+/// counts them.
+fn estimates(after: &[Record]) -> Vec<Estimate> {
     let mut seen = BTreeSet::new();
-    (log.records.iter().filter_map(Estimate::of))
+    (after.iter().filter_map(Estimate::of))
         .filter(|e| seen.insert(e.identity()))
         .collect()
 }
@@ -172,8 +194,8 @@ pub struct ClaimLine {
     pub pass_e_value: Option<f64>,
 }
 
-pub fn claims(log: &Log, spec: &Spec) -> Vec<ClaimLine> {
-    let levels: BTreeMap<String, Option<f64>> = (first_verdicts(&log.records).into_iter())
+pub fn claims(after: &[Record], spec: &Spec) -> Vec<ClaimLine> {
+    let levels: BTreeMap<String, Option<f64>> = (first_verdicts(after).into_iter())
         .map(|v| (v.hypothesis, v.level))
         .collect();
     (spec.question.hypotheses.iter())
@@ -210,8 +232,8 @@ pub struct VerdictLine {
     pub label: String,
 }
 
-pub fn verdicts(log: &Log) -> Vec<VerdictLine> {
-    (first_verdicts(&log.records).into_iter())
+pub fn verdicts(after: &[Record]) -> Vec<VerdictLine> {
+    (first_verdicts(after).into_iter())
         .map(|v| VerdictLine {
             display: display_word(&v.verdict).into(),
             hypothesis: v.hypothesis,
@@ -240,9 +262,9 @@ pub struct ResultRow {
     pub registered: bool,
 }
 
-pub fn results(log: &Log, spec: &Spec, hypotheses: &[HypothesisCard]) -> Vec<ResultRow> {
-    let verdicts = first_verdicts(&log.records);
-    (estimates(log).into_iter())
+pub fn results(after: &[Record], spec: &Spec, hypotheses: &[HypothesisCard]) -> Vec<ResultRow> {
+    let verdicts = first_verdicts(after);
+    (estimates(after).into_iter())
         .map(|e| {
             let h = (spec.question.hypotheses.iter()).find(|h| h.id == e.hypothesis);
             let outcome = spec.outcomes.iter().find(|o| o.id == e.outcome);
@@ -315,11 +337,12 @@ fn place(curve: &Curve, stratum: &str, estimate: f64) -> Placed {
     }
 }
 
-pub fn sensitivity(log: &Log, spec: &Spec) -> Vec<Sensitivity> {
+/// The gate's curves from the register record of `log`, with the estimates in `after`.
+pub fn sensitivity(log: &Log, after: &[Record], spec: &Spec) -> Vec<Sensitivity> {
     let Some((_, reg)) = register(log) else {
         return vec![];
     };
-    let estimates = estimates(log);
+    let estimates = estimates(after);
     (reg.gate.into_iter())
         .map(|g| {
             let strata = (spec.question.hypotheses.iter())
@@ -366,10 +389,16 @@ fn from_rows<T: Ord + DeserializeOwned>(log: &Log, key: &str) -> Option<Vec<T>> 
 }
 
 pub fn stack(log: &Log, spec: &Spec, events: Option<&Outside>) -> Stack {
+    let levels: Option<Vec<u8>> = from_rows(log, "isolation");
+    let agentless = (levels.as_ref()).is_some_and(|l| l.iter().all(|l| *l < AGENT_LEVEL));
+    let agent_sha256 = match from_rows(log, "agent_sha256") {
+        None if agentless => Field::NotApplicable,
+        found => Field::of(found, events),
+    };
     Stack {
-        isolation: Field::of(from_rows(log, "isolation"), events),
+        isolation: Field::of(levels, events),
         launcher: Field::of(from_rows(log, "launcher"), events),
-        agent_sha256: Field::of(from_rows(log, "agent_sha256"), events),
+        agent_sha256,
         vcpus: Field::of(None, None),
         memory_cap_mib: Field::of(spec.design.row_memory_mib, None),
     }
@@ -386,7 +415,38 @@ pub struct Setup {
     pub defaults: Value,
     /// Every value taken from another study.
     pub resolved: Vec<Resolved>,
+    pub seeds: Seeds,
     pub stack: Stack,
+}
+
+/// The study's seed and how its rows' seeds derive from it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Seeds {
+    /// The plan hash of the register record: every draw derives from it.
+    pub root: Field<String>,
+    pub rule: String,
+    /// Row records that hold a seed, and those whose seed `rule` gives from `root`.
+    pub rows: u64,
+    pub derived: u64,
+}
+
+fn seeds(log: &Log, reg: Option<&Register>) -> Seeds {
+    let root = reg.map(|g| g.spec_hash.clone());
+    let bytes = root.as_deref().and_then(crate::spec::hash_bytes);
+    let seeded: Vec<&Record> = rows(log).filter(|r| r.body.get("seed").is_some()).collect();
+    let derived = (seeded.iter())
+        .filter(|r| {
+            let index = r.body["recheck_of"].as_u64().or(r.row);
+            let want = bytes.zip(index).map(|(h, i)| crate::seed::row_hex(&h, i));
+            want.is_some_and(|w| r.body["seed"] == w.as_str())
+        })
+        .count();
+    Seeds {
+        root: Field::of(root, None),
+        rule: ROW_SEED.into(),
+        rows: seeded.len() as u64,
+        derived: derived as u64,
+    }
 }
 
 pub fn setup(log: &Log, spec: &Spec, events: Option<&Outside>) -> Setup {
@@ -398,6 +458,7 @@ pub fn setup(log: &Log, spec: &Spec, events: Option<&Outside>) -> Setup {
             .map(|a| a.instrument)
             .unwrap_or_default(),
         defaults: reg.as_ref().map_or(Value::Null, |g| g.defaults.clone()),
+        seeds: seeds(log, reg.as_ref()),
         resolved: reg.map(|g| g.resolved).unwrap_or_default(),
         stack: stack(log, spec, events),
     }
@@ -460,6 +521,7 @@ pub struct Cost {
     /// The machine's rate is in its config; no record holds it.
     pub usd: Field<f64>,
     pub budget: Budget,
+    pub telemetry: Totals,
 }
 
 pub fn cost(log: &Log, spec: &Spec) -> Cost {
@@ -471,23 +533,34 @@ pub fn cost(log: &Log, spec: &Spec) -> Cost {
         unknown_cpu: t.unknown_cpu,
         usd: Field::of(None, None),
         budget: spec.scope.budget.clone(),
+        telemetry: Totals::of(rows(log).map(|r| &r.body)),
     }
 }
 
-/// The row records of one stage that ended one way.
+/// The `ok` row records of one stage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunGroup {
     pub stage: String,
-    pub exit: String,
     pub rows: u64,
 }
 
-/// Every execution the log records, invalid ones included.
+/// An invalid attempt: a `row` record whose exit is not `ok`, or a `spend` record, which holds
+/// an attempt no row record holds. `cpu_seconds` is the attempt's own; the box's is left out.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Attempt {
+    pub row: Option<u64>,
+    pub kind: String,
+    pub exit: Option<String>,
+    pub reason: Option<String>,
+    pub cpu_seconds: Option<f64>,
+}
+
+/// Every execution the log records, invalid ones included (`UNRECORDED` for the rest).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Runs {
-    pub rows: Vec<RunGroup>,
-    /// Attempts no row record holds, each in a `spend` record.
-    pub spend: u64,
+    pub ok: Vec<RunGroup>,
+    /// In log order.
+    pub attempts: Vec<Attempt>,
     /// The run sessions are events, which no key signs.
     pub sessions: Field<u64>,
     /// The reason in the study's `stop` record.
@@ -495,19 +568,27 @@ pub struct Runs {
 }
 
 pub fn runs(log: &Log, events: Option<&Outside>) -> Runs {
-    let mut groups: BTreeMap<(String, String), u64> = BTreeMap::new();
-    for r in rows(log) {
-        let key = (
-            text(r, "stage").unwrap_or_default(),
-            text(r, "exit").unwrap_or_default(),
-        );
-        *groups.entry(key).or_default() += 1;
+    let mut ok: BTreeMap<String, u64> = BTreeMap::new();
+    let mut attempts = vec![];
+    for r in &log.records {
+        let row = r.kind == "row";
+        if row && r.body["exit"] == "ok" {
+            *ok.entry(text(r, "stage").unwrap_or_default()).or_default() += 1;
+        } else if row || r.kind == "spend" {
+            attempts.push(Attempt {
+                row: r.row,
+                kind: r.kind.clone(),
+                exit: text(r, "exit"),
+                reason: text(r, "reason"),
+                cpu_seconds: r.body["cpu_seconds"].as_f64(),
+            });
+        }
     }
     Runs {
-        rows: (groups.into_iter())
-            .map(|((stage, exit), rows)| RunGroup { stage, exit, rows })
+        ok: (ok.into_iter())
+            .map(|(stage, rows)| RunGroup { stage, rows })
             .collect(),
-        spend: log.records.iter().filter(|r| r.kind == "spend").count() as u64,
+        attempts,
         sessions: Field::of(None, events),
         stopped: crate::cli::stopped_why(&log.records),
     }

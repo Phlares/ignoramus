@@ -167,7 +167,7 @@ pub fn expand(
                         condition: cond.to_string(),
                         repeat,
                         shard: 0,
-                        seed_hex: hex::encode(seed(spec_hash, &format!("row/{index}"))),
+                        seed_hex: crate::seed::row_hex(spec_hash, index),
                         recheck_of: None,
                     });
                     index = index.saturating_add(1);

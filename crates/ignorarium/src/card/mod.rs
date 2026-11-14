@@ -402,10 +402,10 @@ pub fn build(home: &Home, id: &str, log: &Log) -> Result<Card, CliError> {
     let spec = &source.spec;
     Ok(Card {
         header: sections::header(log, spec),
-        claims: sections::claims(log, spec),
-        verdicts: sections::verdicts(log),
-        results: sections::results(log, spec, &hypotheses),
-        sensitivity: sections::sensitivity(log, spec),
+        claims: sections::claims(&after, spec),
+        verdicts: sections::verdicts(&after),
+        results: sections::results(&after, spec, &hypotheses),
+        sensitivity: sections::sensitivity(log, &after, spec),
         setup: sections::setup(log, spec, events.as_ref()),
         surprises: sections::surprises(log),
         cost: sections::cost(log, spec),

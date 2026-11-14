@@ -2,7 +2,9 @@
 mod common;
 use common::{Lab, estimate, finished_with, instrument, lab, plant};
 use ignorarium::canon::sha256_hex;
-use ignorarium::card::sections::{Field, NOT_IN_RECORDS, Outside};
+use ignorarium::card::sections::{
+    Attempt, Field, Listed, NOT_APPLICABLE, NOT_IN_RECORDS, Outside, ROW_SEED, UNRECORDED,
+};
 use ignorarium::card::{self, Card};
 use ignorarium::derived::GatePrediction;
 use ignorarium::rules::{Curve, CurvePoint};
@@ -64,6 +66,11 @@ fn curve() -> Curve {
 /// stratum and pooled, one `fail` verdict, and rows whose `arm-a` values pair to `ESTIMATE`.
 /// `row_keys` are added to every row record.
 fn fixture(lab: &Lab, statistic: &str, row_keys: Value) {
+    plant(&lab.home, ID, &bodies(lab, statistic, row_keys));
+}
+
+/// The records `fixture` plants, with the plan already stored.
+fn bodies(lab: &Lab, statistic: &str, row_keys: Value) -> Vec<(&'static str, Value)> {
     let text = spec_text(statistic);
     let arm = [("arm-a", 1.0, json!({}))];
     let estimates = ["code", "article", ""]
@@ -118,7 +125,7 @@ fn fixture(lab: &Lab, statistic: &str, row_keys: Value) {
     ));
     std::fs::create_dir_all(lab.home.study_dir(ID)).unwrap();
     std::fs::write(lab.home.study_dir(ID).join("spec.toml"), text).unwrap();
-    plant(&lab.home, ID, &bodies);
+    bodies
 }
 
 fn rows_on_level_2() -> Value {
@@ -126,10 +133,14 @@ fn rows_on_level_2() -> Value {
 }
 
 fn card_of(lab: &Lab) -> Card {
+    card_of_study(lab, ID)
+}
+
+fn card_of_study(lab: &Lab, id: &str) -> Card {
     let key = keys::load(&lab.home).unwrap().unwrap();
-    let path = lab.home.study_dir(ID).join("records.jsonl");
+    let path = lab.home.study_dir(id).join("records.jsonl");
     let log = records::read_log(&path, &key.verifying_key()).unwrap();
-    card::build(&lab.home, ID, &log).unwrap_or_else(|e| panic!("{}", e.msg))
+    card::build(&lab.home, id, &log).unwrap_or_else(|e| panic!("{}", e.msg))
 }
 
 fn recorded<T>(value: T) -> Field<T> {
@@ -278,10 +289,10 @@ fn outside_files_hashed_not_parsed() {
     }
     std::fs::write(dir.join("readings.md"), format!("## TL;DR\n{said}\n")).unwrap();
     let card = card_of(&lab);
-    let want: Vec<Outside> = (files.iter())
-        .map(|name| Outside {
+    let want: Vec<Listed> = (files.iter())
+        .map(|name| Listed {
             path: name.to_string(),
-            sha256: sha256_hex(&std::fs::read(dir.join(name)).unwrap()),
+            sha256: Some(sha256_hex(&std::fs::read(dir.join(name)).unwrap())),
         })
         .collect();
     assert_eq!(card.outside.files, want);
@@ -293,4 +304,183 @@ fn outside_files_hashed_not_parsed() {
         !json.contains(&readings),
         "readings.md is named by path only"
     );
+}
+
+#[test]
+fn absent_outside_file_listed_as_missing() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let dir = lab.home.study_dir(ID);
+    std::fs::write(dir.join("statement.md"), "# statement\n").unwrap();
+    let files = card_of(&lab).outside.files;
+    let hash = sha256_hex(b"# statement\n");
+    let want: Vec<Listed> = ["statement.md", "gaps.md", "decisions.md", "deviations.toml"]
+        .iter()
+        .map(|name| Listed {
+            path: name.to_string(),
+            sha256: (*name == "statement.md").then(|| hash.clone()),
+        })
+        .collect();
+    assert_eq!(files, want);
+}
+
+#[test]
+fn agent_not_applicable_below_level_2() {
+    let lab = lab();
+    fixture(
+        &lab,
+        MEAN,
+        json!({ "isolation": 1, "launcher": "bwrap 0.9" }),
+    );
+    std::fs::write(lab.home.study_dir(ID).join("events.jsonl"), "{}\n").unwrap();
+    let agent = card_of(&lab).setup.stack.agent_sha256;
+    assert_eq!(agent, Field::NotApplicable);
+    assert_eq!(agent.shown(|v| v.join(", ")), NOT_APPLICABLE);
+    assert_eq!(NOT_APPLICABLE, "not applicable");
+}
+
+#[test]
+fn card_reads_one_analysis() {
+    let lab = lab();
+    let mut all = bodies(&lab, MEAN, rows_on_level_2());
+    // An earlier verdict and estimate, before the analysis record the card counts from.
+    let early = json!({ "stratum": "code", "side": "below", "margin": MARGIN, "clusters": 4, "value": 999.0 });
+    all.insert(
+        1,
+        (
+            "verdict",
+            json!({
+                "hypothesis": "H1", "verdict": "pass", "basis": "test", "level": 0.01,
+                "e_value": 999.0, "bounds": [early], "incomplete_units": 0, "reason": null,
+            }),
+        ),
+    );
+    let mut stale = estimate(&[("arm-a", 1.0, json!({}))], "code", 4.0, Some(0.1));
+    stale["mean"] = json!(0.5);
+    all.insert(1, ("estimate", stale));
+    plant(&lab.home, ID, &all);
+    let card = card_of(&lab);
+    assert_eq!(card.hypotheses[0].verdict, "fail");
+    assert_eq!(card.verdicts[0].display, "not shown");
+    assert_eq!(card.claims[0].level, Some(0.005));
+    let code = card.results.iter().find(|r| r.stratum == "code").unwrap();
+    assert_eq!((code.estimate, code.e_value), (ESTIMATE, Some(3.1)));
+    let placed = &card.sensitivity[0].placed;
+    assert!(placed.iter().all(|p| p.estimate == ESTIMATE), "{placed:?}");
+}
+
+#[test]
+fn runs_itemize_invalid_attempts() {
+    let lab = lab();
+    let mut all = bodies(&lab, MEAN, rows_on_level_2());
+    all.push((
+        "row",
+        json!({
+            "stage": "confirmation", "condition": "arm-a", "unit": "src/code-0.txt#9",
+            "repeat": 0, "exit": "void:infra", "attempts": 1, "cpu_seconds": 0.5,
+            "wall_seconds": 1.0, "reason": "the machine did not boot",
+        }),
+    ));
+    all.push((
+        "spend",
+        json!({ "cpu_seconds": 1.5, "wall_seconds": 2.0, "reason": "row timed out" }),
+    ));
+    plant(&lab.home, ID, &all);
+    let runs = card_of(&lab).runs;
+    let ok: Vec<(String, u64)> = runs.ok.iter().map(|g| (g.stage.clone(), g.rows)).collect();
+    assert_eq!(ok, vec![("confirmation".to_string(), 80)]);
+    let want = vec![
+        Attempt {
+            row: None,
+            kind: "row".into(),
+            exit: Some("void:infra".into()),
+            reason: Some("the machine did not boot".into()),
+            cpu_seconds: Some(0.5),
+        },
+        Attempt {
+            row: None,
+            kind: "spend".into(),
+            exit: None,
+            reason: Some("row timed out".into()),
+            cpu_seconds: Some(1.5),
+        },
+    ];
+    assert_eq!(runs.attempts, want);
+    assert_eq!(UNRECORDED, "Executions recorded nowhere cannot be listed.");
+}
+
+/// Telemetry whose tick counts rise by `25 x i` per field `i` at 100 ticks a second, with
+/// `cgroup` as given.
+fn telemetry(cgroup: Value) -> Value {
+    let start: Vec<u64> = vec![1000; 10];
+    let end: Vec<u64> = (0..10).map(|i| 1000 + 25 * i).collect();
+    json!({
+        "host_cpu": { "model": "Test CPU", "flags_sha256": "00" },
+        "cpu_ticks": { "user_hz": 100, "start": start, "end": end },
+        "cgroup": cgroup,
+    })
+}
+
+#[test]
+fn cost_totals_row_telemetry() {
+    let unavailable = json!({ "unavailable": "level 2 rows run in a machine" });
+    let lab = lab();
+    fixture(&lab, MEAN, json!({ "telemetry": telemetry(unavailable) }));
+    let t = card_of(&lab).cost.telemetry;
+    assert_eq!((t.rows, t.recorded), (80, 80));
+    assert_eq!(t.host_cpu.value, vec!["Test CPU".to_string()]);
+    assert_eq!((t.cpu_ticks.read, t.cpu_ticks.unavailable), (80, 0));
+    // steal is field 7: 175 ticks a row at 100 a second, over 80 rows.
+    assert_eq!(t.cpu_ticks.value["steal"], 1.75 * 80.0);
+    assert_eq!(t.cpu_ticks.value["user"], 0.0);
+    assert_eq!(t.cpu_ticks.value.len(), 10);
+    assert_eq!((t.cgroup.read, t.cgroup.unavailable), (0, 80));
+    assert!(t.cgroup.value.is_empty(), "unavailable is not zero");
+    assert_eq!(t.memory_peak_max, None);
+    let read = json!({
+        "memory_peak": 4096, "memory_events": { "max": 2, "oom_kill": 0 },
+        "cpu_stat": { "usage_usec": 500, "user_usec": 300, "system_usec": 200 },
+    });
+    let lab = self::lab();
+    fixture(&lab, MEAN, json!({ "telemetry": telemetry(read) }));
+    let t = card_of(&lab).cost.telemetry;
+    assert_eq!((t.cgroup.read, t.cgroup.unavailable), (80, 0));
+    assert_eq!(t.cgroup.value["cpu_stat.usage_usec"], 500.0 * 80.0);
+    assert_eq!(t.cgroup.value["memory_events.max"], 2.0 * 80.0);
+    assert_eq!(t.memory_peak_max, Some(4096));
+}
+
+/// A payload whose `arm-a` value is 6 against the reference's 8.
+const MINUS_25: &str = "#!/bin/sh\ncase \"$2\" in exact) v=8;; *) v=6;; esac\nprintf '{\"ppl\": %s}' \"$v\" > \"$IGNORARIUM_OUT/values.json\"\n";
+
+#[test]
+fn seeds_derive_from_the_plan_hash() {
+    use ignorarium::backend::level0::Level0;
+    use ignorarium::runner::{RunStatus, prepare_with, run};
+    let lab = lab();
+    common::pilot(&lab.home, vec![common::arm_a()]);
+    let edit = |t: String| {
+        common::confirmatory(t)
+            .replace("units = 3", "units = 1")
+            .replace("{ quantile = 0.5 }", "{ mean = [-30.0, 30.0] }")
+            .replace("power_at = -20.0", "power_at = -25.0")
+    };
+    common::register_study(&lab, "mean", edit, &[], MINUS_25);
+    let work = common::work(&lab, "mean");
+    let plan = prepare_with(&lab.home, "mean", &work, vec![Box::new(Level0)]).unwrap();
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let card = card_of_study(&lab, "mean");
+    let rows = common::rows_of(&lab, "mean").len() as u64;
+    assert!(rows > 0);
+    let seeds = &card.setup.seeds;
+    assert_eq!(
+        seeds.root,
+        Field::Recorded {
+            value: card.header.spec_hash.clone()
+        }
+    );
+    assert_eq!(seeds.rule, ROW_SEED);
+    assert_eq!((seeds.rows, seeds.derived), (rows, rows));
+    let t = &card.cost.telemetry;
+    assert_eq!((t.rows, t.recorded), (rows, rows));
 }
