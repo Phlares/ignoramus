@@ -100,7 +100,7 @@ pub enum Entry {
 pub type Scan = BTreeMap<String, Entry>;
 
 /// The path of an input below the view: its segments joined by `/`, empty ones dropped.
-fn key(path: &str) -> String {
+pub fn key(path: &str) -> String {
     path.split('/')
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()

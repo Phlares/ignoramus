@@ -1,17 +1,25 @@
 //! `report`: the verdicts of a finished study, with the clip counts of its mean claims.
 //! Appends one `opened` record, so a reader of the log sees that the results were read.
-use super::check::HomeRecords;
-use super::status::{relabelled, shown_labels};
-use super::{CliError, Ctx, Done, Run, located, not_registered, out, stopped_why};
-use crate::derived::{
-    Analysis, ChildEstimate, Estimate, OPENED, Register, SpawnStop, StudyState, Verdict,
-};
+use super::{CliError, Ctx, Done, Run, located, not_registered, out};
+use crate::canon::sha256_hex;
+use crate::card::sidecar::{DATA_FILE, OBSERVATIONS_FILE, Sidecars};
+use crate::card::{self, Card, Opened, readings, recipe, render};
+use crate::derived::OPENED;
 use crate::diag::printable;
-use crate::records::{self, Record, RecordDraft, RecordError};
-use crate::rules::BoxRecords;
-use crate::runner::stored_spec;
-use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use crate::files::optional;
+use crate::home::Home;
+use crate::records::{self, Log, RecordDraft, RecordError};
+use serde_json::json;
+use std::path::Path;
+
+/// The way `report` writes the card.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum Format {
+    Text,
+    Json,
+    Md,
+    Tex,
+}
 
 /// What stops the append: a refusal of this verb, or the log's own fault.
 enum Stop {
@@ -31,187 +39,26 @@ impl From<CliError> for Stop {
     }
 }
 
-/// The time the results were complete: the later of the last counted estimate or verdict
-/// record and, when the study holds a stream slot, the close of that slot. A record the report
-/// drops as a repeat does not count. With neither, the analysis record's time.
-fn finished_at(close: Option<String>, analysed: &str, after: &[Record]) -> String {
-    let mut estimates = BTreeSet::new();
-    let mut verdicts = BTreeSet::new();
-    let mut stamps: Vec<String> = (after.iter())
-        .filter(|r| match (Estimate::of(r), Verdict::of(r)) {
-            (Some(e), _) => estimates.insert(e.identity()),
-            (_, Some(v)) => verdicts.insert(v.hypothesis),
-            _ => false,
-        })
-        .map(|r| r.ts.clone())
-        .collect();
-    stamps.extend(close);
-    stamps
-        .into_iter()
-        .max()
-        .unwrap_or_else(|| analysed.to_string())
+pub fn report(ctx: &Ctx, id: &str, folder: Option<&Path>) -> Result<Card, CliError> {
+    report_with(ctx, id, folder, |_, _| Ok(())).map(|(card, ())| card)
 }
 
-/// How a finished study finished: its records after the analysis, and when.
-struct Finish<'a> {
-    analysed: &'a Record,
-    after: Vec<Record>,
-    at: String,
-}
-
-/// The finish of study `id`, whose records are `all`; `None` when it is not finished.
-fn standing<'a>(
-    records: &HomeRecords,
+/// `report`, with `before` run on the built card and its log ahead of the `opened` append. When
+/// `before` refuses, nothing is appended.
+fn report_with<T>(
+    ctx: &Ctx,
     id: &str,
-    all: &'a [Record],
-) -> Result<Option<Finish<'a>>, String> {
-    let mut close = None;
-    let state = StudyState::of(Some(all.to_vec()), |log, slot| {
-        close = records.stream_closed_at(log, id, slot)?;
-        Ok(close.is_some())
-    })?;
-    let StudyState::Finished(after) = state else {
-        return Ok(None);
-    };
-    let analysed = (all.iter().find(|r| Analysis::of(r).is_some()))
-        .ok_or_else(|| format!("study {id} has no analysis record"))?;
-    let at = finished_at(close, &analysed.ts, &after);
-    Ok(Some(Finish {
-        analysed,
-        after,
-        at,
-    }))
-}
-
-/// The family of study `id`, whose register record holds `own`: its root and every other
-/// member, root first, each with its state. `at` is when `id` finished.
-fn family_block(
-    records: &HomeRecords,
-    id: &str,
-    own: &Register,
-    at: &str,
-) -> Result<Value, String> {
-    let (root, lock) = match &own.family {
-        Some(lock) => (id.to_string(), lock.clone()),
-        None => match records.family_of(id)? {
-            Some(found) => (found.root, found.lock),
-            None => return Ok(Value::Null),
-        },
-    };
-    let others = std::iter::once(root.clone())
-        .chain(lock.members.into_iter().map(|m| m.id))
-        .filter(|m| m != id);
-    let mut members = vec![];
-    for other in others {
-        let fault = |e: String| format!("study {other}: {e}");
-        let mut m = json!({
-            "study": other, "state": "not registered",
-            "finished_at": null, "first_opened": null, "before": null,
-        });
-        if let Some(all) = records.study(&other).map_err(fault)? {
-            m["state"] = json!("not finished");
-            if let Some(f) = standing(records, &other, &all).map_err(fault)? {
-                m["state"] = json!("finished");
-                m["first_opened"] =
-                    json!((all.iter().find(|r| r.kind == OPENED)).map(|r| r.ts.clone()));
-                m["before"] = json!(f.at.as_str() < at);
-                m["finished_at"] = json!(f.at);
-            }
-        }
-        members.push(m);
-    }
-    Ok(json!({ "root": root, "members": members }))
-}
-
-fn clips(analysis: &Analysis, h: &str) -> Value {
-    let mine: Vec<Value> = (analysis.clipped.iter())
-        .filter(|c| c.hypothesis == h)
-        .map(|c| json!({ "stratum": c.stratum, "below": c.below, "above": c.above, "units": c.units }))
-        .collect();
-    if mine.is_empty() {
-        Value::Null
-    } else {
-        Value::Array(mine)
-    }
-}
-
-pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
+    folder: Option<&Path>,
+    before: impl FnOnce(&Card, &Log) -> Result<T, CliError>,
+) -> Result<(Card, T), CliError> {
     let (home, log) = located(ctx, id)?;
     let key = crate::keys::load(home)
         .map_err(|e| CliError::usage(format!("box key: {e}")))?
         .ok_or_else(|| not_registered(id))?;
-    let mut value = Value::Null;
+    let mut built = None;
     let appended = records::append_with(&log, &key, |all| -> Result<_, Stop> {
-        if let Some(r) = all.iter().find(|r| r.study != id) {
-            return Err(CliError::refuse(format!(
-                "cannot report {id}: record {} belongs to study {}",
-                r.seq, r.study
-            ))
-            .into());
-        }
-        let own = (all.iter().find_map(Register::of)).ok_or_else(|| not_registered(id))?;
-        let box_records = HomeRecords::signed(home, &key);
-        let refuse = |e: String| CliError::refuse(format!("cannot report {id}: {e}"));
-        let Some(Finish {
-            analysed,
-            after,
-            at,
-        }) = standing(&box_records, id, all).map_err(refuse)?
-        else {
-            let said = match stopped_why(all) {
-                Some(why) => format!("study {id} is stopped: {why}; it has no report"),
-                None => format!("study {id} is not finished; status shows its progress"),
-            };
-            return Err(CliError::refuse(said).into());
-        };
-        let analysis = Analysis::of(analysed).ok_or_else(|| not_registered(id))?;
-        let mut seen = BTreeSet::new();
-        let hypotheses: Vec<Value> = after
-            .iter()
-            .filter_map(Verdict::of)
-            .filter(|v| seen.insert(v.hypothesis.clone()))
-            .map(|v| {
-                json!({
-                    "hypothesis": v.hypothesis, "verdict": v.verdict, "basis": v.basis,
-                    "e_value": v.e_value, "level": v.level, "reason": v.reason,
-                    "clipped": clips(&analysis, &v.hypothesis),
-                })
-            })
-            .collect();
-        let mut seen = BTreeSet::new();
-        let kids: Vec<ChildEstimate> = (all.iter().filter_map(ChildEstimate::of))
-            .filter(|e| seen.insert((e.child.clone(), e.outcome.clone())))
-            .collect();
-        let shown = if kids.is_empty() {
-            vec![]
-        } else {
-            let (spec, _, hash, _) = stored_spec(&home.study_dir(id))
-                .map_err(|e| CliError::usage(format!("cannot report {id}: {e}")))?;
-            shown_labels(&spec, &hash)
-        };
-        let stopped: BTreeSet<String> = (all.iter().filter_map(SpawnStop::of))
-            .flat_map(|s| s.children)
-            .collect();
-        let children: Vec<Value> = (kids.iter())
-            .map(|e| {
-                json!({
-                    "child": relabelled(&shown, &e.child),
-                    "parent": relabelled(&shown, &e.parent),
-                    "operator": e.operator, "value": e.value, "outcome": e.outcome,
-                    "clusters": e.clusters, "units": e.units, "mean": e.mean, "repeats": e.repeats,
-                    "stopped": stopped.contains(&e.child),
-                })
-            })
-            .collect();
-        let family = family_block(&box_records, id, &own, &at).map_err(refuse)?;
-        value = json!({
-            "study": id,
-            "finished_at": at,
-            "records": all.len(),
-            "hypotheses": hypotheses,
-            "children": children,
-            "family": family,
-        });
+        let card = card::build(home, id, all, folder)?;
+        built = Some((before(&card, all)?, card));
         Ok(vec![RecordDraft::new(id, OPENED, json!({}))])
     })
     .map_err(|e| match e {
@@ -222,18 +69,20 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
     let opened = appended
         .first()
         .ok_or_else(|| CliError::usage("no record appended"))?;
-    value["opened"] = json!({ "seq": opened.seq, "ts": opened.ts });
-    Ok(value)
+    let (kept, mut card) = built.ok_or_else(|| CliError::usage("no card built"))?;
+    card.opened = Opened {
+        seq: opened.seq,
+        ts: opened.ts.clone(),
+    };
+    Ok((card, kept))
 }
 
-fn text(r: &Value) -> String {
-    let id = r["study"].as_str().unwrap_or_default();
+fn text(r: &Card) -> String {
     let mut s = format!(
-        "study {id}: finished {}, {} records verified\n",
-        r["finished_at"].as_str().unwrap_or_default(),
-        r["records"]
+        "study {}: finished {}, {} records verified\n",
+        r.study, r.finished_at, r.records
     );
-    if let Some(f) = r["family"].as_object() {
+    if let Some(f) = r.family.as_object() {
         let members = f["members"].as_array().into_iter().flatten();
         let waiting: Vec<String> = (members.clone())
             .filter(|m| m["state"] != "finished")
@@ -258,35 +107,31 @@ fn text(r: &Value) -> String {
             ));
         }
     }
-    for h in r["hypotheses"].as_array().into_iter().flatten() {
-        s.push_str(&format!(
-            "{}: {} ({})",
-            h["hypothesis"].as_str().unwrap_or_default(),
-            h["verdict"].as_str().unwrap_or_default(),
-            h["basis"].as_str().unwrap_or_default()
-        ));
-        if let Some(e) = h["e_value"].as_f64() {
+    for h in &r.hypotheses {
+        s.push_str(&format!("{}: {} ({})", h.hypothesis, h.verdict, h.basis));
+        if let Some(e) = h.e_value {
             s.push_str(&format!(", e-value {e}"));
         }
-        if let Some(l) = h["level"].as_f64() {
+        if let Some(l) = h.level {
             s.push_str(&format!(", level {l}"));
         }
-        if let Some(why) = h["reason"].as_str() {
+        if let Some(why) = &h.reason {
             s.push_str(&format!(": {why}"));
         }
         s.push('\n');
-        for c in h["clipped"].as_array().into_iter().flatten() {
-            let stratum = match c["stratum"].as_str() {
-                Some("") | None => "all",
-                Some(x) => x,
+        for c in h.clipped.iter().flatten() {
+            let stratum = if c.stratum.is_empty() {
+                "all"
+            } else {
+                &c.stratum
             };
             s.push_str(&format!(
                 "  clipped in {stratum}: {} below lo, {} above hi, of {} units\n",
-                c["below"], c["above"], c["units"]
+                c.below, c.above, c.units
             ));
         }
     }
-    for c in r["children"].as_array().into_iter().flatten() {
+    for c in &r.children {
         let partial = if c["stopped"] == true {
             ", stopped (partial: only the rows that ran)"
         } else {
@@ -305,12 +150,211 @@ fn text(r: &Value) -> String {
     s
 }
 
-pub fn run(ctx: &Ctx, id: &str, json: bool) -> Run {
-    let r = report(ctx, id)?;
-    let shown = if json {
-        serde_json::to_string_pretty(&r).map_err(|e| CliError::usage(e.to_string()))? + "\n"
-    } else {
-        text(&r)
+fn write_files(dir: &Path, files: &[(String, String)]) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    files
+        .iter()
+        .try_for_each(|(name, text)| std::fs::write(dir.join(name), text))
+}
+
+fn latex(card: &Card) -> Result<Vec<(String, String)>, CliError> {
+    render::latex(card).map_err(|e| CliError::usage(format!("report: {e}")))
+}
+
+const CARD_FILES: [&str; 6] = [
+    "card.json",
+    "card.md",
+    "manifest.sha256",
+    DATA_FILE,
+    OBSERVATIONS_FILE,
+    readings::FILE,
+];
+
+/// What `--card` writes besides `card.json`, `card.md` and `readings.md`. Rendered and checked
+/// before the `opened` append.
+struct Parts {
+    tex: Vec<(String, String)>,
+    figures: Vec<(String, String)>,
+    manifest: String,
+    sidecars: Sidecars,
+}
+
+/// Refuses an `--out` folder that holds a symlink, a file this command does not write, or
+/// anything `read_dir` cannot list. Checked at every depth with `symlink_metadata`.
+fn check_folder(dir: &Path, parts: &Parts) -> Result<(), CliError> {
+    let refuse = |at: &Path, why: &str| {
+        CliError::usage(format!(
+            "report: {}: {why}; use an empty folder",
+            at.display()
+        ))
+    };
+    let listed = |files: &[(String, String)], name: &str| files.iter().any(|(n, _)| n == name);
+    match std::fs::symlink_metadata(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(refuse(dir, &e.to_string())),
+        Ok(m) if m.file_type().is_symlink() => return Err(refuse(dir, "a symlink")),
+        Ok(m) if !m.is_dir() => return Err(refuse(dir, "not a folder")),
+        Ok(_) => {}
+    }
+    let mut pending = vec![(dir.to_path_buf(), 0)];
+    while let Some((at, depth)) = pending.pop() {
+        let entries = std::fs::read_dir(&at).map_err(|e| refuse(&at, &e.to_string()))?;
+        for e in entries {
+            let e = e.map_err(|e| refuse(&at, &e.to_string()))?;
+            let path = e.path();
+            let name = e.file_name().to_string_lossy().into_owned();
+            let kind = (std::fs::symlink_metadata(&path))
+                .map_err(|e| refuse(&path, &e.to_string()))?
+                .file_type();
+            let known = match (depth, kind.is_dir()) {
+                _ if kind.is_symlink() => return Err(refuse(&path, "a symlink")),
+                (0, true) => name == "tex",
+                (0, false) => CARD_FILES.contains(&name.as_str()) || listed(&parts.figures, &name),
+                (_, true) => false,
+                (_, false) => listed(&parts.tex, &name),
+            };
+            if !known {
+                return Err(refuse(&path, "a file --card does not write"));
+            }
+            if kind.is_dir() {
+                pending.push((path, depth + 1));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Renders what `--card` writes beyond the card and checks it against `dir` and the study
+/// folder.
+fn plan_card(home: &Home, card: &Card, log: &Log, dir: &Path) -> Result<Parts, CliError> {
+    let usage = |e: String| CliError::usage(format!("report: {e}"));
+    let lines = recipe::manifest_lines(&home.study_dir(&card.study)).map_err(usage)?;
+    let manifest = recipe::list_text(&lines);
+    let sidecars = Sidecars::of(home, &card.study, log).map_err(usage)?;
+    let unchanged = sha256_hex(manifest.as_bytes()) == card.recipe.manifest.list_sha256
+        && sidecars.data_list() == card.setup.data
+        && sidecars.observations_card(card.observations.forced.clone()) == card.observations;
+    if !unchanged {
+        return Err(usage(
+            "the study folder changed while the card was built".into(),
+        ));
+    }
+    let parts = Parts {
+        sidecars,
+        tex: latex(card)?,
+        figures: render::figures(card).map_err(usage)?,
+        manifest,
+    };
+    check_folder(dir, &parts)?;
+    Ok(parts)
+}
+
+/// Writes the card files into `dir`. `readings.md` is written only when absent.
+fn write_card(card: &Card, parts: &Parts, dir: &Path) -> std::io::Result<()> {
+    let own = [
+        ("card.json".to_string(), card.json()),
+        ("card.md".to_string(), render::markdown(card)),
+        ("manifest.sha256".to_string(), parts.manifest.clone()),
+        (DATA_FILE.to_string(), parts.sidecars.data.clone()),
+        (
+            OBSERVATIONS_FILE.to_string(),
+            parts.sidecars.observations.clone(),
+        ),
+    ];
+    write_files(dir, &own)?;
+    write_files(dir, &parts.figures)?;
+    write_files(&dir.join("tex"), &parts.tex)?;
+    let made = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dir.join(readings::FILE));
+    match made {
+        Ok(mut f) => std::io::Write::write_all(&mut f, readings::template(card).as_bytes()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Prints a flag on stderr for each way the existing `readings.md` does not fit the new card.
+fn flag_readings(old: &[u8], card: &Card) {
+    let text = String::from_utf8_lossy(old);
+    let now = card.sha256();
+    match readings::header_hash(&text) {
+        Some(h) if h == now => {}
+        found => eprintln!(
+            "report: {} names card {}, but the new card is {now}",
+            readings::FILE,
+            found.unwrap_or("none")
+        ),
+    }
+    // Text from `readings.md` is the author's: escaped and cut before it reaches a terminal.
+    let shown = |t: &str| printable(&t.chars().take(80).collect::<String>());
+    for e in readings::check(&text) {
+        eprintln!(
+            "report: {} line {} ({}): {}",
+            readings::FILE,
+            e.line,
+            shown(&e.slot),
+            shown(&e.excerpt)
+        );
+    }
+}
+
+fn run_card(ctx: &Ctx, id: &str, dir: &Path, folder: Option<&Path>) -> Run {
+    let home = ctx.home()?;
+    let (card, parts) = report_with(ctx, id, folder, |card, log| plan_card(home, card, log, dir))?;
+    let old = optional(std::fs::read(dir.join(readings::FILE))).unwrap_or_else(|e| {
+        eprintln!("report: cannot read {} to check it: {e}", readings::FILE);
+        None
+    });
+    write_card(&card, &parts, dir).map_err(|e| {
+        CliError::usage(format!(
+            "{}: {e}; the opened record (seq {}) was appended",
+            dir.display(),
+            card.opened.seq
+        ))
+    })?;
+    if let Some(old) = old {
+        flag_readings(&old, &card);
+    }
+    out(&format!("wrote the card of {id} to {}\n", dir.display()))?;
+    Ok(Done::exit(0))
+}
+
+pub fn run(
+    ctx: &Ctx,
+    id: &str,
+    format: Format,
+    card: bool,
+    dir: Option<&Path>,
+    folder: Option<&Path>,
+) -> Run {
+    if card {
+        let dir = dir.ok_or_else(|| CliError::usage("report: --card needs --out <dir>"))?;
+        return run_card(ctx, id, dir, folder);
+    }
+    // Refused before `report` appends its record.
+    match (format, dir) {
+        (Format::Tex, None) => {
+            return Err(CliError::usage("report: --format tex needs --out <dir>"));
+        }
+        (Format::Tex, Some(_)) | (_, None) => {}
+        (_, Some(_)) => {
+            return Err(CliError::usage(
+                "report: --out applies to --format tex only",
+            ));
+        }
+    }
+    let shown = match (format, dir) {
+        (Format::Tex, Some(dir)) => {
+            let (_, files) = report_with(ctx, id, folder, |card, _| latex(card))?;
+            write_files(dir, &files)
+                .map_err(|e| CliError::usage(format!("{}: {e}", dir.display())))?;
+            format!("wrote {} files to {}\n", files.len(), dir.display())
+        }
+        (Format::Json, _) => report(ctx, id, folder)?.json(),
+        (Format::Md, _) => render::markdown(&report(ctx, id, folder)?),
+        _ => text(&report(ctx, id, folder)?),
     };
     out(&shown)?;
     Ok(Done::exit(0))

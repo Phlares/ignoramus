@@ -1,8 +1,18 @@
-//! Write-once files: atomic publish, no overwrite, no symlink following.
+//! Write-once files: atomic publish, no overwrite, no symlink following. And `optional`, for
+//! files that may be absent.
 use crate::canon::canonical_line;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+
+/// `found`, with a missing file as `None`.
+pub fn optional<T>(found: io::Result<T>) -> io::Result<Option<T>> {
+    match found {
+        Ok(v) => Ok(Some(v)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Written {
@@ -154,14 +164,6 @@ pub fn read_tail<R: Read + Seek>(r: &mut R) -> io::Result<Tail> {
     } else {
         Tail::Partial(buf)
     })
-}
-
-/// Every byte of `r`, from its start.
-pub fn read_whole<R: Read + Seek>(r: &mut R) -> io::Result<Vec<u8>> {
-    r.seek(SeekFrom::Start(0))?;
-    let mut buf = Vec::new();
-    r.read_to_end(&mut buf)?;
-    Ok(buf)
 }
 
 /// Append one write to a log under an exclusive lock. `build` reads what it

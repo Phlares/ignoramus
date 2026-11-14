@@ -1,5 +1,8 @@
 //! Canonical JSON and SHA-256 hashing.
+use digest_io::IoWrapper;
 use sha2::{Digest, Sha256};
+use std::io;
+use std::path::Path;
 
 /// Serialization failure. `serde_json::Value` holds only finite numbers,
 /// so this is not reachable for values built from it.
@@ -36,4 +39,11 @@ pub fn canonical_line<T: serde::Serialize>(v: &T) -> std::io::Result<Vec<u8>> {
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
+}
+
+/// The SHA-256 of the file at `path`, read as a stream.
+pub fn sha256_file(path: &Path) -> io::Result<String> {
+    let mut hasher = IoWrapper(Sha256::new());
+    io::copy(&mut std::fs::File::open(path)?, &mut hasher)?;
+    Ok(hex::encode(hasher.0.finalize()))
 }

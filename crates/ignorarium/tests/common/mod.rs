@@ -154,7 +154,7 @@ pub fn edited(lab: &Lab, id: &str, edit: impl Fn(String) -> String, payload: &st
 pub fn records_of(lab: &Lab, id: &str) -> Vec<records::Record> {
     let key = keys::load(&lab.home).unwrap().unwrap();
     let path = lab.home.study_dir(id).join("records.jsonl");
-    records::read_all(&path, &key.verifying_key()).unwrap()
+    (records::read_log(&path, &key.verifying_key()).unwrap()).restored()
 }
 
 pub fn kind_of(lab: &Lab, id: &str, kind: &str) -> Vec<records::Record> {
@@ -890,4 +890,51 @@ pub fn clusters(stratum: &str, n: usize) -> String {
             )
         })
         .collect()
+}
+
+/// Runs git in `dir` with a fixed identity; returns its trimmed stdout.
+pub fn git(dir: &Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Stages and commits everything under `folder`, which sits inside a repo.
+pub fn commit_all(folder: &Path) {
+    git(folder, &["add", "-A"]);
+    git(folder, &["commit", "-q", "-m", "x"]);
+}
+
+/// A git repo holding `files` (path, text) under its folder `sub` ("" for the root), committed.
+/// Returns the repo and the folder.
+pub fn study_repo(sub: &str, files: &[(&str, &str)]) -> (TempDir, PathBuf) {
+    let repo = TempDir::new().unwrap();
+    git(repo.path(), &["init", "-q"]);
+    let folder = repo.path().join(sub);
+    for (name, text) in files {
+        let path = folder.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(repo.path().join(".keep"), "").unwrap();
+    commit_all(repo.path());
+    (repo, folder)
 }

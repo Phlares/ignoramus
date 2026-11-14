@@ -1,5 +1,6 @@
 use evidence::claim::{
-    Bound, Statistic, clipped, e_value, e_values, holds, observation, order, stopped,
+    Bound, Grid, Statistic, clipped, e_value, e_values, holds, observation, order, stopped,
+    tightest,
 };
 use evidence::eprocess::{EProcess, Score};
 use evidence::rng::Rng;
@@ -421,4 +422,109 @@ fn with_infinite_stop_it_equals_e_value() {
         stopped(&mean, &below(0.5), &obs, f64::INFINITY),
         e_value(&mean, &below(0.5), &obs)
     );
+}
+
+/// The e-value of a `tail` claim at `margin` over `samples`, one per cluster.
+fn e_at(stat: &Statistic, tail: Tail, margin: f64, samples: &[&[f64]]) -> f64 {
+    let b = Bound { tail, margin };
+    let obs: Vec<f64> = (samples.iter())
+        .map(|xs| observation(stat, &b, xs).unwrap())
+        .collect();
+    e_value(stat, &b, &obs).unwrap()
+}
+
+const UNIT_RANGE: Statistic = Statistic::Mean { lo: -1.0, hi: 1.0 };
+
+#[test]
+fn tightest_is_first_passing_margin() {
+    let samples: Vec<&[f64]> = vec![&[0.0]; 300];
+    let grid = Grid {
+        from: 0.0,
+        to: 1.0,
+        step: 1e-4,
+    };
+    let found = tightest(&UNIT_RANGE, Tail::Lower, &samples, 200.0, grid).unwrap();
+    let m = found.margin.unwrap();
+    assert!(e_at(&UNIT_RANGE, Tail::Lower, m, &samples) >= 200.0);
+    assert!(e_at(&UNIT_RANGE, Tail::Lower, m - grid.step, &samples) < 200.0);
+    assert!(found.contiguous);
+    assert_eq!((found.grid, found.threshold), (grid, 200.0));
+}
+
+#[test]
+fn tightest_not_above_registered_margin() {
+    // Cluster means -0.5 and 0.3 in turn: the estimate is -0.1.
+    let samples: Vec<&[f64]> = (0..200)
+        .map(|i| if i % 2 == 0 { &[-0.5][..] } else { &[0.3][..] })
+        .collect();
+    let grid = Grid {
+        from: -0.1,
+        to: 1.0,
+        step: 1e-4,
+    };
+    let threshold = 20.0;
+    let found = tightest(&UNIT_RANGE, Tail::Lower, &samples, threshold, grid).unwrap();
+    let mut passed = 0;
+    for registered in [0.0, 0.1, 0.25, 0.5, 0.9] {
+        if e_at(&UNIT_RANGE, Tail::Lower, registered, &samples) >= threshold {
+            passed += 1;
+            assert!(found.margin.unwrap() <= registered, "{registered}");
+        }
+    }
+    assert!(passed > 0);
+}
+
+#[test]
+fn no_margin_passes() {
+    let samples: Vec<&[f64]> = vec![&[-1.0]; 3];
+    let grid = Grid {
+        from: -1.0,
+        to: 1.0,
+        step: 1e-4,
+    };
+    let found = tightest(&UNIT_RANGE, Tail::Lower, &samples, 200.0, grid).unwrap();
+    assert_eq!(found.margin, None);
+}
+
+/// A quantile claim below the median. Cluster 0 holds 0 and 1: its share at or below the
+/// margin is 1/2 from 0 and 1 from 1. Cluster 1 lies above every margin, and the 10 clusters
+/// after it at 0 lie at or below each margin from 0. A share of 1 in cluster 0 makes the
+/// e-process bet on cluster 1, which loses half the wealth, so the e-value at 1 falls below
+/// the one at 0.
+#[test]
+fn gap_in_passing_set_flagged() {
+    let median = Statistic::Quantile(0.5);
+    let mut samples: Vec<&[f64]> = vec![&[0.0, 1.0], &[10.0]];
+    samples.extend(std::iter::repeat_n(&[0.0][..], 10));
+    let e = |m| e_at(&median, Tail::Lower, m, &samples);
+    let threshold = e(0.0);
+    assert!(
+        threshold > 1.0 && e(1.0) < threshold,
+        "{threshold} {}",
+        e(1.0)
+    );
+    // Grid points 0, 0.5, 1 and 1.5.
+    let grid = Grid {
+        from: -0.5,
+        to: 2.0,
+        step: 0.5,
+    };
+    let found = tightest(&median, Tail::Lower, &samples, threshold, grid).unwrap();
+    assert_eq!(found.margin, Some(0.0));
+    assert!(!found.contiguous);
+}
+
+#[test]
+fn both_tail_refused() {
+    let grid = Grid {
+        from: 0.0,
+        to: 1.0,
+        step: 0.1,
+    };
+    let refused = tightest(&UNIT_RANGE, Tail::Both, &[&[0.0]], 2.0, grid);
+    assert_eq!(refused, Err(Error::Parameter("tail")));
+    // A grid with no point between its ends refuses it too.
+    let empty = Grid { to: 0.0, ..grid };
+    let refused = tightest(&UNIT_RANGE, Tail::Both, &[&[0.0]], 2.0, empty);
+    assert_eq!(refused, Err(Error::Parameter("tail")));
 }

@@ -57,7 +57,7 @@ pub enum Template {
     PlantedSpawn,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Mode {
     Exploratory,
@@ -110,7 +110,7 @@ pub struct Hypothesis {
 }
 
 /// A one-key table: `{ below = m }`, `{ above = m }` or `{ within = [a, b] }`.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Claim {
     Below(f64),
@@ -132,7 +132,7 @@ impl Claim {
 
 /// A one-key table: `{ mean = [lo, hi] }`, the range each unit is clipped to before a cluster
 /// mean is taken, or `{ quantile = q }`.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StatisticSpec {
     Mean([f64; 2]),
@@ -202,7 +202,7 @@ pub enum StopRule {
     EProcess,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Budget {
     pub cpu_hours: f64,

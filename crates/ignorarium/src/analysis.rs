@@ -15,11 +15,12 @@ use crate::schedule::{self, Row, SELECTION_STAGE};
 use crate::seed::seed;
 use crate::spec;
 use crate::spec::model::{
-    Claim, Direction, Hypothesis, Mode, Paired as Rule, Role, SELECTED, Spec,
+    Claim, Direction, Hypothesis, Mode, Paired as Rule, Role, SELECTED, Spec, StatisticSpec,
 };
 use crate::stream::{Log, LogName};
 use crate::units::{self, Cluster};
 use crate::{resize, spawn};
+use evidence::claim::{Bound, Grid, Inversion};
 use evidence::rng::Rng;
 use evidence::{Tail, claim, tree};
 use serde::{Deserialize, Serialize};
@@ -266,9 +267,23 @@ fn samples(clusters: &[Cluster], h: &Hypothesis, stratum: &str, paired: &Paired)
 /// registration and its signed records. It gives the unit values its estimates were fitted
 /// from, so a later plan can fit them as its own test reads them.
 pub struct Source {
-    spec: Spec,
+    pub(crate) spec: Spec,
+    pub(crate) hash: [u8; 32],
     pairs: Paired,
     clusters: Vec<Cluster>,
+}
+
+/// One observation a registered test read: the cluster's value for one bound, at its place
+/// (from 1) in the order of that test.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Observed {
+    pub hypothesis: String,
+    pub stratum: String,
+    pub side: &'static str,
+    pub position: u64,
+    pub cluster: String,
+    pub units: u64,
+    pub observation: f64,
 }
 
 /// What `Source::refit` gives: the clusters and units it fitted, as an estimate counts them,
@@ -286,10 +301,11 @@ pub struct Refit {
 impl Source {
     /// The study of `records` whose stored plan is `text`. Its clusters are those `finish`
     /// measured: the data of each input comes from the `inputs` record and the rows
-    /// (`held_by`), and the reserve clusters that ran from the `resize` record. `Err` (why)
-    /// when the text does not parse, is not the plan the register record names, or a record
-    /// the clusters need is missing or does not parse.
-    pub fn read(text: &[u8], records: &[Record]) -> Result<Source, String> {
+    /// (`held_by`, a row without its own list holding `shared`), and the reserve clusters
+    /// that ran from the `resize` record. `Err` (why) when the text does not parse, is not
+    /// the plan the register record names, or a record the clusters need is missing or does
+    /// not parse.
+    pub fn read(text: &[u8], records: &[Record], shared: Option<&Value>) -> Result<Source, String> {
         let register =
             (records.iter().find_map(Register::of)).ok_or("it has no register record")?;
         let unparsed = "its stored plan does not parse";
@@ -298,15 +314,62 @@ impl Source {
             return Err("its stored plan is not the one the study registered".into());
         }
         let (spec, _, hash, _) = typed(raw).map_err(|_| unparsed)?;
-        let all = distinct_clusters(units::clusters(&spec, &hash), &held_by(records)?);
+        let all = distinct_clusters(units::clusters(&spec, &hash), &held_by(records, shared)?);
         let resize = resize::recorded(records).map_err(|_| "its resize record does not parse")?;
         let ran = resize::ran(&spec, &all, resize.as_ref());
         let clusters = measured(&spec, &all, &ran);
         Ok(Source {
             pairs: paired(&spec, records),
             spec,
+            hash,
             clusters,
         })
+    }
+
+    /// The `intervals` of `verdicts` over the clusters the study measured.
+    pub fn intervals(&self, verdicts: &[Verdict]) -> Result<Vec<IntervalResult>, String> {
+        intervals(
+            &self.spec,
+            &self.pairs,
+            &self.clusters,
+            &self.hash,
+            verdicts,
+        )
+    }
+
+    /// The observations each registered test read, in the order it read them: per claim, per
+    /// stratum, per bound. None for a study that is not confirmatory.
+    pub fn observations(&self) -> Result<Vec<Observed>, String> {
+        let mut out = Vec::new();
+        if self.spec.study.mode != Mode::Confirmatory {
+            return Ok(out);
+        }
+        let hypotheses = self.spec.question.hypotheses.iter();
+        for h in hypotheses {
+            let (Some(claim), Some(stat)) = (h.claim, h.statistic.as_ref()) else {
+                continue;
+            };
+            let stat = stat.to_evidence();
+            for scope in scopes(&self.spec, h, &self.pairs, &self.clusters) {
+                let samples = ordered(h, &scope, &self.hash);
+                for b in claim.bounds() {
+                    for (i, (cluster, xs)) in samples.iter().enumerate() {
+                        let fault =
+                            |e: evidence::Error| format!("the observations of {}: {e}", h.id);
+                        out.push(Observed {
+                            hypothesis: h.id.clone(),
+                            stratum: scope.stratum.to_string(),
+                            side: side(&b),
+                            position: i as u64 + 1,
+                            cluster: cluster.to_string(),
+                            units: xs.len() as u64,
+                            observation: claim::observation(&stat, &b, xs).map_err(fault)?,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// The fit `estimates` gives hypothesis `id` in group `stratum`, over the unit values,
@@ -338,19 +401,22 @@ impl Source {
 /// Each input of a study, in spec order, with the (exact, normalized) hashes of the data its
 /// rows ran on. The `inputs` record names each input's exact hash, or none for one that was
 /// absent, and every row names the pair of each input present, in the same order; all rows
-/// name the same. A study with no row names no data, and each input stands alone
+/// name the same. A row without its own list names `shared`, the list a `records::Log` keeps
+/// once. A study with no row names no data, and each input stands alone
 /// (`distinct_clusters`).
-fn held_by(records: &[Record]) -> Result<InputHashes, String> {
+fn held_by(records: &[Record], shared: Option<&Value>) -> Result<InputHashes, String> {
+    fn list<'a>(r: &'a Record, shared: Option<&'a Value>) -> &'a Value {
+        (r.body.get("data_hashes").or(shared)).unwrap_or(&Value::Null)
+    }
     let Some(row) = own_rows(records).next() else {
         return Ok(vec![]);
     };
     let frozen = (records.iter().find_map(Inputs::of)).ok_or("it has rows and no inputs record")?;
     let other = "its rows and its inputs record name other data";
-    if own_rows(records).any(|r| r.body["data_hashes"] != row.body["data_hashes"]) {
+    if own_rows(records).any(|r| list(r, shared) != list(row, shared)) {
         return Err(other.into());
     }
-    let named =
-        Vec::<(String, String)>::deserialize(&row.body["data_hashes"]).map_err(|_| other)?;
+    let named = Vec::<(String, String)>::deserialize(list(row, shared)).map_err(|_| other)?;
     let mut named = named.into_iter();
     let mut out = Vec::new();
     for (path, exact) in frozen.inputs {
@@ -376,20 +442,23 @@ fn measured(spec: &Spec, clusters: &[Cluster], ran: &BTreeSet<&str>) -> Vec<Clus
         .collect()
 }
 
+/// The unit values of each cluster `group` gives, with its path.
+pub(crate) type Measured<'a> = (&'a str, Vec<f64>);
+
 /// The clusters of `role` in `stratum` (every stratum for the pooled group `""`), in the order
 /// of `clusters`, each as the contrast's value for each picked unit that counts, and the count
 /// of picked units that do not. A unit counts when every term pairs in at least `repeats`
 /// repeats; its value is the weighted sum of the terms' means. A cluster with no unit that
 /// counts is left out.
-pub(crate) fn group(
-    clusters: &[Cluster],
+pub(crate) fn group_paths<'a>(
+    clusters: &'a [Cluster],
     role: Role,
     stratum: &str,
     outcome: &str,
     contrast: &BTreeMap<String, f64>,
     paired: &Paired,
     repeats: u32,
-) -> (Vec<Vec<f64>>, u64) {
+) -> (Vec<Measured<'a>>, u64) {
     let mut incomplete = 0;
     let samples = (clusters.iter())
         .filter(|c| c.role == role)
@@ -409,11 +478,26 @@ pub(crate) fn group(
                     None => incomplete += 1,
                 }
             }
-            xs
+            (c.path.as_str(), xs)
         })
-        .filter(|xs| !xs.is_empty())
+        .filter(|(_, xs)| !xs.is_empty())
         .collect();
     (samples, incomplete)
+}
+
+/// `group` without the cluster paths.
+pub(crate) fn group(
+    clusters: &[Cluster],
+    role: Role,
+    stratum: &str,
+    outcome: &str,
+    contrast: &BTreeMap<String, f64>,
+    paired: &Paired,
+    repeats: u32,
+) -> (Vec<Vec<f64>>, u64) {
+    let (found, incomplete) =
+        group_paths(clusters, role, stratum, outcome, contrast, paired, repeats);
+    (found.into_iter().map(|(_, xs)| xs).collect(), incomplete)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -492,7 +576,7 @@ pub fn verdicts(
         for v in out.iter_mut().filter(|v| v.basis != NONE) {
             v.verdict = "fail".into();
             v.e_value = v.e_value.map(|_| 0.0);
-            v.reason = Some(format!("stopped: {why}"));
+            v.reason = Some(format!("{STOPPED}{why}"));
         }
     }
     if spec.study.mode != Mode::Confirmatory {
@@ -547,6 +631,20 @@ fn tree_of(
 
 const PASS: &str = "pass";
 const NONE: &str = "none";
+/// The start of the reason of a verdict a stop forced to fail.
+const STOPPED: &str = "stopped: ";
+/// The start of the reason of a tested verdict whose claim the test refuses.
+const UNTESTABLE: &str = "the claim cannot be tested: ";
+/// The start of the reason of a tested verdict with an incomplete unit in scope.
+const INCOMPLETE: &str = "incomplete units in scope: ";
+
+/// Why the e-value of `v` was forced to 0, when it was: a stop, a claim the test refuses, or an
+/// incomplete unit in scope. A reason of another kind leaves the e-value as the test gave it.
+pub(crate) fn forced_reason(v: &Verdict) -> Option<&str> {
+    let reason = v.reason.as_deref()?;
+    let forcing = [STOPPED, UNTESTABLE, INCOMPLETE];
+    (v.e_value == Some(0.0) && forcing.iter().any(|p| reason.starts_with(p))).then_some(reason)
+}
 const TEST: &str = "test";
 
 /// The verdict on `h` of `spec` before the level is split: a claim fails until the tree passes
@@ -579,7 +677,7 @@ fn judge(
     let results = match held(h, &claim, &scopes, spec_hash, tested) {
         Ok(results) => results,
         Err(e) => {
-            v.reason = Some(format!("the claim cannot be tested: {e}"));
+            v.reason = Some(format!("{UNTESTABLE}{e}"));
             v.e_value = tested.then_some(0.0);
             return v;
         }
@@ -587,7 +685,7 @@ fn judge(
     let holds = results.iter().all(|(_, holds)| *holds);
     v.bounds = results.into_iter().map(|(b, _)| b).collect();
     if tested && incomplete > 0 {
-        v.reason = Some(format!("incomplete units in scope: {incomplete}"));
+        v.reason = Some(format!("{INCOMPLETE}{incomplete}"));
         v.e_value = Some(0.0);
     } else if tested {
         let least = v.bounds.iter().filter_map(|b| b.value).reduce(f64::min);
@@ -602,8 +700,8 @@ fn judge(
 /// first-batch cluster and of each appended reserve cluster, and the count of incomplete units.
 struct Scope<'a> {
     stratum: &'a str,
-    first: Vec<Vec<f64>>,
-    appended: Vec<Vec<f64>>,
+    first: Vec<Measured<'a>>,
+    appended: Vec<Measured<'a>>,
     incomplete: u64,
 }
 
@@ -613,13 +711,13 @@ fn scopes<'a>(
     spec: &Spec,
     h: &'a Hypothesis,
     paired: &Paired,
-    clusters: &[Cluster],
+    clusters: &'a [Cluster],
 ) -> Vec<Scope<'a>> {
     let repeats = spec.design.repeats;
     (claim_strata(h).into_iter())
         .map(|stratum| {
             let of = |role| {
-                group(
+                group_paths(
                     clusters,
                     role,
                     stratum,
@@ -655,7 +753,7 @@ pub fn clip_counts(spec: &Spec, paired: &Paired, clusters: &[Cluster]) -> Vec<Gr
                 .first
                 .iter()
                 .chain(&s.appended)
-                .flatten()
+                .flat_map(|(_, xs)| xs)
                 .copied()
                 .collect();
             if let Some((below, above)) = claim::clipped(&stat, &units) {
@@ -686,38 +784,140 @@ fn held(
         .ok_or(evidence::Error::Parameter("statistic"))?
         .to_evidence();
     let mut out = Vec::new();
-    for Scope {
-        stratum,
-        first,
-        appended,
-        ..
-    } in scopes
-    {
-        let path = format!("test/{}/{stratum}", h.id);
-        let order = claim::order(first.len(), &mut Rng::from_seed(seed(spec_hash, &path)));
-        let samples: Vec<&Vec<f64>> = (order.iter().map(|&i| &first[i])).chain(appended).collect();
+    for scope in scopes {
+        let samples = ordered(h, scope, spec_hash);
         for b in claim.bounds() {
             let obs = (samples.iter())
-                .map(|xs| claim::observation(&stat, &b, xs))
+                .map(|(_, xs)| claim::observation(&stat, &b, xs))
                 .collect::<Result<Vec<f64>, _>>()?;
             let value = if tested {
                 Some(finite(claim::e_value(&stat, &b, &obs)?))
             } else {
                 (!obs.is_empty()).then(|| obs.iter().sum::<f64>() / obs.len() as f64)
             };
-            let side = if b.tail == Tail::Lower {
-                "below"
-            } else {
-                "above"
-            };
             let result = BoundResult {
-                stratum: stratum.to_string(),
-                side: side.into(),
+                stratum: scope.stratum.to_string(),
+                side: side(&b).into(),
                 margin: b.margin,
                 clusters: obs.len() as u64,
                 value,
             };
             out.push((result, claim::holds(&stat, &b, &obs)?));
+        }
+    }
+    Ok(out)
+}
+
+/// The values of `scope` in the order the test of `h` reads them: the first batch in its
+/// seeded order, then the appended clusters.
+fn ordered<'a>(
+    h: &Hypothesis,
+    scope: &'a Scope<'_>,
+    spec_hash: &[u8; 32],
+) -> Vec<&'a Measured<'a>> {
+    let path = format!("test/{}/{}", h.id, scope.stratum);
+    let rng = &mut Rng::from_seed(seed(spec_hash, &path));
+    let order = claim::order(scope.first.len(), rng);
+    (order.iter().map(|&i| &scope.first[i]))
+        .chain(&scope.appended)
+        .collect()
+}
+
+fn side(b: &Bound) -> &'static str {
+    if b.tail == Tail::Lower {
+        "below"
+    } else {
+        "above"
+    }
+}
+
+/// The step of the margins `intervals` tries, in the statistic's units.
+pub const INTERVAL_STEP: f64 = 1e-4;
+
+/// One bound of a claim in one stratum, its registered test inverted (`claim::tightest`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct IntervalResult {
+    pub hypothesis: String,
+    pub stratum: String,
+    /// `below` or `above`, as the bound's `BoundResult`.
+    pub side: String,
+    /// The mean of the cluster observations.
+    pub estimate: f64,
+    pub inversion: Inversion,
+}
+
+/// The margins tried for bound `b`: steps of `INTERVAL_STEP` from the registered margin, so
+/// a margin that passed is on the grid. The grid starts at the last step at or behind
+/// `estimate` and runs to the end of the range on the claimed side (`hi` below, `lo` above).
+fn anchored(b: &Bound, estimate: f64, (lo, hi): (f64, f64)) -> Grid {
+    let steps = (estimate - b.margin) / INTERVAL_STEP;
+    let (steps, to) = match b.tail {
+        Tail::Lower => (steps.floor(), hi),
+        _ => (steps.ceil(), lo),
+    };
+    Grid {
+        from: b.margin + steps * INTERVAL_STEP,
+        to,
+        step: INTERVAL_STEP,
+    }
+}
+
+/// Per verdict of `verdicts` with a level, on a claim on a mean, per stratum and bound: the
+/// registered test, rerun over the same observations in the same order (`ordered`) at each
+/// margin of `anchored`'s grid, against 1 / level. None for a verdict with an incomplete unit, whose test gives 0
+/// at every margin; for a verdict a stop forced to fail (`verdicts`), whose test never ran to
+/// its size; for a quantile claim, whose margin has no declared range; or for a stratum
+/// with no cluster, which has no estimate. `Err` names a bound whose test cannot be inverted.
+pub fn intervals(
+    spec: &Spec,
+    paired: &Paired,
+    clusters: &[Cluster],
+    spec_hash: &[u8; 32],
+    verdicts: &[Verdict],
+) -> Result<Vec<IntervalResult>, String> {
+    let mut out = Vec::new();
+    let forced = |v: &Verdict| (v.reason.as_deref()).is_some_and(|r| r.starts_with(STOPPED));
+    for v in (verdicts.iter()).filter(|v| v.incomplete_units == 0 && !forced(v)) {
+        let h = (spec.question.hypotheses.iter()).find(|h| h.id == v.hypothesis);
+        let Some((h, level)) = h.zip(v.level) else {
+            continue;
+        };
+        let (Some(claim), Some(StatisticSpec::Mean([lo, hi]))) = (h.claim, h.statistic) else {
+            continue;
+        };
+        let stat = claim::Statistic::Mean { lo, hi };
+        for scope in scopes(spec, h, paired, clusters) {
+            let samples: Vec<&[f64]> = (ordered(h, &scope, spec_hash).into_iter())
+                .map(|(_, xs)| xs.as_slice())
+                .collect();
+            if samples.is_empty() {
+                continue;
+            }
+            let interval = |b: Bound| -> Result<IntervalResult, evidence::Error> {
+                let obs = (samples.iter())
+                    .map(|xs| claim::observation(&stat, &b, xs))
+                    .collect::<Result<Vec<f64>, _>>()?;
+                let estimate = obs.iter().sum::<f64>() / obs.len() as f64;
+                let grid = anchored(&b, estimate, (lo, hi));
+                Ok(IntervalResult {
+                    hypothesis: h.id.clone(),
+                    stratum: scope.stratum.to_string(),
+                    side: side(&b).into(),
+                    estimate,
+                    inversion: claim::tightest(&stat, b.tail, &samples, 1.0 / level, grid)?,
+                })
+            };
+            for b in claim.bounds() {
+                let fault = |e| {
+                    format!(
+                        "the interval of {} {} {}: {e}",
+                        h.id,
+                        scope.stratum,
+                        side(&b)
+                    )
+                };
+                out.push(interval(b).map_err(fault)?);
+            }
         }
     }
     Ok(out)

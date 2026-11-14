@@ -1,7 +1,8 @@
 //! `report`: the verdicts of a finished study, through the real binary.
 mod common;
 use common::{
-    Lab, bin, edited, finished_with, instrument, lab, plain, plant, records_of, source_spec, text,
+    Lab, bin, edited, finished_with, git, instrument, lab, plain, plant, records_of, source_spec,
+    study_repo, text,
 };
 use serde_json::{Value, json};
 
@@ -265,6 +266,15 @@ fn an_unfinished_study_refuses_blind_or_not() {
     }
 }
 
+/// `bodies` with a register record that names the plan `text`, which a test writes in place
+/// of the planted one.
+fn registered_as(mut bodies: Vec<(&'static str, Value)>, text: &str) -> Vec<(&'static str, Value)> {
+    let hash = ignorarium::spec::parse(text.as_bytes()).unwrap().hash;
+    let register = bodies.iter_mut().find(|(k, _)| *k == "register").unwrap();
+    register.1["spec_hash"] = json!(hash);
+    bodies
+}
+
 #[test]
 fn a_blind_finished_study_shows_everything() {
     let lab = lab();
@@ -273,8 +283,12 @@ fn a_blind_finished_study_shows_everything() {
     std::fs::create_dir_all(&dir).unwrap();
     let blind = source_spec(&[]).replace("blind = false", "blind = true");
     assert!(blind.contains("blind = true"));
-    std::fs::write(dir.join("spec.toml"), blind).unwrap();
-    plant(&lab.home, "s2", &finished_study(&three(), &[]));
+    std::fs::write(dir.join("spec.toml"), &blind).unwrap();
+    plant(
+        &lab.home,
+        "s2",
+        &registered_as(finished_study(&three(), &[]), &blind),
+    );
     let open = report_json(&lab, "s1");
     let shut = report_json(&lab, "s2");
     assert_eq!(open["hypotheses"], shut["hypotheses"]);
@@ -487,9 +501,13 @@ fn a_blind_report_shows_children_by_the_blind_label_of_their_condition() {
     let dir = lab.home.study_dir("s1");
     std::fs::create_dir_all(&dir).unwrap();
     let blind = source_spec(&["fiction".to_string()]).replace("blind = false", "blind = true");
-    std::fs::write(dir.join("spec.toml"), blind).unwrap();
+    std::fs::write(dir.join("spec.toml"), &blind).unwrap();
     let kids = [child_estimate("arm-a~window_tokens=64", 64, -12.5)];
-    plant(&lab.home, "s1", &with_children(&kids));
+    plant(
+        &lab.home,
+        "s1",
+        &registered_as(with_children(&kids), &blind),
+    );
     let r = report_json(&lab, "s1");
     let child = r["children"][0]["child"].as_str().unwrap();
     let parent = r["children"][0]["parent"].as_str().unwrap();
@@ -502,4 +520,400 @@ fn a_blind_report_shows_children_by_the_blind_label_of_their_condition() {
         "{}",
         text(&a)
     );
+}
+
+#[test]
+fn report_json_has_card_version() {
+    let lab = lab();
+    let bodies = finished_study(&three(), &[]);
+    plant(&lab.home, "s1", &bodies);
+    let a = bin(&lab)
+        .args(["report", "s1", "--format", "json"])
+        .assert()
+        .success();
+    let r: Value = serde_json::from_str(&text(&a)).unwrap();
+    assert_eq!(r["card_version"], 1);
+    assert_eq!(r["study"], "s1");
+    assert_eq!(r["finished_at"], ts_of(&lab));
+    assert_eq!(r["records"], bodies.len());
+    assert_eq!(r["hypotheses"].as_array().unwrap().len(), 3);
+    assert_eq!(r["hypotheses"][0]["e_value"], 312.4);
+    assert_eq!(r["children"], json!([]));
+    assert_eq!(r["family"], Value::Null);
+    let opened = records_of(&lab, "s1").pop().unwrap();
+    assert_eq!(r["opened"], json!({ "seq": opened.seq, "ts": opened.ts }));
+}
+
+#[test]
+fn md_prints_the_markdown_card() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let a = bin(&lab)
+        .args(["report", "s1", "--format", "md"])
+        .assert()
+        .success();
+    let md = text(&a);
+    assert!(md.starts_with("# Study card: s1\n"), "{md}");
+    assert!(md.contains("## Re-run recipe"));
+    let kinds: Vec<String> = records_of(&lab, "s1").into_iter().map(|r| r.kind).collect();
+    assert!(kinds.contains(&"opened".to_string()), "{kinds:?}");
+}
+
+#[test]
+fn tex_needs_an_out_folder_and_out_needs_tex() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    for args in [&["--format", "tex"][..], &["--format", "md", "--out", "x"]] {
+        let a = bin(&lab).args(["report", "s1"]).args(args).assert().code(2);
+        let err = String::from_utf8_lossy(&a.get_output().stderr).into_owned();
+        assert!(err.contains("--out"), "{args:?}: {err}");
+    }
+    let kinds: Vec<String> = records_of(&lab, "s1").into_iter().map(|r| r.kind).collect();
+    assert!(!kinds.contains(&"opened".to_string()), "{kinds:?}");
+}
+
+#[test]
+fn tex_writes_its_files_to_the_out_folder() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let out = lab.home.study_dir("s1").join("tex-out");
+    bin(&lab)
+        .args(["report", "s1", "--format", "tex", "--out"])
+        .arg(&out)
+        .assert()
+        .success();
+    for name in ["results.tex", "deviations.tex", "sensitivity.tex"] {
+        assert!(out.join(name).is_file(), "{name}");
+    }
+}
+
+#[test]
+fn tex_refuses_colliding_value_names_before_the_opened_record() {
+    let lab = lab();
+    let named = |h: &str| {
+        let mut e = common::arm_a();
+        e["hypothesis"] = json!(h);
+        e
+    };
+    let bodies = finished_with(instrument(), None, vec![named("h 1"), named("h-1")]);
+    plant(&lab.home, "s1", &bodies);
+    let out = lab.root.join("tex-out");
+    let a = bin(&lab)
+        .args(["report", "s1", "--format", "tex", "--out"])
+        .arg(&out)
+        .assert()
+        .code(2);
+    let err = String::from_utf8_lossy(&a.get_output().stderr).into_owned();
+    assert!(err.contains("h 1") && err.contains("h-1"), "{err}");
+    no_opened(&lab);
+}
+
+/// A payload whose `arm-a` value is 6 against the reference's 8: every unit pairs to -25 %.
+const MINUS_25: &str = "#!/bin/sh\ncase \"$2\" in exact) v=8;; *) v=6;; esac\nprintf '{\"ppl\": %s}' \"$v\" > \"$IGNORARIUM_OUT/values.json\"\n";
+
+#[test]
+fn card_marks_interval_post_hoc() {
+    use evidence::claim::{Grid, Statistic, tightest};
+    use ignorarium::backend::level0::Level0;
+    use ignorarium::runner::{RunStatus, prepare_with, run};
+    let lab = lab();
+    // `common::confirmatory`, one unit per cluster, on a mean in [-30, 30] sized at -25.
+    common::pilot(&lab.home, vec![common::arm_a()]);
+    let edit = |t: String| {
+        common::confirmatory(t)
+            .replace("units = 3", "units = 1")
+            .replace("{ quantile = 0.5 }", "{ mean = [-30.0, 30.0] }")
+            .replace("power_at = -20.0", "power_at = -25.0")
+    };
+    common::register_study(&lab, "mean", edit, &[], MINUS_25);
+    let work = common::work(&lab, "mean");
+    let plan = prepare_with(&lab.home, "mean", &work, vec![Box::new(Level0)]).unwrap();
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let r = report_json(&lab, "mean");
+    let h = &r["hypotheses"][0];
+    assert_eq!(h["verdict"], "pass");
+    assert_eq!(
+        h.get("intervals"),
+        None,
+        "intervals live on results rows only"
+    );
+    let level = h["level"].as_f64().unwrap();
+    // 15 clusters at -25: the same e-process at each margin from -25 up to 30.
+    let grid = Grid {
+        from: -25.0,
+        to: 30.0,
+        step: 1e-4,
+    };
+    let samples: Vec<&[f64]> = vec![&[-25.0]; 15];
+    let mean = Statistic::Mean {
+        lo: -30.0,
+        hi: 30.0,
+    };
+    let found = tightest(&mean, evidence::Tail::Lower, &samples, 1.0 / level, grid).unwrap();
+    assert!(found.margin.unwrap() < 0.0);
+    let want = json!([{
+        "stratum": "", "side": "below", "estimate": -25.0, "bound": found.margin,
+        "method": "inverted registered e-process",
+        "grid": { "from": -25.0, "to": 30.0, "step": 1e-4 },
+        "contiguous": true, "registered": false,
+    }]);
+    let pooled = (r["results"].as_array().unwrap().iter())
+        .find(|row| row["hypothesis"] == h["hypothesis"] && row["stratum"] == "")
+        .unwrap();
+    assert_eq!(pooled["intervals"], want);
+}
+
+fn card_out(lab: &Lab, out: &std::path::Path) -> assert_cmd::assert::Assert {
+    bin(lab)
+        .args(["report", "s1", "--card", "--out"])
+        .arg(out)
+        .assert()
+}
+
+#[test]
+fn card_out_writes_the_frozen_card_and_keeps_readings() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let out = lab.root.join("card");
+    card_out(&lab, &out).success();
+    for name in [
+        "card.json",
+        "card.md",
+        "manifest.sha256",
+        "data.sha256",
+        "observations.csv",
+        "readings.md",
+    ] {
+        assert!(out.join(name).is_file(), "{name}");
+    }
+    assert!(out.join("tex/results.tex").is_file());
+    let bytes = std::fs::read(out.join("card.json")).unwrap();
+    let card: Value = serde_json::from_slice(&bytes).unwrap();
+    let sha = ignorarium::canon::sha256_hex;
+    let manifest = std::fs::read(out.join("manifest.sha256")).unwrap();
+    assert_eq!(sha(&manifest), card["recipe"]["manifest"]["list_sha256"]);
+    let readings = std::fs::read_to_string(out.join("readings.md")).unwrap();
+    assert!(readings.starts_with(&format!("<!-- card sha256: {} -->\n", sha(&bytes))));
+    // A filled readings.md survives a second run; the card changes only by its opened record.
+    std::fs::write(out.join("readings.md"), "mine\n").unwrap();
+    card_out(&lab, &out).success();
+    assert_eq!(
+        std::fs::read_to_string(out.join("readings.md")).unwrap(),
+        "mine\n"
+    );
+    let again = std::fs::read(out.join("card.json")).unwrap();
+    assert_ne!(again, bytes);
+    let frozen = |bytes: &[u8]| {
+        let mut card: Value = serde_json::from_slice(bytes).unwrap();
+        card["opened"] = Value::Null;
+        card["records"] = Value::Null;
+        serde_json::to_vec_pretty(&card).unwrap()
+    };
+    assert_eq!(
+        String::from_utf8(frozen(&again)).unwrap(),
+        String::from_utf8(frozen(&bytes)).unwrap(),
+        "only opened and records may change"
+    );
+}
+
+#[test]
+fn data_sidecar_hash_matches_card() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let out = lab.root.join("card");
+    card_out(&lab, &out).success();
+    let card: Value =
+        serde_json::from_slice(&std::fs::read(out.join("card.json")).unwrap()).unwrap();
+    let sidecar =
+        |name: &str| ignorarium::canon::sha256_hex(&std::fs::read(out.join(name)).unwrap());
+    assert_eq!(sidecar("data.sha256"), card["setup"]["data"]["list_sha256"]);
+    assert_eq!(sidecar("observations.csv"), card["observations"]["sha256"]);
+}
+
+#[test]
+fn card_out_refuses_foreign_files_before_the_opened_record() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let out = lab.root.join("card");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join("stale.txt"), "x").unwrap();
+    let a = card_out(&lab, &out).code(2);
+    let err = String::from_utf8_lossy(&a.get_output().stderr).into_owned();
+    assert!(err.contains("stale.txt"), "{err}");
+    let kinds: Vec<String> = records_of(&lab, "s1").into_iter().map(|r| r.kind).collect();
+    assert!(!kinds.contains(&"opened".to_string()), "{kinds:?}");
+}
+
+#[test]
+fn card_conflicts_with_format_and_needs_out() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    for args in [&["--card", "--format", "md", "--out", "x"][..], &["--card"]] {
+        bin(&lab).args(["report", "s1"]).args(args).assert().code(2);
+    }
+}
+
+fn stderr_of(a: &assert_cmd::assert::Assert) -> String {
+    String::from_utf8_lossy(&a.get_output().stderr).into_owned()
+}
+
+fn no_opened(lab: &Lab) {
+    let kinds: Vec<String> = records_of(lab, "s1").into_iter().map(|r| r.kind).collect();
+    assert!(!kinds.contains(&"opened".to_string()), "{kinds:?}");
+}
+
+#[test]
+fn card_out_refuses_a_foreign_file_in_a_nested_folder() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let out = lab.root.join("card");
+    std::fs::create_dir_all(out.join("tex/sub")).unwrap();
+    std::fs::write(out.join("tex/sub/x.txt"), "x").unwrap();
+    let a = card_out(&lab, &out).code(2);
+    assert!(stderr_of(&a).contains("sub"), "{}", stderr_of(&a));
+    no_opened(&lab);
+}
+
+#[cfg(unix)]
+#[test]
+fn card_out_refuses_symlinks() {
+    use std::os::unix::fs::symlink;
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let elsewhere = lab.root.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(elsewhere.join("f"), "x").unwrap();
+    for (name, target) in [
+        ("card.json", elsewhere.join("f")),
+        ("tex", elsewhere.clone()),
+    ] {
+        let out = lab.root.join(format!("card-{name}"));
+        std::fs::create_dir_all(&out).unwrap();
+        symlink(&target, out.join(name)).unwrap();
+        let a = card_out(&lab, &out).code(2);
+        assert!(stderr_of(&a).contains("symlink"), "{}", stderr_of(&a));
+    }
+    no_opened(&lab);
+    assert_eq!(std::fs::read(elsewhere.join("f")).unwrap(), b"x");
+}
+
+#[test]
+fn readings_are_flagged_not_blocked_or_rewritten() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let out = lab.root.join("card");
+    let a = card_out(&lab, &out).success();
+    assert_eq!(stderr_of(&a), "", "a fresh template draws no flag");
+    // Second run: the card changes (new opened record), so the header is stale. One slot has a digit.
+    let path = out.join("readings.md");
+    let old = std::fs::read_to_string(&path).unwrap();
+    let mine = old.replacen("## TL;DR\n", "## TL;DR\n\nIt moved 5 points.\n", 1);
+    std::fs::write(&path, &mine).unwrap();
+    let a = card_out(&lab, &out).success();
+    let err = stderr_of(&a);
+    let new = ignorarium::canon::sha256_hex(&std::fs::read(out.join("card.json")).unwrap());
+    let stale = old.lines().next().unwrap();
+    let stale = stale
+        .trim_start_matches("<!-- card sha256: ")
+        .trim_end_matches(" -->");
+    assert!(err.contains(stale) && err.contains(&new), "{err}");
+    assert!(err.contains("It moved 5 points."), "{err}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), mine);
+}
+
+#[test]
+fn flags_escape_the_authors_text_and_cut_it() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let out = lab.root.join("card");
+    card_out(&lab, &out).success();
+    let long = "x".repeat(200);
+    let text = format!("## TL;DR\n\n\u{1b}[31m5 red {long}\n");
+    std::fs::write(out.join("readings.md"), text).unwrap();
+    let err = stderr_of(&card_out(&lab, &out).success());
+    assert!(!err.contains('\u{1b}'), "{err:?}");
+    assert!(err.contains("\\u{1b}[31m5 red"), "{err:?}");
+    assert!(!err.contains(&"x".repeat(81)), "{err:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_readings_file_is_flagged() {
+    use std::os::unix::fs::PermissionsExt;
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let out = lab.root.join("card");
+    card_out(&lab, &out).success();
+    let path = out.join("readings.md");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let readable = std::fs::read(&path).is_ok();
+    let err = stderr_of(&card_out(&lab, &out).success());
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    // A root user reads the file anyway; the flag then has nothing to say.
+    assert!(readable || err.contains("cannot read readings.md"), "{err}");
+}
+
+#[test]
+fn study_folder_applies_to_every_format_and_to_the_card() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let (_repo, folder) = study_repo("sub", &[("gaps.md", "g\n")]);
+    let commit = git(&folder, &["rev-parse", "HEAD"]);
+    let with = |args: &[&str]| {
+        let mut c = bin(&lab);
+        c.args(["report", "s1"]).args(args).arg("--study-folder");
+        c.arg(&folder).assert().success()
+    };
+    let json: Value = serde_json::from_str(&text(&with(&["--json"]))).unwrap();
+    assert_eq!(
+        json["outside_source"],
+        json!({ "path": "sub/", "commit": commit })
+    );
+    assert!(text(&with(&["--format", "md"])).contains(&commit));
+    with(&[]);
+    let out = lab.root.join("card");
+    let a = with(&["--card", "--out", out.to_str().unwrap()]);
+    drop(a);
+    let card: Value =
+        serde_json::from_slice(&std::fs::read(out.join("card.json")).unwrap()).unwrap();
+    assert_eq!(card["outside_source"]["commit"], commit.as_str());
+}
+
+#[test]
+fn a_study_folder_refusal_comes_before_the_opened_record() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let (_repo, folder) = study_repo("", &[("gaps.md", "g\n")]);
+    std::fs::write(folder.join("gaps.md"), "changed\n").unwrap();
+    let a = bin(&lab)
+        .args(["report", "s1", "--study-folder"])
+        .arg(&folder)
+        .assert()
+        .failure();
+    assert!(stderr_of(&a).contains("gaps.md"), "{}", stderr_of(&a));
+    no_opened(&lab);
+    let a = bin(&lab)
+        .args(["report", "s1", "--study-folder"])
+        .arg(lab.root.join("none"))
+        .assert()
+        .failure();
+    assert!(stderr_of(&a).contains("not a folder"), "{}", stderr_of(&a));
+    no_opened(&lab);
+}
+
+#[test]
+fn a_missing_git_binary_is_a_refusal_that_says_so() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let (_repo, folder) = study_repo("", &[("gaps.md", "g\n")]);
+    let empty = lab.root.join("no-bin");
+    std::fs::create_dir_all(&empty).unwrap();
+    let a = bin(&lab)
+        .env("PATH", &empty)
+        .args(["report", "s1", "--study-folder"])
+        .arg(&folder)
+        .assert()
+        .failure();
+    assert!(stderr_of(&a).contains("git not found"), "{}", stderr_of(&a));
+    no_opened(&lab);
 }
