@@ -1,26 +1,50 @@
 //! The re-run recipe and the citation (design 2.1, items 13 and 14).
-use super::sections::{EVENTS, Field, Outside, READINGS};
+use super::sections::Field;
 use crate::canon::sha256_hex;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::fs::FileType;
+use std::io::{self, Read};
 use std::path::Path;
 
-/// Top-level files the manifest leaves out. `readings.md` changes when an author fills a slot;
-/// the card must not. The box rewrites the two logs on every report read; the card names
-/// the record log by count and last hash instead.
-pub const SKIPPED: [&str; 3] = [READINGS, "records.jsonl", EVENTS];
+/// The study-folder names a re-run reads. A name ending in `/` is a tree. Nothing else in the
+/// folder is an input: logs, `run/`, `deviations.jsonl` and `readings.md` are not listed.
+pub const ROOTS: [&str; 7] = [
+    "spec.toml",
+    "spec.json",
+    "spec.hash",
+    "salt",
+    "schedule.json",
+    "in/",
+    "payload/",
+];
 /// The study folder's citation file.
 pub const CITATION_FILE: &str = "CITATION.cff";
+/// What a re-run needs beside the command.
+pub const REQUIRES: [&str; 3] = [
+    "a box home where the study is registered",
+    "the study folder as the working directory",
+    "the box version recorded in `box_version`",
+];
 
-/// Every file of the study folder but the `skipped` ones, by relative path in sorted order.
+/// The re-run inputs of a study folder. `tree_sha256` is the SHA-256 of the `manifest_lines`
+/// text: one line `<sha256>  <relative path>\n` per file, sorted, with `/` in paths. A symlink
+/// is never followed; its line reads `link:<sha256 of the target text>  <path>`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
-    pub skipped: Vec<String>,
-    pub files: Vec<Outside>,
+    pub roots: Vec<String>,
+    /// Roots the folder does not hold.
+    pub missing: Vec<String>,
+    pub files: u64,
+    pub tree_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Recipe {
     pub command: String,
+    /// The isolation levels the rows hold. More than one is drift; the command uses the highest.
+    pub isolation_levels: Vec<u8>,
+    pub requires: Vec<String>,
     /// No record holds the box binary's hash (issue #67).
     pub box_binary_sha256: Field<String>,
     pub box_version: Field<String>,
@@ -29,44 +53,97 @@ pub struct Recipe {
     pub manifest: Manifest,
 }
 
-fn walk(dir: &Path, prefix: &str, out: &mut Vec<Outside>) -> Result<(), String> {
-    let fault = |e: std::io::Error| format!("{}: {e}", dir.display());
-    let mut names = vec![];
-    for entry in std::fs::read_dir(dir).map_err(fault)? {
-        names.push(
-            entry
-                .map_err(fault)?
-                .file_name()
-                .to_string_lossy()
-                .into_owned(),
-        );
+fn hash_file(path: &Path) -> io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        match file.read(&mut buf)? {
+            0 => return Ok(hex::encode(hasher.finalize())),
+            n => hasher.update(&buf[..n]),
+        }
     }
-    names.sort();
-    for name in names {
-        if prefix.is_empty() && SKIPPED.contains(&name.as_str()) {
-            continue;
+}
+
+fn utf8(path: &Path) -> Result<&str, String> {
+    path.to_str()
+        .ok_or_else(|| format!("{}: the path is not UTF-8", path.display()))
+}
+
+fn entry(
+    full: &Path,
+    rel: &str,
+    kind: FileType,
+    out: &mut Vec<(String, String)>,
+) -> Result<(), String> {
+    let fault = |e: io::Error| format!("{rel}: {e}");
+    if kind.is_symlink() {
+        let target = std::fs::read_link(full).map_err(fault)?;
+        let hash = sha256_hex(utf8(&target)?.as_bytes());
+        out.push((format!("link:{hash}  {rel}"), rel.into()));
+    } else if kind.is_dir() {
+        let mut names = vec![];
+        for e in std::fs::read_dir(full).map_err(fault)? {
+            let e = e.map_err(fault)?;
+            let name = e.file_name();
+            let name = utf8(Path::new(&name))?.to_string();
+            names.push((name, e.file_type().map_err(fault)?));
         }
-        let path = format!("{prefix}{name}");
-        let full = dir.join(&name);
-        if full.is_dir() {
-            walk(&full, &format!("{path}/"), out)?;
-        } else {
-            let bytes = std::fs::read(&full).map_err(|e| format!("{path}: {e}"))?;
-            out.push(Outside {
-                path,
-                sha256: sha256_hex(&bytes),
-            });
+        for (name, kind) in names {
+            entry(&full.join(&name), &format!("{rel}/{name}"), kind, out)?;
         }
+    } else if kind.is_file() {
+        out.push((
+            format!("{}  {rel}", hash_file(full).map_err(fault)?),
+            rel.into(),
+        ));
+    } else {
+        return Err(format!("{rel}: not a file, directory or link"));
     }
     Ok(())
 }
 
-/// The recipe of study `id`, whose folder is `dir` and whose analyses name `box_version`.
-pub fn recipe(dir: &Path, id: &str, box_version: Option<String>) -> Result<Recipe, String> {
-    let mut files = vec![];
-    walk(dir, "", &mut files)?;
+/// The lines of the study folder's manifest, and the roots it lacks.
+fn walk(study_dir: &Path) -> Result<(Vec<String>, Vec<String>), String> {
+    let (mut lines, mut missing) = (vec![], vec![]);
+    for root in ROOTS {
+        let name = root.trim_end_matches('/');
+        match std::fs::symlink_metadata(study_dir.join(name)) {
+            Ok(meta) => entry(&study_dir.join(name), name, meta.file_type(), &mut lines)?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => missing.push(root.to_string()),
+            Err(e) => return Err(format!("{name}: {e}")),
+        }
+    }
+    lines.sort_by(|a, b| a.1.cmp(&b.1));
+    let lines = lines.into_iter().map(|(line, _)| line).collect();
+    Ok((lines, missing))
+}
+
+/// The sorted manifest lines of `study_dir`, one `<sha256>  <path>` per file, without the LF.
+pub fn manifest_lines(study_dir: &Path) -> Result<Vec<String>, String> {
+    walk(study_dir).map(|(lines, _)| lines)
+}
+
+/// The recipe of study `id`, whose folder is `dir`, whose rows hold `levels` and whose
+/// analyses name `box_version`.
+pub fn recipe(
+    dir: &Path,
+    id: &str,
+    mut levels: Vec<u8>,
+    box_version: Option<String>,
+) -> Result<Recipe, String> {
+    let (lines, missing) = walk(dir)?;
+    levels.sort();
+    levels.dedup();
+    let mut command = format!("ignorarium run {id}");
+    if let Some(top) = levels.last() {
+        command += &format!(" --max-level {top}");
+    }
+    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
     Ok(Recipe {
-        command: format!("ignorarium run {id}"),
+        command,
+        isolation_levels: levels,
+        requires: REQUIRES.map(String::from).to_vec(),
         box_binary_sha256: Field::Missing { link: None },
         box_version: match box_version {
             Some(value) => Field::Recorded { value },
@@ -74,8 +151,10 @@ pub fn recipe(dir: &Path, id: &str, box_version: Option<String>) -> Result<Recip
         },
         bundle_doi: Field::Missing { link: None },
         manifest: Manifest {
-            skipped: SKIPPED.map(String::from).to_vec(),
-            files,
+            roots: ROOTS.map(String::from).to_vec(),
+            missing,
+            files: lines.len() as u64,
+            tree_sha256: sha256_hex(text.as_bytes()),
         },
     })
 }

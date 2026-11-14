@@ -489,39 +489,131 @@ fn seeds_derive_from_the_plan_hash() {
 fn recipe_lists_missing_binary_hash() {
     let lab = lab();
     fixture(&lab, MEAN, rows_on_level_2());
-    let dir = lab.home.study_dir(ID);
-    std::fs::write(dir.join("statement.md"), "# statement\n").unwrap();
-    std::fs::write(dir.join("events.jsonl"), "{}\n").unwrap();
-    std::fs::create_dir_all(dir.join("out")).unwrap();
-    std::fs::write(dir.join("out/b.txt"), "b").unwrap();
-    std::fs::write(dir.join("out/a.txt"), "a").unwrap();
-    std::fs::write(dir.join("readings.md"), "## TL;DR\nblank\n").unwrap();
-    let before = card_of(&lab).recipe;
-    assert_eq!(before.command, "ignorarium run s1");
-    assert_eq!(before.box_binary_sha256, Field::Missing { link: None });
-    assert_eq!(before.bundle_doi, Field::Missing { link: None });
-    assert_eq!(
-        before.box_binary_sha256.shown(|v| v.clone()),
-        NOT_IN_RECORDS
-    );
+    let r = card_of(&lab).recipe;
+    assert_eq!(r.command, "ignorarium run s1 --max-level 2");
+    assert_eq!(r.isolation_levels, [2]);
+    assert_eq!(r.requires.len(), 3);
+    assert_eq!(r.box_binary_sha256, Field::Missing { link: None });
+    assert_eq!(r.bundle_doi, Field::Missing { link: None });
+    assert_eq!(r.box_binary_sha256.shown(|v| v.clone()), NOT_IN_RECORDS);
     let version = card_of(&lab).surprises.box_versions[0].clone();
-    assert_eq!(before.box_version, recorded(version));
-    let files = &before.manifest.files;
-    let paths: Vec<&str> = files.iter().map(|o| o.path.as_str()).collect();
+    assert_eq!(r.box_version, recorded(version));
+    let m = &r.manifest;
+    assert_eq!(m.roots.len(), 7);
+    assert_eq!(m.files, 1);
+    assert_eq!(m.missing.len(), 6);
+    assert!(!m.missing.contains(&"spec.toml".to_string()));
+}
+
+#[test]
+fn recipe_level_comes_from_the_rows() {
+    let lab = lab();
+    fixture(
+        &lab,
+        MEAN,
+        json!({ "isolation": 1, "launcher": "bwrap 0.9" }),
+    );
+    let r = card_of(&lab).recipe;
+    assert_eq!(r.command, "ignorarium run s1 --max-level 1");
+    let lab = lab_with_levels();
+    let r = card_of(&lab).recipe;
+    assert_eq!(r.isolation_levels, [1, 2]);
+    assert!(r.command.ends_with("--max-level 2"));
+}
+
+fn lab_with_levels() -> Lab {
+    let lab = lab();
+    let mut bodies = bodies(&lab, MEAN, rows_on_level_2());
+    let first = bodies.iter_mut().find(|(k, _)| *k == "row").unwrap();
+    first.1["isolation"] = json!(1);
+    plant(&lab.home, ID, &bodies);
+    lab
+}
+
+fn manifest_of(lab: &Lab) -> ignorarium::card::recipe::Manifest {
+    card_of(lab).recipe.manifest
+}
+
+#[test]
+fn manifest_ignores_what_a_run_rewrites() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let dir = lab.home.study_dir(ID);
+    let before = manifest_in(&dir);
+    std::fs::create_dir_all(dir.join("run")).unwrap();
+    std::fs::write(dir.join("run/control"), "pause").unwrap();
+    std::fs::write(dir.join("deviations.jsonl"), "{}\n").unwrap();
+    std::fs::write(dir.join("readings.md"), "filled\n").unwrap();
+    std::fs::write(dir.join("events.jsonl"), "{}\n").unwrap();
+    assert_eq!(manifest_in(&dir), before);
+    std::fs::create_dir_all(dir.join("payload")).unwrap();
+    std::fs::write(dir.join("payload/run.sh"), "a").unwrap();
+    let with = manifest_in(&dir);
+    assert_ne!(with.tree_sha256, before.tree_sha256);
+    assert_eq!(with.files, before.files + 1);
+    assert!(!with.missing.contains(&"payload/".to_string()));
+    std::fs::write(dir.join("payload/run.sh"), "b").unwrap();
+    assert_ne!(manifest_in(&dir).tree_sha256, with.tree_sha256);
+}
+
+#[test]
+fn manifest_lines_match_the_tree_hash() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let dir = lab.home.study_dir(ID);
+    std::fs::create_dir_all(dir.join("in/sub")).unwrap();
+    std::fs::write(dir.join("in/sub/b"), "b").unwrap();
+    std::fs::write(dir.join("in/a"), "a").unwrap();
+    let lines = card::recipe::manifest_lines(&dir).unwrap();
+    let paths: Vec<&str> = lines
+        .iter()
+        .map(|l| l.split_once("  ").unwrap().1)
+        .collect();
     assert_eq!(
         paths,
-        ["out/a.txt", "out/b.txt", "spec.toml", "statement.md"]
+        ["in/a", "in/sub/b", "spec.toml"]
+            .map(String::from)
+            .map(|s| s.leak() as &str)
     );
-    assert_eq!(files[0].sha256, sha256_hex(b"a"));
-    assert_eq!(
-        before.manifest.skipped,
-        ["readings.md", "records.jsonl", "events.jsonl"]
-    );
-    std::fs::write(dir.join("readings.md"), "## TL;DR\nfilled\n").unwrap();
-    std::fs::write(dir.join("events.jsonl"), "{}\n{}\n").unwrap();
-    assert_eq!(card_of(&lab).recipe, before);
-    std::fs::write(dir.join("out/a.txt"), "changed").unwrap();
-    assert_ne!(card_of(&lab).recipe, before);
+    assert!(lines[0].starts_with(&sha256_hex(b"a")));
+    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    assert_eq!(manifest_of(&lab).tree_sha256, sha256_hex(text.as_bytes()));
+    assert_eq!(manifest_of(&lab).files, 3);
+}
+
+#[cfg(unix)]
+#[test]
+fn manifest_records_links_and_never_follows_them() {
+    use std::os::unix::fs::symlink;
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let dir = lab.home.study_dir(ID);
+    std::fs::create_dir_all(dir.join("in")).unwrap();
+    symlink("/etc/hostname", dir.join("in/host")).unwrap();
+    symlink(".", dir.join("in/loop")).unwrap();
+    symlink("nowhere", dir.join("payload")).unwrap();
+    let lines = card::recipe::manifest_lines(&dir).unwrap();
+    let link = |t: &str, p: &str| format!("link:{}  {p}", sha256_hex(t.as_bytes()));
+    assert!(lines.contains(&link("/etc/hostname", "in/host")));
+    assert!(lines.contains(&link(".", "in/loop")));
+    assert!(lines.contains(&link("nowhere", "payload")));
+    assert_eq!(lines.len(), 4);
+}
+
+#[cfg(unix)]
+#[test]
+fn manifest_refuses_a_fifo() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let dir = lab.home.study_dir(ID);
+    std::fs::create_dir_all(dir.join("in")).unwrap();
+    let made = std::process::Command::new("mkfifo")
+        .arg(dir.join("in/pipe"))
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let err = card::recipe::manifest_lines(&dir).unwrap_err();
+    assert!(err.contains("in/pipe"), "{err}");
 }
 
 const CFF: &str = "cff-version: 1.2.0\nmessage: Cite it.\n# a comment\ntitle: \"Does X help?\"\n\
@@ -559,4 +651,10 @@ fn citation_refuses_what_it_cannot_read() {
         let err = card::build(&lab.home, ID, &log).expect_err(bad);
         assert!(err.msg.contains("CITATION.cff"), "{}", err.msg);
     }
+}
+
+fn manifest_in(dir: &std::path::Path) -> card::recipe::Manifest {
+    card::recipe::recipe(dir, ID, vec![2], None)
+        .unwrap()
+        .manifest
 }

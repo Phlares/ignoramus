@@ -405,7 +405,14 @@ pub fn build(home: &Home, id: &str, log: &Log) -> Result<Card, CliError> {
     let family = family_block(&box_records, id, &own, &at).map_err(refuse)?;
     let spec = &source.spec;
     let surprises = sections::surprises(log);
-    let recipe = recipe::recipe(&dir, id, surprises.box_versions.first().cloned())
+    let levels: Vec<u8> = (log.records.iter().filter(|r| r.kind == "row"))
+        .filter_map(|r| {
+            r.body["isolation"]
+                .as_u64()
+                .and_then(|n| u8::try_from(n).ok())
+        })
+        .collect();
+    let recipe = recipe::recipe(&dir, id, levels, surprises.box_versions.first().cloned())
         .map_err(CliError::usage)?;
     let citation = recipe::citation(&dir, id).map_err(CliError::usage)?;
     Ok(Card {
