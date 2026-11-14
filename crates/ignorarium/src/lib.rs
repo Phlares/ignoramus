@@ -8,6 +8,7 @@ pub mod card;
 pub mod cli;
 pub mod control;
 pub mod derived;
+pub mod deviations;
 pub mod diag;
 pub mod environ;
 pub mod estimate;

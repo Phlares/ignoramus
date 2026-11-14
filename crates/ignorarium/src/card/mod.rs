@@ -5,8 +5,10 @@ use crate::cli::check::HomeRecords;
 use crate::cli::status::{relabelled, shown_labels};
 use crate::cli::{CliError, not_registered, stopped_why};
 use crate::derived::{
-    Analysis, ChildEstimate, Estimate, OPENED, Register, SpawnStop, StudyState, Verdict,
+    Analysis, ChildEstimate, Estimate, OPENED, PinDeviated, Register, SpawnStop, StudyState,
+    Verdict,
 };
+use crate::deviations::{Deviations, Timing};
 use crate::home::Home;
 use crate::records::{Log, Record};
 use crate::rules::BoxRecords;
@@ -95,6 +97,67 @@ pub struct Clip {
     pub units: u64,
 }
 
+/// One row of the deviation table. A signed row comes from the register record; an unsigned
+/// row comes from `deviations.toml`, which no key signs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "mark", rename_all = "lowercase")]
+pub enum DeviationRow {
+    Signed {
+        from: String,
+        reason: String,
+        timing: String,
+        differs: Vec<String>,
+    },
+    Unsigned {
+        /// `deviation` or `unregistered`.
+        entry: String,
+        /// The deviation's type, or the unregistered step.
+        subject: String,
+        reason: String,
+        timing: Timing,
+        original: Option<String>,
+        impact: Option<String>,
+        source: String,
+        /// SHA-256 of `deviations.toml`.
+        sha256: String,
+    },
+}
+
+/// The deviation table: the signed rows first, then the file's rows.
+pub fn deviation_table(signed: &[PinDeviated], file: Option<&Deviations>) -> Vec<DeviationRow> {
+    let signed = signed.iter().map(|d| DeviationRow::Signed {
+        from: d.from.clone(),
+        reason: d.reason.clone(),
+        timing: d.timing.clone(),
+        differs: d.differs.clone(),
+    });
+    let unsigned = file.into_iter().flat_map(|f| {
+        let hash = &f.sha256;
+        let deviations = f.deviation.iter().map(move |d| DeviationRow::Unsigned {
+            entry: "deviation".into(),
+            subject: d.kind.clone(),
+            reason: d.reason.clone(),
+            timing: d.timing,
+            original: Some(d.original.clone()),
+            impact: Some(d.impact.clone()),
+            source: d.source.clone(),
+            sha256: hash.clone(),
+        });
+        let unregistered = f.unregistered.iter().map(move |u| DeviationRow::Unsigned {
+            entry: "unregistered".into(),
+            subject: u.step.clone(),
+            reason: u.reason.clone(),
+            timing: u.timing,
+            original: None,
+            impact: None,
+            source: u.source.clone(),
+            sha256: hash.clone(),
+        });
+        deviations.chain(unregistered)
+    });
+    signed.chain(unsigned).collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Card {
     pub card_version: u32,
@@ -105,6 +168,7 @@ pub struct Card {
     pub hypotheses: Vec<HypothesisCard>,
     pub children: Vec<Value>,
     pub family: Value,
+    pub deviations: Vec<DeviationRow>,
 }
 
 /// The time the results were complete: the later of the last counted estimate or verdict
@@ -244,6 +308,7 @@ pub fn build(home: &Home, id: &str, log: &Log) -> Result<Card, CliError> {
     let verdicts: Vec<Verdict> = (after.iter().filter_map(Verdict::of))
         .filter(|v| seen.insert(v.hypothesis.clone()))
         .collect();
+    let file = crate::deviations::load(&home.study_dir(id)).map_err(CliError::usage)?;
     let text = std::fs::read(home.study_dir(id).join("spec.toml"))
         .map_err(|e| CliError::usage(format!("cannot report {id}: its plan: {e}")))?;
     let source = Source::read(&text, all, log.data_hashes.as_ref()).map_err(refuse)?;
@@ -296,6 +361,7 @@ pub fn build(home: &Home, id: &str, log: &Log) -> Result<Card, CliError> {
         hypotheses,
         children,
         family,
+        deviations: deviation_table(&own.deviations, file.as_ref()),
     })
 }
 
