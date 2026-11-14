@@ -150,6 +150,32 @@ fn an_e_value_never_rounds_up_to_a_pass() {
 }
 
 #[test]
+fn thresholds_round_up_and_e_values_down() {
+    let mut c = card();
+    c.claims[0].pass_e_value = Some(81.300_81);
+    c.hypotheses[0].e_value = Some(81.300_5);
+    c.surprises.triggers.push(ignorarium::derived::Trigger {
+        id: "t1".into(),
+        e_value: 81.300_5,
+        threshold: 81.300_81,
+        fired: false,
+        reason: None,
+        admitted: vec![],
+        skipped: vec![],
+    });
+    let md = markdown(&c);
+    assert!(md.contains("pass rule: e-value at least 81.31 "), "{md}");
+    assert!(md.contains("e-value 81.30)"), "{md}");
+    assert!(md.contains("e-value 81.30 against 81.31,"), "{md}");
+    // A threshold already at 4 digits stays, float noise in its scaling included.
+    c.claims[0].pass_e_value = Some(1.0 / 0.005);
+    c.surprises.triggers[0].threshold = 10.13;
+    let md = markdown(&c);
+    assert!(md.contains("pass rule: e-value at least 200.0 "), "{md}");
+    assert!(md.contains("against 10.13,"), "{md}");
+}
+
+#[test]
 fn a_gap_prints_a_note_not_a_bound() {
     let md = markdown(&with_bound(None, false));
     assert!(

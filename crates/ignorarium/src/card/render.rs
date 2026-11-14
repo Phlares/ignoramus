@@ -34,6 +34,11 @@ fn e_text(x: f64) -> String {
     sig(x, |v| (v + 1e-9).floor())
 }
 
+/// A threshold rounds up, so an e-value below it never prints equal to it.
+fn threshold_text(x: f64) -> String {
+    sig(x, |v| (v - 1e-9).ceil())
+}
+
 /// A fraction as a percent with 2 decimals; a change carries its sign.
 fn pct(x: f64, signed: bool) -> String {
     if signed {
@@ -570,7 +575,10 @@ fn claim_section(c: &Card) -> String {
                     names(&l.strata)
                 };
                 let pass = (l.pass_e_value).map_or_else(String::new, |e| {
-                    format!("; pass rule: e-value at least {} in {groups}", sig4(e))
+                    format!(
+                        "; pass rule: e-value at least {} in {groups}",
+                        threshold_text(e)
+                    )
                 });
                 let claim = l
                     .claim
@@ -718,7 +726,7 @@ fn surprises_section(c: &Card) -> String {
             "Trigger {}: e-value {} against {}, {fired}; admitted {}; skipped {}{why}",
             t.id,
             e_text(t.e_value),
-            sig4(t.threshold),
+            threshold_text(t.threshold),
             names(&t.admitted),
             names(&skipped)
         )
