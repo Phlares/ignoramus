@@ -405,6 +405,7 @@ version = "0.0.1"
 dependencies = [
  "assert_cmd",
  "clap",
+ "digest-io",
  "ed25519-dalek",
  "evidence",
  "flate2",

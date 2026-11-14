@@ -5,6 +5,7 @@ use crate::canon::sha256_hex;
 use crate::card::{self, Card, Opened, readings, recipe, render};
 use crate::derived::OPENED;
 use crate::diag::printable;
+use crate::files::optional;
 use crate::home::Home;
 use crate::records::{self, RecordDraft, RecordError};
 use serde_json::json;
@@ -283,14 +284,10 @@ fn flag_readings(old: &[u8], card: &Card) {
 fn run_card(ctx: &Ctx, id: &str, dir: &Path) -> Run {
     let home = ctx.home()?;
     let (card, parts) = report_with(ctx, id, |card| plan_card(home, card, dir))?;
-    let old = match std::fs::read(dir.join(readings::FILE)) {
-        Ok(bytes) => Some(bytes),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => {
-            eprintln!("report: cannot read {} to check it: {e}", readings::FILE);
-            None
-        }
-    };
+    let old = optional(std::fs::read(dir.join(readings::FILE))).unwrap_or_else(|e| {
+        eprintln!("report: cannot read {} to check it: {e}", readings::FILE);
+        None
+    });
     write_card(&card, &parts, dir).map_err(|e| {
         CliError::usage(format!(
             "{}: {e}; the opened record (seq {}) was appended",

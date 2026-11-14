@@ -54,34 +54,29 @@ struct Raw {
     unregistered: Vec<Unregistered>,
 }
 
-/// The bytes of `name` in `dir`, and as text; `None` when there is no such file.
-fn read(dir: &Path, name: &str) -> Result<Option<(String, Vec<u8>)>, String> {
-    let bytes = match std::fs::read(dir.join(name)) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("{name}: {e}")),
-    };
-    let text = String::from_utf8(bytes.clone()).map_err(|e| format!("{name}: {e}"))?;
-    Ok(Some((text, bytes)))
+/// The text of `name` in `dir`; `None` when there is no such file.
+fn read(dir: &Path, name: &str) -> Result<Option<String>, String> {
+    crate::files::optional(std::fs::read_to_string(dir.join(name)))
+        .map_err(|e| format!("{name}: {e}"))
 }
 
 /// The deviations file of the study folder `study_dir`; `None` when there is none.
 pub fn load(study_dir: &Path) -> Result<Option<Deviations>, String> {
-    let Some((text, bytes)) = read(study_dir, FILE)? else {
+    let Some(text) = read(study_dir, FILE)? else {
         return Ok(None);
     };
     let raw: Raw = toml::from_str(&text).map_err(|e| format!("{FILE}: {e}"))?;
     Ok(Some(Deviations {
         deviation: raw.deviation,
         unregistered: raw.unregistered,
-        sha256: crate::canon::sha256_hex(&bytes),
+        sha256: crate::canon::sha256_hex(text.as_bytes()),
     }))
 }
 
 /// The rows the box wrote to `deviations.jsonl`, with the file's SHA-256; `None` when there is
 /// no such file.
 pub fn recorded(study_dir: &Path) -> Result<Option<(Vec<DeviationRow>, String)>, String> {
-    let Some((text, bytes)) = read(study_dir, RECORDED)? else {
+    let Some(text) = read(study_dir, RECORDED)? else {
         return Ok(None);
     };
     let rows = (text.lines().enumerate())
@@ -90,5 +85,5 @@ pub fn recorded(study_dir: &Path) -> Result<Option<(Vec<DeviationRow>, String)>,
             serde_json::from_str(l).map_err(|e| format!("{RECORDED}: line {}: {e}", i + 1))
         })
         .collect::<Result<_, _>>()?;
-    Ok(Some((rows, crate::canon::sha256_hex(&bytes))))
+    Ok(Some((rows, crate::canon::sha256_hex(text.as_bytes()))))
 }

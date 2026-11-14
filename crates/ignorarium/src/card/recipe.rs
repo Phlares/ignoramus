@@ -1,10 +1,10 @@
 //! The re-run recipe and the citation (design 2.1, items 13 and 14).
 use super::sections::Field;
-use crate::canon::sha256_hex;
+use crate::canon::{sha256_file, sha256_hex};
+use crate::files::optional;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::fs::FileType;
-use std::io::{self, Read};
+use std::io;
 use std::path::Path;
 
 /// The study-folder names a re-run reads. A name ending in `/` is a tree. Nothing else in the
@@ -54,18 +54,6 @@ pub struct Recipe {
     pub manifest: Manifest,
 }
 
-fn hash_file(path: &Path) -> io::Result<String> {
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        match file.read(&mut buf)? {
-            0 => return Ok(hex::encode(hasher.finalize())),
-            n => hasher.update(&buf[..n]),
-        }
-    }
-}
-
 fn utf8(path: &Path) -> Result<&str, String> {
     path.to_str()
         .ok_or_else(|| format!("{}: the path is not UTF-8", path.display()))
@@ -107,7 +95,7 @@ fn entry(
         }
     } else if kind.is_file() {
         out.push((
-            format!("{}  {rel}", hash_file(full).map_err(fault)?),
+            format!("{}  {rel}", sha256_file(full).map_err(fault)?),
             rel.into(),
         ));
     } else {
@@ -309,15 +297,12 @@ impl Cff {
 /// The citation of study `id` from `CITATION.cff` in `dir`. A missing file gives `Missing`;
 /// a file the line reader cannot read is refused.
 pub fn citation(dir: &Path, id: &str) -> Result<Citation, String> {
-    let text = match std::fs::read_to_string(dir.join(CITATION_FILE)) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Citation {
-                bibtex: Field::Missing { link: None },
-                cff: Field::Missing { link: None },
-            });
-        }
-        Err(e) => return Err(format!("{CITATION_FILE}: {e}")),
+    let read = optional(std::fs::read_to_string(dir.join(CITATION_FILE)));
+    let Some(text) = read.map_err(|e| format!("{CITATION_FILE}: {e}"))? else {
+        return Ok(Citation {
+            bibtex: Field::Missing { link: None },
+            cff: Field::Missing { link: None },
+        });
     };
     let cff = parse(&text).map_err(|e| format!("{CITATION_FILE}: {e}"))?;
     Ok(Citation {

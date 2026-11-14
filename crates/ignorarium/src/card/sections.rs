@@ -2,10 +2,11 @@
 //! Files of the study folder that no key signs enter only by path and SHA-256.
 use super::Interval;
 use crate::analysis::{IntervalResult, claim_strata};
-use crate::canon::sha256_hex;
+use crate::canon::sha256_file;
 use crate::derived::{
     Analysis, Estimate, GroupClip, Inputs, Instrument, Register, Resolved, Trigger, Verdict,
 };
+use crate::files::optional;
 use crate::records::{Log, Record};
 use crate::rules::{Curve, CurvePoint};
 use crate::runner::Tally;
@@ -55,14 +56,11 @@ pub struct Outside {
 impl Outside {
     /// File `name` of the study folder `dir`; `None` when there is none.
     pub fn of(dir: &Path, name: &str) -> Result<Option<Outside>, String> {
-        match std::fs::read(dir.join(name)) {
-            Ok(bytes) => Ok(Some(Outside {
-                path: name.into(),
-                sha256: sha256_hex(&bytes),
-            })),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(format!("{name}: {e}")),
-        }
+        let hash = optional(sha256_file(&dir.join(name))).map_err(|e| format!("{name}: {e}"))?;
+        Ok(hash.map(|sha256| Outside {
+            path: name.into(),
+            sha256,
+        }))
     }
 }
 

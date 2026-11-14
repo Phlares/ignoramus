@@ -1,8 +1,18 @@
-//! Write-once files: atomic publish, no overwrite, no symlink following.
+//! Write-once files: atomic publish, no overwrite, no symlink following. And `optional`, for
+//! files that may be absent.
 use crate::canon::canonical_line;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+
+/// `found`, with a missing file as `None`.
+pub fn optional<T>(found: io::Result<T>) -> io::Result<Option<T>> {
+    match found {
+        Ok(v) => Ok(Some(v)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Written {
