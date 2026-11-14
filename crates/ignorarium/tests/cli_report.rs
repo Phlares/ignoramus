@@ -593,6 +593,27 @@ fn tex_writes_its_files_to_the_out_folder() {
     }
 }
 
+#[test]
+fn tex_refuses_colliding_value_names_before_the_opened_record() {
+    let lab = lab();
+    let named = |h: &str| {
+        let mut e = common::arm_a();
+        e["hypothesis"] = json!(h);
+        e
+    };
+    let bodies = finished_with(instrument(), None, vec![named("h 1"), named("h-1")]);
+    plant(&lab.home, "s1", &bodies);
+    let out = lab.root.join("tex-out");
+    let a = bin(&lab)
+        .args(["report", "s1", "--format", "tex", "--out"])
+        .arg(&out)
+        .assert()
+        .code(2);
+    let err = String::from_utf8_lossy(&a.get_output().stderr).into_owned();
+    assert!(err.contains("h 1") && err.contains("h-1"), "{err}");
+    no_opened(&lab);
+}
+
 /// A payload whose `arm-a` value is 6 against the reference's 8: every unit pairs to -25 %.
 const MINUS_25: &str = "#!/bin/sh\ncase \"$2\" in exact) v=8;; *) v=6;; esac\nprintf '{\"ppl\": %s}' \"$v\" > \"$IGNORARIUM_OUT/values.json\"\n";
 

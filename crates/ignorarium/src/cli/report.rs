@@ -155,11 +155,8 @@ fn write_files(dir: &Path, files: &[(String, String)]) -> std::io::Result<()> {
         .try_for_each(|(name, text)| std::fs::write(dir.join(name), text))
 }
 
-/// Writes the LaTeX fragments of `card` into `dir`; the count of files.
-fn write_tex(card: &Card, dir: &Path) -> Result<usize, CliError> {
-    let files = render::latex(card).map_err(|e| CliError::usage(format!("report: {e}")))?;
-    write_files(dir, &files).map_err(|e| CliError::usage(format!("{}: {e}", dir.display())))?;
-    Ok(files.len())
+fn latex(card: &Card) -> Result<Vec<(String, String)>, CliError> {
+    render::latex(card).map_err(|e| CliError::usage(format!("report: {e}")))
 }
 
 const CARD_FILES: [&str; 4] = ["card.json", "card.md", "manifest.sha256", readings::FILE];
@@ -229,7 +226,7 @@ fn plan_card(home: &Home, card: &Card, dir: &Path) -> Result<Parts, CliError> {
         ));
     }
     let parts = Parts {
-        tex: render::latex(card).map_err(usage)?,
+        tex: latex(card)?,
         figures: render::figures(card).map_err(usage)?,
         manifest,
     };
@@ -329,14 +326,16 @@ pub fn run(ctx: &Ctx, id: &str, format: Format, card: bool, dir: Option<&Path>) 
             ));
         }
     }
-    let r = report(ctx, id)?;
     let shown = match (format, dir) {
-        (Format::Json, _) => r.json(),
-        (Format::Md, _) => render::markdown(&r),
         (Format::Tex, Some(dir)) => {
-            format!("wrote {} files to {}\n", write_tex(&r, dir)?, dir.display())
+            let (_, files) = report_with(ctx, id, latex)?;
+            write_files(dir, &files)
+                .map_err(|e| CliError::usage(format!("{}: {e}", dir.display())))?;
+            format!("wrote {} files to {}\n", files.len(), dir.display())
         }
-        _ => text(&r),
+        (Format::Json, _) => report(ctx, id)?.json(),
+        (Format::Md, _) => render::markdown(&report(ctx, id)?),
+        _ => text(&report(ctx, id)?),
     };
     out(&shown)?;
     Ok(Done::exit(0))
