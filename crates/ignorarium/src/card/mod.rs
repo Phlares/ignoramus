@@ -4,11 +4,12 @@ use crate::analysis::{IntervalResult, Source};
 use crate::cli::check::HomeRecords;
 use crate::cli::status::{relabelled, shown_labels};
 use crate::cli::{CliError, not_registered, stopped_why};
+use crate::control::{DeviationRow as Recorded, Timing};
 use crate::derived::{
     Analysis, ChildEstimate, Estimate, OPENED, PinDeviated, Register, SpawnStop, StudyState,
     Verdict,
 };
-use crate::deviations::{Deviations, Timing};
+use crate::deviations::Deviations;
 use crate::home::Home;
 use crate::records::{Log, Record};
 use crate::rules::BoxRecords;
@@ -97,8 +98,9 @@ pub struct Clip {
     pub units: u64,
 }
 
-/// One row of the deviation table. A signed row comes from the register record; an unsigned
-/// row comes from `deviations.toml`, which no key signs.
+/// One row of the deviation table. A signed row comes from the register record. A recorded
+/// row comes from `deviations.jsonl`, which the box writes. An unsigned row comes from
+/// `deviations.toml`, which a person writes. No key signs the last two.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "mark", rename_all = "lowercase")]
 pub enum DeviationRow {
@@ -108,6 +110,16 @@ pub enum DeviationRow {
         timing: String,
         differs: Vec<String>,
     },
+    Recorded {
+        kind: String,
+        reason: String,
+        timing: Timing,
+        original: String,
+        justification: String,
+        impact: String,
+        /// SHA-256 of `deviations.jsonl`.
+        sha256: String,
+    },
     Unsigned {
         /// `deviation` or `unregistered`.
         entry: String,
@@ -116,6 +128,7 @@ pub enum DeviationRow {
         reason: String,
         timing: Timing,
         original: Option<String>,
+        justification: Option<String>,
         impact: Option<String>,
         source: String,
         /// SHA-256 of `deviations.toml`.
@@ -123,23 +136,39 @@ pub enum DeviationRow {
     },
 }
 
-/// The deviation table: the signed rows first, then the file's rows.
-pub fn deviation_table(signed: &[PinDeviated], file: Option<&Deviations>) -> Vec<DeviationRow> {
+/// The deviation table: signed rows, then the rows the box recorded, then the file's rows.
+pub fn deviation_table(
+    signed: &[PinDeviated],
+    recorded: Option<&(Vec<Recorded>, String)>,
+    file: Option<&Deviations>,
+) -> Vec<DeviationRow> {
     let signed = signed.iter().map(|d| DeviationRow::Signed {
         from: d.from.clone(),
         reason: d.reason.clone(),
         timing: d.timing.clone(),
         differs: d.differs.clone(),
     });
+    let recorded = recorded.into_iter().flat_map(|(rows, hash)| {
+        rows.iter().map(move |r| DeviationRow::Recorded {
+            kind: r.kind.clone(),
+            reason: r.reason.clone(),
+            timing: r.timing,
+            original: r.original.clone(),
+            justification: r.justification.clone(),
+            impact: r.impact.clone(),
+            sha256: hash.clone(),
+        })
+    });
     let unsigned = file.into_iter().flat_map(|f| {
         let hash = &f.sha256;
         let deviations = f.deviation.iter().map(move |d| DeviationRow::Unsigned {
             entry: "deviation".into(),
-            subject: d.kind.clone(),
-            reason: d.reason.clone(),
-            timing: d.timing,
-            original: Some(d.original.clone()),
-            impact: Some(d.impact.clone()),
+            subject: d.row.kind.clone(),
+            reason: d.row.reason.clone(),
+            timing: d.row.timing,
+            original: Some(d.row.original.clone()),
+            justification: Some(d.row.justification.clone()),
+            impact: Some(d.row.impact.clone()),
             source: d.source.clone(),
             sha256: hash.clone(),
         });
@@ -149,13 +178,14 @@ pub fn deviation_table(signed: &[PinDeviated], file: Option<&Deviations>) -> Vec
             reason: u.reason.clone(),
             timing: u.timing,
             original: None,
+            justification: None,
             impact: None,
             source: u.source.clone(),
             sha256: hash.clone(),
         });
         deviations.chain(unregistered)
     });
-    signed.chain(unsigned).collect()
+    signed.chain(recorded).chain(unsigned).collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -308,6 +338,7 @@ pub fn build(home: &Home, id: &str, log: &Log) -> Result<Card, CliError> {
     let verdicts: Vec<Verdict> = (after.iter().filter_map(Verdict::of))
         .filter(|v| seen.insert(v.hypothesis.clone()))
         .collect();
+    let recorded = crate::deviations::recorded(&home.study_dir(id)).map_err(CliError::usage)?;
     let file = crate::deviations::load(&home.study_dir(id)).map_err(CliError::usage)?;
     let text = std::fs::read(home.study_dir(id).join("spec.toml"))
         .map_err(|e| CliError::usage(format!("cannot report {id}: its plan: {e}")))?;
@@ -361,7 +392,7 @@ pub fn build(home: &Home, id: &str, log: &Log) -> Result<Card, CliError> {
         hypotheses,
         children,
         family,
-        deviations: deviation_table(&own.deviations, file.as_ref()),
+        deviations: deviation_table(&own.deviations, recorded.as_ref(), file.as_ref()),
     })
 }
 
