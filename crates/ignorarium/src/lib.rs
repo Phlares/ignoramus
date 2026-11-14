@@ -4,6 +4,7 @@ pub mod analysis;
 pub mod backend;
 pub mod budget;
 pub mod canon;
+pub mod card;
 pub mod cli;
 pub mod control;
 pub mod derived;

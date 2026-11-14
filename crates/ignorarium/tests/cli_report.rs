@@ -503,3 +503,41 @@ fn a_blind_report_shows_children_by_the_blind_label_of_their_condition() {
         text(&a)
     );
 }
+
+#[test]
+fn report_json_has_card_version() {
+    let lab = lab();
+    let bodies = finished_study(&three(), &[]);
+    plant(&lab.home, "s1", &bodies);
+    let a = bin(&lab)
+        .args(["report", "s1", "--format", "json"])
+        .assert()
+        .success();
+    let r: Value = serde_json::from_str(&text(&a)).unwrap();
+    assert_eq!(r["card_version"], 1);
+    assert_eq!(r["study"], "s1");
+    assert_eq!(r["finished_at"], ts_of(&lab));
+    assert_eq!(r["records"], bodies.len());
+    assert_eq!(r["hypotheses"].as_array().unwrap().len(), 3);
+    assert_eq!(r["hypotheses"][0]["e_value"], 312.4);
+    assert_eq!(r["children"], json!([]));
+    assert_eq!(r["family"], Value::Null);
+    let opened = records_of(&lab, "s1").pop().unwrap();
+    assert_eq!(r["opened"], json!({ "seq": opened.seq, "ts": opened.ts }));
+}
+
+#[test]
+fn formats_not_built_yet_are_refused() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    for f in ["md", "tex"] {
+        let a = bin(&lab)
+            .args(["report", "s1", "--format", f])
+            .assert()
+            .code(2);
+        let err = String::from_utf8_lossy(&a.get_output().stderr).into_owned();
+        assert!(err.contains("not built yet"), "{f}: {err}");
+    }
+    let kinds: Vec<String> = records_of(&lab, "s1").into_iter().map(|r| r.kind).collect();
+    assert!(!kinds.contains(&"opened".to_string()), "{kinds:?}");
+}

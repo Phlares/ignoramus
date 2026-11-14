@@ -187,8 +187,11 @@ enum Verb {
     Report {
         /// Study id.
         study: String,
-        /// Print one JSON object instead of text.
-        #[arg(long)]
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        format: report::Format,
+        /// Same as `--format json`.
+        #[arg(long, conflicts_with = "format")]
         json: bool,
     },
     /// Ask a run to pause at the next row boundary.
@@ -261,7 +264,15 @@ impl Verb {
             Verb::Probe => probe::run(ctx),
             Verb::Run { study, max_level } => run::run(ctx, &study, max_level),
             Verb::Status { study, json } => status::run(ctx, &study, json),
-            Verb::Report { study, json } => report::run(ctx, &study, json),
+            Verb::Report {
+                study,
+                format,
+                json,
+            } => report::run(
+                ctx,
+                &study,
+                if json { report::Format::Json } else { format },
+            ),
             Verb::Pause { study } => pause::run(ctx, &study),
             Verb::Resume { study } => resume::run(ctx, &study),
             Verb::Stop { study, reason } => stop::run(ctx, &study, &reason),
@@ -348,7 +359,7 @@ fn located<'a>(ctx: &'a Ctx, id: &str) -> Result<(&'a Home, PathBuf), CliError> 
     Ok((home, log))
 }
 
-fn not_registered(id: &str) -> CliError {
+pub(crate) fn not_registered(id: &str) -> CliError {
     CliError::refuse(format!("study {id} is not registered"))
 }
 
@@ -389,7 +400,7 @@ fn refuse_if_stopped(id: &str, all: &[crate::records::Record]) -> Result<(), Cli
 }
 
 /// The reason in the study's stop record, when it has one.
-fn stopped_why(all: &[crate::records::Record]) -> Option<String> {
+pub(crate) fn stopped_why(all: &[crate::records::Record]) -> Option<String> {
     all.iter()
         .find(|r| r.kind == "stop")
         .map(|r| r.body["why"].as_str().unwrap_or_default().to_string())
