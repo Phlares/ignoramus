@@ -379,7 +379,7 @@ pub fn build(home: &Home, id: &str, log: &Log) -> Result<Card, CliError> {
     let text = std::fs::read(dir.join("spec.toml"))
         .map_err(|e| CliError::usage(format!("cannot report {id}: its plan: {e}")))?;
     let source = Source::read(&text, all, log.data_hashes.as_ref()).map_err(refuse)?;
-    let intervals = source.intervals(&verdicts);
+    let intervals = source.intervals(&verdicts).map_err(refuse)?;
     let hypotheses: Vec<HypothesisCard> = (verdicts.into_iter())
         .map(|v| HypothesisCard {
             clipped: clips(&analysis, &v.hypothesis),

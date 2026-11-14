@@ -987,7 +987,7 @@ fn intervals_match_verdict_order() {
     };
     let want = inverted(&drawn);
     assert!(want.margin.is_some());
-    let found = intervals(&spec, &p, &all, &HASH, &vs);
+    let found = intervals(&spec, &p, &all, &HASH, &vs).unwrap();
     assert_eq!(
         found,
         [IntervalResult {
@@ -1014,7 +1014,7 @@ fn only_a_tested_mean_claim_with_a_level_gets_an_interval() {
     let groups = same("c", "", 6, 0.0);
     let (p, clusters) = data(&within, &groups);
     let (vs, _) = decided(&within, &p, &clusters, Some(LEVEL));
-    let found = intervals(&within, &p, &clusters, &HASH, &vs);
+    let found = intervals(&within, &p, &clusters, &HASH, &vs).unwrap();
     // One per bound: up from the estimate to hi below, down to lo above.
     let ends: Vec<(&str, f64, f64)> = (found.iter())
         .map(|r| (r.side.as_str(), r.inversion.grid.from, r.inversion.grid.to))
@@ -1024,17 +1024,23 @@ fn only_a_tested_mean_claim_with_a_level_gets_an_interval() {
     // No level, no interval: an exploratory study, or a level the tree did not give.
     let exploratory = below_zero("exploratory", &[]);
     let (vs, _) = decided(&exploratory, &p, &clusters, Some(LEVEL));
-    assert_eq!(intervals(&exploratory, &p, &clusters, &HASH, &vs), []);
+    assert_eq!(
+        intervals(&exploratory, &p, &clusters, &HASH, &vs).unwrap(),
+        []
+    );
     let tested = below_zero("confirmatory", &[]);
     let (mut vs, _) = decided(&tested, &p, &clusters, Some(LEVEL));
-    assert_eq!(intervals(&tested, &p, &clusters, &HASH, &vs).len(), 1);
+    assert_eq!(
+        intervals(&tested, &p, &clusters, &HASH, &vs).unwrap().len(),
+        1
+    );
     vs[0].level = None;
-    assert_eq!(intervals(&tested, &p, &clusters, &HASH, &vs), []);
+    assert_eq!(intervals(&tested, &p, &clusters, &HASH, &vs).unwrap(), []);
     // A unit with no paired value: the test gives 0 at every margin.
     let mut short = clusters.clone();
     short[0].picked.push(1);
     let (vs, _) = decided(&tested, &p, &short, Some(LEVEL));
-    assert_eq!(intervals(&tested, &p, &short, &HASH, &vs), []);
+    assert_eq!(intervals(&tested, &p, &short, &HASH, &vs).unwrap(), []);
     // A quantile claim has no declared range to search.
     let quantile = claimed(
         "confirmatory",
@@ -1043,7 +1049,24 @@ fn only_a_tested_mean_claim_with_a_level_gets_an_interval() {
         json!({ "quantile": 0.5 }),
     );
     let (vs, _) = decided(&quantile, &p, &clusters, Some(LEVEL));
-    assert_eq!(intervals(&quantile, &p, &clusters, &HASH, &vs), []);
+    assert_eq!(intervals(&quantile, &p, &clusters, &HASH, &vs).unwrap(), []);
+}
+
+#[test]
+fn a_bound_that_cannot_be_inverted_is_an_error_not_a_gap() {
+    use ignorarium::spec::model::StatisticSpec;
+    let spec = below_zero("confirmatory", &["code", "article"]);
+    let (p, clusters) = data(&spec, &same("c", "code", 15, -1.0));
+    let (vs, _) = decided(&spec, &p, &clusters, Some(LEVEL));
+    // A stratum with no cluster has no estimate and no interval; the other keeps its own.
+    let found = intervals(&spec, &p, &clusters, &HASH, &vs).unwrap();
+    let strata: Vec<&str> = found.iter().map(|r| r.stratum.as_str()).collect();
+    assert_eq!(strata, ["code"]);
+    // A range end the grid cannot reach.
+    let mut broken = spec.clone();
+    broken.question.hypotheses[0].statistic = Some(StatisticSpec::Mean([-1.0, f64::INFINITY]));
+    let e = intervals(&broken, &p, &clusters, &HASH, &vs).unwrap_err();
+    assert!(e.contains("H1") && e.contains("code"), "{e}");
 }
 
 #[test]
@@ -1052,7 +1075,7 @@ fn a_stopped_study_gets_no_interval() {
     // 15 clusters at -1 pass at 1 / 0.005 (`strong`): the full study shows a bound.
     let (p, clusters) = data(&spec, &same("c", "", 15, -1.0));
     let go = verdicts(&spec, &p, &clusters, &HASH, Some(LEVEL), None);
-    let shown = intervals(&spec, &p, &clusters, &HASH, &go);
+    let shown = intervals(&spec, &p, &clusters, &HASH, &go).unwrap();
     assert!(shown.len() == 1 && shown[0].inversion.margin.is_some());
     // The stop forces the claim to fail with e-value 0, and keeps its level.
     let stopped = verdicts(&spec, &p, &clusters, &HASH, Some(LEVEL), Some("why"));
@@ -1060,7 +1083,10 @@ fn a_stopped_study_gets_no_interval() {
         (stopped[0].e_value, stopped[0].level),
         (Some(0.0), Some(LEVEL))
     );
-    assert_eq!(intervals(&spec, &p, &clusters, &HASH, &stopped), []);
+    assert_eq!(
+        intervals(&spec, &p, &clusters, &HASH, &stopped).unwrap(),
+        []
+    );
 }
 
 fn clip(stratum: &str, below: u64, above: u64, units: u64) -> GroupClip {

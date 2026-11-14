@@ -314,7 +314,7 @@ impl Source {
     }
 
     /// The `intervals` of `verdicts` over the clusters the study measured.
-    pub fn intervals(&self, verdicts: &[Verdict]) -> Vec<IntervalResult> {
+    pub fn intervals(&self, verdicts: &[Verdict]) -> Result<Vec<IntervalResult>, String> {
         intervals(
             &self.spec,
             &self.pairs,
@@ -770,14 +770,14 @@ pub struct IntervalResult {
 /// above), against 1 / level. None for a verdict with an incomplete unit, whose test gives 0
 /// at every margin; for a verdict a stop forced to fail (`verdicts`), whose test never ran to
 /// its size; for a quantile claim, whose margin has no declared range; or for a stratum
-/// with no cluster, which has no estimate.
+/// with no cluster, which has no estimate. `Err` names a bound whose test cannot be inverted.
 pub fn intervals(
     spec: &Spec,
     paired: &Paired,
     clusters: &[Cluster],
     spec_hash: &[u8; 32],
     verdicts: &[Verdict],
-) -> Vec<IntervalResult> {
+) -> Result<Vec<IntervalResult>, String> {
     let mut out = Vec::new();
     let forced = |v: &Verdict| (v.reason.as_deref()).is_some_and(|r| r.starts_with(STOPPED));
     for v in (verdicts.iter()).filter(|v| v.incomplete_units == 0 && !forced(v)) {
@@ -793,6 +793,9 @@ pub fn intervals(
             let samples: Vec<&[f64]> = (ordered(h, &scope, spec_hash).into_iter())
                 .map(Vec::as_slice)
                 .collect();
+            if samples.is_empty() {
+                continue;
+            }
             let interval = |b: Bound| -> Result<IntervalResult, evidence::Error> {
                 let obs = (samples.iter())
                     .map(|xs| claim::observation(&stat, &b, xs))
@@ -811,10 +814,20 @@ pub fn intervals(
                     inversion: claim::tightest(&stat, b.tail, &samples, 1.0 / level, grid)?,
                 })
             };
-            out.extend(claim.bounds().into_iter().filter_map(|b| interval(b).ok()));
+            for b in claim.bounds() {
+                let fault = |e| {
+                    format!(
+                        "the interval of {} {} {}: {e}",
+                        h.id,
+                        scope.stratum,
+                        side(&b)
+                    )
+                };
+                out.push(interval(b).map_err(fault)?);
+            }
         }
     }
-    out
+    Ok(out)
 }
 
 /// `e` kept finite: above the largest float it is that float, and NaN is 0, so it fails.
