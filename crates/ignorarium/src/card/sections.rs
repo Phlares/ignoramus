@@ -40,8 +40,6 @@ pub const LISTED: [&str; 5] = [
     crate::deviations::FILE,
     super::recipe::CITATION_FILE,
 ];
-/// The author slots. The card names them by path only, so filling a slot keeps the card's hash.
-pub const READINGS: &str = "readings.md";
 /// The run log, which no key signs.
 pub const EVENTS: &str = "events.jsonl";
 const PENDING: &str = "pending";
@@ -122,7 +120,7 @@ pub fn outside(study_dir: &Path) -> Result<OutsideFiles, String> {
     }
     Ok(OutsideFiles {
         files,
-        readings: READINGS.into(),
+        readings: super::readings::FILE.into(),
     })
 }
 

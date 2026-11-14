@@ -1,5 +1,6 @@
 //! The card as Markdown, as LaTeX fragments and as one figure per hypothesis.
 //! Each function reads the card and nothing else. Display rounding lives here only.
+use super::readings::NOT_READ;
 use super::sections::{Field, Outside, ResultRow, UNRECORDED};
 use super::{Card, DeviationRow, Interval};
 use crate::spec::model::{Claim, StatisticSpec};
@@ -276,7 +277,7 @@ fn deviations_table(c: &Card) -> Table {
                 original.clone(),
                 justification.clone(),
                 impact.clone(),
-                "deviations.jsonl".into(),
+                crate::deviations::RECORDED.into(),
             ],
             DeviationRow::Unsigned {
                 entry,
@@ -646,7 +647,7 @@ fn figures_section(c: &Card) -> String {
     (c.claims.iter())
         .map(|l| {
             let alt = esc(&alt_text(c, &l.hypothesis));
-            format!("- ![{alt}](figure-{}.svg)\n", slug(&l.hypothesis))
+            format!("- ![{alt}]({})\n", figure_file(&l.hypothesis))
         })
         .collect()
 }
@@ -875,8 +876,10 @@ pub fn markdown(c: &Card) -> String {
             .map(|v| format!("{}: {}", v.hypothesis, v.label))
             .collect(),
     );
+    let (first, rest) = NOT_READ.split_at(1);
     let readings = format!(
-        "Not yet read by the author. The slots are in {}.\n",
+        "{}{rest}. The slots are in {}.\n",
+        first.to_uppercase(),
         esc(&c.outside.readings)
     );
     let sections = [
