@@ -1,11 +1,12 @@
 //! `report`: the verdicts of a finished study, with the clip counts of its mean claims.
 //! Appends one `opened` record, so a reader of the log sees that the results were read.
 use super::{CliError, Ctx, Done, Run, located, not_registered, out};
-use crate::card::{self, Card, Opened};
+use crate::card::{self, Card, Opened, render};
 use crate::derived::OPENED;
 use crate::diag::printable;
 use crate::records::{self, RecordDraft, RecordError};
 use serde_json::json;
+use std::path::Path;
 
 /// The way `report` writes the card.
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -14,13 +15,6 @@ pub enum Format {
     Json,
     Md,
     Tex,
-}
-
-impl Format {
-    fn name(self) -> String {
-        let value = clap::ValueEnum::to_possible_value(&self);
-        value.map_or_else(String::new, |v| v.get_name().to_string())
-    }
 }
 
 /// What stops the append: a refusal of this verb, or the log's own fault.
@@ -141,17 +135,38 @@ fn text(r: &Card) -> String {
     s
 }
 
-pub fn run(ctx: &Ctx, id: &str, format: Format) -> Run {
-    if matches!(format, Format::Md | Format::Tex) {
-        return Err(CliError::usage(format!(
-            "report: format {} is not built yet",
-            format.name()
-        )));
+/// Writes the LaTeX fragments of `card` into `dir`; the count of files.
+fn write_tex(card: &Card, dir: &Path) -> Result<usize, CliError> {
+    let io = |e: std::io::Error| CliError::usage(format!("{}: {e}", dir.display()));
+    std::fs::create_dir_all(dir).map_err(io)?;
+    let files = render::latex(card);
+    for (name, text) in &files {
+        std::fs::write(dir.join(name), text).map_err(io)?;
+    }
+    Ok(files.len())
+}
+
+pub fn run(ctx: &Ctx, id: &str, format: Format, dir: Option<&Path>) -> Run {
+    // Refused before `report` appends its record.
+    match (format, dir) {
+        (Format::Tex, None) => {
+            return Err(CliError::usage("report: --format tex needs --out <dir>"));
+        }
+        (Format::Tex, Some(_)) | (_, None) => {}
+        (_, Some(_)) => {
+            return Err(CliError::usage(
+                "report: --out applies to --format tex only",
+            ));
+        }
     }
     let r = report(ctx, id)?;
-    let shown = match format {
-        Format::Json => {
+    let shown = match (format, dir) {
+        (Format::Json, _) => {
             serde_json::to_string_pretty(&r).map_err(|e| CliError::usage(e.to_string()))? + "\n"
+        }
+        (Format::Md, _) => render::markdown(&r),
+        (Format::Tex, Some(dir)) => {
+            format!("wrote {} files to {}\n", write_tex(&r, dir)?, dir.display())
         }
         _ => text(&r),
     };

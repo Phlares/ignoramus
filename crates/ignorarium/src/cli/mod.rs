@@ -193,6 +193,9 @@ enum Verb {
         /// Same as `--format json`.
         #[arg(long, conflicts_with = "format")]
         json: bool,
+        /// The folder `--format tex` writes its files to.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// Ask a run to pause at the next row boundary.
     Pause {
@@ -268,10 +271,12 @@ impl Verb {
                 study,
                 format,
                 json,
+                out,
             } => report::run(
                 ctx,
                 &study,
                 if json { report::Format::Json } else { format },
+                out.as_deref(),
             ),
             Verb::Pause { study } => pause::run(ctx, &study),
             Verb::Resume { study } => resume::run(ctx, &study),

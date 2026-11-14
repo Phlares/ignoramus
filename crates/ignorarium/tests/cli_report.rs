@@ -545,19 +545,52 @@ fn report_json_has_card_version() {
 }
 
 #[test]
-fn formats_not_built_yet_are_refused() {
+fn md_prints_the_markdown_card() {
     let lab = lab();
     plant(&lab.home, "s1", &finished_study(&three(), &[]));
-    for f in ["md", "tex"] {
-        let a = bin(&lab)
-            .args(["report", "s1", "--format", f])
-            .assert()
-            .code(2);
+    let a = bin(&lab)
+        .args(["report", "s1", "--format", "md"])
+        .assert()
+        .success();
+    let md = text(&a);
+    assert!(
+        md.starts_with(
+            "# Study card: s1
+"
+        ),
+        "{md}"
+    );
+    assert!(md.contains("## Re-run recipe"));
+    let kinds: Vec<String> = records_of(&lab, "s1").into_iter().map(|r| r.kind).collect();
+    assert!(kinds.contains(&"opened".to_string()), "{kinds:?}");
+}
+
+#[test]
+fn tex_needs_an_out_folder_and_out_needs_tex() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    for args in [&["--format", "tex"][..], &["--format", "md", "--out", "x"]] {
+        let a = bin(&lab).args(["report", "s1"]).args(args).assert().code(2);
         let err = String::from_utf8_lossy(&a.get_output().stderr).into_owned();
-        assert!(err.contains("not built yet"), "{f}: {err}");
+        assert!(err.contains("--out"), "{args:?}: {err}");
     }
     let kinds: Vec<String> = records_of(&lab, "s1").into_iter().map(|r| r.kind).collect();
     assert!(!kinds.contains(&"opened".to_string()), "{kinds:?}");
+}
+
+#[test]
+fn tex_writes_its_files_to_the_out_folder() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let out = lab.home.study_dir("s1").join("tex-out");
+    bin(&lab)
+        .args(["report", "s1", "--format", "tex", "--out"])
+        .arg(&out)
+        .assert()
+        .success();
+    for name in ["results.tex", "deviations.tex", "sensitivity.tex"] {
+        assert!(out.join(name).is_file(), "{name}");
+    }
 }
 
 /// A payload whose `arm-a` value is 6 against the reference's 8: every unit pairs to -25 %.

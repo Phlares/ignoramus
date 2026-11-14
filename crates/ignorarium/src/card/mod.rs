@@ -1,6 +1,7 @@
 //! The study card: everything `report` says about a finished study, as one structure.
 //! Each output format renders this structure; none reads the log on its own.
 pub mod recipe;
+pub mod render;
 pub mod sections;
 
 use crate::analysis::{IntervalResult, Source};
