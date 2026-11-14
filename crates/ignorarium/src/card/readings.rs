@@ -123,8 +123,13 @@ fn uncommented(text: &str) -> String {
     out + rest
 }
 
-/// Each slot of `text` as (heading, prose). A slot with no prose reads `NOT_READ`.
-pub fn read_slots(text: &str) -> Vec<(String, String)> {
+/// Each slot of `text` as (heading, prose). A slot with no prose reads `NOT_READ`. `Err`
+/// holds every `check` error: the slots refuse a typed number.
+pub fn read_slots(text: &str) -> Result<Vec<(String, String)>, Vec<SlotError>> {
+    let errors = check(text);
+    if !errors.is_empty() {
+        return Err(errors);
+    }
     let mut slots: Vec<(String, String)> = vec![];
     for line in text.lines() {
         match slot_name(line) {
@@ -145,7 +150,7 @@ pub fn read_slots(text: &str) -> Vec<(String, String)> {
             prose
         };
     }
-    slots
+    Ok(slots)
 }
 
 /// An empty `readings.md` for `card`: the hash header, `## TL;DR`, and one

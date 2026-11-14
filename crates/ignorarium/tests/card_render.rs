@@ -386,14 +386,32 @@ fn slot_allows_references_refuses_digits() {
 fn empty_slot_renders_not_yet_read() {
     let c = card();
     let t = readings::template(&c);
-    let shown = readings::read_slots(&t);
+    let shown = readings::read_slots(&t).unwrap();
     assert_eq!(shown[0], ("TL;DR".to_string(), NOT_READ.to_string()));
     assert_eq!(shown.len(), 1 + c.results.len());
     assert!(shown.iter().all(|(_, s)| s == NOT_READ), "{shown:?}");
     assert_eq!(NOT_READ, "not yet read by the author");
     assert_eq!(readings::check(&t), vec![]);
     let filled = t.replacen("## TL;DR\n", "## TL;DR\n\nIt held.\n", 1);
-    assert_eq!(readings::read_slots(&filled)[0].1, "It held.");
+    assert_eq!(readings::read_slots(&filled).unwrap()[0].1, "It held.");
+}
+
+#[test]
+fn slots_with_a_typed_number_are_refused_when_read() {
+    let t = readings::template(&card());
+    let typed = t.replacen(
+        "## TL;DR
+",
+        "## TL;DR
+
+It moved 5 points.
+",
+        1,
+    );
+    let errors = readings::read_slots(&typed).unwrap_err();
+    assert_eq!(errors, readings::check(&typed));
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].slot, "TL;DR");
 }
 
 #[test]
