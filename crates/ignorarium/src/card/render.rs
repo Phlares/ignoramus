@@ -15,18 +15,23 @@ fn word<T: Serialize>(v: &T) -> String {
     }
 }
 
-/// `x` to 4 significant digits.
-fn sig4(x: f64) -> String {
+/// `x` to 4 significant digits, cut to an integer count of units by `cut`.
+fn sig(x: f64, cut: fn(f64) -> f64) -> String {
     if x == 0.0 || !x.is_finite() {
         return x.to_string();
     }
     let e = x.abs().log10().floor() as i32;
     let scale = 10f64.powi(e - 3);
-    format!(
-        "{:.*}",
-        (3 - e).max(0) as usize,
-        (x / scale).round() * scale
-    )
+    format!("{:.*}", (3 - e).max(0) as usize, cut(x / scale) * scale)
+}
+
+fn sig4(x: f64) -> String {
+    sig(x, f64::round)
+}
+
+/// An e-value rounds down: the printed number never reaches a threshold the value misses.
+fn e_text(x: f64) -> String {
+    sig(x, |v| (v + 1e-9).floor())
 }
 
 /// A fraction as a percent with 2 decimals; a change carries its sign.
@@ -38,13 +43,24 @@ fn pct(x: f64, signed: bool) -> String {
     }
 }
 
-/// The decimals a grid step names: step 1e-4 gives 4.
+/// The decimals in a grid step's shortest form: 1e-4 gives 4, 0.25 gives 2, 0.5 gives 1.
 fn decimals(step: f64) -> usize {
-    (-step.log10() - 1e-9).ceil().max(0.0) as usize
+    (step.to_string().split_once('.')).map_or(0, |(_, d)| d.len())
 }
 
+/// A bound rounds outward to the step's decimals: up for `below`, down for `above`. The shown
+/// number never lies on the passing side of the true bound.
 fn bound_text(i: &Interval) -> Option<String> {
-    i.bound.map(|b| format!("{:.*}", decimals(i.grid.step), b))
+    let d = decimals(i.grid.step);
+    let k = 10f64.powi(d as i32);
+    i.bound.map(|b| {
+        let n = if i.side == "above" {
+            (b * k + 1e-9).floor()
+        } else {
+            (b * k - 1e-9).ceil()
+        };
+        format!("{:.*}", d, n / k)
+    })
 }
 
 fn interval_text(i: &Interval) -> String {
@@ -146,7 +162,7 @@ fn results_table(c: &Card) -> Table {
                 sig4(r.estimate),
                 r.percent_change.map_or_else(String::new, |p| pct(p, true)),
                 interval,
-                r.e_value.map_or_else(String::new, sig4),
+                r.e_value.map_or_else(String::new, e_text),
                 r.clusters.to_string(),
                 r.units.to_string(),
                 if r.registered {
@@ -284,7 +300,7 @@ fn md_table(t: &Table) -> String {
     let mut s = line(t.head.iter().map(|h| h.to_string()).collect());
     s += &line(t.head.iter().map(|_| "---".to_string()).collect());
     for r in &t.rows {
-        s += &line(r.iter().map(|c| flat(c).replace('|', "\\|")).collect());
+        s += &line(r.iter().map(|c| esc(c)).collect());
     }
     s
 }
@@ -313,9 +329,10 @@ fn tabular(t: &Table) -> String {
     s + "\\end{tabular}\n"
 }
 
-/// `s` as a file-name part: lower case, `[a-z0-9-]` only; the pooled group is `all`.
+/// `s` as a file-name part: lower case, `[a-z0-9-]` only. A name is never empty, so the empty
+/// slug is the pooled group's alone.
 fn slug(s: &str) -> String {
-    (group(s).to_lowercase().chars())
+    (s.to_lowercase().chars())
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()
 }
@@ -327,7 +344,7 @@ fn values(r: &ResultRow) -> Vec<(String, String)> {
         r.percent_change
             .map(|p| ("percent-change".into(), pct(p, true))),
     );
-    v.extend(r.e_value.map(|e| ("e-value".into(), sig4(e))));
+    v.extend(r.e_value.map(|e| ("e-value".into(), e_text(e))));
     for i in &r.intervals {
         v.extend(bound_text(i).map(|b| (format!("bound-{}", slug(&i.side)), b)));
     }
@@ -335,20 +352,29 @@ fn values(r: &ResultRow) -> Vec<(String, String)> {
 }
 
 /// The LaTeX fragments of the card: (file name, contents). Every table is a plain `tabular`.
-pub fn latex(c: &Card) -> Vec<(String, String)> {
+/// Two values that name the same file are refused.
+pub fn latex(c: &Card) -> Result<Vec<(String, String)>, String> {
     let mut out = vec![
         ("study.tex".to_string(), tex_escape(&c.study)),
         ("results.tex".into(), tabular(&results_table(c))),
         ("deviations.tex".into(), tabular(&deviations_table(c))),
         ("sensitivity.tex".into(), tabular(&sensitivity_table(c))),
     ];
+    let mut from = std::collections::BTreeMap::new();
     for r in &c.results {
         for (name, text) in values(r) {
             let (h, g) = (slug(&r.hypothesis), slug(&r.stratum));
-            out.push((format!("value-{h}-{g}-{name}.tex"), tex_escape(&text)));
+            let file = format!("value-{h}-{g}-{name}.tex");
+            let source = format!("({:?}, {:?}, {name})", r.hypothesis, r.stratum);
+            if let Some(first) = from.insert(file.clone(), source.clone()) {
+                return Err(format!(
+                    "{file}: two values (hypothesis, group, field) share it: {first} and {source}"
+                ));
+            }
+            out.push((file, tex_escape(&text)));
         }
     }
-    out
+    Ok(out)
 }
 
 const INK: &str = "#1a1a1a";
@@ -431,8 +457,30 @@ pub fn figure(c: &Card, h: &str) -> String {
     s + "</svg>\n"
 }
 
+/// Card text as inline Markdown text: one line, no markup. Every card string goes through here.
+fn esc(s: &str) -> String {
+    let mut out = String::new();
+    for c in flat(s).chars() {
+        if "\\`*_[]<>|&~".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// `text` in a code fence longer than any run of backticks in it.
+fn fence(text: &str, lang: &str) -> String {
+    let run = (text.split(|c| c != '`').map(str::len)).max().unwrap_or(0);
+    let f = "`".repeat((run + 1).max(3));
+    format!("{f}{lang}\n{}\n{f}", text.trim_end())
+}
+
 fn list(items: Vec<String>) -> String {
-    items.into_iter().map(|i| format!("- {i}\n")).collect()
+    items
+        .into_iter()
+        .map(|i| format!("- {}\n", esc(&i)))
+        .collect()
 }
 
 fn names(v: &[String]) -> String {
@@ -515,7 +563,7 @@ fn verdict_section(c: &Card) -> String {
                 .flat_map(|h| {
                     let mut f = vec![format!("basis {}", h.basis)];
                     f.extend(h.level.map(|l| format!("level {l}")));
-                    f.extend(h.e_value.map(|e| format!("e-value {}", sig4(e))));
+                    f.extend(h.e_value.map(|e| format!("e-value {}", e_text(e))));
                     f.extend(h.reason.clone());
                     f
                 })
@@ -552,14 +600,12 @@ fn sensitivity_section(c: &Card) -> String {
 }
 
 fn figures_section(c: &Card) -> String {
-    list(
-        (c.claims.iter())
-            .map(|l| {
-                let alt = alt_text(c, &l.hypothesis);
-                format!("![{alt}](figure-{}.svg)", slug(&l.hypothesis))
-            })
-            .collect(),
-    )
+    (c.claims.iter())
+        .map(|l| {
+            let alt = esc(&alt_text(c, &l.hypothesis));
+            format!("- ![{alt}](figure-{}.svg)\n", slug(&l.hypothesis))
+        })
+        .collect()
 }
 
 fn setup_section(c: &Card) -> String {
@@ -636,7 +682,7 @@ fn surprises_section(c: &Card) -> String {
         format!(
             "Trigger {}: e-value {} against {}, {fired}; admitted {}; skipped {}{why}",
             t.id,
-            sig4(t.e_value),
+            e_text(t.e_value),
             sig4(t.threshold),
             names(&t.admitted),
             names(&skipped)
@@ -721,7 +767,7 @@ fn runs_section(c: &Card) -> String {
 
 fn recipe_section(c: &Card) -> String {
     let (r, m) = (&c.recipe, &c.recipe.manifest);
-    let mut l = vec![format!("Command: `{}`", r.command)];
+    let mut l: Vec<String> = vec![];
     l.extend(r.requires.iter().map(|q| format!("Requires: {q}")));
     l.push(format!(
         "Isolation levels held: {}",
@@ -750,16 +796,21 @@ fn recipe_section(c: &Card) -> String {
         "Manifest: {} files, tree SHA-256 {}",
         m.files, m.tree_sha256
     ));
-    list(l)
+    format!("Command:\n\n{}\n\n{}", fence(&r.command, ""), list(l))
+}
+
+fn fenced_field(f: &Field<String>, lang: &str) -> String {
+    match f {
+        Field::Recorded { value } => format!("\n\n{}", fence(value, lang)),
+        _ => esc(&field(f, |v| v.clone())),
+    }
 }
 
 fn citation_section(c: &Card) -> String {
-    let fenced =
-        |lang: &'static str| move |t: &String| format!("\n\n```{lang}\n{}\n```", t.trim_end());
     format!(
         "BibTeX: {}\n\nCITATION.cff: {}\n",
-        field(&c.citation.bibtex, fenced("bibtex")),
-        field(&c.citation.cff, fenced("yaml"))
+        fenced_field(&c.citation.bibtex, "bibtex"),
+        fenced_field(&c.citation.cff, "yaml")
     )
 }
 
@@ -779,8 +830,8 @@ pub fn markdown(c: &Card) -> String {
             .collect(),
     );
     let readings = format!(
-        "Not yet read by the author. The slots are in `{}`.\n",
-        c.outside.readings
+        "Not yet read by the author. The slots are in {}.\n",
+        esc(&c.outside.readings)
     );
     let sections = [
         ("Header", header_section(c)),
@@ -802,5 +853,5 @@ pub fn markdown(c: &Card) -> String {
     let body: Vec<String> = (sections.iter())
         .map(|(h, b)| format!("## {h}\n\n{b}"))
         .collect();
-    format!("# Study card: {}\n\n{}", c.study, body.join("\n"))
+    format!("# Study card: {}\n\n{}", esc(&c.study), body.join("\n"))
 }

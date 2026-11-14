@@ -14,7 +14,7 @@
 
 ## Claim
 
-- H1 (ppl-ratio): claim below 0.039221; mean clipped to [-0.693147, 0.693147]; level 0.005; pass rule: e-value at least 200.0 in code, article
+- H1 (ppl-ratio): claim below 0.039221; mean clipped to \[-0.693147, 0.693147\]; level 0.005; pass rule: e-value at least 200.0 in code, article
 
 ## Verdicts
 
@@ -65,12 +65,12 @@
 - Environment: efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef
 - Model input model/m.bin (model): 13e35c44395f6cade670c076230362267c5288989d3498e207877d62b859a6d8
 - Seed root (plan hash): sha256:0a8dd75d8ea12c0b0fa61d8181b7f4644ba0e99710894279075edc760f1ad0df
-- Row seeds: 0 of 0 derive from the root by: SHA-256(plan hash bytes || "row/<index>"); a recheck copy keeps the seed of the row it repeats
+- Row seeds: 0 of 0 derive from the root by: SHA-256(plan hash bytes \|\| "row/\<index\>"); a recheck copy keeps the seed of the row it repeats
 - Launcher: cloud-hypervisor v41.0
 - Agent SHA-256: abababababababababababababababababababababababababababababababab
 - Virtual CPUs: not in the records
 - Row memory cap (MiB): 2304
-- Values the box defaulted: []
+- Values the box defaulted: \[\]
 - File statement.md: 41223cbbb20ae697e44152d58bac670e18fa614caf3b68c827bc1733d80feacd
 - File gaps.md: absent
 - File decisions.md: absent
@@ -109,11 +109,16 @@ Executions recorded nowhere cannot be listed.
 
 ## Re-run recipe
 
-- Command: `ignorarium run s1 --max-level 2`
+Command:
+
+```
+ignorarium run s1 --max-level 2
+```
+
 - Requires: a box home where the study is registered
 - Requires: the study folder as the working directory
-- Requires: the box version recorded in `box_version`
-- Isolation levels held: [2]
+- Requires: the box version recorded in \`box\_version\`
+- Isolation levels held: \[2\]
 - Box version: 0.1.0
 - Box binary SHA-256: not in the records
 - Bundle DOI: not in the records
@@ -129,4 +134,4 @@ CITATION.cff: not in the records
 
 ## Author readings
 
-Not yet read by the author. The slots are in `readings.md`.
+Not yet read by the author. The slots are in readings.md.

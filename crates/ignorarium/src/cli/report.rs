@@ -139,7 +139,7 @@ fn text(r: &Card) -> String {
 fn write_tex(card: &Card, dir: &Path) -> Result<usize, CliError> {
     let io = |e: std::io::Error| CliError::usage(format!("{}: {e}", dir.display()));
     std::fs::create_dir_all(dir).map_err(io)?;
-    let files = render::latex(card);
+    let files = render::latex(card).map_err(|e| CliError::usage(format!("report: {e}")))?;
     for (name, text) in &files {
         std::fs::write(dir.join(name), text).map_err(io)?;
     }

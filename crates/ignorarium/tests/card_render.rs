@@ -23,13 +23,14 @@ fn with_bound(bound: Option<f64>, contiguous: bool) -> Card {
 }
 
 fn files(c: &Card) -> Vec<(String, String)> {
-    latex(c)
+    latex(c).unwrap()
 }
 
-#[test]
-fn markdown_golden() {
-    let got = markdown(&card());
-    let path = fixture("e1-like.md");
+/// The card of `fixture(name)`, rendered, against the golden `name` with `.md`.
+fn golden(name: &str) {
+    let text = std::fs::read_to_string(fixture(&format!("{name}.json"))).unwrap();
+    let got = markdown(&serde_json::from_str(&text).unwrap());
+    let path = fixture(&format!("{name}.md"));
     if std::env::var_os("UPDATE_GOLDEN").is_some() {
         std::fs::write(&path, &got).unwrap();
     }
@@ -37,6 +38,16 @@ fn markdown_golden() {
         .unwrap()
         .replace("\r\n", "\n");
     assert_eq!(got, want);
+}
+
+#[test]
+fn markdown_golden() {
+    golden("e1-like");
+}
+
+#[test]
+fn markdown_golden_with_formatted_bounds() {
+    golden("e1-like-bounds");
 }
 
 #[test]
@@ -66,12 +77,20 @@ fn markdown_sections_follow_design_order() {
     assert!(at.windows(2).all(|w| w[0] < w[1]), "{at:?}");
 }
 
+/// The card with the code row's `below` bound `b` at grid step `step`, on side `side`.
+fn rounded(side: &str, b: f64, step: f64) -> String {
+    let mut c = card();
+    let i = &mut c.results[0].intervals[0];
+    (i.side, i.bound, i.grid.step) = (side.into(), Some(b), step);
+    markdown(&c)
+}
+
 #[test]
 fn display_rounding_is_applied_here() {
     let md = markdown(&with_bound(Some(0.039_212_34), true));
     assert!(
-        md.contains("below 0.0392 "),
-        "bound to the grid's 4 decimals"
+        md.contains("below 0.0393 "),
+        "a below bound rounds up, to the grid's 4 decimals: {md}"
     );
     assert!(
         md.contains("inverted registered e-process"),
@@ -80,9 +99,40 @@ fn display_rounding_is_applied_here() {
     assert!(md.contains("+2.91%"), "percent change, 2 decimals");
     assert!(md.contains("3.100"), "e-value, 4 significant digits");
     assert!(!md.contains("CLT"));
+    assert!(md.contains("0.039221"), "the margin keeps full precision");
+}
+
+#[test]
+fn bounds_round_outward_on_the_step_grid() {
+    assert!(rounded("above", 0.039_281, 1e-4).contains("above 0.0392 "));
+    assert!(
+        rounded("below", 0.0392, 1e-4).contains("below 0.0392 "),
+        "a grid value stays"
+    );
+    assert!(
+        rounded("below", 0.0393, 1e-4).contains("below 0.0393 "),
+        "no float drift"
+    );
+    assert!(
+        rounded("below", 0.31, 0.25).contains("below 0.31 "),
+        "step 0.25 has 2 decimals"
+    );
+    assert!(rounded("above", 0.319, 0.25).contains("above 0.31 "));
+    assert!(
+        rounded("below", 0.31, 0.5).contains("below 0.4 "),
+        "step 0.5 has 1 decimal"
+    );
+}
+
+#[test]
+fn an_e_value_never_rounds_up_to_a_pass() {
     let mut c = card();
+    c.results[0].e_value = Some(199.96);
+    let md = markdown(&c);
+    assert!(md.contains("| 199.9 |"), "{md}");
+    assert!(!md.contains("200.0 |"));
     c.results[0].e_value = Some(312.456_7);
-    assert!(markdown(&c).contains("312.5"));
+    assert!(markdown(&c).contains("| 312.4 |"));
 }
 
 #[test]
@@ -147,7 +197,6 @@ fn inline_value_files_named_by_path() {
     let mut c = card();
     c.results[0].hypothesis = "H 1/x".into();
     c.results[0].stratum = "Code_A".into();
-    c.results[1].stratum = String::new();
     let all = files(&c);
     let names: Vec<&str> = all.iter().map(|(n, _)| n.as_str()).collect();
     for want in [
@@ -157,7 +206,7 @@ fn inline_value_files_named_by_path() {
     ] {
         assert!(names.contains(&want), "{want} in {names:?}");
     }
-    assert!(names.contains(&"value-h1-all-estimate.tex"), "{names:?}");
+    assert!(names.contains(&"value-h1--estimate.tex"), "{names:?}");
     for n in names.iter().filter(|n| n.starts_with("value-")) {
         let stem = n.trim_end_matches(".tex");
         assert!(
@@ -196,4 +245,70 @@ fn figure_has_alt_text_and_margin_line() {
         assert!(!svg.contains(banned), "{banned}");
     }
     assert!(svg.contains("<circle"), "a point per stratum");
+}
+
+#[test]
+fn value_files_that_share_a_name_are_refused() {
+    let mut c = card();
+    c.results[0].hypothesis = "H 1/x".into();
+    c.results[1].hypothesis = "H-1-x".into();
+    c.results[1].stratum = c.results[0].stratum.clone();
+    let e = latex(&c).unwrap_err();
+    assert!(e.contains("H 1/x") && e.contains("H-1-x"), "{e}");
+    let mut c = card();
+    c.results[0].stratum = "all".into();
+    c.results[1].stratum = "all".into();
+    assert!(latex(&c).is_err(), "two groups named all");
+    let mut c = card();
+    c.results[0].stratum = "all".into();
+    let names: Vec<String> = files(&c).into_iter().map(|f| f.0).collect();
+    assert!(names.contains(&"value-h1-all-estimate.tex".to_string()));
+    assert!(
+        names.contains(&"value-h1--estimate.tex".to_string()),
+        "pooled has its own name"
+    );
+}
+
+#[test]
+fn free_text_cannot_break_the_markdown() {
+    use ignorarium::card::DeviationRow;
+    use ignorarium::card::sections::{FailedRow, Field};
+    let nasty = "a|b `c` <b> [x](y)\nz";
+    let mut c = card();
+    c.deviations.push(DeviationRow::Signed {
+        from: "s0".into(),
+        reason: nasty.into(),
+        timing: "t".into(),
+        differs: vec![],
+    });
+    c.surprises.failed.push(FailedRow {
+        row: Some(1),
+        stage: "s".into(),
+        exit: "e".into(),
+        reason: Some("x\n## Injected".into()),
+    });
+    c.claims[0].statement = "![img](http://x)".into();
+    c.citation.bibtex = Field::Recorded {
+        value: "@a{b,\n t = {```}}".into(),
+    };
+    let md = markdown(&c);
+    assert!(md.contains(r"a\|b \`c\` \<b\> \[x\](y) z"), "{md}");
+    assert!(!md.contains("\n## Injected"), "a newline ends no bullet");
+    assert!(md.contains(r"!\[img\]"), "{md}");
+    assert!(
+        md.contains("\n````bibtex\n"),
+        "a fence longer than the text's backticks"
+    );
+    for line in md.lines().filter(|l| l.starts_with("| signed")) {
+        assert_eq!(line.matches(" | ").count(), 7, "{line}");
+    }
+    c.hypotheses[0].hypothesis = "H]x".into();
+    c.claims[0].hypothesis = "H]x".into();
+    c.results
+        .iter_mut()
+        .for_each(|r| r.hypothesis = "H]x".into());
+    assert!(
+        markdown(&c).contains(r"![H\]x"),
+        "alt text and link text are escaped"
+    );
 }
