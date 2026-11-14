@@ -379,6 +379,10 @@
       {
         "path": "deviations.toml",
         "sha256": null
+      },
+      {
+        "path": "CITATION.cff",
+        "sha256": null
       }
     ],
     "readings": "readings.md"

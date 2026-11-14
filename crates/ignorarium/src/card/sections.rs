@@ -32,11 +32,12 @@ pub const LABEL_NOT_COMPUTED: &str = "label not computed";
 /// The results note of a quantile claim (ruling R8).
 pub const NO_QUANTILE_INTERVAL: &str = "the interval is not built for quantile claims";
 /// The study-folder files the card lists by hash, in order.
-pub const LISTED: [&str; 4] = [
+pub const LISTED: [&str; 5] = [
     "statement.md",
     "gaps.md",
     "decisions.md",
     crate::deviations::FILE,
+    super::recipe::CITATION_FILE,
 ];
 /// The author slots. The card names them by path only, so filling a slot keeps the card's hash.
 pub const READINGS: &str = "readings.md";

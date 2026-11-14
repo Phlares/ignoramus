@@ -278,12 +278,18 @@ fn outside_files_hashed_not_parsed() {
     fixture(&lab, MEAN, rows_on_level_2());
     let dir = lab.home.study_dir(ID);
     let said = "e-value 987654 shown";
-    let files = ["statement.md", "gaps.md", "decisions.md", "deviations.toml"];
+    let files = [
+        "statement.md",
+        "gaps.md",
+        "decisions.md",
+        "deviations.toml",
+        "CITATION.cff",
+    ];
     for name in files {
-        let text = if name == "deviations.toml" {
-            String::new()
-        } else {
-            format!("# {name}\n{said}\n")
+        let text = match name {
+            "deviations.toml" => String::new(),
+            "CITATION.cff" => CFF.to_string(),
+            _ => format!("# {name}\n{said}\n"),
         };
         std::fs::write(dir.join(name), text).unwrap();
     }
@@ -314,8 +320,14 @@ fn absent_outside_file_listed_as_missing() {
     std::fs::write(dir.join("statement.md"), "# statement\n").unwrap();
     let files = card_of(&lab).outside.files;
     let hash = sha256_hex(b"# statement\n");
-    let want: Vec<Listed> = ["statement.md", "gaps.md", "decisions.md", "deviations.toml"]
-        .iter()
+    let listed = [
+        "statement.md",
+        "gaps.md",
+        "decisions.md",
+        "deviations.toml",
+        "CITATION.cff",
+    ];
+    let want: Vec<Listed> = (listed.iter())
         .map(|name| Listed {
             path: name.to_string(),
             sha256: (*name == "statement.md").then(|| hash.clone()),

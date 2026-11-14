@@ -75,6 +75,7 @@
 - File gaps.md: absent
 - File decisions.md: absent
 - File deviations.toml: absent
+- File CITATION.cff: absent
 
 ## Deviations
 

@@ -404,6 +404,10 @@
       {
         "path": "deviations.toml",
         "sha256": "37b4026807fe5c96bcacafec1a782e37abc01ea0de834218d37cc3b5f65fab26"
+      },
+      {
+        "path": "CITATION.cff",
+        "sha256": null
       }
     ],
     "readings": "readings.md"

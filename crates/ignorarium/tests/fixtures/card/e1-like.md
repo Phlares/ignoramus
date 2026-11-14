@@ -75,6 +75,7 @@
 - File gaps.md: absent
 - File decisions.md: absent
 - File deviations.toml: 37b4026807fe5c96bcacafec1a782e37abc01ea0de834218d37cc3b5f65fab26
+- File CITATION.cff: absent
 
 ## Deviations
 
