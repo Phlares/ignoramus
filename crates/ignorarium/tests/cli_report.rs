@@ -64,12 +64,11 @@ fn a_finished_study_reports_each_verdict() {
     assert_eq!(r["records"], bodies.len());
     let want = json!([
         { "hypothesis": "h1", "verdict": "pass", "basis": "test", "e_value": 312.4,
-          "level": 0.005, "reason": null, "clipped": null, "intervals": [] },
+          "level": 0.005, "reason": null, "clipped": null },
         { "hypothesis": "h2", "verdict": "fail", "basis": "test", "e_value": 0.0,
-          "level": 0.005, "reason": "incomplete units in scope: 2", "clipped": null,
-          "intervals": [] },
+          "level": 0.005, "reason": "incomplete units in scope: 2", "clipped": null },
         { "hypothesis": "h3", "verdict": "none", "basis": "none", "e_value": null,
-          "level": null, "reason": null, "clipped": null, "intervals": [] },
+          "level": null, "reason": null, "clipped": null },
     ]);
     assert_eq!(r["hypotheses"], want);
     let opened = records_of(&lab, "s1").pop().unwrap();
@@ -638,6 +637,11 @@ fn card_marks_interval_post_hoc() {
     let r = report_json(&lab, "mean");
     let h = &r["hypotheses"][0];
     assert_eq!(h["verdict"], "pass");
+    assert_eq!(
+        h.get("intervals"),
+        None,
+        "intervals live on results rows only"
+    );
     let level = h["level"].as_f64().unwrap();
     // 15 clusters at -25: the same e-process at each margin from -25 up to 30.
     let grid = Grid {
@@ -658,7 +662,10 @@ fn card_marks_interval_post_hoc() {
         "grid": { "from": -25.0, "to": 30.0, "step": 1e-4 },
         "contiguous": true, "registered": false,
     }]);
-    assert_eq!(h["intervals"], want);
+    let pooled = (r["results"].as_array().unwrap().iter())
+        .find(|row| row["hypothesis"] == h["hypothesis"] && row["stratum"] == "")
+        .unwrap();
+    assert_eq!(pooled["intervals"], want);
 }
 
 fn card_out(lab: &Lab, out: &std::path::Path) -> assert_cmd::assert::Assert {

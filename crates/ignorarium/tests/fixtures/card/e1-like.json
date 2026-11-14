@@ -15,37 +15,7 @@
       "e_value": 3.1,
       "level": 0.005,
       "reason": null,
-      "clipped": null,
-      "intervals": [
-        {
-          "stratum": "code",
-          "side": "below",
-          "estimate": 0.028699999999999726,
-          "bound": null,
-          "method": "inverted registered e-process",
-          "grid": {
-            "from": 0.028699999999999726,
-            "to": 0.693147,
-            "step": 0.0001
-          },
-          "contiguous": true,
-          "registered": false
-        },
-        {
-          "stratum": "article",
-          "side": "below",
-          "estimate": 0.028699999999999726,
-          "bound": null,
-          "method": "inverted registered e-process",
-          "grid": {
-            "from": 0.028699999999999726,
-            "to": 0.693147,
-            "step": 0.0001
-          },
-          "contiguous": true,
-          "registered": false
-        }
-      ]
+      "clipped": null
     }
   ],
   "children": [],

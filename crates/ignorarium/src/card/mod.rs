@@ -48,7 +48,6 @@ pub struct HypothesisCard {
     pub level: Option<f64>,
     pub reason: Option<String>,
     pub clipped: Option<Vec<Clip>>,
-    pub intervals: Vec<Interval>,
 }
 
 /// The method every `Interval` names.
@@ -383,10 +382,6 @@ pub fn build(home: &Home, id: &str, log: &Log) -> Result<Card, CliError> {
     let hypotheses: Vec<HypothesisCard> = (verdicts.into_iter())
         .map(|v| HypothesisCard {
             clipped: clips(&analysis, &v.hypothesis),
-            intervals: (intervals.iter())
-                .filter(|r| r.hypothesis == v.hypothesis)
-                .map(Interval::from)
-                .collect(),
             hypothesis: v.hypothesis,
             verdict: v.verdict,
             basis: v.basis,
@@ -435,7 +430,7 @@ pub fn build(home: &Home, id: &str, log: &Log) -> Result<Card, CliError> {
         header: sections::header(log, spec),
         claims: sections::claims(&after, spec),
         verdicts: sections::verdicts(&after),
-        results: sections::results(&after, spec, &hypotheses),
+        results: sections::results(&after, spec, &intervals),
         sensitivity: sections::sensitivity(log, &after, spec),
         setup: sections::setup(log, spec, events.as_ref()),
         surprises,

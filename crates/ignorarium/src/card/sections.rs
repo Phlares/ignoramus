@@ -1,7 +1,7 @@
 //! The card's sections (design 2.1), each built from the verified log and the registered plan.
 //! Files of the study folder that no key signs enter only by path and SHA-256.
-use super::{HypothesisCard, Interval};
-use crate::analysis::claim_strata;
+use super::Interval;
+use crate::analysis::{IntervalResult, claim_strata};
 use crate::canon::sha256_hex;
 use crate::derived::{
     Analysis, Estimate, GroupClip, Inputs, Instrument, Register, Resolved, Trigger, Verdict,
@@ -255,14 +255,14 @@ pub struct ResultRow {
     pub percent_change: Option<f64>,
     /// The least e-value of the claim's bounds in this group; `None` where no bound is held.
     pub e_value: Option<f64>,
-    /// The group's intervals from the hypothesis's card entry, never registered.
+    /// The group's intervals, never registered. The card holds them here only.
     pub intervals: Vec<Interval>,
     pub note: Option<String>,
     /// The outcome is registered.
     pub registered: bool,
 }
 
-pub fn results(after: &[Record], spec: &Spec, hypotheses: &[HypothesisCard]) -> Vec<ResultRow> {
+pub fn results(after: &[Record], spec: &Spec, intervals: &[IntervalResult]) -> Vec<ResultRow> {
     let verdicts = first_verdicts(after);
     (estimates(after).into_iter())
         .map(|e| {
@@ -277,10 +277,9 @@ pub fn results(after: &[Record], spec: &Spec, hypotheses: &[HypothesisCard]) -> 
                 .filter(|b| b.stratum == e.stratum)
                 .filter_map(|b| b.value)
                 .reduce(f64::min);
-            let intervals = (hypotheses.iter().filter(|c| c.hypothesis == e.hypothesis))
-                .flat_map(|c| &c.intervals)
-                .filter(|i| i.stratum == e.stratum)
-                .cloned()
+            let intervals = (intervals.iter())
+                .filter(|i| i.hypothesis == e.hypothesis && i.stratum == e.stratum)
+                .map(Interval::from)
                 .collect();
             ResultRow {
                 percent_change: log_ratio.then(|| e.mean.exp() - 1.0),
