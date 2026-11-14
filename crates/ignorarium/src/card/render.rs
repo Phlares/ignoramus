@@ -774,7 +774,10 @@ fn cost_section(c: &Card) -> String {
             t.host_cpu.read,
             t.host_cpu.unavailable
         ),
-        format!("CPU ticks, seconds: {}", word(&t.cpu_ticks.value)),
+        format!(
+            "Host CPU ticks summed over rows, seconds (rows that ran at the same time each count the same host ticks): {}",
+            word(&t.cpu_ticks.value)
+        ),
         format!("Cgroup counters: {}", word(&t.cgroup.value)),
         format!("Peak memory, bytes: {peak}"),
     ])

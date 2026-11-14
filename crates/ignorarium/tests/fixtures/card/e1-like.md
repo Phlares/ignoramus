@@ -96,7 +96,7 @@
 - Completed rows: 80; attempts charged the row estimate for an unread CPU count: 0
 - Telemetry: 0 of 80 rows hold it
 - Host CPU models: none (0 read, 0 unavailable)
-- CPU ticks, seconds: {}
+- Host CPU ticks summed over rows, seconds (rows that ran at the same time each count the same host ticks): {}
 - Cgroup counters: {}
 - Peak memory, bytes: none read
 

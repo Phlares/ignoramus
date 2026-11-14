@@ -176,6 +176,13 @@ fn thresholds_round_up_and_e_values_down() {
 }
 
 #[test]
+fn host_cpu_ticks_say_they_double_count_concurrent_rows() {
+    let md = markdown(&card());
+    let label = "Host CPU ticks summed over rows, seconds (rows that ran at the same time each count the same host ticks): ";
+    assert!(md.contains(label), "{md}");
+}
+
+#[test]
 fn a_gap_prints_a_note_not_a_bound() {
     let md = markdown(&with_bound(None, false));
     assert!(
