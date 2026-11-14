@@ -1,6 +1,6 @@
 //! `deviations.toml`: the unsigned deviation record, and its place on the card.
 mod common;
-use common::{bin, finished_with, instrument, lab, plant, text};
+use common::{bin, finished_with, instrument, lab, plant, study_repo, text};
 use ignorarium::control::{self, DeviationRow, Timing};
 use ignorarium::deviations;
 use serde_json::{Value, json};
@@ -92,9 +92,10 @@ fn signed_study() -> Vec<(&'static str, Value)> {
 fn card_merges_signed_and_file_rows() {
     let lab = lab();
     plant(&lab.home, "s1", &signed_study());
-    write(&lab.home.study_dir("s1"), FILE);
+    let (_repo, folder) = study_repo("", &[("deviations.toml", FILE)]);
     let a = bin(&lab)
-        .args(["report", "s1", "--json"])
+        .args(["report", "s1", "--json", "--study-folder"])
+        .arg(&folder)
         .assert()
         .success();
     let r: Value = serde_json::from_str(&text(&a)).unwrap();
@@ -133,8 +134,12 @@ fn card_without_a_file_has_only_signed_rows() {
 fn a_malformed_file_refuses_the_report_naming_the_file() {
     let lab = lab();
     plant(&lab.home, "s1", &signed_study());
-    write(&lab.home.study_dir("s1"), "[[deviation]\n");
-    let a = bin(&lab).args(["report", "s1"]).assert().code(2);
+    let (_repo, folder) = study_repo("", &[("deviations.toml", "[[deviation]\n")]);
+    let a = bin(&lab)
+        .args(["report", "s1", "--study-folder"])
+        .arg(&folder)
+        .assert()
+        .code(2);
     let err = String::from_utf8_lossy(&a.get_output().stderr).into_owned();
     assert!(err.contains("deviations.toml"), "{err}");
 }
@@ -174,9 +179,10 @@ fn card_includes_recorded_rows() {
     let lab = lab();
     plant(&lab.home, "s1", &signed_study());
     control::deviation(&lab.home, "s1", &recorded_row()).unwrap();
-    write(&lab.home.study_dir("s1"), FILE);
+    let (_repo, folder) = study_repo("", &[("deviations.toml", FILE)]);
     let a = bin(&lab)
-        .args(["report", "s1", "--json"])
+        .args(["report", "s1", "--json", "--study-folder"])
+        .arg(&folder)
         .assert()
         .success();
     let r: Value = serde_json::from_str(&text(&a)).unwrap();

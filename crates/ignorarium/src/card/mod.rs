@@ -26,6 +26,7 @@ use sections::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
+use std::path::Path;
 
 /// The version of the card's JSON form.
 pub const CARD_VERSION: u32 = 1;
@@ -218,6 +219,8 @@ pub struct Card {
     pub cost: Cost,
     pub runs: Runs,
     pub outside: OutsideFiles,
+    /// The git commit that pins the outside files; `None` when no study folder was given.
+    pub outside_source: Option<sections::Source>,
     pub recipe: Recipe,
     pub citation: Citation,
 }
@@ -339,8 +342,14 @@ fn clips(analysis: &Analysis, h: &str) -> Option<Vec<Clip>> {
     (!mine.is_empty()).then_some(mine)
 }
 
-/// The card of finished study `id`, whose log is `log`. Refuses a study that is not finished.
-pub fn build(home: &Home, id: &str, log: &Log) -> Result<Card, CliError> {
+/// The card of finished study `id`, whose log is `log`. Its outside files come from
+/// `study_folder`, the author's git folder. Refuses a study that is not finished.
+pub fn build(
+    home: &Home,
+    id: &str,
+    log: &Log,
+    study_folder: Option<&Path>,
+) -> Result<Card, CliError> {
     let key = crate::keys::load(home)
         .map_err(|e| CliError::usage(format!("box key: {e}")))?
         .ok_or_else(|| not_registered(id))?;
@@ -371,8 +380,13 @@ pub fn build(home: &Home, id: &str, log: &Log) -> Result<Card, CliError> {
     let verdicts: Vec<Verdict> = sections::first_verdicts(&after);
     let dir = home.study_dir(id);
     let recorded = crate::deviations::recorded(&dir).map_err(CliError::usage)?;
-    let file = crate::deviations::load(&dir).map_err(CliError::usage)?;
-    let outside = sections::outside(&dir).map_err(CliError::usage)?;
+    let (outside, outside_source) = sections::outside(study_folder).map_err(CliError::usage)?;
+    let held = |name| study_folder.filter(|_| outside.holds(name));
+    let file = (held(crate::deviations::FILE))
+        .map(crate::deviations::load)
+        .transpose()
+        .map_err(CliError::usage)?
+        .flatten();
     let events = Outside::of(&dir, sections::EVENTS).map_err(CliError::usage)?;
     let text = std::fs::read(dir.join("spec.toml"))
         .map_err(|e| CliError::usage(format!("cannot report {id}: its plan: {e}")))?;
@@ -421,7 +435,7 @@ pub fn build(home: &Home, id: &str, log: &Log) -> Result<Card, CliError> {
     };
     let recipe =
         recipe::recipe(&dir, id, levels, &analysis.box_version).map_err(CliError::usage)?;
-    let citation = recipe::citation(&dir, id).map_err(CliError::usage)?;
+    let citation = recipe::citation(held(recipe::CITATION_FILE), id).map_err(CliError::usage)?;
     Ok(Card {
         header: sections::header(&own, &registered.ts, spec),
         claims: sections::claims(&after, spec),
@@ -435,6 +449,7 @@ pub fn build(home: &Home, id: &str, log: &Log) -> Result<Card, CliError> {
         cost: sections::cost(log, spec),
         runs: sections::runs(log, events.as_ref()),
         outside,
+        outside_source,
         card_version: CARD_VERSION,
         study: id.to_string(),
         finished_at: at,

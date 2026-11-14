@@ -1,7 +1,8 @@
 //! `report`: the verdicts of a finished study, through the real binary.
 mod common;
 use common::{
-    Lab, bin, edited, finished_with, instrument, lab, plain, plant, records_of, source_spec, text,
+    Lab, bin, edited, finished_with, git, instrument, lab, plain, plant, records_of, source_spec,
+    study_repo, text,
 };
 use serde_json::{Value, json};
 
@@ -829,4 +830,69 @@ fn an_unreadable_readings_file_is_flagged() {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
     // A root user reads the file anyway; the flag then has nothing to say.
     assert!(readable || err.contains("cannot read readings.md"), "{err}");
+}
+
+#[test]
+fn study_folder_applies_to_every_format_and_to_the_card() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let (_repo, folder) = study_repo("sub", &[("gaps.md", "g\n")]);
+    let commit = git(&folder, &["rev-parse", "HEAD"]);
+    let with = |args: &[&str]| {
+        let mut c = bin(&lab);
+        c.args(["report", "s1"]).args(args).arg("--study-folder");
+        c.arg(&folder).assert().success()
+    };
+    let json: Value = serde_json::from_str(&text(&with(&["--json"]))).unwrap();
+    assert_eq!(
+        json["outside_source"],
+        json!({ "path": "sub/", "commit": commit })
+    );
+    assert!(text(&with(&["--format", "md"])).contains(&commit));
+    with(&[]);
+    let out = lab.root.join("card");
+    let a = with(&["--card", "--out", out.to_str().unwrap()]);
+    drop(a);
+    let card: Value =
+        serde_json::from_slice(&std::fs::read(out.join("card.json")).unwrap()).unwrap();
+    assert_eq!(card["outside_source"]["commit"], commit.as_str());
+}
+
+#[test]
+fn a_study_folder_refusal_comes_before_the_opened_record() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let (_repo, folder) = study_repo("", &[("gaps.md", "g\n")]);
+    std::fs::write(folder.join("gaps.md"), "changed\n").unwrap();
+    let a = bin(&lab)
+        .args(["report", "s1", "--study-folder"])
+        .arg(&folder)
+        .assert()
+        .failure();
+    assert!(stderr_of(&a).contains("gaps.md"), "{}", stderr_of(&a));
+    no_opened(&lab);
+    let a = bin(&lab)
+        .args(["report", "s1", "--study-folder"])
+        .arg(lab.root.join("none"))
+        .assert()
+        .failure();
+    assert!(stderr_of(&a).contains("not a folder"), "{}", stderr_of(&a));
+    no_opened(&lab);
+}
+
+#[test]
+fn a_missing_git_binary_is_a_refusal_that_says_so() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let (_repo, folder) = study_repo("", &[("gaps.md", "g\n")]);
+    let empty = lab.root.join("no-bin");
+    std::fs::create_dir_all(&empty).unwrap();
+    let a = bin(&lab)
+        .env("PATH", &empty)
+        .args(["report", "s1", "--study-folder"])
+        .arg(&folder)
+        .assert()
+        .failure();
+    assert!(stderr_of(&a).contains("git not found"), "{}", stderr_of(&a));
+    no_opened(&lab);
 }

@@ -1,15 +1,16 @@
 //! The card's sections, built from a finished confirmatory study with two strata.
 mod common;
-use common::{Lab, estimate, finished_with, instrument, lab, plant};
+use common::{Lab, commit_all, estimate, finished_with, git, instrument, lab, plant, study_repo};
 use ignorarium::canon::sha256_hex;
 use ignorarium::card::sections::{
-    Attempt, Field, Listed, NOT_APPLICABLE, NOT_IN_RECORDS, Outside, ROW_SEED, UNRECORDED,
+    Attempt, Field, Listed, NOT_APPLICABLE, NOT_IN_RECORDS, Outside, ROW_SEED, Source, UNRECORDED,
 };
 use ignorarium::card::{self, Card};
 use ignorarium::derived::GatePrediction;
 use ignorarium::rules::{Curve, CurvePoint};
 use ignorarium::{keys, records, spec};
 use serde_json::{Value, json};
+use std::path::Path;
 
 const ID: &str = "s1";
 /// ln(1.04): the claim's margin, +4%.
@@ -137,10 +138,24 @@ fn card_of(lab: &Lab) -> Card {
 }
 
 fn card_of_study(lab: &Lab, id: &str) -> Card {
+    build_in(lab, id, None).unwrap_or_else(|e| panic!("{}", e.msg))
+}
+
+fn build_in(lab: &Lab, id: &str, folder: Option<&Path>) -> Result<Card, ignorarium::cli::CliError> {
     let key = keys::load(&lab.home).unwrap().unwrap();
     let path = lab.home.study_dir(id).join("records.jsonl");
     let log = records::read_log(&path, &key.verifying_key()).unwrap();
-    card::build(&lab.home, id, &log).unwrap_or_else(|e| panic!("{}", e.msg))
+    card::build(&lab.home, id, &log, folder)
+}
+
+/// The card of `ID` with its outside files read from `folder`.
+fn card_in(lab: &Lab, folder: &Path) -> Card {
+    build_in(lab, ID, Some(folder)).unwrap_or_else(|e| panic!("{}", e.msg))
+}
+
+/// The refusal `build` gives for `folder`.
+fn refusal(lab: &Lab, folder: &Path) -> String {
+    build_in(lab, ID, Some(folder)).expect_err("a refusal").msg
 }
 
 fn recorded<T>(value: T) -> Field<T> {
@@ -272,35 +287,42 @@ fn missing_field_prints_not_in_records() {
     );
 }
 
+const FIXED: [&str; 4] = ["gaps.md", "decisions.md", "deviations.toml", "CITATION.cff"];
+
+fn present(path: &str, text: &str) -> Listed {
+    Listed {
+        path: path.into(),
+        sha256: Some(sha256_hex(text.as_bytes())),
+        note: None,
+    }
+}
+
+fn absent(path: &str, note: Option<&str>) -> Listed {
+    Listed {
+        path: path.into(),
+        sha256: None,
+        note: note.map(String::from),
+    }
+}
+
 #[test]
 fn outside_files_hashed_not_parsed() {
     let lab = lab();
     fixture(&lab, MEAN, rows_on_level_2());
-    let dir = lab.home.study_dir(ID);
     let said = "e-value 987654 shown";
-    let files = [
-        "statement.md",
-        "gaps.md",
-        "decisions.md",
-        "deviations.toml",
-        "CITATION.cff",
-    ];
-    for name in files {
-        let text = match name {
-            "deviations.toml" => String::new(),
-            "CITATION.cff" => CFF.to_string(),
-            _ => format!("# {name}\n{said}\n"),
-        };
-        std::fs::write(dir.join(name), text).unwrap();
-    }
+    let text = |name: &str| match name {
+        "deviations.toml" => String::new(),
+        "CITATION.cff" => CFF.to_string(),
+        _ => format!("# {name}\n{said}\n"),
+    };
+    let mut files: Vec<(&str, String)> = FIXED.iter().map(|n| (*n, text(n))).collect();
+    files.push(("prereg/statement.md", text("statement.md")));
+    let files: Vec<(&str, &str)> = files.iter().map(|(n, t)| (*n, t.as_str())).collect();
+    let (_repo, folder) = study_repo("", &files);
+    let dir = lab.home.study_dir(ID);
     std::fs::write(dir.join("readings.md"), format!("## TL;DR\n{said}\n")).unwrap();
-    let card = card_of(&lab);
-    let want: Vec<Listed> = (files.iter())
-        .map(|name| Listed {
-            path: name.to_string(),
-            sha256: Some(sha256_hex(&std::fs::read(dir.join(name)).unwrap())),
-        })
-        .collect();
+    let card = card_in(&lab, &folder);
+    let want: Vec<Listed> = files.iter().map(|(n, t)| present(n, t)).collect();
     assert_eq!(card.outside.files, want);
     assert_eq!(card.outside.readings, "readings.md");
     let json = serde_json::to_string(&card).unwrap();
@@ -313,27 +335,175 @@ fn outside_files_hashed_not_parsed() {
 }
 
 #[test]
+fn outside_files_from_git_folder() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let toml = "[[unregistered]]\nstep = \"s\"\nreason = \"r\"\ntiming = \"after-results\"\nsource = \"x\"\n";
+    let (_repo, folder) = study_repo(
+        "studies/e1",
+        &[
+            ("prereg/x-statement.md", "# s\n"),
+            ("gaps.md", "g\n"),
+            ("deviations.toml", toml),
+        ],
+    );
+    let card = card_in(&lab, &folder);
+    assert_eq!(
+        card.outside.files,
+        [
+            present("gaps.md", "g\n"),
+            absent("decisions.md", None),
+            present("deviations.toml", toml),
+            absent("CITATION.cff", None),
+            present("prereg/x-statement.md", "# s\n"),
+        ]
+    );
+    let want = Source {
+        path: git(&folder, &["rev-parse", "--show-prefix"]),
+        commit: git(&folder, &["rev-parse", "HEAD"]),
+    };
+    assert_eq!(want.path, "studies/e1/");
+    assert_eq!(card.outside_source, Some(want));
+    let rows: Vec<&str> = (card.deviations.iter())
+        .map(|d| match d {
+            card::DeviationRow::Unsigned { subject, .. } => subject.as_str(),
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(rows, ["s"], "deviations.toml comes from the study folder");
+}
+
+#[test]
 fn absent_outside_file_listed_as_missing() {
     let lab = lab();
     fixture(&lab, MEAN, rows_on_level_2());
-    let dir = lab.home.study_dir(ID);
-    std::fs::write(dir.join("statement.md"), "# statement\n").unwrap();
-    let files = card_of(&lab).outside.files;
-    let hash = sha256_hex(b"# statement\n");
-    let listed = [
-        "statement.md",
-        "gaps.md",
-        "decisions.md",
-        "deviations.toml",
-        "CITATION.cff",
-    ];
-    let want: Vec<Listed> = (listed.iter())
-        .map(|name| Listed {
-            path: name.to_string(),
-            sha256: (*name == "statement.md").then(|| hash.clone()),
+    let (_repo, folder) = study_repo("", &[("gaps.md", "g\n")]);
+    let files = card_in(&lab, &folder).outside.files;
+    let want: Vec<Listed> = (FIXED.iter())
+        .map(|n| match *n {
+            "gaps.md" => present(n, "g\n"),
+            _ => absent(n, None),
         })
         .collect();
     assert_eq!(files, want);
+}
+
+#[test]
+fn no_study_folder_marks_missing() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    // A file in the box folder is never read.
+    std::fs::write(lab.home.study_dir(ID).join("gaps.md"), "g\n").unwrap();
+    std::fs::write(lab.home.study_dir(ID).join("deviations.toml"), "[[x]]\n").unwrap();
+    let card = card_of(&lab);
+    let want: Vec<Listed> = FIXED
+        .iter()
+        .map(|n| absent(n, Some("no study folder given")))
+        .collect();
+    assert_eq!(card.outside.files, want);
+    assert_eq!(card.outside_source, None);
+    assert!(card.deviations.is_empty());
+    assert_eq!(card.citation.bibtex, Field::Missing { link: None });
+}
+
+#[test]
+fn uncommitted_outside_file_refused() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let (_repo, folder) = study_repo("", &[("gaps.md", "g\n"), ("prereg/s.md", "s\n")]);
+    std::fs::write(folder.join("gaps.md"), "changed\n").unwrap();
+    let said = refusal(&lab, &folder);
+    assert!(
+        said.contains("gaps.md") && said.contains("uncommitted"),
+        "{said}"
+    );
+    commit_all(&folder);
+    std::fs::write(folder.join("prereg/s.md"), "changed\n").unwrap();
+    assert!(refusal(&lab, &folder).contains("prereg/s.md"));
+}
+
+#[test]
+fn untracked_prereg_file_refused() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let (_repo, folder) = study_repo("", &[("prereg/s.md", "s\n")]);
+    std::fs::write(folder.join("prereg/new.md"), "n\n").unwrap();
+    let said = refusal(&lab, &folder);
+    assert!(said.contains("prereg/new.md"), "{said}");
+    // An ignored file is untracked too.
+    std::fs::remove_file(folder.join("prereg/new.md")).unwrap();
+    std::fs::write(folder.join(".gitignore"), "*.log\n").unwrap();
+    commit_all(&folder);
+    std::fs::write(folder.join("prereg/hid.log"), "n\n").unwrap();
+    assert!(refusal(&lab, &folder).contains("prereg/hid.log"));
+}
+
+#[test]
+fn not_a_git_folder_refused() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let plain = tempfile::TempDir::new().unwrap();
+    std::fs::write(plain.path().join("gaps.md"), "g\n").unwrap();
+    let said = refusal(&lab, plain.path());
+    assert!(said.contains("git work tree"), "{said}");
+    let file = plain.path().join("gaps.md");
+    assert!(refusal(&lab, &file).contains("not a folder"));
+    assert!(refusal(&lab, &plain.path().join("none")).contains("not a folder"));
+    let (_repo, folder) = study_repo("", &[]);
+    assert!(refusal(&lab, &folder.join(".git")).contains("git work tree"));
+}
+
+#[cfg(unix)]
+#[test]
+fn prereg_is_walked_sorted_and_links_are_not_followed() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let (_repo, folder) = study_repo(
+        "",
+        &[
+            ("prereg/b.md", "b\n"),
+            ("prereg/a/z.md", "z\n"),
+            ("prereg/a.md", "a\n"),
+        ],
+    );
+    std::os::unix::fs::symlink("/etc/hostname", folder.join("prereg/ln.md")).unwrap();
+    std::os::unix::fs::symlink(".", folder.join("prereg/loop")).unwrap();
+    std::os::unix::fs::symlink("gaps.md", folder.join("decisions.md")).unwrap();
+    // A linked CITATION.cff would be refused if read; a linked deviations.toml would not parse.
+    std::os::unix::fs::symlink("prereg/a.md", folder.join("CITATION.cff")).unwrap();
+    std::os::unix::fs::symlink("prereg/a.md", folder.join("deviations.toml")).unwrap();
+    commit_all(&folder);
+    let files = card_in(&lab, &folder).outside.files;
+    let link = |p: &str| absent(p, Some("link not followed"));
+    assert_eq!(files[1], link("decisions.md"));
+    assert_eq!(
+        files[4..],
+        [
+            present("prereg/a.md", "a\n"),
+            present("prereg/a/z.md", "z\n"),
+            present("prereg/b.md", "b\n"),
+            link("prereg/ln.md"),
+            link("prereg/loop"),
+        ]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn prereg_refuses_control_characters_and_a_fifo() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let (_repo, folder) = study_repo("", &[("prereg/ok.md", "s\n")]);
+    std::fs::write(folder.join("prereg/a\nb"), "x").unwrap();
+    let slash = char::from(92u8);
+    assert!(refusal(&lab, &folder).contains(&format!("prereg/a{slash}nb")));
+    std::fs::remove_file(folder.join("prereg/a\nb")).unwrap();
+    let made = std::process::Command::new("mkfifo")
+        .arg(folder.join("prereg/pipe"))
+        .status()
+        .unwrap();
+    assert!(made.success());
+    assert!(refusal(&lab, &folder).contains("prereg/pipe"));
 }
 
 #[test]
@@ -654,9 +824,12 @@ version: 0.3.0\nauthors:\n  - family-names: Lovelace\n    given-names: Ada\n    
 fn citation_from_cff() {
     let lab = lab();
     fixture(&lab, MEAN, rows_on_level_2());
-    assert_eq!(card_of(&lab).citation.bibtex, Field::Missing { link: None });
-    std::fs::write(lab.home.study_dir(ID).join("CITATION.cff"), CFF).unwrap();
-    let c = card_of(&lab).citation;
+    let (_repo, folder) = study_repo("", &[]);
+    let missing = Field::Missing { link: None };
+    assert_eq!(card_in(&lab, &folder).citation.bibtex, missing);
+    std::fs::write(folder.join("CITATION.cff"), CFF).unwrap();
+    commit_all(&folder);
+    let c = card_in(&lab, &folder).citation;
     let bib = "@software{s1,\n  title = {Does X help?},\n  author = {Lovelace, Ada and Babbage, Charles},\n  version = {0.3.0}\n}\n";
     assert_eq!(c.bibtex, recorded(bib.to_string()));
     let cff = "title: \"Does X help?\"\nversion: 0.3.0\nauthors:\n  - family-names: Lovelace\n    given-names: Ada\n  - family-names: Babbage\n    given-names: Charles\n";
@@ -667,9 +840,8 @@ fn citation_from_cff() {
 fn citation_refuses_what_it_cannot_read() {
     let lab = lab();
     fixture(&lab, MEAN, rows_on_level_2());
-    let path = lab.home.study_dir(ID).join("CITATION.cff");
-    let key = keys::load(&lab.home).unwrap().unwrap();
-    let log_path = lab.home.study_dir(ID).join("records.jsonl");
+    let (_repo, folder) = study_repo("", &[]);
+    let path = folder.join("CITATION.cff");
     for bad in [
         "title: >\n  folded\nauthors:\n  - family-names: A\n    given-names: B\n",
         "title: T\nauthors:\n  - name: A Lab\n",
@@ -678,9 +850,9 @@ fn citation_refuses_what_it_cannot_read() {
         "title: T {x}\nauthors:\n  - family-names: A\n    given-names: B\n",
     ] {
         std::fs::write(&path, bad).unwrap();
-        let log = records::read_log(&log_path, &key.verifying_key()).unwrap();
-        let err = card::build(&lab.home, ID, &log).expect_err(bad);
-        assert!(err.msg.contains("CITATION.cff"), "{}", err.msg);
+        commit_all(&folder);
+        let err = refusal(&lab, &folder);
+        assert!(err.contains("CITATION.cff"), "{err}");
     }
 }
 

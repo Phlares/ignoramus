@@ -71,11 +71,12 @@
 - Virtual CPUs: not in the records
 - Row memory cap (MiB): 2304
 - Values the box defaulted: \[\]
-- File statement.md: 41223cbbb20ae697e44152d58bac670e18fa614caf3b68c827bc1733d80feacd
 - File gaps.md: absent
 - File decisions.md: absent
 - File deviations.toml: 37b4026807fe5c96bcacafec1a782e37abc01ea0de834218d37cc3b5f65fab26
 - File CITATION.cff: absent
+- File prereg/statement.md: 41223cbbb20ae697e44152d58bac670e18fa614caf3b68c827bc1733d80feacd
+- Outside files pinned at commit 0123456789abcdef0123456789abcdef01234567, folder "studies/example/"
 
 ## Deviations
 

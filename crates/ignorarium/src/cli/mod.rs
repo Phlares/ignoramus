@@ -199,6 +199,10 @@ enum Verb {
         /// The folder `--format tex` or `--card` writes its files to.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// The author's git folder of the study. The card hashes its outside files there and
+        /// pins them by commit.
+        #[arg(long)]
+        study_folder: Option<PathBuf>,
     },
     /// Ask a run to pause at the next row boundary.
     Pause {
@@ -276,12 +280,14 @@ impl Verb {
                 json,
                 card,
                 out,
+                study_folder,
             } => report::run(
                 ctx,
                 &study,
                 if json { report::Format::Json } else { format },
                 card,
                 out.as_deref(),
+                study_folder.as_deref(),
             ),
             Verb::Pause { study } => pause::run(ctx, &study),
             Verb::Resume { study } => resume::run(ctx, &study),

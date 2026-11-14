@@ -1,6 +1,7 @@
 //! The card's sections (design 2.1), each built from the verified log and the registered plan.
 //! Files of the study folder that no key signs enter only by path and SHA-256.
 use super::Interval;
+use super::recipe::{children, plain};
 use crate::analysis::{IntervalResult, claim_strata};
 use crate::canon::sha256_file;
 use crate::derived::{
@@ -32,14 +33,20 @@ const AGENT_LEVEL: u8 = 2;
 pub const LABEL_NOT_COMPUTED: &str = "label not computed";
 /// The results note of a quantile claim (ruling R8).
 pub const NO_QUANTILE_INTERVAL: &str = "the interval is not built for quantile claims";
-/// The study-folder files the card lists by hash, in order.
-pub const LISTED: [&str; 5] = [
-    "statement.md",
+/// The files of the study folder the card lists by name, in order. Every file under `PREREG`
+/// follows them.
+pub const LISTED: [&str; 4] = [
     "gaps.md",
     "decisions.md",
     crate::deviations::FILE,
     super::recipe::CITATION_FILE,
 ];
+/// The study folder's tree of preregistered documents, among them the statement.
+pub const PREREG: &str = "prereg";
+/// Why an outside file is missing when no `--study-folder` is given.
+pub const NO_STUDY_FOLDER: &str = "no study folder given";
+/// Why a link in the study folder is missing from the list.
+pub const LINK_NOT_FOLLOWED: &str = "link not followed";
 /// The run log, which no key signs.
 pub const EVENTS: &str = "events.jsonl";
 const PENDING: &str = "pending";
@@ -96,32 +103,151 @@ impl<T> Field<T> {
     }
 }
 
-/// A `LISTED` file; `sha256` is `None` when the study folder does not hold it.
+/// An outside file; `sha256` is `None` when the study folder does not hold it, and `note`
+/// says why when it could not.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Listed {
     pub path: String,
     pub sha256: Option<String>,
+    pub note: Option<String>,
 }
 
-/// Every `LISTED` file, and the path of the author slots.
+/// Where the outside files are pinned: the study folder's path inside its git repo, and the
+/// full hash of the repo's HEAD.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Source {
+    pub path: String,
+    pub commit: String,
+}
+
+/// Every outside file, and the path of the author slots.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutsideFiles {
     pub files: Vec<Listed>,
     pub readings: String,
 }
 
-pub fn outside(study_dir: &Path) -> Result<OutsideFiles, String> {
-    let mut files = vec![];
-    for name in LISTED {
-        files.push(Listed {
-            path: name.into(),
-            sha256: Outside::of(study_dir, name)?.map(|o| o.sha256),
-        });
+impl OutsideFiles {
+    /// Whether the study folder holds file `name` as a regular file.
+    pub fn holds(&self, name: &str) -> bool {
+        (self.files.iter()).any(|f| f.path == name && f.sha256.is_some())
     }
-    Ok(OutsideFiles {
-        files,
-        readings: super::readings::FILE.into(),
-    })
+}
+
+/// The paths under `PREREG` in `dir` that are files or links, sorted. A link is not entered.
+/// Refuses what the manifest walk refuses.
+fn prereg(dir: &Path) -> Result<Vec<String>, String> {
+    let mut found = vec![];
+    let mut pending = vec![(dir.join(PREREG), PREREG.to_string())];
+    while let Some((full, rel)) = pending.pop() {
+        plain(&rel, "the path")?;
+        let kind = match std::fs::symlink_metadata(&full) {
+            Ok(meta) => meta.file_type(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && rel == PREREG => continue,
+            Err(e) => return Err(format!("{rel}: {e}")),
+        };
+        if kind.is_dir() {
+            for (name, _) in children(&full, &rel)? {
+                pending.push((full.join(&name), format!("{rel}/{name}")));
+            }
+        } else if kind.is_file() || kind.is_symlink() {
+            found.push(rel);
+        } else {
+            return Err(format!("{rel}: not a file, directory or link"));
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
+/// File `name` of `dir` by hash. A link is not followed.
+fn listed(dir: &Path, name: &str) -> Result<Listed, String> {
+    let listed = |sha256, note: Option<&str>| Listed {
+        path: name.into(),
+        sha256,
+        note: note.map(String::from),
+    };
+    let link = (optional(std::fs::symlink_metadata(dir.join(name))))
+        .map_err(|e| format!("{name}: {e}"))?
+        .is_some_and(|m| m.file_type().is_symlink());
+    if link {
+        return Ok(listed(None, Some(LINK_NOT_FOLLOWED)));
+    }
+    Ok(listed(Outside::of(dir, name)?.map(|o| o.sha256), None))
+}
+
+/// Runs git in `dir`; returns its stdout without the final line break. Each line git printed
+/// passes the control-character check.
+fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let out = std::process::Command::new("git")
+        .args(["--literal-pathspecs", "-c", "core.fsmonitor=false", "-C"])
+        .arg(dir)
+        .args(args)
+        .output()
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => "git not found; --study-folder needs git".to_string(),
+            _ => format!("cannot run git: {e}"),
+        })?;
+    if !out.status.success() {
+        let why = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("git {}: {}", args[0], why.trim()));
+    }
+    let text = String::from_utf8(out.stdout).map_err(|_| format!("git {}: not UTF-8", args[0]))?;
+    let text = text.strip_suffix('\n').unwrap_or(&text);
+    (text.lines()).try_for_each(|line| plain(line, "the output of git").map(drop))?;
+    Ok(text.to_string())
+}
+
+/// The outside files of the study folder `dir`, pinned by its git commit. With no folder every
+/// file is missing. Refuses a folder that is not in a git work tree, and a listed file that is
+/// untracked, ignored or changed since the commit.
+pub fn outside(dir: Option<&Path>) -> Result<(OutsideFiles, Option<Source>), String> {
+    let readings = super::readings::FILE.to_string();
+    let Some(dir) = dir else {
+        let files = LISTED.map(|name| Listed {
+            path: name.into(),
+            sha256: None,
+            note: Some(NO_STUDY_FOLDER.into()),
+        });
+        return Ok((
+            OutsideFiles {
+                files: files.to_vec(),
+                readings,
+            },
+            None,
+        ));
+    };
+    if !dir.is_dir() {
+        return Err(format!("{}: not a folder", dir.display()));
+    }
+    let not_inside = |why: &str| format!("{}: not inside a git work tree{why}", dir.display());
+    let inside = git(dir, &["rev-parse", "--is-inside-work-tree"])
+        .map_err(|e| not_inside(&format!(" ({e})")))?;
+    if inside != "true" {
+        return Err(not_inside(""));
+    }
+    let names = LISTED.map(String::from).into_iter().chain(prereg(dir)?);
+    let files = names
+        .map(|name| listed(dir, &name))
+        .collect::<Result<Vec<_>, _>>()?;
+    let held: Vec<&str> = (files.iter())
+        .filter(|f| f.sha256.is_some())
+        .map(|f| f.path.as_str())
+        .collect();
+    let mut status = vec!["status", "--porcelain", "--ignored", "--"];
+    status.extend(&held);
+    let changed = git(dir, &status)?;
+    if !changed.is_empty() {
+        return Err(format!(
+            "{}: a listed file is untracked or has uncommitted changes:\n{changed}",
+            dir.display()
+        ));
+    }
+    let source = Source {
+        path: git(dir, &["rev-parse", "--show-prefix"])?,
+        commit: git(dir, &["rev-parse", "HEAD"])?,
+    };
+    Ok((OutsideFiles { files, readings }, Some(source)))
 }
 
 /// The first estimate of each hypothesis, contrast and stratum in `after`, as `report`

@@ -38,8 +38,8 @@ impl From<CliError> for Stop {
     }
 }
 
-pub fn report(ctx: &Ctx, id: &str) -> Result<Card, CliError> {
-    report_with(ctx, id, |_| Ok(())).map(|(card, ())| card)
+pub fn report(ctx: &Ctx, id: &str, folder: Option<&Path>) -> Result<Card, CliError> {
+    report_with(ctx, id, folder, |_| Ok(())).map(|(card, ())| card)
 }
 
 /// `report`, with `before` run on the built card ahead of the `opened` append. When `before`
@@ -47,6 +47,7 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Card, CliError> {
 fn report_with<T>(
     ctx: &Ctx,
     id: &str,
+    folder: Option<&Path>,
     before: impl FnOnce(&Card) -> Result<T, CliError>,
 ) -> Result<(Card, T), CliError> {
     let (home, log) = located(ctx, id)?;
@@ -55,7 +56,7 @@ fn report_with<T>(
         .ok_or_else(|| not_registered(id))?;
     let mut built = None;
     let appended = records::append_with(&log, &key, |all| -> Result<_, Stop> {
-        let card = card::build(home, id, all)?;
+        let card = card::build(home, id, all, folder)?;
         built = Some((before(&card)?, card));
         Ok(vec![RecordDraft::new(id, OPENED, json!({}))])
     })
@@ -280,9 +281,9 @@ fn flag_readings(old: &[u8], card: &Card) {
     }
 }
 
-fn run_card(ctx: &Ctx, id: &str, dir: &Path) -> Run {
+fn run_card(ctx: &Ctx, id: &str, dir: &Path, folder: Option<&Path>) -> Run {
     let home = ctx.home()?;
-    let (card, parts) = report_with(ctx, id, |card| plan_card(home, card, dir))?;
+    let (card, parts) = report_with(ctx, id, folder, |card| plan_card(home, card, dir))?;
     let old = optional(std::fs::read(dir.join(readings::FILE))).unwrap_or_else(|e| {
         eprintln!("report: cannot read {} to check it: {e}", readings::FILE);
         None
@@ -301,10 +302,17 @@ fn run_card(ctx: &Ctx, id: &str, dir: &Path) -> Run {
     Ok(Done::exit(0))
 }
 
-pub fn run(ctx: &Ctx, id: &str, format: Format, card: bool, dir: Option<&Path>) -> Run {
+pub fn run(
+    ctx: &Ctx,
+    id: &str,
+    format: Format,
+    card: bool,
+    dir: Option<&Path>,
+    folder: Option<&Path>,
+) -> Run {
     if card {
         let dir = dir.ok_or_else(|| CliError::usage("report: --card needs --out <dir>"))?;
-        return run_card(ctx, id, dir);
+        return run_card(ctx, id, dir, folder);
     }
     // Refused before `report` appends its record.
     match (format, dir) {
@@ -320,14 +328,14 @@ pub fn run(ctx: &Ctx, id: &str, format: Format, card: bool, dir: Option<&Path>) 
     }
     let shown = match (format, dir) {
         (Format::Tex, Some(dir)) => {
-            let (_, files) = report_with(ctx, id, latex)?;
+            let (_, files) = report_with(ctx, id, folder, latex)?;
             write_files(dir, &files)
                 .map_err(|e| CliError::usage(format!("{}: {e}", dir.display())))?;
             format!("wrote {} files to {}\n", files.len(), dir.display())
         }
-        (Format::Json, _) => report(ctx, id)?.json(),
-        (Format::Md, _) => render::markdown(&report(ctx, id)?),
-        _ => text(&report(ctx, id)?),
+        (Format::Json, _) => report(ctx, id, folder)?.json(),
+        (Format::Md, _) => render::markdown(&report(ctx, id, folder)?),
+        _ => text(&report(ctx, id, folder)?),
     };
     out(&shown)?;
     Ok(Done::exit(0))

@@ -210,7 +210,21 @@ fn setup_section(c: &Card) -> String {
         (s.resolved.iter())
             .map(|r| format!("Taken from study {}: {} = {}", r.study, r.path, r.value)),
     );
-    l.extend((c.outside.files.iter()).map(|f| format!("File {}: {}", f.path, sha(&f.sha256))));
+    l.extend(c.outside.files.iter().map(|f| {
+        let why = f.note.as_ref().map(|n| format!(" ({n})"));
+        format!(
+            "File {}: {}{}",
+            f.path,
+            sha(&f.sha256),
+            why.unwrap_or_default()
+        )
+    }));
+    l.extend(c.outside_source.iter().map(|o| {
+        format!(
+            "Outside files pinned at commit {}, folder \"{}\"",
+            o.commit, o.path
+        )
+    }));
     list(l)
 }
 

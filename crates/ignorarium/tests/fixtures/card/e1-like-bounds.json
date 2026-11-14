@@ -365,27 +365,36 @@
   "outside": {
     "files": [
       {
-        "path": "statement.md",
-        "sha256": "41223cbbb20ae697e44152d58bac670e18fa614caf3b68c827bc1733d80feacd"
-      },
-      {
         "path": "gaps.md",
-        "sha256": null
+        "sha256": null,
+        "note": null
       },
       {
         "path": "decisions.md",
-        "sha256": null
+        "sha256": null,
+        "note": null
       },
       {
         "path": "deviations.toml",
-        "sha256": null
+        "sha256": "37b4026807fe5c96bcacafec1a782e37abc01ea0de834218d37cc3b5f65fab26",
+        "note": null
       },
       {
         "path": "CITATION.cff",
-        "sha256": null
+        "sha256": null,
+        "note": null
+      },
+      {
+        "path": "prereg/statement.md",
+        "sha256": "41223cbbb20ae697e44152d58bac670e18fa614caf3b68c827bc1733d80feacd",
+        "note": null
       }
     ],
     "readings": "readings.md"
+  },
+  "outside_source": {
+    "path": "studies/example/",
+    "commit": "0123456789abcdef0123456789abcdef01234567"
   },
   "recipe": {
     "command": "ignorarium run s1 --max-level 2",

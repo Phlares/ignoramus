@@ -54,13 +54,13 @@ pub struct Recipe {
     pub manifest: Manifest,
 }
 
-fn utf8(path: &Path) -> Result<&str, String> {
+pub(super) fn utf8(path: &Path) -> Result<&str, String> {
     path.to_str()
         .ok_or_else(|| format!("{}: the path is not UTF-8", path.display()))
 }
 
 /// Refuses a control character, which could forge a line of the manifest text.
-fn plain<'a>(text: &'a str, of: &str) -> Result<&'a str, String> {
+pub(super) fn plain<'a>(text: &'a str, of: &str) -> Result<&'a str, String> {
     match text.chars().any(|c| c < ' ' || c == '\x7f') {
         true => Err(format!(
             "{}: {of} holds a control character",
@@ -68,6 +68,19 @@ fn plain<'a>(text: &'a str, of: &str) -> Result<&'a str, String> {
         )),
         false => Ok(text),
     }
+}
+
+/// The entries of folder `full` (path `rel` in its tree) by UTF-8 name and type, unsorted.
+pub(super) fn children(full: &Path, rel: &str) -> Result<Vec<(String, FileType)>, String> {
+    let fault = |e: io::Error| format!("{rel}: {e}");
+    let mut names = vec![];
+    for e in std::fs::read_dir(full).map_err(fault)? {
+        let e = e.map_err(fault)?;
+        let name = e.file_name();
+        let name = utf8(Path::new(&name))?.to_string();
+        names.push((name, e.file_type().map_err(fault)?));
+    }
+    Ok(names)
 }
 
 fn entry(
@@ -83,14 +96,7 @@ fn entry(
         let hash = sha256_hex(plain(utf8(&target)?, "the link target")?.as_bytes());
         out.push((format!("link:{hash}  {rel}"), rel.into()));
     } else if kind.is_dir() {
-        let mut names = vec![];
-        for e in std::fs::read_dir(full).map_err(fault)? {
-            let e = e.map_err(fault)?;
-            let name = e.file_name();
-            let name = utf8(Path::new(&name))?.to_string();
-            names.push((name, e.file_type().map_err(fault)?));
-        }
-        for (name, kind) in names {
+        for (name, kind) in children(full, rel)? {
             entry(&full.join(&name), &format!("{rel}/{name}"), kind, out)?;
         }
     } else if kind.is_file() {
@@ -292,11 +298,13 @@ impl Cff {
     }
 }
 
-/// The citation of study `id` from `CITATION.cff` in `dir`. A missing file gives `Missing`;
-/// a file the line reader cannot read is refused.
-pub fn citation(dir: &Path, id: &str) -> Result<Citation, String> {
+/// The citation of study `id` from `CITATION.cff` in the study folder `dir`. No folder or no
+/// file gives `Missing`; a file the line reader cannot read is refused.
+pub fn citation(dir: Option<&Path>, id: &str) -> Result<Citation, String> {
     let fault = |e: String| format!("{CITATION_FILE}: {e}");
-    let text = optional(std::fs::read_to_string(dir.join(CITATION_FILE)));
+    let text = dir.map_or(Ok(None), |d| {
+        optional(std::fs::read_to_string(d.join(CITATION_FILE)))
+    });
     let text = text.map_err(|e| fault(e.to_string()))?;
     let cff = text.as_deref().map(parse).transpose().map_err(fault)?;
     Ok(Citation {
