@@ -1,5 +1,6 @@
 //! The study card: everything `report` says about a finished study, as one structure.
 //! Each output format renders this structure; none reads the log on its own.
+pub mod recipe;
 pub mod sections;
 
 use crate::analysis::{IntervalResult, Source};
@@ -15,6 +16,7 @@ use crate::deviations::Deviations;
 use crate::home::Home;
 use crate::records::{Log, Record};
 use crate::rules::BoxRecords;
+use recipe::{Citation, Recipe};
 use sections::{
     ClaimLine, Cost, Header, Outside, OutsideFiles, ResultRow, Runs, Sensitivity, Setup, Surprises,
     VerdictLine,
@@ -215,6 +217,8 @@ pub struct Card {
     pub cost: Cost,
     pub runs: Runs,
     pub outside: OutsideFiles,
+    pub recipe: Recipe,
+    pub citation: Citation,
 }
 
 /// The time the results were complete: the later of the last counted estimate or verdict
@@ -400,6 +404,10 @@ pub fn build(home: &Home, id: &str, log: &Log) -> Result<Card, CliError> {
         .collect();
     let family = family_block(&box_records, id, &own, &at).map_err(refuse)?;
     let spec = &source.spec;
+    let surprises = sections::surprises(log);
+    let recipe = recipe::recipe(&dir, id, surprises.box_versions.first().cloned())
+        .map_err(CliError::usage)?;
+    let citation = recipe::citation(&dir, id).map_err(CliError::usage)?;
     Ok(Card {
         header: sections::header(log, spec),
         claims: sections::claims(&after, spec),
@@ -407,7 +415,9 @@ pub fn build(home: &Home, id: &str, log: &Log) -> Result<Card, CliError> {
         results: sections::results(&after, spec, &hypotheses),
         sensitivity: sections::sensitivity(log, &after, spec),
         setup: sections::setup(log, spec, events.as_ref()),
-        surprises: sections::surprises(log),
+        surprises,
+        recipe,
+        citation,
         cost: sections::cost(log, spec),
         runs: sections::runs(log, events.as_ref()),
         outside,

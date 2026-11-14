@@ -484,3 +484,79 @@ fn seeds_derive_from_the_plan_hash() {
     let t = &card.cost.telemetry;
     assert_eq!((t.rows, t.recorded), (rows, rows));
 }
+
+#[test]
+fn recipe_lists_missing_binary_hash() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let dir = lab.home.study_dir(ID);
+    std::fs::write(dir.join("statement.md"), "# statement\n").unwrap();
+    std::fs::write(dir.join("events.jsonl"), "{}\n").unwrap();
+    std::fs::create_dir_all(dir.join("out")).unwrap();
+    std::fs::write(dir.join("out/b.txt"), "b").unwrap();
+    std::fs::write(dir.join("out/a.txt"), "a").unwrap();
+    std::fs::write(dir.join("readings.md"), "## TL;DR\nblank\n").unwrap();
+    let before = card_of(&lab).recipe;
+    assert_eq!(before.command, "ignorarium run s1");
+    assert_eq!(before.box_binary_sha256, Field::Missing { link: None });
+    assert_eq!(before.bundle_doi, Field::Missing { link: None });
+    assert_eq!(
+        before.box_binary_sha256.shown(|v| v.clone()),
+        NOT_IN_RECORDS
+    );
+    let version = card_of(&lab).surprises.box_versions[0].clone();
+    assert_eq!(before.box_version, recorded(version));
+    let files = &before.manifest.files;
+    let paths: Vec<&str> = files.iter().map(|o| o.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        ["out/a.txt", "out/b.txt", "spec.toml", "statement.md"]
+    );
+    assert_eq!(files[0].sha256, sha256_hex(b"a"));
+    assert_eq!(
+        before.manifest.skipped,
+        ["readings.md", "records.jsonl", "events.jsonl"]
+    );
+    std::fs::write(dir.join("readings.md"), "## TL;DR\nfilled\n").unwrap();
+    std::fs::write(dir.join("events.jsonl"), "{}\n{}\n").unwrap();
+    assert_eq!(card_of(&lab).recipe, before);
+    std::fs::write(dir.join("out/a.txt"), "changed").unwrap();
+    assert_ne!(card_of(&lab).recipe, before);
+}
+
+const CFF: &str = "cff-version: 1.2.0\nmessage: Cite it.\n# a comment\ntitle: \"Does X help?\"\n\
+version: 0.3.0\nauthors:\n  - family-names: Lovelace\n    given-names: Ada\n    orcid: https://orcid.org/0000\n  - family-names: Babbage\n    given-names: Charles\nlicense: MIT\n";
+
+#[test]
+fn citation_from_cff() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    assert_eq!(card_of(&lab).citation.bibtex, Field::Missing { link: None });
+    std::fs::write(lab.home.study_dir(ID).join("CITATION.cff"), CFF).unwrap();
+    let c = card_of(&lab).citation;
+    let bib = "@software{s1,\n  title = {Does X help?},\n  author = {Lovelace, Ada and Babbage, Charles},\n  version = {0.3.0}\n}\n";
+    assert_eq!(c.bibtex, recorded(bib.to_string()));
+    let cff = "title: \"Does X help?\"\nversion: 0.3.0\nauthors:\n  - family-names: Lovelace\n    given-names: Ada\n  - family-names: Babbage\n    given-names: Charles\n";
+    assert_eq!(c.cff, recorded(cff.to_string()));
+}
+
+#[test]
+fn citation_refuses_what_it_cannot_read() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let path = lab.home.study_dir(ID).join("CITATION.cff");
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let log_path = lab.home.study_dir(ID).join("records.jsonl");
+    for bad in [
+        "title: >\n  folded\nauthors:\n  - family-names: A\n    given-names: B\n",
+        "title: T\nauthors:\n  - name: A Lab\n",
+        "title: T\n",
+        "authors:\n  - family-names: A\n    given-names: B\n",
+        "title: T {x}\nauthors:\n  - family-names: A\n    given-names: B\n",
+    ] {
+        std::fs::write(&path, bad).unwrap();
+        let log = records::read_log(&log_path, &key.verifying_key()).unwrap();
+        let err = card::build(&lab.home, ID, &log).expect_err(bad);
+        assert!(err.msg.contains("CITATION.cff"), "{}", err.msg);
+    }
+}
