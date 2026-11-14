@@ -353,7 +353,8 @@ pub fn build(home: &Home, id: &str, log: &Log) -> Result<Card, CliError> {
             r.seq, r.study
         )));
     }
-    let own = (all.iter().find_map(Register::of)).ok_or_else(|| not_registered(id))?;
+    let (registered, own) = (all.iter().find_map(|r| Register::of(r).map(|g| (r, g))))
+        .ok_or_else(|| not_registered(id))?;
     let box_records = HomeRecords::signed(home, &key);
     let refuse = |e: String| CliError::refuse(format!("cannot report {id}: {e}"));
     let Some(Finish {
@@ -427,12 +428,12 @@ pub fn build(home: &Home, id: &str, log: &Log) -> Result<Card, CliError> {
         recipe::recipe(&dir, id, levels, &analysis.box_version).map_err(CliError::usage)?;
     let citation = recipe::citation(&dir, id).map_err(CliError::usage)?;
     Ok(Card {
-        header: sections::header(log, spec),
+        header: sections::header(&own, &registered.ts, spec),
         claims: sections::claims(&after, spec),
         verdicts: sections::verdicts(&after),
         results: sections::results(&after, spec, &intervals),
-        sensitivity: sections::sensitivity(log, &after, spec),
-        setup: sections::setup(log, spec, events.as_ref()),
+        sensitivity: sections::sensitivity(&own, &after, spec),
+        setup: sections::setup(log, &own, spec, events.as_ref()),
         surprises,
         recipe,
         citation,

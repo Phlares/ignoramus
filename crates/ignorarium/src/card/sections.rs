@@ -128,10 +128,6 @@ pub fn outside(study_dir: &Path) -> Result<OutsideFiles, String> {
     })
 }
 
-fn register(log: &Log) -> Option<(&Record, Register)> {
-    (log.records.iter()).find_map(|r| Register::of(r).map(|reg| (r, reg)))
-}
-
 /// The first estimate of each hypothesis, contrast and stratum in `after`, as `report`
 /// counts them.
 fn estimates(after: &[Record]) -> Vec<Estimate> {
@@ -164,19 +160,14 @@ pub struct Header {
     pub timestamp: Field<String>,
 }
 
-pub fn header(log: &Log, spec: &Spec) -> Header {
-    let reg = register(log);
+/// The header of a study whose register record `own` was written at `registered_at`.
+pub fn header(own: &Register, registered_at: &str, spec: &Spec) -> Header {
     Header {
         mode: spec.study.mode,
         blind: spec.access.blind,
-        spec_hash: reg
-            .as_ref()
-            .map_or_else(String::new, |(_, g)| g.spec_hash.clone()),
-        registered_at: reg.as_ref().map_or_else(String::new, |(r, _)| r.ts.clone()),
-        timestamp: Field::of(
-            reg.and_then(|(_, g)| g.timestamp).filter(|t| t != PENDING),
-            None,
-        ),
+        spec_hash: own.spec_hash.clone(),
+        registered_at: registered_at.into(),
+        timestamp: Field::of(own.timestamp.clone().filter(|t| t != PENDING), None),
     }
 }
 
@@ -337,13 +328,10 @@ fn place(curve: &Curve, stratum: &str, estimate: f64) -> Placed {
     }
 }
 
-/// The gate's curves from the register record of `log`, with the estimates in `after`.
-pub fn sensitivity(log: &Log, after: &[Record], spec: &Spec) -> Vec<Sensitivity> {
-    let Some((_, reg)) = register(log) else {
-        return vec![];
-    };
+/// The gate's curves from the register record `own`, with the estimates in `after`.
+pub fn sensitivity(own: &Register, after: &[Record], spec: &Spec) -> Vec<Sensitivity> {
     let estimates = estimates(after);
-    (reg.gate.into_iter())
+    (own.gate.iter())
         .map(|g| {
             let strata = (spec.question.hypotheses.iter())
                 .find(|h| h.id == g.id)
@@ -355,11 +343,11 @@ pub fn sensitivity(log: &Log, after: &[Record], spec: &Spec) -> Vec<Sensitivity>
                 .flat_map(|c| held.clone().map(|e| place(c, &e.stratum, e.mean)))
                 .collect();
             Sensitivity {
-                hypothesis: g.id,
+                hypothesis: g.id.clone(),
                 power: g.power,
                 target: g.target,
                 power_at: g.power_at,
-                curve: g.curve,
+                curve: g.curve.clone(),
                 placed,
             }
         })
@@ -430,9 +418,8 @@ pub struct Seeds {
     pub derived: u64,
 }
 
-fn seeds(log: &Log, reg: Option<&Register>) -> Seeds {
-    let root = reg.map(|g| g.spec_hash.clone());
-    let bytes = root.as_deref().and_then(crate::spec::hash_bytes);
+fn seeds(log: &Log, own: &Register) -> Seeds {
+    let bytes = crate::spec::hash_bytes(&own.spec_hash);
     let seeded: Vec<&Record> = rows(log).filter(|r| r.body.get("seed").is_some()).collect();
     let derived = (seeded.iter())
         .filter(|r| {
@@ -442,24 +429,23 @@ fn seeds(log: &Log, reg: Option<&Register>) -> Seeds {
         })
         .count();
     Seeds {
-        root: Field::of(root, None),
+        root: Field::of(Some(own.spec_hash.clone()), None),
         rule: ROW_SEED.into(),
         rows: seeded.len() as u64,
         derived: derived as u64,
     }
 }
 
-pub fn setup(log: &Log, spec: &Spec, events: Option<&Outside>) -> Setup {
-    let reg = register(log).map(|(_, g)| g);
+pub fn setup(log: &Log, own: &Register, spec: &Spec, events: Option<&Outside>) -> Setup {
     Setup {
         data: (log.records.iter().find_map(Inputs::of)).map_or_else(Vec::new, |i| i.inputs),
         data_grade: Field::of(None, None),
         instrument: (log.records.iter().find_map(Analysis::of))
             .map(|a| a.instrument)
             .unwrap_or_default(),
-        defaults: reg.as_ref().map_or(Value::Null, |g| g.defaults.clone()),
-        seeds: seeds(log, reg.as_ref()),
-        resolved: reg.map(|g| g.resolved).unwrap_or_default(),
+        defaults: own.defaults.clone(),
+        seeds: seeds(log, own),
+        resolved: own.resolved.clone(),
         stack: stack(log, spec, events),
     }
 }
