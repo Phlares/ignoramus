@@ -658,3 +658,21 @@ fn manifest_in(dir: &std::path::Path) -> card::recipe::Manifest {
         .unwrap()
         .manifest
 }
+
+#[cfg(unix)]
+#[test]
+fn manifest_refuses_control_characters() {
+    use std::os::unix::fs::symlink;
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let dir = lab.home.study_dir(ID);
+    std::fs::create_dir_all(dir.join("in")).unwrap();
+    std::fs::write(dir.join("in/a\nb"), "x").unwrap();
+    let err = card::recipe::manifest_lines(&dir).unwrap_err();
+    let slash = char::from(92u8);
+    assert!(err.contains(&format!("in/a{slash}nb")), "{err}");
+    std::fs::remove_file(dir.join("in/a\nb")).unwrap();
+    symlink("t\rx", dir.join("in/link")).unwrap();
+    let err = card::recipe::manifest_lines(&dir).unwrap_err();
+    assert!(err.contains(&format!("t{slash}rx")), "{err}");
+}

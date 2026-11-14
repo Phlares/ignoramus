@@ -70,16 +70,28 @@ fn utf8(path: &Path) -> Result<&str, String> {
         .ok_or_else(|| format!("{}: the path is not UTF-8", path.display()))
 }
 
+/// Refuses a control character, which could forge a line of the manifest text.
+fn plain<'a>(text: &'a str, of: &str) -> Result<&'a str, String> {
+    match text.chars().any(|c| c < ' ' || c == '\x7f') {
+        true => Err(format!(
+            "{}: {of} holds a control character",
+            text.escape_debug()
+        )),
+        false => Ok(text),
+    }
+}
+
 fn entry(
     full: &Path,
     rel: &str,
     kind: FileType,
     out: &mut Vec<(String, String)>,
 ) -> Result<(), String> {
+    plain(rel, "the path")?;
     let fault = |e: io::Error| format!("{rel}: {e}");
     if kind.is_symlink() {
         let target = std::fs::read_link(full).map_err(fault)?;
-        let hash = sha256_hex(utf8(&target)?.as_bytes());
+        let hash = sha256_hex(plain(utf8(&target)?, "the link target")?.as_bytes());
         out.push((format!("link:{hash}  {rel}"), rel.into()));
     } else if kind.is_dir() {
         let mut names = vec![];
