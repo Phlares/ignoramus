@@ -243,7 +243,7 @@ fn append_with_sees_every_record_and_chains_what_make_returns() {
     let k = key(1);
     let p = three(d.path(), &k);
     let made = records::append_with(&p, &k, |all| {
-        let rows: Vec<Option<u64>> = all.iter().map(|r| r.row).collect();
+        let rows: Vec<Option<u64>> = all.records.iter().map(|r| r.row).collect();
         assert_eq!(rows, [Some(0), Some(1), Some(2)]);
         Ok::<_, records::RecordError>(vec![draft(3), draft(4)])
     })
@@ -358,7 +358,7 @@ fn append_with_holds_the_lock_while_make_runs() {
         let (seen, second_made) = mpsc::channel();
         let first = s.spawn(move || {
             records::append_with(p, k, |all| {
-                entered.send(all.len()).unwrap();
+                entered.send(all.records.len()).unwrap();
                 let _ = go.recv();
                 Ok::<_, records::RecordError>(vec![draft(0)])
             })
@@ -366,7 +366,7 @@ fn append_with_holds_the_lock_while_make_runs() {
         assert_eq!(in_first.recv().unwrap(), 0);
         let second = s.spawn(move || {
             records::append_with(p, k, |all| {
-                seen.send(all.to_vec()).unwrap();
+                seen.send(all.records.clone()).unwrap();
                 Ok::<_, records::RecordError>(vec![draft(1)])
             })
         });
@@ -1022,4 +1022,123 @@ fn find_skips_entries_that_are_not_study_folders() {
     let h1 = records::hash(&first);
     let got = records::find(&home, &k.verifying_key(), &[&h1]).unwrap();
     assert_eq!(got, BTreeMap::from([(h1, first)]));
+}
+
+fn shared() -> Value {
+    json!([["e1", "n1"], ["e2", "n2"], ["e3", "n3"]])
+}
+
+fn row_draft(n: u64, data: &Value) -> RecordDraft {
+    RecordDraft {
+        kind: "row".into(),
+        body: json!({ "n": n, "data_hashes": data }),
+        ..draft(n)
+    }
+}
+
+fn rows(dir: &Path, k: &SigningKey, data: &[Value]) -> std::path::PathBuf {
+    let p = dir.join("rows.jsonl");
+    for (n, d) in data.iter().enumerate() {
+        records::append(&p, k, row_draft(n as u64, d)).unwrap();
+    }
+    p
+}
+
+fn tail_error(p: &Path, vk: &ed25519_dalek::VerifyingKey) -> String {
+    let all = records::read_all(p, vk).unwrap_err().to_string();
+    assert_eq!(records::read_log(p, vk).unwrap_err().to_string(), all);
+    all
+}
+
+#[test]
+fn streamed_read_keeps_tail_errors() {
+    let d = tempfile::tempdir().unwrap();
+    let k = key(1);
+    let vk = k.verifying_key();
+    let p = three(d.path(), &k);
+    let good = lines(&p);
+    let bytes = std::fs::read(&p).unwrap();
+    std::fs::write(&p, &bytes[..bytes.len() - 10]).unwrap();
+    assert_eq!(tail_error(&p, &vk), "line 3 is not a whole record");
+    let mut v = good.clone();
+    let at = v[1].find("\"sig\":\"").unwrap() + 7;
+    let flip = if &v[1][at..=at] == "0" { "1" } else { "0" };
+    v[1].replace_range(at..=at, flip);
+    write_lines(&p, &v);
+    assert_eq!(tail_error(&p, &vk), "record 1: signature does not match");
+    let mut v = good;
+    v.swap(1, 2);
+    write_lines(&p, &v);
+    assert_eq!(tail_error(&p, &vk), "record 2: chain is broken");
+}
+
+#[test]
+fn shared_row_data_stored_once() {
+    let d = tempfile::tempdir().unwrap();
+    let k = key(1);
+    let vk = k.verifying_key();
+    let p = rows(d.path(), &k, &[shared(), shared(), shared()]);
+    let log = records::read_log(&p, &vk).unwrap();
+    assert_eq!(log.data_hashes, Some(shared()));
+    assert_eq!(log.records.len(), 3);
+    assert!(
+        log.records
+            .iter()
+            .all(|r| r.body.get("data_hashes").is_none())
+    );
+    assert_eq!(log.records[2].body["n"], 2);
+    assert_eq!(records::read_all(&p, &vk).unwrap(), log.records);
+    assert_eq!(records::verify(&p, &vk).unwrap(), 3);
+}
+
+#[test]
+fn differing_row_data_kept() {
+    let d = tempfile::tempdir().unwrap();
+    let k = key(1);
+    let other = json!([["x1", "y1"]]);
+    let p = rows(d.path(), &k, &[shared(), shared(), other.clone()]);
+    let log = records::read_log(&p, &k.verifying_key()).unwrap();
+    assert_eq!(log.data_hashes, Some(shared()));
+    assert!(log.records[0].body.get("data_hashes").is_none());
+    assert!(log.records[1].body.get("data_hashes").is_none());
+    assert_eq!(log.records[2].body["data_hashes"], other);
+}
+
+#[test]
+fn log_without_row_data_has_none() {
+    let d = tempfile::tempdir().unwrap();
+    let k = key(1);
+    let log = records::read_log(&three(d.path(), &k), &k.verifying_key()).unwrap();
+    assert_eq!(log.data_hashes, None);
+    assert_eq!(log.records.len(), 3);
+}
+
+#[test]
+fn append_with_sees_log() {
+    let d = tempfile::tempdir().unwrap();
+    let k = key(1);
+    let p = rows(d.path(), &k, &[shared(), shared(), shared()]);
+    let made = records::append_with(&p, &k, |log| {
+        assert_eq!(log.records.len(), 3);
+        assert_eq!(log.data_hashes, Some(shared()));
+        Ok::<_, records::RecordError>(vec![draft(3)])
+    })
+    .unwrap();
+    assert_eq!(made[0].seq, 3);
+    assert_eq!(records::verify(&p, &k.verifying_key()).unwrap(), 4);
+}
+
+#[test]
+fn find_matches_the_stored_hash_of_a_row_that_shares_its_data() {
+    let k = key(1);
+    let d = tempfile::tempdir().unwrap();
+    let home = Home::open_at(&d.path().join("home")).unwrap();
+    std::fs::create_dir(home.study_dir("a")).unwrap();
+    let p = home.study_dir("a").join("records.jsonl");
+    let first = records::append(&p, &k, row_draft(0, &shared())).unwrap();
+    let second = records::append(&p, &k, row_draft(1, &shared())).unwrap();
+    let want = [records::hash(&first), records::hash(&second)];
+    let found = records::find(&home, &k.verifying_key(), &[&want[0], &want[1]]).unwrap();
+    assert_eq!(found.keys().collect::<Vec<_>>().len(), 2);
+    assert!(found.contains_key(&want[1]));
 }

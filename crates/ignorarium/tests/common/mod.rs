@@ -154,7 +154,7 @@ pub fn edited(lab: &Lab, id: &str, edit: impl Fn(String) -> String, payload: &st
 pub fn records_of(lab: &Lab, id: &str) -> Vec<records::Record> {
     let key = keys::load(&lab.home).unwrap().unwrap();
     let path = lab.home.study_dir(id).join("records.jsonl");
-    records::read_all(&path, &key.verifying_key()).unwrap()
+    (records::read_log(&path, &key.verifying_key()).unwrap()).restored()
 }
 
 pub fn kind_of(lab: &Lab, id: &str, kind: &str) -> Vec<records::Record> {

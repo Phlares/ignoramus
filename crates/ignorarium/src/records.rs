@@ -1,15 +1,16 @@
 //! Signed, hash-chained record log: one JSON line per record.
 use crate::canon::{canonical_line, canonical_of, sha256_hex};
-use crate::files::{Tail, locked_append, locked_write, read_whole};
+use crate::files::{Tail, locked_append, locked_write};
 use crate::home::Home;
 use crate::keys::{sign_hex, verify_hex};
 use crate::time::now_rfc3339;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io;
+use std::io::{self, BufRead, Seek};
 use std::path::Path;
 
+const LF: u8 = b'\n';
 const GENESIS_PREV: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -178,6 +179,53 @@ impl<E: From<RecordError>> From<io::Error> for Failed<E> {
     }
 }
 
+/// The records of a log, and the `data_hashes` that its row records share. The first record
+/// whose body has `data_hashes` sets it; each later record whose list equals it has the field
+/// removed, and a record whose list differs keeps its own. The stored hash of a record that
+/// lost the field is not `hash` of the record held here.
+#[derive(Debug, Default, PartialEq)]
+pub struct Log {
+    pub records: Vec<Record>,
+    pub data_hashes: Option<serde_json::Value>,
+}
+
+impl Log {
+    fn push(&mut self, mut r: Record) {
+        if let Some(body) = r.body.as_object_mut() {
+            let same = match (&self.data_hashes, body.get("data_hashes")) {
+                (None, Some(_)) => {
+                    self.data_hashes = body.remove("data_hashes");
+                    false
+                }
+                (Some(shared), Some(own)) => shared == own,
+                _ => false,
+            };
+            if same {
+                body.remove("data_hashes");
+            }
+        }
+        self.records.push(r);
+    }
+}
+
+impl Log {
+    /// The records as stored: each row that lost its `data_hashes` gets the shared list back.
+    pub fn restored(self) -> Vec<Record> {
+        let Log {
+            mut records,
+            data_hashes,
+        } = self;
+        if let Some(shared) = data_hashes {
+            for r in records.iter_mut().filter(|r| r.kind == "row") {
+                if let Some(body) = r.body.as_object_mut() {
+                    body.entry("data_hashes").or_insert_with(|| shared.clone());
+                }
+            }
+        }
+        records
+    }
+}
+
 /// Under the log's exclusive lock, read and verify every record, then append what `make`
 /// returns for them, chained after the last, in one write. A log that fails verification is
 /// refused before `make` runs; when `make` fails, nothing is written. Returns the records
@@ -185,16 +233,16 @@ impl<E: From<RecordError>> From<io::Error> for Failed<E> {
 pub fn append_with<E: From<RecordError>>(
     path: &Path,
     key: &SigningKey,
-    make: impl FnOnce(&[Record]) -> Result<Vec<RecordDraft>, E>,
+    make: impl FnOnce(&Log) -> Result<Vec<RecordDraft>, E>,
 ) -> Result<Vec<Record>, E> {
     let mut out = Vec::new();
     locked_write(path, |f| -> Result<Vec<u8>, Failed<E>> {
-        let buf = read_whole(f)?;
-        let (all, mut prev) = verified(&buf, &key.verifying_key())
+        f.seek(io::SeekFrom::Start(0))?;
+        let (log, mut prev) = verified(io::BufReader::new(&mut *f), &key.verifying_key())
             .map_err(|e| Failed(E::from(RecordError::Log(e))))?;
         let mut lines = Vec::new();
-        for d in make(&all).map_err(Failed)? {
-            let stored = seal((all.len() + out.len()) as u64, prev, d, key)?;
+        for d in make(&log).map_err(Failed)? {
+            let stored = seal((log.records.len() + out.len()) as u64, prev, d, key)?;
             lines.extend(canonical_line(&stored)?);
             prev = stored.hash;
             out.push(stored.record);
@@ -210,12 +258,25 @@ pub fn verify(path: &Path, key: &VerifyingKey) -> Result<u64, VerifyError> {
     read_all(path, key).map(|r| r.len() as u64)
 }
 
-/// Check every line in order and return the records. A missing file holds none. The file is
-/// read once, so each record returned is a line that was checked.
+/// Check every line in order and return the records, without their shared `data_hashes`
+/// (see `Log`). A missing file holds none.
 pub fn read_all(path: &Path, key: &VerifyingKey) -> Result<Vec<Record>, VerifyError> {
-    match std::fs::read(path) {
-        Ok(buf) => verified(&buf, key).map(|(all, _)| all),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+    read_log(path, key).map(|l| l.records)
+}
+
+/// Check every line in order and return the log. A missing file holds none. The file is
+/// read once, a line at a time, so each record returned is a line that was checked.
+pub fn read_log(path: &Path, key: &VerifyingKey) -> Result<Log, VerifyError> {
+    Ok(match open_read(path)? {
+        Some(f) => verified(io::BufReader::new(f), key)?.0,
+        None => Log::default(),
+    })
+}
+
+fn open_read(path: &Path) -> Result<Option<std::fs::File>, VerifyError> {
+    match std::fs::File::open(path) {
+        Ok(f) => Ok(Some(f)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
     }
 }
@@ -223,25 +284,39 @@ pub fn read_all(path: &Path, key: &VerifyingKey) -> Result<Vec<Record>, VerifyEr
 /// The first record of the log at `path`, checked as `read_all` checks it, without reading
 /// the rest of the file; `None` for a missing or empty log.
 pub fn first(path: &Path, key: &VerifyingKey) -> Result<Option<Record>, VerifyError> {
-    use std::io::BufRead;
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e.into()),
+    let Some(file) = open_read(path)? else {
+        return Ok(None);
     };
     let mut line = Vec::new();
-    io::BufReader::new(file).read_until(b'\n', &mut line)?;
-    Ok(verified(&line, key)?.0.into_iter().next())
+    io::BufReader::new(file).read_until(LF, &mut line)?;
+    Ok(verified(&line[..], key)?.0.records.into_iter().next())
 }
 
-/// The records `buf` holds, each line checked in order, and the hash of the last one (the
-/// genesis value when there is none).
-fn verified(buf: &[u8], key: &VerifyingKey) -> Result<(Vec<Record>, String), VerifyError> {
+/// The log `src` holds, each line checked before the next is read, and the hash of the last
+/// record (the genesis value when there is none).
+fn verified(src: impl BufRead, key: &VerifyingKey) -> Result<(Log, String), VerifyError> {
+    let mut log = Log::default();
+    let prev = checked(src, key, |s| log.push(s.record))?;
+    Ok((log, prev))
+}
+
+/// Check each line of `src` in order and hand its stored form to `each`. Returns the hash of
+/// the last record (the genesis value when there is none).
+fn checked(
+    mut src: impl BufRead,
+    key: &VerifyingKey,
+    mut each: impl FnMut(Stored),
+) -> Result<String, VerifyError> {
     let mut prev = GENESIS_PREV.to_string();
-    let mut out = Vec::new();
-    for (i, raw) in buf.split_inclusive(|&b| b == b'\n').enumerate() {
-        let parse = VerifyError::Parse { line: i + 1 };
-        let s = parse_line(raw).ok_or(parse)?;
+    let mut raw = Vec::new();
+    for n in 0u64.. {
+        raw.clear();
+        if src.read_until(LF, &mut raw)? == 0 {
+            break;
+        }
+        let s = parse_line(&raw).ok_or(VerifyError::Parse {
+            line: n as usize + 1,
+        })?;
         let seq = s.record.seq;
         let bytes = canonical_of(&s.record)?;
         if sha256_hex(&bytes) != s.hash {
@@ -250,13 +325,13 @@ fn verified(buf: &[u8], key: &VerifyingKey) -> Result<(Vec<Record>, String), Ver
         if !verify_hex(key, &bytes, &s.sig) {
             return Err(VerifyError::BadSig { seq });
         }
-        if seq != out.len() as u64 || s.record.prev != prev {
+        if seq != n || s.record.prev != prev {
             return Err(VerifyError::BrokenChain { seq });
         }
-        prev = s.hash;
-        out.push(s.record);
+        prev = s.hash.clone();
+        each(s);
     }
-    Ok((out, prev))
+    Ok(prev)
 }
 
 /// Hex SHA-256 of the record's canonical bytes: the `hash` that `append` stores.
@@ -309,16 +384,19 @@ pub fn find(
         return Ok(found);
     }
     for (study, log) in logs(home)? {
-        let read = read_all(&log, key).map_err(|cause| VerifyError::In {
-            study,
+        let in_study = |cause| VerifyError::In {
+            study: study.clone(),
             cause: Box::new(cause),
-        })?;
-        for r in read {
-            let h = self::hash(&r);
-            if hashes.contains(&h.as_str()) {
-                found.entry(h).or_insert(r);
+        };
+        let Some(f) = open_read(&log).map_err(in_study)? else {
+            continue;
+        };
+        checked(io::BufReader::new(f), key, |s| {
+            if hashes.contains(&s.hash.as_str()) {
+                found.entry(s.hash).or_insert(s.record);
             }
-        }
+        })
+        .map_err(in_study)?;
     }
     Ok(found)
 }

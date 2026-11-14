@@ -142,23 +142,23 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
         .ok_or_else(|| not_registered(id))?;
     let mut value = Value::Null;
     let appended = records::append_with(&log, &key, |all| -> Result<_, Stop> {
-        if let Some(r) = all.iter().find(|r| r.study != id) {
+        if let Some(r) = all.records.iter().find(|r| r.study != id) {
             return Err(CliError::refuse(format!(
                 "cannot report {id}: record {} belongs to study {}",
                 r.seq, r.study
             ))
             .into());
         }
-        let own = (all.iter().find_map(Register::of)).ok_or_else(|| not_registered(id))?;
+        let own = (all.records.iter().find_map(Register::of)).ok_or_else(|| not_registered(id))?;
         let box_records = HomeRecords::signed(home, &key);
         let refuse = |e: String| CliError::refuse(format!("cannot report {id}: {e}"));
         let Some(Finish {
             analysed,
             after,
             at,
-        }) = standing(&box_records, id, all).map_err(refuse)?
+        }) = standing(&box_records, id, &all.records).map_err(refuse)?
         else {
-            let said = match stopped_why(all) {
+            let said = match stopped_why(&all.records) {
                 Some(why) => format!("study {id} is stopped: {why}; it has no report"),
                 None => format!("study {id} is not finished; status shows its progress"),
             };
@@ -179,7 +179,7 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
             })
             .collect();
         let mut seen = BTreeSet::new();
-        let kids: Vec<ChildEstimate> = (all.iter().filter_map(ChildEstimate::of))
+        let kids: Vec<ChildEstimate> = (all.records.iter().filter_map(ChildEstimate::of))
             .filter(|e| seen.insert((e.child.clone(), e.outcome.clone())))
             .collect();
         let shown = if kids.is_empty() {
@@ -189,7 +189,7 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
                 .map_err(|e| CliError::usage(format!("cannot report {id}: {e}")))?;
             shown_labels(&spec, &hash)
         };
-        let stopped: BTreeSet<String> = (all.iter().filter_map(SpawnStop::of))
+        let stopped: BTreeSet<String> = (all.records.iter().filter_map(SpawnStop::of))
             .flat_map(|s| s.children)
             .collect();
         let children: Vec<Value> = (kids.iter())
@@ -207,7 +207,7 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
         value = json!({
             "study": id,
             "finished_at": at,
-            "records": all.len(),
+            "records": all.records.len(),
             "hypotheses": hypotheses,
             "children": children,
             "family": family,

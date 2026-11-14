@@ -391,7 +391,7 @@ impl Log {
     ) -> Result<Next, StreamError> {
         let mut opened = None;
         records::append_with(&self.path, key, |all| -> Result<_, StreamError> {
-            let mut r = replay(self.log, all)?;
+            let mut r = replay(self.log, &all.records)?;
             let (epoch, index, slot) = r.open_next();
             let level = slot.level();
             if !(level > 0.0 && level >= at_least) {
@@ -405,7 +405,7 @@ impl Log {
                 return Err(StreamError::Reserved { slot: index, keep });
             }
             let mut drafts = Vec::new();
-            if all.is_empty() {
+            if all.records.is_empty() {
                 drafts.push(RecordDraft::new("", CONFIG, config()));
             }
             if epoch {
@@ -439,7 +439,7 @@ impl Log {
         }
         let mut decided = None;
         records::append_with(&self.path, key, |all| -> Result<_, StreamError> {
-            let mut r = replay(self.log, all)?;
+            let mut r = replay(self.log, &all.records)?;
             let (held, epoch, _) = (r.open.remove(&slot))
                 .filter(|(_, _, holder)| holder.as_str() == study)
                 .ok_or(StreamError::NotOpen { slot })?;

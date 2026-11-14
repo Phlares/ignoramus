@@ -192,7 +192,7 @@ impl BoxRecords for HomeRecords {
         let Some(key) = self.key_for(&log)? else {
             return Ok(None);
         };
-        let all = records::read_all(&log, key).map_err(|e| e.to_string())?;
+        let all = (records::read_log(&log, key).map_err(|e| e.to_string())?).restored();
         if let Some(r) = all.iter().find(|r| r.study != id) {
             return Err(format!("record {} belongs to study {}", r.seq, r.study));
         }

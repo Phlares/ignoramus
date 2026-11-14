@@ -156,14 +156,6 @@ pub fn read_tail<R: Read + Seek>(r: &mut R) -> io::Result<Tail> {
     })
 }
 
-/// Every byte of `r`, from its start.
-pub fn read_whole<R: Read + Seek>(r: &mut R) -> io::Result<Vec<u8>> {
-    r.seek(SeekFrom::Start(0))?;
-    let mut buf = Vec::new();
-    r.read_to_end(&mut buf)?;
-    Ok(buf)
-}
-
 /// Append one write to a log under an exclusive lock. `build` reads what it
 /// needs from the locked file and returns the bytes to write; they go out in
 /// one `write_all`, then fsync.
