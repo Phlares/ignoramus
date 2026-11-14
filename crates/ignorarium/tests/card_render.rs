@@ -103,6 +103,20 @@ fn display_rounding_is_applied_here() {
 }
 
 #[test]
+fn the_interval_states_its_search_grid() {
+    let md = markdown(&card());
+    let grid =
+        "grid: steps of 0.0001 from the registered margin, searched from 0.028621 to 0.693147";
+    assert!(md.contains(grid), "{md}");
+    let mut c = card();
+    c.results[0].intervals[0].grid.from = 0.028_470_999_999_999_996;
+    assert!(
+        markdown(&c).contains("searched from 0.028471 to"),
+        "float noise is cut"
+    );
+}
+
+#[test]
 fn bounds_round_outward_on_the_step_grid() {
     assert!(rounded("above", 0.039_281, 1e-4).contains("above 0.0392 "));
     assert!(

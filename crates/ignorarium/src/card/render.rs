@@ -63,6 +63,12 @@ fn bound_text(i: &Interval) -> Option<String> {
     })
 }
 
+/// `x` to 10 decimals with trailing zeros cut: a grid end without float noise.
+fn grid_end(x: f64) -> String {
+    let s = format!("{x:.10}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
 fn interval_text(i: &Interval) -> String {
     let said = match (bound_text(i), i.contiguous) {
         (Some(b), _) => format!("{} {b}", i.side),
@@ -74,7 +80,14 @@ fn interval_text(i: &Interval) -> String {
     } else {
         "post hoc"
     };
-    format!("{said} ({}; {tag})", i.method)
+    let g = &i.grid;
+    format!(
+        "{said} ({}; grid: steps of {} from the registered margin, searched from {} to {}; {tag})",
+        i.method,
+        g.step,
+        grid_end(g.from),
+        grid_end(g.to)
+    )
 }
 
 /// Every `Field` prints through here.

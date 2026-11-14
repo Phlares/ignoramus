@@ -78,7 +78,7 @@
           "bound": 0.039212345,
           "method": "inverted registered e-process",
           "grid": {
-            "from": 0.028699999999999726,
+            "from": 0.028470999999999996,
             "to": 0.693147,
             "step": 0.00025
           },
@@ -106,7 +106,7 @@
           "bound": 0.0301499,
           "method": "inverted registered e-process",
           "grid": {
-            "from": 0.028699999999999726,
+            "from": 0.028470999999999996,
             "to": 0.693147,
             "step": 0.00025
           },

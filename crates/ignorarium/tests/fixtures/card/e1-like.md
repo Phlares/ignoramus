@@ -30,8 +30,8 @@
 
 | Hypothesis | Group | Outcome | Estimate | Change | Interval | E-value | Clusters | Units | Status |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| H1 | code | ppl-ratio | 0.02870 | +2.91% | below: no grid margin passes (inverted registered e-process; post hoc) | 3.100 | 4 | 20 | registered |
-| H1 | article | ppl-ratio | 0.02870 | +2.91% | below: no grid margin passes (inverted registered e-process; post hoc) | 3.100 | 4 | 20 | registered |
+| H1 | code | ppl-ratio | 0.02870 | +2.91% | below: no grid margin passes (inverted registered e-process; grid: steps of 0.0001 from the registered margin, searched from 0.028621 to 0.693147; post hoc) | 3.100 | 4 | 20 | registered |
+| H1 | article | ppl-ratio | 0.02870 | +2.91% | below: no grid margin passes (inverted registered e-process; grid: steps of 0.0001 from the registered margin, searched from 0.028621 to 0.693147; post hoc) | 3.100 | 4 | 20 | registered |
 | H1 | all | ppl-ratio | 0.02870 | +2.91% | no interval |  | 8 | 40 | registered |
 
 ## Sensitivity
