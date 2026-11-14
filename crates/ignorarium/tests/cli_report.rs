@@ -552,13 +552,7 @@ fn md_prints_the_markdown_card() {
         .assert()
         .success();
     let md = text(&a);
-    assert!(
-        md.starts_with(
-            "# Study card: s1
-"
-        ),
-        "{md}"
-    );
+    assert!(md.starts_with("# Study card: s1\n"), "{md}");
     assert!(md.contains("## Re-run recipe"));
     let kinds: Vec<String> = records_of(&lab, "s1").into_iter().map(|r| r.kind).collect();
     assert!(kinds.contains(&"opened".to_string()), "{kinds:?}");

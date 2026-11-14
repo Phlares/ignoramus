@@ -77,8 +77,7 @@ fn report_with<T>(
 
 fn text(r: &Card) -> String {
     let mut s = format!(
-        "study {}: finished {}, {} records verified
-",
+        "study {}: finished {}, {} records verified\n",
         r.study, r.finished_at, r.records
     );
     if let Some(f) = r.family.as_object() {
@@ -298,11 +297,7 @@ fn run_card(ctx: &Ctx, id: &str, dir: &Path) -> Run {
     if let Some(old) = old {
         flag_readings(&old, &card);
     }
-    out(&format!(
-        "wrote the card of {id} to {}
-",
-        dir.display()
-    ))?;
+    out(&format!("wrote the card of {id} to {}\n", dir.display()))?;
     Ok(Done::exit(0))
 }
 

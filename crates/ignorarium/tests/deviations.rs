@@ -142,14 +142,7 @@ fn a_malformed_file_refuses_the_report_naming_the_file() {
 #[test]
 fn a_deviation_without_a_source_is_refused_by_name() {
     let dir = scratch("source");
-    write(
-        &dir,
-        &FILE.replace(
-            "source = \"notes.md:12\"
-",
-            "",
-        ),
-    );
+    write(&dir, &FILE.replace("source = \"notes.md:12\"\n", ""));
     let e = deviations::load(&dir).unwrap_err();
     assert!(e.contains("source"), "{e}");
 }
@@ -159,11 +152,7 @@ fn a_deviation_without_a_justification_is_refused_by_name() {
     let dir = scratch("just");
     write(
         &dir,
-        &FILE.replace(
-            "justification = \"one seed hung\"
-",
-            "",
-        ),
+        &FILE.replace("justification = \"one seed hung\"\n", ""),
     );
     let e = deviations::load(&dir).unwrap_err();
     assert!(e.contains("justification"), "{e}");
@@ -210,12 +199,7 @@ fn card_includes_recorded_rows() {
 fn a_malformed_recorded_file_refuses_the_report_naming_the_file() {
     let lab = lab();
     plant(&lab.home, "s1", &signed_study());
-    std::fs::write(
-        lab.home.study_dir("s1").join("deviations.jsonl"),
-        "{nope
-",
-    )
-    .unwrap();
+    std::fs::write(lab.home.study_dir("s1").join("deviations.jsonl"), "{nope\n").unwrap();
     let a = bin(&lab).args(["report", "s1"]).assert().code(2);
     let err = String::from_utf8_lossy(&a.get_output().stderr).into_owned();
     assert!(err.contains("deviations.jsonl"), "{err}");

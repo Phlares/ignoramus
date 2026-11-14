@@ -433,15 +433,7 @@ fn empty_slot_renders_not_yet_read() {
 #[test]
 fn slots_with_a_typed_number_are_refused_when_read() {
     let t = readings::template(&card());
-    let typed = t.replacen(
-        "## TL;DR
-",
-        "## TL;DR
-
-It moved 5 points.
-",
-        1,
-    );
+    let typed = t.replacen("## TL;DR\n", "## TL;DR\n\nIt moved 5 points.\n", 1);
     let errors = readings::read_slots(&typed).unwrap_err();
     assert_eq!(errors, readings::check(&typed));
     assert_eq!(errors.len(), 1);

@@ -225,9 +225,7 @@ pub struct Card {
 impl Card {
     /// The frozen card file: pretty JSON in struct order, one trailing newline.
     pub fn json(&self) -> String {
-        serde_json::to_string_pretty(self).expect("a card holds only string keys")
-            + "
-"
+        serde_json::to_string_pretty(self).expect("a card holds only string keys") + "\n"
     }
 
     /// The card's identity: the SHA-256 of `json()`.

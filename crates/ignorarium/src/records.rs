@@ -206,9 +206,7 @@ impl Log {
         }
         self.records.push(r);
     }
-}
 
-impl Log {
     /// The records as stored: each row that lost its `data_hashes` gets the shared list back.
     pub fn restored(self) -> Vec<Record> {
         let Log {
