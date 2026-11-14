@@ -30,8 +30,8 @@
 
 | Hypothesis | Group | Outcome | Estimate | Change | Interval | E-value | Clusters | Units | Status |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| H1 | code | ppl-ratio | 0.02870 | +2.91% | below 0.03922 (inverted registered e-process; grid: steps of 0.00025 from the registered margin, searched from 0.028471 to 0.693147; post hoc) | 3.100 | 4 | 20 | registered |
-| H1 | article | ppl-ratio | 0.02870 | +2.91% | below 0.03015 (inverted registered e-process; grid: steps of 0.00025 from the registered margin, searched from 0.028471 to 0.693147; post hoc) | 3.100 | 4 | 20 | registered |
+| H1 | code | ppl-ratio | 0.02870 | +2.91% | below 0.03948 (inverted registered e-process; grid: steps of 0.00025 from the registered margin, searched from 0.028471 to 0.693147; post hoc) | 3.100 | 4 | 20 | registered |
+| H1 | article | ppl-ratio | 0.02870 | +2.91% | below 0.04523 (inverted registered e-process; grid: steps of 0.00025 from the registered margin, searched from 0.028471 to 0.693147; post hoc) | 3.100 | 4 | 20 | registered |
 | H1 | all | ppl-ratio | 0.02870 | +2.91% | no interval |  | 8 | 40 | registered |
 
 ## Sensitivity
@@ -46,7 +46,7 @@
 
 ## Figures
 
-- ![H1: code: estimate 0.02870 (+2.91%), below bound 0.03922; article: estimate 0.02870 (+2.91%), below bound 0.03015. Registered margin: below 0.039221.](figure-h1.svg)
+- ![H1: code: estimate 0.02870 (+2.91%), below bound 0.03948; article: estimate 0.02870 (+2.91%), below bound 0.04523. Registered margin: below 0.039221.](figure-h1.svg)
 
 ## Setup
 

@@ -50,6 +50,40 @@ fn markdown_golden_with_formatted_bounds() {
     golden("e1-like-bounds");
 }
 
+/// Each fixture's bounds sit on their grid, and a bound inside the margin comes with a verdict
+/// that shows the claim: the test that passes at the bound passes at the looser margin.
+#[test]
+fn golden_fixtures_are_self_consistent() {
+    use ignorarium::spec::model::Claim;
+    for name in ["e1-like", "e1-like-bounds"] {
+        let text = std::fs::read_to_string(fixture(&format!("{name}.json"))).unwrap();
+        let c: Card = serde_json::from_str(&text).unwrap();
+        for r in &c.results {
+            let line = c
+                .claims
+                .iter()
+                .find(|l| l.hypothesis == r.hypothesis)
+                .unwrap();
+            let shown =
+                (c.verdicts.iter()).any(|v| v.hypothesis == r.hypothesis && v.display == "shown");
+            for i in &r.intervals {
+                let Some(b) = i.bound else { continue };
+                let k = (b - i.grid.from) / i.grid.step;
+                assert!((k - k.round()).abs() < 1e-6, "{name}: {b} is off its grid");
+                let inside = match (line.claim, i.side.as_str()) {
+                    (Some(Claim::Below(m)), "below") => b <= m,
+                    (Some(Claim::Above(m)), "above") => b >= m,
+                    _ => false,
+                };
+                assert!(
+                    !inside || shown,
+                    "{name}: bound {b} inside the margin, verdict not shown"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn markdown_sections_follow_design_order() {
     let md = markdown(&card());

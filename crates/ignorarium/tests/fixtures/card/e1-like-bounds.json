@@ -75,7 +75,7 @@
           "stratum": "code",
           "side": "below",
           "estimate": 0.028699999999999726,
-          "bound": 0.039212345,
+          "bound": 0.03947099999999999,
           "method": "inverted registered e-process",
           "grid": {
             "from": 0.028470999999999996,
@@ -103,7 +103,7 @@
           "stratum": "article",
           "side": "below",
           "estimate": 0.028699999999999726,
-          "bound": 0.0301499,
+          "bound": 0.045221,
           "method": "inverted registered e-process",
           "grid": {
             "from": 0.028470999999999996,
