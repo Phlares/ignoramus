@@ -42,7 +42,8 @@ pub struct Manifest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Recipe {
     pub command: String,
-    /// The isolation levels the rows hold. More than one is drift; the command uses the highest.
+    /// The isolation levels the rows hold, sorted. More than one is drift; the command uses the
+    /// highest.
     pub isolation_levels: Vec<u8>,
     pub requires: Vec<String>,
     /// No record holds the box binary's hash (issue #67).
@@ -136,17 +137,11 @@ pub fn manifest_lines(study_dir: &Path) -> Result<Vec<String>, String> {
     walk(study_dir).map(|(lines, _)| lines)
 }
 
-/// The recipe of study `id`, whose folder is `dir`, whose rows hold `levels` and whose
-/// analysis, the one the card reads, names `box_version`.
-pub fn recipe(
-    dir: &Path,
-    id: &str,
-    mut levels: Vec<u8>,
-    box_version: &str,
-) -> Result<Recipe, String> {
+/// The recipe of study `id`, whose folder is `dir`, whose rows hold `levels` (sorted, as
+/// `Stack::isolation` holds them) and whose analysis, the one the card reads, names
+/// `box_version`.
+pub fn recipe(dir: &Path, id: &str, levels: &[u8], box_version: &str) -> Result<Recipe, String> {
     let (lines, missing) = walk(dir)?;
-    levels.sort();
-    levels.dedup();
     let mut command = format!("ignorarium run {id}");
     if let Some(top) = levels.last() {
         command += &format!(" --max-level {top}");
@@ -154,7 +149,7 @@ pub fn recipe(
     let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
     Ok(Recipe {
         command,
-        isolation_levels: levels,
+        isolation_levels: levels.to_vec(),
         requires: REQUIRES.map(String::from).to_vec(),
         box_binary_sha256: Field::Missing { link: None },
         box_version: Field::Recorded {

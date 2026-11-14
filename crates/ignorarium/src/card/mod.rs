@@ -20,8 +20,8 @@ use crate::records::{Log, Record};
 use crate::rules::BoxRecords;
 use recipe::{Citation, Recipe};
 use sections::{
-    ClaimLine, Cost, Header, Outside, OutsideFiles, ResultRow, Runs, Sensitivity, Setup, Surprises,
-    VerdictLine,
+    ClaimLine, Cost, Field, Header, Outside, OutsideFiles, ResultRow, Runs, Sensitivity, Setup,
+    Surprises, VerdictLine,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -416,14 +416,11 @@ pub fn build(home: &Home, id: &str, log: &Log) -> Result<Card, CliError> {
         .collect();
     let family = family_block(&box_records, id, &own, &at).map_err(refuse)?;
     let spec = &source.spec;
-    let surprises = sections::surprises(log);
-    let levels: Vec<u8> = (log.records.iter().filter(|r| r.kind == "row"))
-        .filter_map(|r| {
-            r.body["isolation"]
-                .as_u64()
-                .and_then(|n| u8::try_from(n).ok())
-        })
-        .collect();
+    let setup = sections::setup(log, &own, spec, events.as_ref());
+    let levels = match &setup.stack.isolation {
+        Field::Recorded { value } => value.as_slice(),
+        _ => &[],
+    };
     let recipe =
         recipe::recipe(&dir, id, levels, &analysis.box_version).map_err(CliError::usage)?;
     let citation = recipe::citation(&dir, id).map_err(CliError::usage)?;
@@ -433,8 +430,8 @@ pub fn build(home: &Home, id: &str, log: &Log) -> Result<Card, CliError> {
         verdicts: sections::verdicts(&after),
         results: sections::results(&after, spec, &intervals),
         sensitivity: sections::sensitivity(&own, &after, spec),
-        setup: sections::setup(log, &own, spec, events.as_ref()),
-        surprises,
+        setup,
+        surprises: sections::surprises(log),
         recipe,
         citation,
         cost: sections::cost(log, spec),

@@ -685,7 +685,7 @@ fn citation_refuses_what_it_cannot_read() {
 }
 
 fn manifest_in(dir: &std::path::Path) -> card::recipe::Manifest {
-    card::recipe::recipe(dir, ID, vec![2], "0.1.0")
+    card::recipe::recipe(dir, ID, &[2], "0.1.0")
         .unwrap()
         .manifest
 }
