@@ -79,7 +79,7 @@ pub enum Field<T> {
 }
 
 impl<T> Field<T> {
-    fn of(value: Option<T>, link: Option<&Outside>) -> Field<T> {
+    pub(crate) fn of(value: Option<T>, link: Option<&Outside>) -> Field<T> {
         match value {
             Some(value) => Field::Recorded { value },
             None => Field::Missing {

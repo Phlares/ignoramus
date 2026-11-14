@@ -139,11 +139,9 @@ pub fn recipe(dir: &Path, id: &str, levels: &[u8], box_version: &str) -> Result<
         command,
         isolation_levels: levels.to_vec(),
         requires: REQUIRES.map(String::from).to_vec(),
-        box_binary_sha256: Field::Missing { link: None },
-        box_version: Field::Recorded {
-            value: box_version.into(),
-        },
-        bundle_doi: Field::Missing { link: None },
+        box_binary_sha256: Field::of(None, None),
+        box_version: Field::of(Some(box_version.into()), None),
+        bundle_doi: Field::of(None, None),
         manifest: Manifest {
             roots: ROOTS.map(String::from).to_vec(),
             missing,
@@ -297,20 +295,12 @@ impl Cff {
 /// The citation of study `id` from `CITATION.cff` in `dir`. A missing file gives `Missing`;
 /// a file the line reader cannot read is refused.
 pub fn citation(dir: &Path, id: &str) -> Result<Citation, String> {
-    let read = optional(std::fs::read_to_string(dir.join(CITATION_FILE)));
-    let Some(text) = read.map_err(|e| format!("{CITATION_FILE}: {e}"))? else {
-        return Ok(Citation {
-            bibtex: Field::Missing { link: None },
-            cff: Field::Missing { link: None },
-        });
-    };
-    let cff = parse(&text).map_err(|e| format!("{CITATION_FILE}: {e}"))?;
+    let fault = |e: String| format!("{CITATION_FILE}: {e}");
+    let text = optional(std::fs::read_to_string(dir.join(CITATION_FILE)));
+    let text = text.map_err(|e| fault(e.to_string()))?;
+    let cff = text.as_deref().map(parse).transpose().map_err(fault)?;
     Ok(Citation {
-        bibtex: Field::Recorded {
-            value: cff.bibtex(id),
-        },
-        cff: Field::Recorded {
-            value: cff.fragment(),
-        },
+        bibtex: Field::of(cff.as_ref().map(|c| c.bibtex(id)), None),
+        cff: Field::of(cff.as_ref().map(Cff::fragment), None),
     })
 }
