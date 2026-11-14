@@ -2,7 +2,9 @@
 use super::sections::Field;
 use crate::canon::{sha256_file, sha256_hex};
 use crate::files::optional;
+use crate::view;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs::FileType;
 use std::io;
 use std::path::Path;
@@ -27,16 +29,60 @@ pub const REQUIRES: [&str; 3] = [
     "the box version recorded in `box_version`",
 ];
 
-/// The re-run inputs of a study folder. `tree_sha256` is the SHA-256 of the `manifest_lines`
+/// The re-run inputs of a study folder. `list_sha256` is the SHA-256 of the `manifest_lines`
 /// text: one line `<sha256>  <relative path>\n` per file, sorted, with `/` in paths. A symlink
-/// is never followed; its line reads `link:<sha256 of the target text>  <path>`.
+/// is never followed; its line reads `link:<sha256 of the target text>  <path>`. It is a flat
+/// hash over the sorted lines with `files` beside it, not a Merkle root.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     pub roots: Vec<String>,
     /// Roots the folder does not hold.
     pub missing: Vec<String>,
     pub files: u64,
-    pub tree_sha256: String,
+    pub list_sha256: String,
+    pub in_folder: Agreement,
+}
+
+/// Whether the walked `in/` holds exactly the signed input list. A flag; never a refusal.
+/// `missing` counts signed inputs `in/` lacks, `extra` the files it holds beyond the list, and
+/// `differ` the inputs it holds under another digest.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Agreement {
+    pub agrees: bool,
+    pub missing: u64,
+    pub extra: u64,
+    pub differ: u64,
+}
+
+/// The text a list of `<sha256>  <path>` lines hashes as: each line with its LF.
+pub fn list_text(lines: &[String]) -> String {
+    lines.iter().map(|l| format!("{l}\n")).collect()
+}
+
+/// The SHA-256 of `list_text(lines)`: the one hash of the manifest and of the signed input list.
+pub fn list_sha256(lines: &[String]) -> String {
+    sha256_hex(list_text(lines).as_bytes())
+}
+
+fn by_path(lines: &[String]) -> BTreeMap<&str, &str> {
+    let pairs = lines.iter().filter_map(|l| l.split_once("  "));
+    pairs.map(|(hash, path)| (path, hash)).collect()
+}
+
+fn agreement(signed: &[String], walked: &[String]) -> Agreement {
+    let signed = by_path(signed);
+    let walked = by_path(walked);
+    let missing = signed.keys().filter(|p| !walked.contains_key(*p)).count();
+    let differ = (signed.iter())
+        .filter(|(p, h)| walked.get(*p).is_some_and(|w| w != *h))
+        .count();
+    let extra = walked.len() - (signed.len() - missing);
+    Agreement {
+        agrees: missing + extra + differ == 0,
+        missing: missing as u64,
+        extra: extra as u64,
+        differ: differ as u64,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -111,7 +157,7 @@ fn entry(
 }
 
 /// The lines of the study folder's manifest, and the roots it lacks.
-fn walk(study_dir: &Path) -> Result<(Vec<String>, Vec<String>), String> {
+pub fn walk(study_dir: &Path) -> Result<(Vec<String>, Vec<String>), String> {
     let (mut lines, mut missing) = (vec![], vec![]);
     for root in ROOTS {
         let name = root.trim_end_matches('/');
@@ -131,17 +177,33 @@ pub fn manifest_lines(study_dir: &Path) -> Result<Vec<String>, String> {
     walk(study_dir).map(|(lines, _)| lines)
 }
 
-/// The recipe of study `id`, whose folder is `dir`, whose rows hold `levels` (sorted, as
-/// `Stack::isolation` holds them) and whose analysis, the one the card reads, names
-/// `box_version`.
-pub fn recipe(dir: &Path, id: &str, levels: &[u8], box_version: &str) -> Result<Recipe, String> {
-    let (lines, missing) = walk(dir)?;
+/// The recipe of study `id`, whose folder `walk` gave as `lines` and the roots it lacks
+/// `missing`, whose signed input list is `signed` (`<sha256>  <path>` lines), whose rows hold
+/// `levels` (sorted, as `Stack::isolation` holds them) and whose analysis, the one the card
+/// reads, names `box_version`.
+pub fn recipe(
+    lines: &[String],
+    missing: Vec<String>,
+    signed: &[String],
+    id: &str,
+    levels: &[u8],
+    box_version: &str,
+) -> Recipe {
     let mut command = format!("ignorarium run {id}");
     if let Some(top) = levels.last() {
         command += &format!(" --max-level {top}");
     }
-    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
-    Ok(Recipe {
+    let prefix = format!("{}/", view::IN);
+    let walked: Vec<String> = (lines.iter())
+        .filter_map(|l| {
+            let (hash, path) = l.split_once("  ")?;
+            let path = path
+                .strip_prefix(&prefix)
+                .filter(|p| *p != view::MANIFEST)?;
+            Some(format!("{hash}  {path}"))
+        })
+        .collect();
+    Recipe {
         command,
         isolation_levels: levels.to_vec(),
         requires: REQUIRES.map(String::from).to_vec(),
@@ -152,9 +214,10 @@ pub fn recipe(dir: &Path, id: &str, levels: &[u8], box_version: &str) -> Result<
             roots: ROOTS.map(String::from).to_vec(),
             missing,
             files: lines.len() as u64,
-            tree_sha256: sha256_hex(text.as_bytes()),
+            list_sha256: list_sha256(lines),
+            in_folder: agreement(signed, &walked),
         },
-    })
+    }
 }
 
 /// How to cite the study, from the keys of its `CITATION.cff`.

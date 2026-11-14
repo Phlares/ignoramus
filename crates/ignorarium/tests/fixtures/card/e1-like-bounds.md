@@ -50,16 +50,9 @@
 
 ## Setup
 
-- Input data/example.txt: absent
-- Input data/confirm.txt: absent
-- Input src/code-0.txt: 70f9254aa2207cc6a4926f13e4734e5edef8341cd0bdb54c00f44f189acd132a
-- Input src/code-1.txt: 82e7a1216cbd1c7664118d663fa239b40db6ab3253fd8daec3f4975b6d92db7e
-- Input src/code-2.txt: dd5b2f508160b897fb8dcfd90cc4e3a4492d0908f80734371eec10a1e7704c85
-- Input src/code-3.txt: 0e80eff398dd38be58bd7e9c0da625c595d500e43a164e41ee9f6d696c6ae220
-- Input src/article-0.txt: 4015ed90443934fc7f69355216cafcb42b556734bc534d949d20d64d250e3572
-- Input src/article-1.txt: 4efa58a7a6c9f0f1ec4de6232102179a8c24ac1d8471f28c79aed32d7f4474a7
-- Input src/article-2.txt: b5a78abb00cc0e44d2be0624aaa26621be3cd5839210a60dffdb09598ed03af7
-- Input src/article-3.txt: 8fcf00aa48dc741ef1cdf462ee5caccd6afe6930560b60b9d34d0805f651d34d
+- Input list: 8 files, list SHA-256 e5c522272fde8c9d554fc18b865dbff94bdfe688baa365c38169f44891655c97, file data.sha256
+- Input folder: does not hold the input list (1 missing, 0 extra, 0 differ)
+- Observations: 16 rows, SHA-256 26118cd324e5bb03652f87664f3e2045cbc30924fd3879c08694a926481c18a2, file observations.csv
 - Data grade: not in the records
 - Payload: cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd
 - Environment: efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef
@@ -123,7 +116,7 @@ ignorarium run s1 --max-level 2
 - Bundle DOI: not in the records
 - Manifest roots: spec.toml, spec.json, spec.hash, salt, schedule.json, in/, payload/
 - Roots the folder lacks: spec.json, spec.hash, salt, schedule.json, in/, payload/
-- Manifest: 1 files, tree SHA-256 53c7939fa1b6a82466144408e7ed4dcdc51ace61a01a933da54727d670c884db
+- Manifest: 1 files, list SHA-256 53c7939fa1b6a82466144408e7ed4dcdc51ace61a01a933da54727d670c884db
 
 ## Citation
 

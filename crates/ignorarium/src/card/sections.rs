@@ -2,10 +2,11 @@
 //! Files of the study folder that no key signs enter only by path and SHA-256.
 use super::Interval;
 use super::recipe::{children, plain};
+use super::sidecar::DataList;
 use crate::analysis::{IntervalResult, claim_strata};
 use crate::canon::sha256_file;
 use crate::derived::{
-    Analysis, Estimate, GroupClip, Inputs, Instrument, Register, Resolved, Trigger, Verdict,
+    Analysis, Estimate, GroupClip, Instrument, Register, Resolved, Trigger, Verdict,
 };
 use crate::files::optional;
 use crate::records::{Log, Record};
@@ -516,8 +517,8 @@ pub fn stack(log: &Log, spec: &Spec, events: Option<&Outside>) -> Stack {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Setup {
-    /// Each input by path, with the digest of its stored copy; `None` for one that was absent.
-    pub data: Vec<(String, Option<String>)>,
+    /// The signed input list: the count and hash of its lines, which `data.sha256` holds.
+    pub data: DataList,
     /// Data grades are not defined yet (audit C6).
     pub data_grade: Field<String>,
     pub instrument: Instrument,
@@ -558,9 +559,15 @@ fn seeds(log: &Log, own: &Register) -> Seeds {
     }
 }
 
-pub fn setup(log: &Log, own: &Register, spec: &Spec, events: Option<&Outside>) -> Setup {
+pub fn setup(
+    log: &Log,
+    own: &Register,
+    spec: &Spec,
+    events: Option<&Outside>,
+    data: DataList,
+) -> Setup {
     Setup {
-        data: (log.records.iter().find_map(Inputs::of)).map_or_else(Vec::new, |i| i.inputs),
+        data,
         data_grade: Field::of(None, None),
         instrument: (log.records.iter().find_map(Analysis::of))
             .map(|a| a.instrument)

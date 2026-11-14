@@ -4,6 +4,7 @@ pub mod readings;
 pub mod recipe;
 pub mod render;
 pub mod sections;
+pub mod sidecar;
 
 use crate::analysis::{IntervalResult, Source};
 use crate::cli::check::HomeRecords;
@@ -25,6 +26,7 @@ use sections::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sidecar::{Observations, Sidecars};
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -215,6 +217,8 @@ pub struct Card {
     pub results: Vec<ResultRow>,
     pub sensitivity: Vec<Sensitivity>,
     pub setup: Setup,
+    /// The observations each registered test read, in `observations.csv`.
+    pub observations: Observations,
     pub surprises: Surprises,
     pub cost: Cost,
     pub runs: Runs,
@@ -428,13 +432,15 @@ pub fn build(
         .collect();
     let family = family_block(&box_records, id, &own, &at).map_err(refuse)?;
     let spec = &source.spec;
-    let setup = sections::setup(log, &own, spec, events.as_ref());
+    let sidecars = Sidecars::from_source(&source, log).map_err(refuse)?;
+    let setup = sections::setup(log, &own, spec, events.as_ref(), sidecars.data_list());
     let levels = match &setup.stack.isolation {
         Field::Recorded { value } => value.as_slice(),
         _ => &[],
     };
-    let recipe =
-        recipe::recipe(&dir, id, levels, &analysis.box_version).map_err(CliError::usage)?;
+    let (walked, lacks) = recipe::walk(&dir).map_err(CliError::usage)?;
+    let signed = &sidecars.lines;
+    let recipe = recipe::recipe(&walked, lacks, signed, id, levels, &analysis.box_version);
     let citation = recipe::citation(held(recipe::CITATION_FILE), id).map_err(CliError::usage)?;
     Ok(Card {
         header: sections::header(&own, &registered.ts, spec),
@@ -443,6 +449,7 @@ pub fn build(
         results: sections::results(&after, spec, &intervals),
         sensitivity: sections::sensitivity(&own, &after, spec),
         setup,
+        observations: sidecars.observations_card(),
         surprises: sections::surprises(log),
         recipe,
         citation,

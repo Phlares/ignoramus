@@ -176,8 +176,22 @@ fn figures_section(c: &Card) -> String {
 fn setup_section(c: &Card) -> String {
     let (s, k) = (&c.setup, &c.setup.stack);
     let sha = |d: &Option<String>| d.as_deref().unwrap_or("absent").to_string();
-    let mut l = vec![];
-    l.extend(s.data.iter().map(|(p, d)| format!("Input {p}: {}", sha(d))));
+    let (d, o, a) = (&s.data, &c.observations, &c.recipe.manifest.in_folder);
+    let mut l = vec![format!(
+        "Input list: {} files, list SHA-256 {}, file {}",
+        d.count, d.list_sha256, d.file
+    )];
+    l.push(match a.agrees {
+        true => "Input folder: holds exactly the input list".to_string(),
+        false => format!(
+            "Input folder: does not hold the input list ({} missing, {} extra, {} differ)",
+            a.missing, a.extra, a.differ
+        ),
+    });
+    l.push(format!(
+        "Observations: {} rows, SHA-256 {}, file {}",
+        o.rows, o.sha256, o.file
+    ));
     l.push(format!(
         "Data grade: {}",
         field(&s.data_grade, |g| g.clone())
@@ -375,8 +389,8 @@ fn recipe_section(c: &Card) -> String {
     };
     l.push(format!("Roots the folder lacks: {lacks}"));
     l.push(format!(
-        "Manifest: {} files, tree SHA-256 {}",
-        m.files, m.tree_sha256
+        "Manifest: {} files, list SHA-256 {}",
+        m.files, m.list_sha256
     ));
     format!("Command:\n\n{}\n\n{}", fence(&r.command, ""), list(l))
 }

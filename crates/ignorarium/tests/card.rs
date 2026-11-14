@@ -750,11 +750,11 @@ fn manifest_ignores_what_a_run_rewrites() {
     std::fs::create_dir_all(dir.join("payload")).unwrap();
     std::fs::write(dir.join("payload/run.sh"), "a").unwrap();
     let with = manifest_in(&dir);
-    assert_ne!(with.tree_sha256, before.tree_sha256);
+    assert_ne!(with.list_sha256, before.list_sha256);
     assert_eq!(with.files, before.files + 1);
     assert!(!with.missing.contains(&"payload/".to_string()));
     std::fs::write(dir.join("payload/run.sh"), "b").unwrap();
-    assert_ne!(manifest_in(&dir).tree_sha256, with.tree_sha256);
+    assert_ne!(manifest_in(&dir).list_sha256, with.list_sha256);
 }
 
 #[test]
@@ -778,7 +778,7 @@ fn manifest_lines_match_the_tree_hash() {
     );
     assert!(lines[0].starts_with(&sha256_hex(b"a")));
     let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
-    assert_eq!(manifest_of(&lab).tree_sha256, sha256_hex(text.as_bytes()));
+    assert_eq!(manifest_of(&lab).list_sha256, sha256_hex(text.as_bytes()));
     assert_eq!(manifest_of(&lab).files, 3);
 }
 
@@ -857,9 +857,8 @@ fn citation_refuses_what_it_cannot_read() {
 }
 
 fn manifest_in(dir: &std::path::Path) -> card::recipe::Manifest {
-    card::recipe::recipe(dir, ID, &[2], "0.1.0")
-        .unwrap()
-        .manifest
+    let (lines, missing) = card::recipe::walk(dir).unwrap();
+    card::recipe::recipe(&lines, missing, &[], ID, &[2], "0.1.0").manifest
 }
 
 #[cfg(unix)]
@@ -878,4 +877,194 @@ fn manifest_refuses_control_characters() {
     symlink("t\rx", dir.join("in/link")).unwrap();
     let err = card::recipe::manifest_lines(&dir).unwrap_err();
     assert!(err.contains(&format!("t{slash}rx")), "{err}");
+}
+
+fn sidecars_of(lab: &Lab) -> card::sidecar::Sidecars {
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let path = lab.home.study_dir(ID).join("records.jsonl");
+    let log = records::read_log(&path, &key.verifying_key()).unwrap();
+    card::sidecar::Sidecars::of(&lab.home, ID, &log).unwrap()
+}
+
+/// The signed input lines of the fixture: each present input, by path.
+fn signed_lines() -> Vec<String> {
+    let mut paths: Vec<String> = (strata().iter())
+        .flat_map(|s| (0..4).map(move |i| format!("src/{s}-{i}.txt")))
+        .collect();
+    paths.sort();
+    (paths.iter())
+        .map(|p| format!("{}  {p}", sha256_hex(p.as_bytes())))
+        .collect()
+}
+
+#[test]
+fn card_data_is_count_and_list_hash() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let card = card_of(&lab);
+    let text: String = signed_lines()
+        .iter()
+        .map(|l| {
+            format!(
+                "{l}
+"
+            )
+        })
+        .collect();
+    let json = serde_json::to_value(&card.setup.data).unwrap();
+    assert_eq!(
+        json,
+        json!({ "count": 8, "list_sha256": sha256_hex(text.as_bytes()), "file": "data.sha256" })
+    );
+    assert_eq!(sidecars_of(&lab).data, text);
+}
+
+/// Writes each signed input into `in/`: its content is its path, which hashes to its signed
+/// digest.
+fn fill_in(lab: &Lab) {
+    let dir = lab.home.study_dir(ID).join("in");
+    for line in signed_lines() {
+        let path = line.split_once("  ").unwrap().1.to_string();
+        std::fs::create_dir_all(dir.join(&path).parent().unwrap()).unwrap();
+        std::fs::write(dir.join(&path), &path).unwrap();
+    }
+    std::fs::write(dir.join("ignorarium:inputs.json"), "[]").unwrap();
+}
+
+fn in_folder(lab: &Lab) -> card::recipe::Agreement {
+    card_of(lab).recipe.manifest.in_folder
+}
+
+fn agreement(missing: u64, extra: u64, differ: u64) -> card::recipe::Agreement {
+    card::recipe::Agreement {
+        agrees: missing + extra + differ == 0,
+        missing,
+        extra,
+        differ,
+    }
+}
+
+#[test]
+fn in_agrees_with_signed_list() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    fill_in(&lab);
+    assert_eq!(in_folder(&lab), agreement(0, 0, 0));
+}
+
+#[test]
+fn in_differs_flagged() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    fill_in(&lab);
+    let dir = lab.home.study_dir(ID).join("in");
+    std::fs::write(dir.join("src/code-1.txt"), "other").unwrap();
+    assert_eq!(in_folder(&lab), agreement(0, 0, 1));
+    std::fs::write(dir.join("stray.txt"), "x").unwrap();
+    assert_eq!(in_folder(&lab), agreement(0, 1, 1));
+    std::fs::remove_file(dir.join("src/code-0.txt")).unwrap();
+    assert_eq!(in_folder(&lab), agreement(1, 1, 1));
+}
+
+/// The observation of cluster `src/<stratum>-<k>.txt` in the fixture below.
+fn observed_at(stratum: &str, k: usize) -> f64 {
+    0.01 * (k + 1) as f64 + if stratum == "code" { 0.0 } else { 0.02 }
+}
+
+// The range is the plan's, as `MEAN` writes it, not ln 2.
+#[allow(clippy::approx_constant)]
+#[test]
+fn observations_csv_recomputes_e_value() {
+    use evidence::Tail;
+    use evidence::claim::{Bound, Statistic, e_value, order};
+    use evidence::rng::Rng;
+    let stat = Statistic::Mean {
+        lo: -0.693147,
+        hi: 0.693147,
+    };
+    let bound = Bound {
+        tail: Tail::Lower,
+        margin: MARGIN,
+    };
+    let lab = lab();
+    let mut all = bodies(&lab, MEAN, rows_on_level_2());
+    let hash = spec::hash_bytes(&spec::parse(spec_text(MEAN).as_bytes()).unwrap().hash).unwrap();
+    for (kind, body) in all.iter_mut().filter(|(k, _)| *k == "row") {
+        let unit = body["unit"].as_str().unwrap().to_string();
+        let (path, _) = unit.split_once('#').unwrap();
+        let name = path.trim_start_matches("src/").trim_end_matches(".txt");
+        let (stratum, k) = name.split_once('-').unwrap();
+        if body["condition"] == "arm-a" {
+            body["values"]["ppl"] = json!(10.0 * observed_at(stratum, k.parse().unwrap()).exp());
+        }
+        assert_eq!(*kind, "row");
+    }
+    // The test reads each stratum's clusters in a seeded order; the registered e-value is the
+    // least over the strata, from observations the test of the fixture's plan would see.
+    let seeded = |stratum: &str| -> Vec<f64> {
+        let path = format!("test/H1/{stratum}");
+        let rng = &mut Rng::from_seed(ignorarium::seed::seed(&hash, &path));
+        order(4, rng)
+            .into_iter()
+            .map(|k| observed_at(stratum, k))
+            .collect()
+    };
+    let want = ["code", "article"]
+        .map(|s| e_value(&stat, &bound, &seeded(s)).unwrap())
+        .into_iter()
+        .fold(f64::INFINITY, f64::min);
+    all.iter_mut().find(|(k, _)| *k == "verdict").unwrap().1["e_value"] = json!(want);
+    plant(&lab.home, ID, &all);
+    let csv = sidecars_of(&lab).observations;
+    let mut lines = csv.lines();
+    assert_eq!(
+        lines.next(),
+        Some("hypothesis,stratum,side,position,cluster,units,observation")
+    );
+    let mut groups: std::collections::BTreeMap<String, Vec<(u64, f64)>> = Default::default();
+    for line in lines {
+        let f: Vec<&str> = line.split(',').collect();
+        assert_eq!(f.len(), 7, "{line}");
+        assert_eq!((f[0], f[2], f[5]), ("H1", "below", "5"), "{line}");
+        groups
+            .entry(f[1].into())
+            .or_default()
+            .push((f[3].parse().unwrap(), f[6].parse().unwrap()));
+    }
+    assert_eq!(groups.len(), 2);
+    let e = groups
+        .values()
+        .map(|g| {
+            let positions: Vec<u64> = g.iter().map(|(p, _)| *p).collect();
+            assert_eq!(positions, [1, 2, 3, 4], "rows come in test order");
+            let obs: Vec<f64> = g.iter().map(|(_, x)| *x).collect();
+            e_value(&stat, &bound, &obs).unwrap()
+        })
+        .fold(f64::INFINITY, f64::min);
+    assert!((e / want - 1.0).abs() < 1e-9, "{e} against {want}");
+    assert_eq!(card_of(&lab).hypotheses[0].e_value, Some(want));
+}
+
+#[test]
+fn observations_hash_is_on_the_card() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let card = card_of(&lab);
+    let csv = sidecars_of(&lab).observations;
+    assert_eq!(card.observations.sha256, sha256_hex(csv.as_bytes()));
+    assert_eq!(card.observations.rows, csv.lines().count() as u64 - 1);
+    assert_eq!(card.observations.file, "observations.csv");
+}
+
+#[test]
+fn card_md_has_no_long_lists() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let md = card::render::markdown(&card_of(&lab));
+    assert!(!md.contains("src/code-0.txt"), "{md}");
+    let digests = md
+        .split(|c: char| !c.is_ascii_hexdigit())
+        .filter(|w| w.len() == 64)
+        .count();
+    assert!(digests <= 11, "{digests} digests in the card");
 }

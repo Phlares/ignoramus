@@ -273,6 +273,19 @@ pub struct Source {
     clusters: Vec<Cluster>,
 }
 
+/// One observation a registered test read: the cluster's value for one bound, at its place
+/// (from 1) in the order of that test.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Observed {
+    pub hypothesis: String,
+    pub stratum: String,
+    pub side: &'static str,
+    pub position: u64,
+    pub cluster: String,
+    pub units: u64,
+    pub observation: f64,
+}
+
 /// What `Source::refit` gives: the clusters and units it fitted, as an estimate counts them,
 /// whether the clip moved a unit value, and the fit of the values before (`raw`) and after the
 /// clip, `None` where `estimates` gives none.
@@ -322,6 +335,41 @@ impl Source {
             &self.hash,
             verdicts,
         )
+    }
+
+    /// The observations each registered test read, in the order it read them: per claim, per
+    /// stratum, per bound. None for a study that is not confirmatory.
+    pub fn observations(&self) -> Result<Vec<Observed>, String> {
+        let mut out = Vec::new();
+        if self.spec.study.mode != Mode::Confirmatory {
+            return Ok(out);
+        }
+        let hypotheses = self.spec.question.hypotheses.iter();
+        for h in hypotheses {
+            let (Some(claim), Some(stat)) = (h.claim, h.statistic.as_ref()) else {
+                continue;
+            };
+            let stat = stat.to_evidence();
+            for scope in scopes(&self.spec, h, &self.pairs, &self.clusters) {
+                let samples = ordered(h, &scope, &self.hash);
+                for b in claim.bounds() {
+                    for (i, (cluster, xs)) in samples.iter().enumerate() {
+                        let fault =
+                            |e: evidence::Error| format!("the observations of {}: {e}", h.id);
+                        out.push(Observed {
+                            hypothesis: h.id.clone(),
+                            stratum: scope.stratum.to_string(),
+                            side: side(&b),
+                            position: i as u64 + 1,
+                            cluster: cluster.to_string(),
+                            units: xs.len() as u64,
+                            observation: claim::observation(&stat, &b, xs).map_err(fault)?,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// The fit `estimates` gives hypothesis `id` in group `stratum`, over the unit values,
@@ -394,20 +442,23 @@ fn measured(spec: &Spec, clusters: &[Cluster], ran: &BTreeSet<&str>) -> Vec<Clus
         .collect()
 }
 
+/// The unit values of each cluster `group` gives, with its path.
+pub(crate) type Measured<'a> = (&'a str, Vec<f64>);
+
 /// The clusters of `role` in `stratum` (every stratum for the pooled group `""`), in the order
 /// of `clusters`, each as the contrast's value for each picked unit that counts, and the count
 /// of picked units that do not. A unit counts when every term pairs in at least `repeats`
 /// repeats; its value is the weighted sum of the terms' means. A cluster with no unit that
 /// counts is left out.
-pub(crate) fn group(
-    clusters: &[Cluster],
+pub(crate) fn group_paths<'a>(
+    clusters: &'a [Cluster],
     role: Role,
     stratum: &str,
     outcome: &str,
     contrast: &BTreeMap<String, f64>,
     paired: &Paired,
     repeats: u32,
-) -> (Vec<Vec<f64>>, u64) {
+) -> (Vec<Measured<'a>>, u64) {
     let mut incomplete = 0;
     let samples = (clusters.iter())
         .filter(|c| c.role == role)
@@ -427,11 +478,26 @@ pub(crate) fn group(
                     None => incomplete += 1,
                 }
             }
-            xs
+            (c.path.as_str(), xs)
         })
-        .filter(|xs| !xs.is_empty())
+        .filter(|(_, xs)| !xs.is_empty())
         .collect();
     (samples, incomplete)
+}
+
+/// `group` without the cluster paths.
+pub(crate) fn group(
+    clusters: &[Cluster],
+    role: Role,
+    stratum: &str,
+    outcome: &str,
+    contrast: &BTreeMap<String, f64>,
+    paired: &Paired,
+    repeats: u32,
+) -> (Vec<Vec<f64>>, u64) {
+    let (found, incomplete) =
+        group_paths(clusters, role, stratum, outcome, contrast, paired, repeats);
+    (found.into_iter().map(|(_, xs)| xs).collect(), incomplete)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -622,8 +688,8 @@ fn judge(
 /// first-batch cluster and of each appended reserve cluster, and the count of incomplete units.
 struct Scope<'a> {
     stratum: &'a str,
-    first: Vec<Vec<f64>>,
-    appended: Vec<Vec<f64>>,
+    first: Vec<Measured<'a>>,
+    appended: Vec<Measured<'a>>,
     incomplete: u64,
 }
 
@@ -633,13 +699,13 @@ fn scopes<'a>(
     spec: &Spec,
     h: &'a Hypothesis,
     paired: &Paired,
-    clusters: &[Cluster],
+    clusters: &'a [Cluster],
 ) -> Vec<Scope<'a>> {
     let repeats = spec.design.repeats;
     (claim_strata(h).into_iter())
         .map(|stratum| {
             let of = |role| {
-                group(
+                group_paths(
                     clusters,
                     role,
                     stratum,
@@ -675,7 +741,7 @@ pub fn clip_counts(spec: &Spec, paired: &Paired, clusters: &[Cluster]) -> Vec<Gr
                 .first
                 .iter()
                 .chain(&s.appended)
-                .flatten()
+                .flat_map(|(_, xs)| xs)
                 .copied()
                 .collect();
             if let Some((below, above)) = claim::clipped(&stat, &units) {
@@ -710,7 +776,7 @@ fn held(
         let samples = ordered(h, scope, spec_hash);
         for b in claim.bounds() {
             let obs = (samples.iter())
-                .map(|xs| claim::observation(&stat, &b, xs))
+                .map(|(_, xs)| claim::observation(&stat, &b, xs))
                 .collect::<Result<Vec<f64>, _>>()?;
             let value = if tested {
                 Some(finite(claim::e_value(&stat, &b, &obs)?))
@@ -732,7 +798,11 @@ fn held(
 
 /// The values of `scope` in the order the test of `h` reads them: the first batch in its
 /// seeded order, then the appended clusters.
-fn ordered<'a>(h: &Hypothesis, scope: &'a Scope<'_>, spec_hash: &[u8; 32]) -> Vec<&'a Vec<f64>> {
+fn ordered<'a>(
+    h: &Hypothesis,
+    scope: &'a Scope<'_>,
+    spec_hash: &[u8; 32],
+) -> Vec<&'a Measured<'a>> {
     let path = format!("test/{}/{}", h.id, scope.stratum);
     let rng = &mut Rng::from_seed(seed(spec_hash, &path));
     let order = claim::order(scope.first.len(), rng);
@@ -806,7 +876,7 @@ pub fn intervals(
         let stat = claim::Statistic::Mean { lo, hi };
         for scope in scopes(spec, h, paired, clusters) {
             let samples: Vec<&[f64]> = (ordered(h, &scope, spec_hash).into_iter())
-                .map(Vec::as_slice)
+                .map(|(_, xs)| xs.as_slice())
                 .collect();
             if samples.is_empty() {
                 continue;

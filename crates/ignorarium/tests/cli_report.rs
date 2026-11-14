@@ -676,7 +676,14 @@ fn card_out_writes_the_frozen_card_and_keeps_readings() {
     plant(&lab.home, "s1", &finished_study(&three(), &[]));
     let out = lab.root.join("card");
     card_out(&lab, &out).success();
-    for name in ["card.json", "card.md", "manifest.sha256", "readings.md"] {
+    for name in [
+        "card.json",
+        "card.md",
+        "manifest.sha256",
+        "data.sha256",
+        "observations.csv",
+        "readings.md",
+    ] {
         assert!(out.join(name).is_file(), "{name}");
     }
     assert!(out.join("tex/results.tex").is_file());
@@ -684,7 +691,7 @@ fn card_out_writes_the_frozen_card_and_keeps_readings() {
     let card: Value = serde_json::from_slice(&bytes).unwrap();
     let sha = ignorarium::canon::sha256_hex;
     let manifest = std::fs::read(out.join("manifest.sha256")).unwrap();
-    assert_eq!(sha(&manifest), card["recipe"]["manifest"]["tree_sha256"]);
+    assert_eq!(sha(&manifest), card["recipe"]["manifest"]["list_sha256"]);
     let readings = std::fs::read_to_string(out.join("readings.md")).unwrap();
     assert!(readings.starts_with(&format!("<!-- card sha256: {} -->\n", sha(&bytes))));
     // A filled readings.md survives a second run; the card changes only by its opened record.
@@ -707,6 +714,20 @@ fn card_out_writes_the_frozen_card_and_keeps_readings() {
         String::from_utf8(frozen(&bytes)).unwrap(),
         "only opened and records may change"
     );
+}
+
+#[test]
+fn data_sidecar_hash_matches_card() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let out = lab.root.join("card");
+    card_out(&lab, &out).success();
+    let card: Value =
+        serde_json::from_slice(&std::fs::read(out.join("card.json")).unwrap()).unwrap();
+    let sidecar =
+        |name: &str| ignorarium::canon::sha256_hex(&std::fs::read(out.join(name)).unwrap());
+    assert_eq!(sidecar("data.sha256"), card["setup"]["data"]["list_sha256"]);
+    assert_eq!(sidecar("observations.csv"), card["observations"]["sha256"]);
 }
 
 #[test]

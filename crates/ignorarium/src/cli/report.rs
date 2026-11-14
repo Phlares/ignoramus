@@ -2,12 +2,13 @@
 //! Appends one `opened` record, so a reader of the log sees that the results were read.
 use super::{CliError, Ctx, Done, Run, located, not_registered, out};
 use crate::canon::sha256_hex;
+use crate::card::sidecar::{DATA_FILE, OBSERVATIONS_FILE, Sidecars};
 use crate::card::{self, Card, Opened, readings, recipe, render};
 use crate::derived::OPENED;
 use crate::diag::printable;
 use crate::files::optional;
 use crate::home::Home;
-use crate::records::{self, RecordDraft, RecordError};
+use crate::records::{self, Log, RecordDraft, RecordError};
 use serde_json::json;
 use std::path::Path;
 
@@ -39,16 +40,16 @@ impl From<CliError> for Stop {
 }
 
 pub fn report(ctx: &Ctx, id: &str, folder: Option<&Path>) -> Result<Card, CliError> {
-    report_with(ctx, id, folder, |_| Ok(())).map(|(card, ())| card)
+    report_with(ctx, id, folder, |_, _| Ok(())).map(|(card, ())| card)
 }
 
-/// `report`, with `before` run on the built card ahead of the `opened` append. When `before`
-/// refuses, nothing is appended.
+/// `report`, with `before` run on the built card and its log ahead of the `opened` append. When
+/// `before` refuses, nothing is appended.
 fn report_with<T>(
     ctx: &Ctx,
     id: &str,
     folder: Option<&Path>,
-    before: impl FnOnce(&Card) -> Result<T, CliError>,
+    before: impl FnOnce(&Card, &Log) -> Result<T, CliError>,
 ) -> Result<(Card, T), CliError> {
     let (home, log) = located(ctx, id)?;
     let key = crate::keys::load(home)
@@ -57,7 +58,7 @@ fn report_with<T>(
     let mut built = None;
     let appended = records::append_with(&log, &key, |all| -> Result<_, Stop> {
         let card = card::build(home, id, all, folder)?;
-        built = Some((before(&card)?, card));
+        built = Some((before(&card, all)?, card));
         Ok(vec![RecordDraft::new(id, OPENED, json!({}))])
     })
     .map_err(|e| match e {
@@ -160,7 +161,14 @@ fn latex(card: &Card) -> Result<Vec<(String, String)>, CliError> {
     render::latex(card).map_err(|e| CliError::usage(format!("report: {e}")))
 }
 
-const CARD_FILES: [&str; 4] = ["card.json", "card.md", "manifest.sha256", readings::FILE];
+const CARD_FILES: [&str; 6] = [
+    "card.json",
+    "card.md",
+    "manifest.sha256",
+    DATA_FILE,
+    OBSERVATIONS_FILE,
+    readings::FILE,
+];
 
 /// What `--card` writes besides `card.json`, `card.md` and `readings.md`. Rendered and checked
 /// before the `opened` append.
@@ -168,6 +176,7 @@ struct Parts {
     tex: Vec<(String, String)>,
     figures: Vec<(String, String)>,
     manifest: String,
+    sidecars: Sidecars,
 }
 
 /// Refuses an `--out` folder that holds a symlink, a file this command does not write, or
@@ -217,16 +226,21 @@ fn check_folder(dir: &Path, parts: &Parts) -> Result<(), CliError> {
 
 /// Renders what `--card` writes beyond the card and checks it against `dir` and the study
 /// folder.
-fn plan_card(home: &Home, card: &Card, dir: &Path) -> Result<Parts, CliError> {
+fn plan_card(home: &Home, card: &Card, log: &Log, dir: &Path) -> Result<Parts, CliError> {
     let usage = |e: String| CliError::usage(format!("report: {e}"));
     let lines = recipe::manifest_lines(&home.study_dir(&card.study)).map_err(usage)?;
-    let manifest: String = lines.iter().map(|l| format!("{l}\n")).collect();
-    if sha256_hex(manifest.as_bytes()) != card.recipe.manifest.tree_sha256 {
+    let manifest = recipe::list_text(&lines);
+    let sidecars = Sidecars::of(home, &card.study, log).map_err(usage)?;
+    let unchanged = sha256_hex(manifest.as_bytes()) == card.recipe.manifest.list_sha256
+        && sidecars.data_list() == card.setup.data
+        && sidecars.observations_card() == card.observations;
+    if !unchanged {
         return Err(usage(
             "the study folder changed while the card was built".into(),
         ));
     }
     let parts = Parts {
+        sidecars,
         tex: latex(card)?,
         figures: render::figures(card).map_err(usage)?,
         manifest,
@@ -241,6 +255,11 @@ fn write_card(card: &Card, parts: &Parts, dir: &Path) -> std::io::Result<()> {
         ("card.json".to_string(), card.json()),
         ("card.md".to_string(), render::markdown(card)),
         ("manifest.sha256".to_string(), parts.manifest.clone()),
+        (DATA_FILE.to_string(), parts.sidecars.data.clone()),
+        (
+            OBSERVATIONS_FILE.to_string(),
+            parts.sidecars.observations.clone(),
+        ),
     ];
     write_files(dir, &own)?;
     write_files(dir, &parts.figures)?;
@@ -283,7 +302,7 @@ fn flag_readings(old: &[u8], card: &Card) {
 
 fn run_card(ctx: &Ctx, id: &str, dir: &Path, folder: Option<&Path>) -> Run {
     let home = ctx.home()?;
-    let (card, parts) = report_with(ctx, id, folder, |card| plan_card(home, card, dir))?;
+    let (card, parts) = report_with(ctx, id, folder, |card, log| plan_card(home, card, log, dir))?;
     let old = optional(std::fs::read(dir.join(readings::FILE))).unwrap_or_else(|e| {
         eprintln!("report: cannot read {} to check it: {e}", readings::FILE);
         None
@@ -328,7 +347,7 @@ pub fn run(
     }
     let shown = match (format, dir) {
         (Format::Tex, Some(dir)) => {
-            let (_, files) = report_with(ctx, id, folder, latex)?;
+            let (_, files) = report_with(ctx, id, folder, |card, _| latex(card))?;
             write_files(dir, &files)
                 .map_err(|e| CliError::usage(format!("{}: {e}", dir.display())))?;
             format!("wrote {} files to {}\n", files.len(), dir.display())
