@@ -1446,17 +1446,17 @@ fn row_estimate(plan: &RunPlan, machine: &Machine) -> Cost {
 /// Cost in the signed records: every attempt's spend, the box's CPU included, from `row` and
 /// `spend` records. `rows` counts completed rows only, so the mean stays per completed row.
 #[derive(Default)]
-struct Tally {
-    rows: u64,
-    cpu: f64,
-    wall: f64,
-    voided: u64,
-    retried: u64,
-    unknown_cpu: u64,
+pub(crate) struct Tally {
+    pub(crate) rows: u64,
+    pub(crate) cpu: f64,
+    pub(crate) wall: f64,
+    pub(crate) voided: u64,
+    pub(crate) retried: u64,
+    pub(crate) unknown_cpu: u64,
 }
 
 impl Tally {
-    fn of(records: &[records::Record]) -> Tally {
+    pub(crate) fn of(records: &[records::Record]) -> Tally {
         let mut t = Tally::default();
         for r in records
             .iter()

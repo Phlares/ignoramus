@@ -1,5 +1,7 @@
 //! The study card: everything `report` says about a finished study, as one structure.
 //! Each output format renders this structure; none reads the log on its own.
+pub mod sections;
+
 use crate::analysis::{IntervalResult, Source};
 use crate::cli::check::HomeRecords;
 use crate::cli::status::{relabelled, shown_labels};
@@ -13,6 +15,10 @@ use crate::deviations::Deviations;
 use crate::home::Home;
 use crate::records::{Log, Record};
 use crate::rules::BoxRecords;
+use sections::{
+    ClaimLine, Cost, Header, Outside, OutsideFiles, ResultRow, Runs, Sensitivity, Setup, Surprises,
+    VerdictLine,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -199,6 +205,16 @@ pub struct Card {
     pub children: Vec<Value>,
     pub family: Value,
     pub deviations: Vec<DeviationRow>,
+    pub header: Header,
+    pub claims: Vec<ClaimLine>,
+    pub verdicts: Vec<VerdictLine>,
+    pub results: Vec<ResultRow>,
+    pub sensitivity: Vec<Sensitivity>,
+    pub setup: Setup,
+    pub surprises: Surprises,
+    pub cost: Cost,
+    pub runs: Runs,
+    pub outside: OutsideFiles,
 }
 
 /// The time the results were complete: the later of the last counted estimate or verdict
@@ -334,13 +350,13 @@ pub fn build(home: &Home, id: &str, log: &Log) -> Result<Card, CliError> {
         return Err(CliError::refuse(said));
     };
     let analysis = Analysis::of(analysed).ok_or_else(|| not_registered(id))?;
-    let mut seen = BTreeSet::new();
-    let verdicts: Vec<Verdict> = (after.iter().filter_map(Verdict::of))
-        .filter(|v| seen.insert(v.hypothesis.clone()))
-        .collect();
-    let recorded = crate::deviations::recorded(&home.study_dir(id)).map_err(CliError::usage)?;
-    let file = crate::deviations::load(&home.study_dir(id)).map_err(CliError::usage)?;
-    let text = std::fs::read(home.study_dir(id).join("spec.toml"))
+    let verdicts: Vec<Verdict> = sections::first_verdicts(&after);
+    let dir = home.study_dir(id);
+    let recorded = crate::deviations::recorded(&dir).map_err(CliError::usage)?;
+    let file = crate::deviations::load(&dir).map_err(CliError::usage)?;
+    let outside = sections::outside(&dir).map_err(CliError::usage)?;
+    let events = Outside::of(&dir, sections::EVENTS).map_err(CliError::usage)?;
+    let text = std::fs::read(dir.join("spec.toml"))
         .map_err(|e| CliError::usage(format!("cannot report {id}: its plan: {e}")))?;
     let source = Source::read(&text, all, log.data_hashes.as_ref()).map_err(refuse)?;
     let intervals = source.intervals(&verdicts);
@@ -383,7 +399,18 @@ pub fn build(home: &Home, id: &str, log: &Log) -> Result<Card, CliError> {
         })
         .collect();
     let family = family_block(&box_records, id, &own, &at).map_err(refuse)?;
+    let spec = &source.spec;
     Ok(Card {
+        header: sections::header(log, spec),
+        claims: sections::claims(log, spec),
+        verdicts: sections::verdicts(log),
+        results: sections::results(log, spec, &hypotheses),
+        sensitivity: sections::sensitivity(log, spec),
+        setup: sections::setup(log, spec, events.as_ref()),
+        surprises: sections::surprises(log),
+        cost: sections::cost(log, spec),
+        runs: sections::runs(log, events.as_ref()),
+        outside,
         card_version: CARD_VERSION,
         study: id.to_string(),
         finished_at: at,
