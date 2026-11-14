@@ -639,3 +639,60 @@ fn card_marks_interval_post_hoc() {
     }]);
     assert_eq!(h["intervals"], want);
 }
+
+fn card_out(lab: &Lab, out: &std::path::Path) -> assert_cmd::assert::Assert {
+    bin(lab)
+        .args(["report", "s1", "--card", "--out"])
+        .arg(out)
+        .assert()
+}
+
+#[test]
+fn card_out_writes_the_frozen_card_and_keeps_readings() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let out = lab.root.join("card");
+    card_out(&lab, &out).success();
+    for name in ["card.json", "card.md", "manifest.sha256", "readings.md"] {
+        assert!(out.join(name).is_file(), "{name}");
+    }
+    assert!(out.join("tex/results.tex").is_file());
+    let bytes = std::fs::read(out.join("card.json")).unwrap();
+    let card: Value = serde_json::from_slice(&bytes).unwrap();
+    let sha = ignorarium::canon::sha256_hex;
+    let manifest = std::fs::read(out.join("manifest.sha256")).unwrap();
+    assert_eq!(sha(&manifest), card["recipe"]["manifest"]["tree_sha256"]);
+    let readings = std::fs::read_to_string(out.join("readings.md")).unwrap();
+    assert!(readings.starts_with(&format!("<!-- card sha256: {} -->\n", sha(&bytes))));
+    // A filled readings.md survives a second run; the card changes only by its opened record.
+    std::fs::write(out.join("readings.md"), "mine\n").unwrap();
+    card_out(&lab, &out).success();
+    assert_eq!(
+        std::fs::read_to_string(out.join("readings.md")).unwrap(),
+        "mine\n"
+    );
+    assert_ne!(std::fs::read(out.join("card.json")).unwrap(), bytes);
+}
+
+#[test]
+fn card_out_refuses_foreign_files_before_the_opened_record() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    let out = lab.root.join("card");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join("stale.txt"), "x").unwrap();
+    let a = card_out(&lab, &out).code(2);
+    let err = String::from_utf8_lossy(&a.get_output().stderr).into_owned();
+    assert!(err.contains("stale.txt"), "{err}");
+    let kinds: Vec<String> = records_of(&lab, "s1").into_iter().map(|r| r.kind).collect();
+    assert!(!kinds.contains(&"opened".to_string()), "{kinds:?}");
+}
+
+#[test]
+fn card_conflicts_with_format_and_needs_out() {
+    let lab = lab();
+    plant(&lab.home, "s1", &finished_study(&three(), &[]));
+    for args in [&["--card", "--format", "md", "--out", "x"][..], &["--card"]] {
+        bin(&lab).args(["report", "s1"]).args(args).assert().code(2);
+    }
+}

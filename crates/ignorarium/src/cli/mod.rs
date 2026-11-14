@@ -193,7 +193,10 @@ enum Verb {
         /// Same as `--format json`.
         #[arg(long, conflicts_with = "format")]
         json: bool,
-        /// The folder `--format tex` writes its files to.
+        /// Write the frozen card, its figures, manifest and author slots to `--out`.
+        #[arg(long, conflicts_with_all = ["format", "json"], requires = "out")]
+        card: bool,
+        /// The folder `--format tex` or `--card` writes its files to.
         #[arg(long)]
         out: Option<PathBuf>,
     },
@@ -271,11 +274,13 @@ impl Verb {
                 study,
                 format,
                 json,
+                card,
                 out,
             } => report::run(
                 ctx,
                 &study,
                 if json { report::Format::Json } else { format },
+                card,
                 out.as_deref(),
             ),
             Verb::Pause { study } => pause::run(ctx, &study),

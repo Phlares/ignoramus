@@ -1,6 +1,6 @@
 //! The Markdown and LaTeX renderers and the figure: pure functions of one card.
 use ignorarium::card::Card;
-use ignorarium::card::render::{figure, latex, markdown, tex_escape};
+use ignorarium::card::render::{self, figure, latex, markdown, tex_escape};
 use std::path::PathBuf;
 
 fn fixture(name: &str) -> PathBuf {
@@ -311,4 +311,72 @@ fn free_text_cannot_break_the_markdown() {
         markdown(&c).contains(r"![H\]x"),
         "alt text and link text are escaped"
     );
+}
+
+use ignorarium::card::readings::{self, NOT_READ};
+
+#[test]
+fn slot_allows_references_refuses_digits() {
+    let ok = "<!-- card sha256: ab12 -->\n\n## TL;DR\n\nThe code row moved {{card:e1:/results/0/estimate}} points; see [paper](https://x.org/a/2).\n";
+    assert_eq!(readings::check(ok), vec![]);
+    let bad = "## TL;DR\n\nGood.\n\n## Reading: H1/code\n\nIt moved by 5 points.\n";
+    let e = readings::check(bad);
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert_eq!(e[0].slot, "Reading: H1/code");
+    assert_eq!(e[0].line, 7);
+    assert!(e[0].excerpt.contains("5 points"));
+    // A digit beside a reference, and a digit in an unclosed reference, both count.
+    assert_eq!(readings::check("## TL;DR\n\n{{card:e1:/a}} 7\n").len(), 1);
+    assert_eq!(readings::check("## TL;DR\n\n{{card:e1:/a 7\n").len(), 1);
+    // A header line that is not the first line gets no exemption.
+    assert_eq!(
+        readings::check("## TL;DR\n<!-- card sha256: ab12 -->\n").len(),
+        1
+    );
+}
+
+#[test]
+fn empty_slot_renders_not_yet_read() {
+    let c = card();
+    let t = readings::template(&c);
+    let shown = readings::read_slots(&t);
+    assert_eq!(shown[0], ("TL;DR".to_string(), NOT_READ.to_string()));
+    assert_eq!(shown.len(), 1 + c.results.len());
+    assert!(shown.iter().all(|(_, s)| s == NOT_READ), "{shown:?}");
+    assert_eq!(NOT_READ, "not yet read by the author");
+    assert_eq!(readings::check(&t), vec![]);
+    let filled = t.replacen("## TL;DR\n", "## TL;DR\n\nIt held.\n", 1);
+    assert_eq!(readings::read_slots(&filled)[0].1, "It held.");
+}
+
+#[test]
+fn card_hash_stable_when_readings_change() {
+    let c = card();
+    let before = c.sha256();
+    let t = readings::template(&c);
+    assert!(t.starts_with(&format!("<!-- card sha256: {before} -->\n")));
+    assert_eq!(markdown(&c), markdown(&c));
+    // The card names the file by path only.
+    assert!(!markdown(&c).contains(&before));
+    let _filled = t.replacen("## TL;DR\n", "## TL;DR\n\nIt held.\n", 1);
+    assert_eq!(c.sha256(), before);
+    assert_eq!(c.json(), c.json());
+    assert!(c.json().ends_with("}\n"));
+}
+
+#[test]
+fn figures_are_one_file_per_claim_and_collisions_name_both() {
+    let c = card();
+    let f = render::figures(&c).unwrap();
+    assert_eq!(f.len(), c.claims.len());
+    assert!(
+        f.iter()
+            .all(|(n, s)| n.starts_with("figure-") && s.contains("<svg"))
+    );
+    let mut dup = c.clone();
+    let mut second = dup.claims[0].clone();
+    second.hypothesis = dup.claims[0].hypothesis.to_lowercase();
+    dup.claims.push(second);
+    let err = render::figures(&dup).unwrap_err();
+    assert!(err.contains("H1") && err.contains("h1"), "{err}");
 }

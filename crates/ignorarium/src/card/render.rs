@@ -381,6 +381,28 @@ const INK: &str = "#1a1a1a";
 const POINT: &str = "#1f5fa8";
 const MARGIN: &str = "#b3261e";
 
+/// The file the Markdown links for the figure of hypothesis `h`.
+fn figure_file(h: &str) -> String {
+    format!("figure-{}.svg", slug(h))
+}
+
+/// One figure file per claim: (file name, SVG). Two hypotheses that name the same file are refused.
+pub fn figures(c: &Card) -> Result<Vec<(String, String)>, String> {
+    let mut from = std::collections::BTreeMap::new();
+    let mut out = vec![];
+    for l in &c.claims {
+        let file = figure_file(&l.hypothesis);
+        if let Some(first) = from.insert(file.clone(), &l.hypothesis) {
+            return Err(format!(
+                "{file}: two hypotheses share it: {first:?} and {:?}",
+                l.hypothesis
+            ));
+        }
+        out.push((file, figure(c, &l.hypothesis)));
+    }
+    Ok(out)
+}
+
 fn xml(s: &str) -> String {
     (s.replace('&', "&amp;"))
         .replace('<', "&lt;")
