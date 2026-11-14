@@ -51,6 +51,7 @@
 ## Setup
 
 - Input list: 8 files, list SHA-256 e5c522272fde8c9d554fc18b865dbff94bdfe688baa365c38169f44891655c97, file data.sha256
+- 2 inputs without a digest
 - Input folder: does not hold the input list (1 missing, 0 extra, 0 differ)
 - Observations: 16 rows, SHA-256 26118cd324e5bb03652f87664f3e2045cbc30924fd3879c08694a926481c18a2, file observations.csv
 - Data grade: not in the records

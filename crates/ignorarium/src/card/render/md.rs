@@ -181,6 +181,7 @@ fn setup_section(c: &Card) -> String {
         "Input list: {} files, list SHA-256 {}, file {}",
         d.count, d.list_sha256, d.file
     )];
+    l.push(format!("{} inputs without a digest", d.absent));
     l.push(match a.agrees {
         true => "Input folder: holds exactly the input list".to_string(),
         false => format!(
@@ -192,6 +193,12 @@ fn setup_section(c: &Card) -> String {
         "Observations: {} rows, SHA-256 {}, file {}",
         o.rows, o.sha256, o.file
     ));
+    l.extend(o.forced.iter().map(|f| {
+        format!(
+            "Observations note: {} holds the raw observations; the registered verdict of {} was forced: {}",
+            o.file, f.hypothesis, f.reason
+        )
+    }));
     l.push(format!(
         "Data grade: {}",
         field(&s.data_grade, |g| g.clone())

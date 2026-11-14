@@ -1,5 +1,6 @@
 //! The files `report --card` writes beside the card: the signed input list and the observations
 //! the tests read. The card keeps their counts and hashes.
+use super::HypothesisCard;
 use super::recipe::{list_sha256, list_text, plain};
 use crate::analysis::{Observed, Source};
 use crate::derived::Inputs;
@@ -19,30 +20,44 @@ const HEADER: &str = "hypothesis,stratum,side,position,cluster,units,observation
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DataList {
     pub count: u64,
+    /// Inputs the `inputs` record names without a digest: absent when the study began.
+    pub absent: u64,
     pub list_sha256: String,
     pub file: String,
 }
 
-/// The rows of the observations file and its SHA-256.
+/// A registered verdict whose e-value was forced to 0, so the file's observations do not give it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Forced {
+    pub hypothesis: String,
+    pub reason: String,
+}
+
+/// The records of the observations file (the header apart), its SHA-256, and the verdicts
+/// whose e-value the file does not reproduce.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Observations {
     pub rows: u64,
     pub sha256: String,
     pub file: String,
+    pub forced: Vec<Forced>,
 }
 
 /// The text of each sidecar file, and the signed input lines it holds.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sidecars {
     pub lines: Vec<String>,
+    pub absent: u64,
+    pub rows: u64,
     pub data: String,
     pub observations: String,
 }
 
 /// The `<sha256>  <path>` line of each present input of the `inputs` record, sorted by path
 /// as the manifest is, each path spelled as the input view holds it.
-fn signed_lines(log: &Log) -> Result<Vec<String>, String> {
+fn signed_lines(log: &Log) -> Result<(Vec<String>, u64), String> {
     let frozen = (log.records.iter().find_map(Inputs::of)).map_or_else(Vec::new, |i| i.inputs);
+    let absent = frozen.iter().filter(|(_, hash)| hash.is_none()).count() as u64;
     let mut pairs: Vec<(String, String)> = (frozen.into_iter())
         .filter_map(|(path, hash)| Some((view::key(&path), hash?)))
         .collect();
@@ -50,10 +65,10 @@ fn signed_lines(log: &Log) -> Result<Vec<String>, String> {
     for (path, _) in &pairs {
         plain(path, "an input path")?;
     }
-    Ok(pairs
-        .into_iter()
+    let lines = (pairs.into_iter())
         .map(|(path, hash)| format!("{hash}  {path}"))
-        .collect())
+        .collect();
+    Ok((lines, absent))
 }
 
 fn cell(text: &str) -> String {
@@ -91,10 +106,13 @@ impl Sidecars {
 
     /// The sidecars of `log`, whose observations `source` reads.
     pub fn from_source(source: &Source, log: &Log) -> Result<Sidecars, String> {
-        let lines = signed_lines(log)?;
+        let (lines, absent) = signed_lines(log)?;
+        let observed = source.observations()?;
         Ok(Sidecars {
             data: list_text(&lines),
-            observations: csv(&source.observations()?),
+            observations: csv(&observed),
+            rows: observed.len() as u64,
+            absent,
             lines,
         })
     }
@@ -102,16 +120,74 @@ impl Sidecars {
     pub fn data_list(&self) -> DataList {
         DataList {
             count: self.lines.len() as u64,
+            absent: self.absent,
             list_sha256: list_sha256(&self.lines),
             file: DATA_FILE.into(),
         }
     }
 
-    pub fn observations_card(&self) -> Observations {
+    /// The observations entry of the card whose verdicts are `verdicts`.
+    pub fn observations_card(&self, verdicts: &[HypothesisCard]) -> Observations {
+        let forced = (verdicts.iter())
+            .filter(|v| v.basis == "test" && v.e_value == Some(0.0))
+            .filter_map(|v| {
+                let reason = v.reason.clone()?;
+                Some(Forced {
+                    hypothesis: v.hypothesis.clone(),
+                    reason,
+                })
+            })
+            .collect();
         Observations {
-            rows: self.observations.lines().count() as u64 - 1,
+            rows: self.rows,
             sha256: crate::canon::sha256_hex(self.observations.as_bytes()),
             file: OBSERVATIONS_FILE.into(),
+            forced,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The records of RFC 4180 `text`.
+    fn parse(text: &str) -> Vec<Vec<String>> {
+        let (mut rows, mut row, mut cell) = (vec![], vec![], String::new());
+        let (mut quoted, mut chars) = (false, text.chars().peekable());
+        while let Some(c) = chars.next() {
+            match (quoted, c) {
+                (true, '"') if chars.peek() == Some(&'"') => {
+                    cell.push('"');
+                    chars.next();
+                }
+                (true, '"') => quoted = false,
+                (false, '"') => quoted = true,
+                (false, ',') => row.push(std::mem::take(&mut cell)),
+                (false, '\n') => {
+                    row.push(std::mem::take(&mut cell));
+                    rows.push(std::mem::take(&mut row));
+                }
+                (_, c) => cell.push(c),
+            }
+        }
+        rows
+    }
+
+    #[test]
+    fn a_cluster_path_with_a_comma_and_a_quote_round_trips() {
+        let path = "src/a,\"b\".txt\nx";
+        let row = Observed {
+            hypothesis: "H1".into(),
+            stratum: "s,1".into(),
+            side: "below",
+            position: 1,
+            cluster: path.into(),
+            units: 5,
+            observation: 0.25,
+        };
+        let rows = parse(&csv(&[row]));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1], ["H1", "s,1", "below", "1", path, "5", "0.25"]);
     }
 }

@@ -914,7 +914,7 @@ fn card_data_is_count_and_list_hash() {
     let json = serde_json::to_value(&card.setup.data).unwrap();
     assert_eq!(
         json,
-        json!({ "count": 8, "list_sha256": sha256_hex(text.as_bytes()), "file": "data.sha256" })
+        json!({ "count": 8, "absent": 2, "list_sha256": sha256_hex(text.as_bytes()), "file": "data.sha256" })
     );
     assert_eq!(sidecars_of(&lab).data, text);
 }
@@ -971,25 +971,18 @@ fn observed_at(stratum: &str, k: usize) -> f64 {
     0.01 * (k + 1) as f64 + if stratum == "code" { 0.0 } else { 0.02 }
 }
 
-// The range is the plan's, as `MEAN` writes it, not ln 2.
+/// The statistic of `MEAN`: the plan's range as written, not ln 2.
 #[allow(clippy::approx_constant)]
-#[test]
-fn observations_csv_recomputes_e_value() {
-    use evidence::Tail;
-    use evidence::claim::{Bound, Statistic, e_value, order};
-    use evidence::rng::Rng;
-    let stat = Statistic::Mean {
+fn plan_stat() -> evidence::claim::Statistic {
+    evidence::claim::Statistic::Mean {
         lo: -0.693147,
         hi: 0.693147,
-    };
-    let bound = Bound {
-        tail: Tail::Lower,
-        margin: MARGIN,
-    };
-    let lab = lab();
-    let mut all = bodies(&lab, MEAN, rows_on_level_2());
-    let hash = spec::hash_bytes(&spec::parse(spec_text(MEAN).as_bytes()).unwrap().hash).unwrap();
-    for (kind, body) in all.iter_mut().filter(|(k, _)| *k == "row") {
+    }
+}
+
+/// Gives each cluster of the fixture its own `observed_at` value.
+fn varied(all: &mut [(&'static str, Value)]) {
+    for (_, body) in all.iter_mut().filter(|(k, _)| *k == "row") {
         let unit = body["unit"].as_str().unwrap().to_string();
         let (path, _) = unit.split_once('#').unwrap();
         let name = path.trim_start_matches("src/").trim_end_matches(".txt");
@@ -997,8 +990,23 @@ fn observations_csv_recomputes_e_value() {
         if body["condition"] == "arm-a" {
             body["values"]["ppl"] = json!(10.0 * observed_at(stratum, k.parse().unwrap()).exp());
         }
-        assert_eq!(*kind, "row");
     }
+}
+
+#[test]
+fn observations_csv_recomputes_e_value() {
+    use evidence::Tail;
+    use evidence::claim::{Bound, e_value, order};
+    use evidence::rng::Rng;
+    let stat = plan_stat();
+    let bound = Bound {
+        tail: Tail::Lower,
+        margin: MARGIN,
+    };
+    let lab = lab();
+    let mut all = bodies(&lab, MEAN, rows_on_level_2());
+    let hash = spec::hash_bytes(&spec::parse(spec_text(MEAN).as_bytes()).unwrap().hash).unwrap();
+    varied(&mut all);
     // The test reads each stratum's clusters in a seeded order; the registered e-value is the
     // least over the strata, from observations the test of the fixture's plan would see.
     let seeded = |stratum: &str| -> Vec<f64> {
@@ -1052,7 +1060,7 @@ fn observations_hash_is_on_the_card() {
     let card = card_of(&lab);
     let csv = sidecars_of(&lab).observations;
     assert_eq!(card.observations.sha256, sha256_hex(csv.as_bytes()));
-    assert_eq!(card.observations.rows, csv.lines().count() as u64 - 1);
+    assert_eq!(card.observations.rows, 8);
     assert_eq!(card.observations.file, "observations.csv");
 }
 
@@ -1067,4 +1075,95 @@ fn card_md_has_no_long_lists() {
         .filter(|w| w.len() == 64)
         .count();
     assert!(digests <= 11, "{digests} digests in the card");
+}
+
+#[test]
+fn inputs_without_a_digest_are_counted_and_printed() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let card = card_of(&lab);
+    assert_eq!(card.setup.data.absent, 2);
+    assert!(card::render::markdown(&card).contains("2 inputs without a digest"));
+}
+
+/// The fixture with `H1`'s registered verdict forced to e-value 0 for `reason`.
+fn forced_lab(reason: &str) -> Lab {
+    let lab = lab();
+    let mut all = bodies(&lab, MEAN, rows_on_level_2());
+    let v = &mut all.iter_mut().find(|(k, _)| *k == "verdict").unwrap().1;
+    (v["e_value"], v["reason"]) = (json!(0.0), json!(reason));
+    plant(&lab.home, ID, &all);
+    lab
+}
+
+#[test]
+fn a_forced_verdict_is_marked_beside_the_observations() {
+    let lab = forced_lab("stopped: out of budget");
+    let card = card_of(&lab);
+    let want = vec![card::sidecar::Forced {
+        hypothesis: "H1".into(),
+        reason: "stopped: out of budget".into(),
+    }];
+    assert_eq!(card.observations.forced, want);
+    let md = card::render::markdown(&card);
+    assert!(md.contains("raw observations"), "{md}");
+    assert!(md.contains("stopped: out of budget"), "{md}");
+}
+
+#[test]
+fn an_unforced_verdict_is_not_marked() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let card = card_of(&lab);
+    assert!(card.observations.forced.is_empty());
+    assert!(!card::render::markdown(&card).contains("raw observations"));
+}
+
+#[test]
+fn observations_csv_recomputes_interval() {
+    use evidence::Tail;
+    use evidence::claim::{Grid, tightest};
+    let stat = plan_stat();
+    let lab = lab();
+    let mut all = bodies(&lab, MEAN, rows_on_level_2());
+    varied(&mut all);
+    // A level the four clusters of a stratum can reach, so each interval has a bound.
+    all.iter_mut().find(|(k, _)| *k == "verdict").unwrap().1["level"] = json!(0.9);
+    plant(&lab.home, ID, &all);
+    let card = card_of(&lab);
+    let csv = sidecars_of(&lab).observations;
+    let threshold = 1.0 / card.hypotheses[0].level.unwrap();
+    let mut checked = 0;
+    for row in card
+        .results
+        .iter()
+        .filter(|r| r.hypothesis == "H1" && !r.stratum.is_empty())
+    {
+        let mut seen: Vec<(u64, f64)> = csv
+            .lines()
+            .skip(1)
+            .map(|l| l.split(',').collect::<Vec<_>>())
+            .filter(|f| f[1] == row.stratum)
+            .map(|f| (f[3].parse().unwrap(), f[6].parse().unwrap()))
+            .collect();
+        seen.sort_by_key(|(position, _)| *position);
+        let cells: Vec<[f64; 1]> = seen.iter().map(|(_, x)| [*x]).collect();
+        let samples: Vec<&[f64]> = cells.iter().map(|c| c.as_slice()).collect();
+        for i in &row.intervals {
+            assert_eq!(i.side, "below");
+            let g = Grid {
+                from: i.grid.from,
+                to: i.grid.to,
+                step: i.grid.step,
+            };
+            let found = tightest(&stat, Tail::Lower, &samples, threshold, g).unwrap();
+            assert!(
+                found.margin.is_some(),
+                "the fixture's interval is not empty"
+            );
+            assert_eq!(found.margin.filter(|_| found.contiguous), i.bound);
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 2);
 }

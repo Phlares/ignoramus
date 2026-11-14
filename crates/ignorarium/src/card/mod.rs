@@ -449,7 +449,7 @@ pub fn build(
         results: sections::results(&after, spec, &intervals),
         sensitivity: sections::sensitivity(&own, &after, spec),
         setup,
-        observations: sidecars.observations_card(),
+        observations: sidecars.observations_card(&hypotheses),
         surprises: sections::surprises(log),
         recipe,
         citation,

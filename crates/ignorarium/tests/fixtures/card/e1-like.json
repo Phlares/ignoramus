@@ -231,6 +231,7 @@
   "setup": {
     "data": {
       "count": 8,
+      "absent": 2,
       "list_sha256": "e5c522272fde8c9d554fc18b865dbff94bdfe688baa365c38169f44891655c97",
       "file": "data.sha256"
     },
@@ -292,7 +293,8 @@
   "observations": {
     "rows": 16,
     "sha256": "26118cd324e5bb03652f87664f3e2045cbc30924fd3879c08694a926481c18a2",
-    "file": "observations.csv"
+    "file": "observations.csv",
+    "forced": []
   },
   "surprises": {
     "failed": [],
