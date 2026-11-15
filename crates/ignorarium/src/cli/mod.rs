@@ -1,11 +1,13 @@
 //! The command line: argument parsing, the shared context, and one event per call.
 use crate::events::{self, Event};
 use crate::home::Home;
+use crate::sys;
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 use std::ffi::OsString;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
+use std::time::Instant;
 
 pub mod check;
 mod docs;
@@ -242,6 +244,20 @@ enum Dev {
 }
 
 impl Verb {
+    /// The study id of a verb that takes one.
+    fn study(&self) -> Option<&str> {
+        match self {
+            Verb::Run { study, .. }
+            | Verb::Status { study, .. }
+            | Verb::Report { study, .. }
+            | Verb::Pause { study }
+            | Verb::Resume { study }
+            | Verb::Stop { study, .. } => Some(study),
+            Verb::Verify { study } => study.as_deref(),
+            _ => None,
+        }
+    }
+
     fn name(&self) -> &'static str {
         match self {
             Verb::Guide { .. } => "guide",
@@ -319,30 +335,53 @@ where
         }
     };
     let name = cli.verb.name();
+    let started = Instant::now();
+    let trace_id = events::new_trace_id();
+    let span_id = events::new_span_id();
     let ctx = Ctx {
         home: Home::open().map_err(|e| e.to_string()),
     };
+    // The selftest runs in a sandbox where the event log is out of reach.
+    if name != "dev.selftest" {
+        let mut attrs = json!({
+            "verb": name,
+            "pid": std::process::id(),
+            "parent": sys::parent_name(),
+            "stdin_tty": std::io::stdin().is_terminal(),
+        });
+        if let (Some(map), Some(study)) = (attrs.as_object_mut(), cli.verb.study()) {
+            map.insert("study".into(), study.into());
+        }
+        warn_on_err(write_event(&ctx, &trace_id, &span_id, "call.start", attrs));
+    }
     // A hung-up terminal fails these writes; the exit code and the event still stand.
     let done = cli.verb.run(&ctx).unwrap_or_else(|e| {
         let _ = writeln!(std::io::stderr(), "error: {}", e.msg);
         Done::exit(e.code)
     });
-    // The self-test runs in a sandbox where the event log is out of reach.
     if name == "dev.selftest" {
         return done.code;
     }
-    if let Err(e) = emit(&ctx, name, &done) {
+    let attrs = end_attrs(&done, started);
+    warn_on_err(write_event(&ctx, &trace_id, &span_id, name, attrs));
+    done.code
+}
+
+fn warn_on_err(r: Result<(), String>) {
+    if let Err(e) = r {
         let _ = writeln!(
             std::io::stderr(),
             "warning: cannot write the event log: {e}"
         );
     }
-    done.code
 }
 
-fn emit(ctx: &Ctx, name: &str, done: &Done) -> Result<(), String> {
-    let home = ctx.home.as_ref().map_err(String::clone)?;
-    let mut attrs = json!({ "exit": done.code });
+fn end_attrs(done: &Done, started: Instant) -> Value {
+    let mut attrs = json!({
+        "exit": done.code,
+        "duration_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "peak_rss_kib": sys::peak_rss_kib(),
+    });
     if let Some(map) = attrs.as_object_mut() {
         if let Some(h) = &done.spec_hash {
             map.insert("spec_hash".into(), Value::String(h.clone()));
@@ -354,12 +393,23 @@ fn emit(ctx: &Ctx, name: &str, done: &Done) -> Result<(), String> {
             map.extend(extra.clone());
         }
     }
+    attrs
+}
+
+fn write_event(
+    ctx: &Ctx,
+    trace_id: &str,
+    span_id: &str,
+    name: &str,
+    attrs: Value,
+) -> Result<(), String> {
+    let home = ctx.home.as_ref().map_err(String::clone)?;
     events::emit(
         &home.root.join("events.jsonl"),
         Event {
             ts: crate::time::now_rfc3339(),
-            trace_id: events::new_trace_id(),
-            span_id: None,
+            trace_id: trace_id.into(),
+            span_id: Some(span_id.into()),
             name: name.into(),
             level: "info".into(),
             attrs,

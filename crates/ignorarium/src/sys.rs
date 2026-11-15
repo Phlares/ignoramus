@@ -175,6 +175,25 @@ pub fn has_exited(pid: u32) -> io::Result<bool> {
     }
 }
 
+/// Peak resident memory of this process, in KiB. `None` when the kernel reports none.
+pub fn peak_rss_kib() -> Option<u64> {
+    // SAFETY: an all-zero `rusage` is a valid value for this plain C struct.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: `usage` is a live local the call fills in.
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } != 0 {
+        return None;
+    }
+    // Linux reports `ru_maxrss` in KiB.
+    u64::try_from(usage.ru_maxrss).ok().filter(|k| *k > 0)
+}
+
+/// Name of the parent process, from `/proc`.
+pub fn parent_name() -> Option<String> {
+    let pid = rustix::process::getppid()?;
+    let comm = std::fs::read_to_string(format!("/proc/{}/comm", pid.as_raw_nonzero())).ok()?;
+    Some(comm.trim_end_matches('\n').to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

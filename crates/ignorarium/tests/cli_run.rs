@@ -627,6 +627,38 @@ fn sighup_kills_the_row_records_its_spend_and_pauses() {
 }
 
 #[test]
+fn a_killed_run_leaves_a_start_without_an_end() {
+    let lab = lab();
+    let id = "killed";
+    let dir = with_payload(&lab, id, SLEEPY_ROW_0);
+    let mut child = start_run(&lab, id, &[]);
+    let row = row_0_file(&dir);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    // The row's group outlives its parent; end it.
+    let group = format!("-{}", row["pgid"]);
+    let _ = std::process::Command::new("kill")
+        .args(["-KILL", "--", &group])
+        .status();
+    let log = std::fs::read_to_string(lab.home.root.join("events.jsonl")).unwrap();
+    let lines: Vec<Value> = log
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let start = lines
+        .iter()
+        .find(|e| e["name"] == "call.start" && e["attrs"]["verb"] == "run")
+        .expect("a call.start for run");
+    assert_eq!(start["attrs"]["study"], id);
+    assert!(
+        !lines
+            .iter()
+            .any(|e| e["name"] != "call.start" && e["span_id"] == start["span_id"]),
+        "{log}"
+    );
+}
+
+#[test]
 fn stop_sends_its_request_before_it_reads_a_torn_log() {
     let lab = lab();
     let id = "torn";
