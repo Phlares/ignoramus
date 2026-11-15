@@ -8,7 +8,7 @@ use crate::diag::printable;
 use crate::records::Record;
 use crate::runner::RunError;
 use crate::runner::progress;
-use crate::spec::model::{Spec, Trigger};
+use crate::spec::model::{SELECTED, Spec, Trigger};
 use crate::{resize, seed, spawn};
 use serde_json::{Value, json};
 
@@ -156,15 +156,18 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
 
     let blind = spec.access.blind;
     let shown = shown_labels(spec, &spec_hash);
-    // The spec's conditions first, then every other counted condition: `selected` and the
-    // admitted children, so the lines sum to `done` and `total`. `relabelled` leaves the
+    // The spec's conditions first, then every other counted condition, so the lines sum to
+    // `done` and `total`. The extra lines sort by shown label with `selected` last: real-id
+    // order would show a blind reader which real ids sort before which. `relabelled` leaves the
     // literal `selected` as is.
     let spec_lines = shown
         .iter()
         .map(|(real, label)| (real.as_str(), label.clone()));
-    let extra_lines = (p.conditions.keys())
+    let mut extra_lines: Vec<(&str, String)> = (p.conditions.keys())
         .filter(|k| !shown.iter().any(|(real, _)| real == *k))
-        .map(|k| (k.as_str(), relabelled(&shown, k)));
+        .map(|k| (k.as_str(), relabelled(&shown, k)))
+        .collect();
+    extra_lines.sort_by(|a, b| ((a.0 == SELECTED), &a.1).cmp(&(b.0 == SELECTED, &b.1)));
     let conditions: Vec<Value> = spec_lines
         .chain(extra_lines)
         .map(|(real, label)| {

@@ -1842,6 +1842,31 @@ fn blind_status_condition_lines_keep_selected_and_hide_child_parents() {
         kids.iter().all(|l| l.starts_with("condition ")),
         "{labels:?}"
     );
+    assert_eq!(labels.last().unwrap(), "selected", "{labels:?}");
+    let mut sorted: Vec<_> = kids.clone();
+    sorted.sort();
+    assert_eq!(kids, sorted, "{labels:?}");
+}
+
+/// Children of `selected` sort after `selected` by real id; the lines put `selected` last.
+#[test]
+fn status_condition_lines_put_selected_after_its_children() {
+    let lab = lab();
+    let spec = |t: String| {
+        spawn_on("{ arm-b = 1.0 }", WINDOW_ON_SELECTED, WINDOWS)(t)
+            .replace("blind = false", "blind = true")
+    };
+    register_study(&lab, "fires", spec, &[], STAGED);
+    assert_eq!(run(&plan_of(&lab, "fires")).unwrap(), RunStatus::Done);
+    let (labels, _, _) = condition_lines(&lab);
+    let n = labels.len();
+    assert_eq!(labels[n - 1], "selected", "{labels:?}");
+    assert!(
+        labels[n - 3..n - 1]
+            .iter()
+            .all(|l| l.contains("~window_tokens="))
+    );
+    assert!(labels[n - 3] < labels[n - 2], "{labels:?}");
 }
 
 #[test]
