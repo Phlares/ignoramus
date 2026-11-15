@@ -1014,6 +1014,17 @@ target = [
 ]
 
 [[rule]]
+code = "E-HSH-002"
+severity = "error"
+problem = "`pins.rule_base` is set and is not the rules hash of this box."
+instruction = "Run `ignorarium check` and copy the `rules` hash it prints into `pins.rule_base`, or leave `pins.rule_base` empty."
+why = "The pin says which rules the plan was approved under. A box with other rules judges a different study."
+sources = []
+target = [
+  { path = "pins.rule_base", check = "named:rule-base-matches" },
+]
+
+[[rule]]
 code = "E-SEC-001"
 severity = "error"
 problem = "A string looks like a secret or personal data; the diagnostic names the kind."

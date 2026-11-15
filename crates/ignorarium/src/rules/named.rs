@@ -155,6 +155,7 @@ const NAMED: &[(&str, NamedFn)] = &[
     ("input-path-safe", input_path_safe),
     ("input-path-nested", input_path_nested),
     ("input-hash-matches", input_hash_matches),
+    ("rule-base-matches", rule_base_matches),
     ("secret-scan", secret_scan),
     ("comment-scan", comment_scan),
 ];
@@ -340,6 +341,13 @@ fn input_hash_matches(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
         }
     }
     out
+}
+
+fn rule_base_matches(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    flag(spec, pat, |v| {
+        v.as_str()
+            .is_some_and(|s| !s.is_empty() && s != crate::identity::rules_sha256())
+    })
 }
 
 fn follow_on_exists(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
