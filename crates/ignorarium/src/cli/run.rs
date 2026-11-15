@@ -4,13 +4,20 @@ use crate::control::{ControlFile, Signal, run_is_live};
 use crate::runner::{self, RunError, RunStatus};
 use crate::{machine, sys};
 
-pub fn run(ctx: &Ctx, id: &str, max_level: Option<u8>) -> Run {
-    go(ctx, id, max_level, false)
+pub fn run(ctx: &Ctx, id: &str, max_level: Option<u8>, box_changed: Option<String>) -> Run {
+    go(ctx, id, max_level, false, box_changed)
 }
 
 /// `run`, or `resume` when `resume` is set: the same refusals, except that `resume`
-/// clears the pending pause that `run` refuses on.
-pub fn go(ctx: &Ctx, id: &str, max_level: Option<u8>, resume: bool) -> Run {
+/// clears the pending pause that `run` refuses on. `box_changed` is the reason for a declared
+/// change of box binary; a `resume` that a live run takes ignores it.
+pub fn go(
+    ctx: &Ctx,
+    id: &str,
+    max_level: Option<u8>,
+    resume: bool,
+    box_changed: Option<String>,
+) -> Run {
     let (home, _, all) = registered(ctx, id)?;
     refuse_if_stopped(id, &all)?;
     let control = ControlFile::of(home, id);
@@ -51,6 +58,7 @@ pub fn go(ctx: &Ctx, id: &str, max_level: Option<u8>, resume: bool) -> Run {
         request_resume()?;
     }
     plan.resumed_by = resume;
+    plan.box_changed = box_changed;
     // Rows start below: a terminal signal must end the row, not leave it running.
     sys::catch_interrupts()
         .map_err(|e| CliError::usage(format!("cannot install the signal handlers: {e}")))?;

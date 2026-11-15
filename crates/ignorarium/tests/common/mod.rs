@@ -1,13 +1,18 @@
 //! A registered study in a temp home, shared by the run tests.
 #![allow(dead_code)]
+use ignorarium::canon::sha256_file;
 use ignorarium::cli::register;
 use ignorarium::derived;
 use ignorarium::home::Home;
+use ignorarium::identity::{self, BoxIdentity};
 use ignorarium::rules::BoxRecords;
+use ignorarium::runner::{self, RunError, RunPlan, RunStatus};
 use ignorarium::spec::model::{Direction, Outcome, Paired, SelectionRule};
+use ignorarium::telemetry::Reading;
 use ignorarium::{keys, records, spec, stream};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use tempfile::TempDir;
 
 /// The box binary, with its home in `lab`.
@@ -15,6 +20,25 @@ pub fn bin(lab: &Lab) -> assert_cmd::Command {
     let mut c = assert_cmd::Command::cargo_bin("ignorarium").unwrap();
     c.env("IGNORARIUM_HOME", &lab.home.root);
     c
+}
+
+/// The box every test study registers and runs under: the embedded rules and the `ignorarium`
+/// binary. A test process is another binary, so `run` passes this one to the gate, and a
+/// study registered here runs through the binary and in the test process alike.
+pub fn box_identity() -> &'static BoxIdentity {
+    static BOX: OnceLock<BoxIdentity> = OnceLock::new();
+    BOX.get_or_init(|| BoxIdentity {
+        rules_sha256: identity::rules_sha256().into(),
+        binary_sha256: Reading::Read(format!(
+            "sha256:{}",
+            sha256_file(env!("CARGO_BIN_EXE_ignorarium").as_ref()).unwrap()
+        )),
+    })
+}
+
+/// `runner::run` as the suite's box.
+pub fn run(plan: &RunPlan) -> Result<RunStatus, RunError> {
+    runner::run_as(plan, box_identity())
 }
 
 /// What the command of `a` printed.
@@ -122,8 +146,15 @@ pub fn register_study(
     let typed = format!("{}\n", &hash["sha256:".len()..][..8]);
     let mut out = Vec::new();
     let mut input = Cursor::new(typed.into_bytes());
-    let done = register::run(&spec_path, &lab.home, &mut input, &mut out, true)
-        .unwrap_or_else(|e| panic!("{}: {}", e.msg, String::from_utf8_lossy(&out)));
+    let done = register::run_as(
+        &spec_path,
+        &lab.home,
+        &mut input,
+        &mut out,
+        true,
+        box_identity(),
+    )
+    .unwrap_or_else(|e| panic!("{}: {}", e.msg, String::from_utf8_lossy(&out)));
     assert_eq!(done.code, 0, "{}", String::from_utf8_lossy(&out));
     lab.home.study_dir(id)
 }

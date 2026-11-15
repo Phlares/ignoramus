@@ -661,7 +661,7 @@ fn level1_dead_box_child() {
         vec![Box::new(backend())],
     )
     .unwrap();
-    let _ = runner::run(&plan);
+    let _ = common::run(&plan);
 }
 
 #[test]
@@ -920,7 +920,7 @@ fn an_unknown_cpu_row_is_charged_the_estimate_warned_about_and_pauses_the_run() 
         vec![Box::new(stuck_bwrap(d.path(), true, false))],
     )
     .unwrap();
-    let status = runner::run(&plan).unwrap();
+    let status = common::run(&plan).unwrap();
     let RunStatus::Paused(why) = status else {
         panic!("{status:?}")
     };
@@ -969,7 +969,7 @@ fn an_unknown_cpu_attempt_that_is_retried_leaves_a_spend_record_and_still_pauses
         vec![Box::new(stuck_bwrap(d.path(), false, true))],
     )
     .unwrap();
-    let status = runner::run(&plan).unwrap();
+    let status = common::run(&plan).unwrap();
     let RunStatus::Paused(why) = status else {
         panic!("{status:?}")
     };
@@ -1076,7 +1076,7 @@ fn an_attempts_record_is_written_before_its_events_can_fail() {
             stop: stop.then(|| ControlFile::of(&lab.home, &id)),
             unknown: true,
         });
-        let err = runner::run(&plan).expect_err("an event write fails");
+        let err = common::run(&plan).expect_err("an event write fails");
         assert!(matches!(err, RunError::Io(_)), "{i}: {err}");
         let held = common::kind_of(&lab, &id, kind);
         assert_eq!(held.len(), 1, "{i}");
@@ -1118,7 +1118,7 @@ fn a_pause_sticks_when_the_event_log_cannot_be_written() {
             stop: None,
             unknown,
         });
-        let err = runner::run(&plan).expect_err("an event write fails");
+        let err = common::run(&plan).expect_err("an event write fails");
         assert!(matches!(err, RunError::Io(_)), "{i}: {err}");
         // The pause is written before any event, and no later row starts.
         let state = ignorarium::control::State::read(&lab.home, &id).unwrap();
@@ -1134,14 +1134,14 @@ fn a_pause_sticks_when_the_event_log_cannot_be_written() {
         std::fs::rename(dir.join("events.old"), dir.join("events.jsonl")).unwrap();
         let again = prepare(&lab.home, &id, &common::work_of(&lab.home, &id), 0).unwrap();
         assert_eq!(
-            runner::run(&again).unwrap(),
+            common::run(&again).unwrap(),
             RunStatus::Paused("a pause was requested".into()),
             "{i}"
         );
         assert_eq!(common::indices(&lab, &id), [0], "{i}");
         // A resume goes on.
         ControlFile::of(&lab.home, &id).request_resume().unwrap();
-        assert_eq!(runner::run(&again).unwrap(), RunStatus::Done, "{i}");
+        assert_eq!(common::run(&again).unwrap(), RunStatus::Done, "{i}");
         assert_eq!(common::indices(&lab, &id), [0, 1, 2, 3, 4, 5], "{i}");
     }
 }
@@ -1209,7 +1209,7 @@ fn an_unknown_cpu_pause_survives_a_failed_alert_at_the_retry_gate() {
         cpu(0.0),
         cpu(1900.0),
     ]));
-    let err = runner::run(&plan).expect_err("the alert write fails");
+    let err = common::run(&plan).expect_err("the alert write fails");
     assert!(matches!(err, RunError::Io(_)), "{err}");
     let state = ignorarium::control::State::read(&lab.home, "gate").unwrap();
     let why = "row 0 has an unknown CPU count; it is charged the row estimate";
@@ -1226,7 +1226,7 @@ fn an_unknown_cpu_pause_survives_a_failed_alert_at_the_retry_gate() {
     std::fs::rename(dir.join("events.old"), dir.join("events.jsonl")).unwrap();
     let again = prepare(&lab.home, "gate", &common::work_of(&lab.home, "gate"), 0).unwrap();
     assert_eq!(
-        runner::run(&again).unwrap(),
+        common::run(&again).unwrap(),
         RunStatus::Paused("a pause was requested".into())
     );
     assert!(common::indices(&lab, "gate").is_empty());
@@ -1348,7 +1348,7 @@ fn prepare_prefers_the_highest_backend() {
         0
     );
     // The whole study runs at level 1, and every record says so.
-    assert_eq!(runner::run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(common::run(&plan).unwrap(), RunStatus::Done);
     let rows = rows_of(&lab, "hi");
     assert_eq!(rows.len(), 6);
     for r in &rows {

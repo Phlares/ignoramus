@@ -1,5 +1,6 @@
 mod common;
 
+use common::run;
 use common::{Lab, lab};
 use ed25519_dalek::SigningKey;
 use evidence::elond::Gamma;
@@ -9,7 +10,7 @@ use ignorarium::derived::{Alpha, Analysis, StudyState};
 use ignorarium::keys;
 use ignorarium::records::{self, Record, RecordDraft};
 use ignorarium::rules::BoxRecords;
-use ignorarium::runner::{RunStatus, prepare_with, run};
+use ignorarium::runner::{RunStatus, prepare_with};
 use ignorarium::stream::{self, Log, LogName, Next, StreamError};
 use serde_json::{Value, json};
 use std::path::PathBuf;

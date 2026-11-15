@@ -12,7 +12,7 @@ use ignorarium::control::{
 use ignorarium::home::Home;
 use ignorarium::keys;
 use ignorarium::records::Record;
-use ignorarium::runner::{self, HEARTBEAT, RunError, RunPlan, RunStatus, prepare_with};
+use ignorarium::runner::{HEARTBEAT, RunError, RunPlan, RunStatus, prepare_with};
 use ignorarium::telemetry::Reading;
 use serde_json::{Value, json};
 use std::cell::{Cell, RefCell};
@@ -67,7 +67,7 @@ fn control_of(lab: &Lab, id: &str) -> ControlFile {
 }
 
 fn go(plan: &RunPlan) -> Result<RunStatus, RunError> {
-    runner::run(plan)
+    common::run(plan)
 }
 
 fn try_stop(home: &Home, id: &str, why: &str) -> Result<Option<Record>, ControlError> {
@@ -826,7 +826,7 @@ fn dead_box_child() {
         vec![Box::new(Level0)],
     )
     .unwrap();
-    let _ = runner::run(&plan);
+    let _ = common::run(&plan);
 }
 
 /// Run study `id` in a child box, kill the box once row `row` runs, and return its row file.

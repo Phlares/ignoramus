@@ -176,6 +176,10 @@ enum Verb {
         /// Use no backend above this isolation level.
         #[arg(long, value_parser = clap::value_parser!(u8).range(..=3))]
         max_level: Option<u8>,
+        /// Run on a box binary that differs from the last session's, for this reason. The
+        /// reason goes into the deviation log and the session record.
+        #[arg(long, value_name = "REASON")]
+        box_changed: Option<String>,
     },
     /// Show how far a study has run and what it has spent.
     Status {
@@ -218,6 +222,11 @@ enum Verb {
     Resume {
         /// Study id.
         study: String,
+        /// Resume on a box binary that differs from the last session's, for this reason. The
+        /// reason goes into the deviation log and the session record. Ignored when a live run
+        /// takes the resume request.
+        #[arg(long, value_name = "REASON")]
+        box_changed: Option<String>,
     },
     /// End a study for good and record why. Works on a paused or idle study.
     Stop {
@@ -251,7 +260,7 @@ impl Verb {
             | Verb::Status { study, .. }
             | Verb::Report { study, .. }
             | Verb::Pause { study }
-            | Verb::Resume { study }
+            | Verb::Resume { study, .. }
             | Verb::Stop { study, .. } => Some(study),
             Verb::Verify { study } => study.as_deref(),
             _ => None,
@@ -291,7 +300,11 @@ impl Verb {
             Verb::Import { source, files } => import::run(ctx, &source, &files),
             Verb::Verify { study } => verify::run(ctx, study.as_deref()),
             Verb::Probe => probe::run(ctx),
-            Verb::Run { study, max_level } => run::run(ctx, &study, max_level),
+            Verb::Run {
+                study,
+                max_level,
+                box_changed,
+            } => run::run(ctx, &study, max_level, box_changed),
             Verb::Status {
                 study,
                 json,
@@ -313,7 +326,7 @@ impl Verb {
                 study_folder.as_deref(),
             ),
             Verb::Pause { study } => pause::run(ctx, &study),
-            Verb::Resume { study } => resume::run(ctx, &study),
+            Verb::Resume { study, box_changed } => resume::run(ctx, &study, box_changed),
             Verb::Stop { study, reason } => stop::run(ctx, &study, &reason),
             Verb::Dev(Dev::GenRuleDocs { out }) => docs::run(&out),
             Verb::Dev(Dev::Selftest) => selftest::run(),

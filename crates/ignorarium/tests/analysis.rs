@@ -1,5 +1,6 @@
 mod common;
 
+use common::run;
 use evidence::claim::{Bound, Grid, Statistic, e_value, order, tightest};
 use evidence::rng::Rng;
 use evidence::{Tail, tree};
@@ -16,7 +17,7 @@ use ignorarium::derived::{
 use ignorarium::home::Home;
 use ignorarium::keys;
 use ignorarium::records::Record;
-use ignorarium::runner::{RunStatus, prepare_with, run};
+use ignorarium::runner::{RunStatus, prepare_with};
 use ignorarium::seed::seed;
 use ignorarium::spec::model::{Direction, Role, SelectionRule, Spec};
 use ignorarium::stream::{Log, LogName};

@@ -1,21 +1,22 @@
 mod common;
 
 use common::{
-    Lab, PAYLOAD, events_of, indices, kind_of, lab, named, plain, register_study, rows_of,
+    Lab, PAYLOAD, events_of, indices, kind_of, lab, named, plain, register_study, rows_of, run,
 };
 use ignorarium::backend::cgroup::rows_parent;
 use ignorarium::backend::level0::Level0;
 use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome, Watch};
 use ignorarium::budget::{Cost, FakeMeter, MeterError};
 use ignorarium::canon::sha256_hex;
-use ignorarium::control::State;
+use ignorarium::control::{DeviationRow, State, Timing};
 use ignorarium::derived::{
     Analysis, BoundResult, Carried, Estimate, Instrument, Recheck, Register, SESSION_END,
     SESSION_START, SessionEnd, SessionStart, StudyState, Verdict, contrast_key,
 };
+use ignorarium::identity::BoxIdentity;
 use ignorarium::planlog::store::PlanLog;
 use ignorarium::prior::{PriorUse, file_hashes};
-use ignorarium::runner::{RunError, RunPlan, RunStatus, prepare, prepare_with, run, up_to};
+use ignorarium::runner::{RunError, RunPlan, RunStatus, prepare, prepare_with, run_as, up_to};
 use ignorarium::spec::model::Role;
 use ignorarium::stream::{Log, LogName};
 use ignorarium::telemetry::{Reading, host_cpu_of};
@@ -527,7 +528,7 @@ fn a_run_writes_one_session_pair() {
     assert_eq!(start.verb, "run");
     assert_eq!(start.pid, std::process::id());
     assert_eq!(start.box_version, env!("CARGO_PKG_VERSION"));
-    let id = ignorarium::identity::current();
+    let id = common::box_identity();
     assert_eq!(start.rules_sha256, id.rules_sha256);
     assert_eq!(start.binary_sha256, id.binary_sha256);
     assert_eq!(start.session.len(), 32);
@@ -594,6 +595,215 @@ fn a_failed_run_ends_the_session_failed_with_a_redacted_error() {
     let error = end.error.as_deref().unwrap();
     assert_eq!(error, plan.redact.text(&e));
     assert!(error.contains("<home>/machine.toml"), "{error}");
+}
+
+/// The suite's box with another binary hash, made of `c`.
+fn rebuilt(c: char) -> BoxIdentity {
+    BoxIdentity {
+        binary_sha256: Reading::Read(format!("sha256:{}", c.to_string().repeat(64))),
+        ..common::box_identity().clone()
+    }
+}
+
+/// A binary hash as the gate's message gives it.
+fn shown(r: &Reading<String>) -> String {
+    match r {
+        Reading::Read(s) => s.clone(),
+        Reading::Unavailable(why) => format!("unavailable: {why}"),
+    }
+}
+
+fn deviations_of(dir: &std::path::Path) -> Vec<DeviationRow> {
+    match std::fs::read_to_string(dir.join("deviations.jsonl")) {
+        Ok(text) => text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+/// Sign a `session.start` of `binary` with no end into study `id`'s log: a killed session.
+fn killed_session(lab: &Lab, id: &str, binary: &Reading<String>) {
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let start = SessionStart {
+        session: ignorarium::events::new_trace_id(),
+        verb: "run".into(),
+        pid: 1,
+        box_version: "0.0.0".into(),
+        rules_sha256: common::box_identity().rules_sha256.clone(),
+        binary_sha256: binary.clone(),
+        started: "2026-11-15T00:00:00Z".into(),
+        changed_from: None,
+        reason: None,
+    };
+    let body = serde_json::to_value(start).unwrap();
+    let log = lab.home.study_dir(id).join("records.jsonl");
+    records::append(
+        &log,
+        &key,
+        records::RecordDraft::new(id, SESSION_START, body),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_changed_binary_refuses_without_a_declaration() {
+    let lab = lab();
+    let dir = plain(&lab, "bc");
+    let plan = plan_of(&lab, "bc");
+    let was = common::box_identity();
+    let now = rebuilt('0');
+    let (old, new) = (shown(&was.binary_sha256), shown(&now.binary_sha256));
+    let e = run_as(&plan, &now).unwrap_err();
+    assert!(
+        matches!(&e, RunError::BoxChanged { was: w, now: n } if *w == old && *n == new),
+        "{e:?}"
+    );
+    assert_eq!(
+        e.to_string(),
+        format!(
+            "the box binary changed since the last session ({old} to {new}); \
+             to continue, run with --box-changed \"<reason>\""
+        )
+    );
+    // A binary that cannot read itself is never the same one.
+    let blind = BoxIdentity {
+        binary_sha256: Reading::Unavailable("no exe".into()),
+        ..was.clone()
+    };
+    let e = run_as(&plan, &blind).unwrap_err();
+    assert!(
+        matches!(&e, RunError::BoxChanged { now, .. } if now == "unavailable: no exe"),
+        "{e:?}"
+    );
+    let (starts, ends) = sessions_of(&lab, "bc");
+    assert!(starts.is_empty() && ends.is_empty());
+    assert!(rows_of(&lab, "bc").is_empty());
+    assert!(deviations_of(&dir).is_empty());
+    // The registered binary still runs.
+    assert_eq!(run_as(&plan, was).unwrap(), RunStatus::Done);
+}
+
+#[test]
+fn a_declared_change_writes_a_deviation_row_and_names_the_old_hash() {
+    let lab = lab();
+    let dir = plain(&lab, "bd");
+    let was = common::box_identity();
+    assert_eq!(run_as(&plan_of(&lab, "bd"), was).unwrap(), RunStatus::Done);
+    // Keep the register and inputs records and rows 0..3, with the first session's start.
+    keep_records(&dir, 5);
+    std::fs::rename(dir.join("run"), dir.join("run-old")).unwrap();
+    let mut plan = plan_of(&lab, "bd");
+    let now = rebuilt('0');
+    let (old, new) = (shown(&was.binary_sha256), shown(&now.binary_sha256));
+    let reason = "rebuilt with a fix to the reader";
+    plan.box_changed = Some(reason.into());
+    assert_eq!(run_as(&plan, &now).unwrap(), RunStatus::Done);
+    let want = DeviationRow {
+        kind: "box-changed".into(),
+        reason: reason.into(),
+        timing: Timing::DuringCollection,
+        original: format!("binary {old}, rules {}", was.rules_sha256),
+        justification: reason.into(),
+        impact: format!(
+            "rows from here run under binary {new}, rules {}",
+            now.rules_sha256
+        ),
+    };
+    assert_eq!(deviations_of(&dir), [want]);
+    let (starts, _) = sessions_of(&lab, "bd");
+    assert_eq!(starts.len(), 2);
+    let start = &starts[1].0;
+    assert_eq!(start.binary_sha256, now.binary_sha256);
+    assert_eq!(start.changed_from, Some(was.binary_sha256.clone()));
+    assert_eq!(start.reason.as_deref(), Some(reason));
+    // The declared binary is the baseline now: it runs on, and the old one refuses.
+    plan.box_changed = None;
+    assert_eq!(run_as(&plan, &now).unwrap(), RunStatus::Done);
+    let e = run_as(&plan, was).unwrap_err();
+    assert!(
+        matches!(&e, RunError::BoxChanged { was: w, now: n } if *w == new && *n == old),
+        "{e:?}"
+    );
+    assert_eq!(deviations_of(&dir).len(), 1);
+}
+
+#[test]
+fn a_declared_change_before_any_row_is_before_collection() {
+    let lab = lab();
+    let dir = plain(&lab, "bb");
+    let mut plan = plan_of(&lab, "bb");
+    plan.box_changed = Some("rebuilt".into());
+    assert_eq!(run_as(&plan, &rebuilt('1')).unwrap(), RunStatus::Done);
+    let rows = deviations_of(&dir);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].timing, Timing::BeforeCollection);
+}
+
+#[test]
+fn a_declaration_with_no_change_refuses() {
+    let lab = lab();
+    let dir = plain(&lab, "bn");
+    let mut plan = plan_of(&lab, "bn");
+    plan.box_changed = Some("rebuilt".into());
+    let e = run_as(&plan, common::box_identity()).unwrap_err();
+    assert!(matches!(e, RunError::NothingChanged), "{e:?}");
+    assert_eq!(
+        e.to_string(),
+        "--box-changed was given, but the box binary is the one the last session ran"
+    );
+    let (starts, _) = sessions_of(&lab, "bn");
+    assert!(starts.is_empty());
+    assert!(rows_of(&lab, "bn").is_empty());
+    assert!(deviations_of(&dir).is_empty());
+}
+
+#[test]
+fn an_old_register_without_box_runs_and_records_a_session() {
+    let lab = lab();
+    let dir = plain(&lab, "old");
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let log = dir.join("records.jsonl");
+    let all = records::read_all(&log, &key.verifying_key()).unwrap();
+    assert_eq!(all.len(), 1);
+    let mut body = all[0].body.clone();
+    body.as_object_mut().unwrap().remove("box").unwrap();
+    std::fs::rename(&log, dir.join("records.old")).unwrap();
+    let draft = records::RecordDraft::new("old", "register", body);
+    records::append(&log, &key, draft).unwrap();
+    let now = rebuilt('2');
+    assert_eq!(
+        run_as(&plan_of(&lab, "old"), &now).unwrap(),
+        RunStatus::Done
+    );
+    let (starts, ends) = sessions_of(&lab, "old");
+    assert_eq!((starts.len(), ends.len()), (1, 1));
+    assert_eq!(starts[0].0.binary_sha256, now.binary_sha256);
+    assert_eq!(starts[0].0.changed_from, None);
+    assert!(deviations_of(&dir).is_empty());
+    // That session is the baseline from here.
+    let e = run_as(&plan_of(&lab, "old"), common::box_identity()).unwrap_err();
+    assert!(matches!(e, RunError::BoxChanged { .. }), "{e:?}");
+}
+
+#[test]
+fn a_killed_session_does_not_block_the_next_run() {
+    let lab = lab();
+    plain(&lab, "dead");
+    let was = common::box_identity();
+    killed_session(&lab, "dead", &was.binary_sha256);
+    assert_eq!(
+        run_as(&plan_of(&lab, "dead"), was).unwrap(),
+        RunStatus::Done
+    );
+    let (starts, ends) = sessions_of(&lab, "dead");
+    assert_eq!((starts.len(), ends.len()), (2, 1));
+    // A killed session of another binary is the baseline too.
+    killed_session(&lab, "dead", &rebuilt('3').binary_sha256);
+    let e = run_as(&plan_of(&lab, "dead"), was).unwrap_err();
+    assert!(matches!(e, RunError::BoxChanged { .. }), "{e:?}");
 }
 
 #[test]

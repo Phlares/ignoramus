@@ -17,7 +17,8 @@ Decision:
   - `session`, an id new for each session;
   - `verb`, `run` or `resume`;
   - `pid`, `box_version`, `rules_sha256` and `binary_sha256` (0028);
-  - `started`, an RFC 3339 time.
+  - `started`, an RFC 3339 time;
+  - after a declared change of binary, `changed_from`, the old binary hash, and `reason` (0028, Gate).
 - **Session end.** When the run ends, after the late-stop check, the box signs `session.end` with the same `session` and a `status`: `done`, `paused`, `stopped` or `failed`. A failed session also holds `error`, with this machine's folders replaced by placeholders. A call refused before it holds the lock writes no session. The box writes `session.end` after it releases the run lock, so a `session.end` can land after the next session's `session.start`. Readers pair a start with its end by `session`, never by position.
 - **A start with no end means the process died.** For example, the kernel killed it or the machine lost power. A `session.end` that cannot be appended looks the same in the log. The failed append leaves the run's own result.
 - **Read strictly.** A missing end is never read as success. `verify --study` prints `sessions: <n>, <k> without an end record`, and pairs each start with its end by `session`. When `m` session records have a body that does not parse, the line ends with `, <m> unreadable`.

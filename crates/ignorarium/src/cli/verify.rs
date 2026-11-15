@@ -1,6 +1,7 @@
 //! `verify`: check the plan logs and, for one study, its record chain.
 use super::{CliError, Ctx, Done, Run, out};
 use crate::derived::{Register, SESSION_END, SESSION_START, SessionEnd, SessionStart};
+use crate::identity::{binary_text, same_binary};
 use crate::planlog::store::PlanLog;
 use crate::records::Record;
 use crate::telemetry::Reading;
@@ -76,6 +77,19 @@ pub fn run(ctx: &Ctx, study: Option<&str>) -> Run {
                     out(&format!(
                         "sessions: {n}, {open} without an end record{unreadable}\n"
                     ))?;
+                    let starts: Vec<SessionStart> =
+                        all.iter().filter_map(SessionStart::of).collect();
+                    let was = registered.as_ref().map(|b| &b.binary_sha256);
+                    for (k, declared) in binary_changes(was, &starts) {
+                        match declared {
+                            Some(why) => out(&format!(
+                                "binary changed at session {k}: declared ({why})\n"
+                            ))?,
+                            None => failed.push(format!(
+                                "study {id}: undeclared binary change at session {k}"
+                            )),
+                        }
+                    }
                 }
                 Err(e) => failed.push(format!("study {id}: {e}")),
             }
@@ -111,16 +125,34 @@ fn sessions(all: &[Record]) -> (usize, usize, usize) {
     (starts.len(), open, unreadable)
 }
 
+/// Each binary change between consecutive session starts, or between the `registered` binary
+/// and the first start: the start's 1-based number, and its reason when it names the binary it
+/// changed from (`None`: undeclared). With no registered binary, the first start has nothing
+/// to compare. An unreadable binary always differs, as at the gate.
+fn binary_changes(
+    registered: Option<&Reading<String>>,
+    starts: &[SessionStart],
+) -> Vec<(usize, Option<String>)> {
+    let before = std::iter::once(registered).chain(starts.iter().map(|s| Some(&s.binary_sha256)));
+    (before.zip(starts).enumerate())
+        .filter(|(_, (was, s))| was.is_some_and(|w| !same_binary(w, &s.binary_sha256)))
+        .map(|(i, (_, s))| {
+            let declared = s.changed_from.as_ref();
+            (
+                i + 1,
+                declared.map(|_| s.reason.clone().unwrap_or_default()),
+            )
+        })
+        .collect()
+}
+
 /// The box identity a register record holds, as text; `not recorded` for a record written
 /// before the field existed.
 fn box_text(b: Option<&crate::identity::BoxIdentity>) -> String {
     let Some(b) = b else {
         return "not recorded".into();
     };
-    let binary = match &b.binary_sha256 {
-        Reading::Read(s) => s.clone(),
-        Reading::Unavailable(why) => format!("unavailable: {why}"),
-    };
+    let binary = binary_text(&b.binary_sha256);
     format!("rules {}, binary {binary}", b.rules_sha256)
 }
 
@@ -177,5 +209,42 @@ mod tests {
             bad(crate::derived::SESSION_END),
         ];
         assert_eq!(sessions(&all), (1, 1, 2));
+    }
+
+    #[test]
+    fn each_binary_change_is_numbered_by_its_session() {
+        let read = |c: &str| Reading::Read(format!("sha256:{c}"));
+        let start = |binary: Reading<String>, declared: Option<(&str, &str)>| SessionStart {
+            session: "a".into(),
+            verb: "run".into(),
+            pid: 1,
+            box_version: "0".into(),
+            rules_sha256: "sha256:ab".into(),
+            binary_sha256: binary,
+            started: "2026-11-15T00:00:00Z".into(),
+            changed_from: declared.map(|(from, _)| read(from)),
+            reason: declared.map(|(_, why)| why.into()),
+        };
+        let (a, b) = (read("aa"), read("bb"));
+        // A register without `box` gives the first session nothing to compare.
+        assert_eq!(binary_changes(None, &[start(b.clone(), None)]), []);
+        assert_eq!(binary_changes(Some(&a), &[start(a.clone(), None)]), []);
+        assert_eq!(
+            binary_changes(Some(&a), &[start(b.clone(), None)]),
+            [(1, None)]
+        );
+        let starts = [
+            start(a.clone(), None),
+            start(b.clone(), Some(("aa", "fix"))),
+            start(b.clone(), None),
+        ];
+        assert_eq!(
+            binary_changes(Some(&a), &starts),
+            [(2, Some("fix".to_string()))]
+        );
+        // An unreadable binary is never the same as another reading.
+        let blind = Reading::Unavailable("no exe".into());
+        let starts = [start(blind.clone(), None), start(blind.clone(), None)];
+        assert_eq!(binary_changes(Some(&a), &starts), [(1, None), (2, None)]);
     }
 }

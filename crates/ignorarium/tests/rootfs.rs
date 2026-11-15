@@ -6,7 +6,7 @@ use ignorarium::backend::level1::Level1;
 use ignorarium::backend::rootfs::{self, Limits, RootfsError, from_store, from_store_capped};
 use ignorarium::backend::{Backend, Probe, RowJob, RowOutcome, Watch};
 use ignorarium::environ::Builder;
-use ignorarium::runner::{self, RunError, RunStatus, environment, prepare_with};
+use ignorarium::runner::{RunError, RunStatus, environment, prepare_with};
 use ignorarium::store::Store;
 use std::fs;
 use std::io;
@@ -892,7 +892,7 @@ fn the_start_event_and_row_records_name_the_environment() {
         vec![Box::new(Level0)],
     )
     .unwrap();
-    assert_eq!(runner::run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(common::run(&plan).unwrap(), RunStatus::Done);
     let events = common::events_of(&dir);
     assert_eq!(
         named(&events, "run.start")[0]["attrs"]["environment"],
@@ -960,7 +960,7 @@ fn a_row_runs_in_the_pinned_image() {
     )
     .unwrap();
     assert_eq!(plan.environment, digest);
-    assert_eq!(runner::run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(common::run(&plan).unwrap(), RunStatus::Done);
     let rows = common::rows_of(&lab, "e2e");
     assert_eq!(rows.len(), 6);
     for r in &rows {
@@ -1004,7 +1004,7 @@ fn a_built_environment_runs_at_level1() {
         vec![Box::new(level1)],
     )
     .unwrap();
-    assert_eq!(runner::run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(common::run(&plan).unwrap(), RunStatus::Done);
     let out = fs::read_to_string(dir.join("run/rows/0/out/os")).unwrap();
     assert_eq!(out, "root:x:0:0:root:/root:/bin/sh\nbusybox\n");
     let events = common::events_of(&dir);

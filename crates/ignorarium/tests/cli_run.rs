@@ -13,6 +13,7 @@ use ignorarium::control::{ControlFile, RunLock, Signal, State};
 use ignorarium::derived::{Register, SESSION_END, SESSION_START, SessionEnd, SessionStart};
 use ignorarium::estimate::apply_defaults;
 use ignorarium::spec::model::Spec;
+use ignorarium::telemetry::Reading;
 use ignorarium::{keys, records, view};
 use serde_json::Value;
 use std::path::Path;
@@ -698,6 +699,128 @@ fn verify_counts_session_records_that_do_not_parse() {
     assert!(
         out.contains("\nsessions: 0, 0 without an end record, 1 unreadable\n"),
         "{out}"
+    );
+}
+
+/// A binary hash made of `c`.
+fn other_binary(c: char) -> Reading<String> {
+    Reading::Read(format!("sha256:{}", c.to_string().repeat(64)))
+}
+
+/// Sign a `session.start` of `binary` with no end into study `id`'s log, declared as a change
+/// from `declared`'s binary for its reason when given.
+fn signed_start(
+    lab: &Lab,
+    id: &str,
+    binary: &Reading<String>,
+    declared: Option<(&Reading<String>, &str)>,
+) {
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let start = SessionStart {
+        session: ignorarium::events::new_trace_id(),
+        verb: "run".into(),
+        pid: 1,
+        box_version: "0.0.0".into(),
+        rules_sha256: common::box_identity().rules_sha256.clone(),
+        binary_sha256: binary.clone(),
+        started: "2026-11-15T00:00:00Z".into(),
+        changed_from: declared.map(|(from, _)| from.clone()),
+        reason: declared.map(|(_, why)| why.into()),
+    };
+    let body = serde_json::to_value(start).unwrap();
+    let log = lab.home.study_dir(id).join("records.jsonl");
+    records::append(
+        &log,
+        &key,
+        records::RecordDraft::new(id, SESSION_START, body),
+    )
+    .unwrap();
+}
+
+#[test]
+fn verify_fails_on_an_undeclared_change() {
+    let lab = lab();
+    let id = "undeclared";
+    plain(&lab, id);
+    signed_start(&lab, id, &other_binary('0'), None);
+    let a = bin(&lab).args(["verify", "--study", id]).assert().code(1);
+    assert!(
+        err(&a).contains(&format!(
+            "study {id}: undeclared binary change at session 1"
+        )),
+        "{}",
+        err(&a)
+    );
+}
+
+#[test]
+fn verify_lists_a_declared_change() {
+    let lab = lab();
+    let id = "declared";
+    plain(&lab, id);
+    let was = &common::box_identity().binary_sha256;
+    signed_start(&lab, id, was, None);
+    signed_start(
+        &lab,
+        id,
+        &other_binary('0'),
+        Some((was, "rebuilt with a fix")),
+    );
+    let a = bin(&lab).args(["verify", "--study", id]).assert().code(0);
+    let out = text(&a);
+    assert!(
+        out.contains("\nbinary changed at session 2: declared (rebuilt with a fix)\n"),
+        "{out}"
+    );
+    assert!(!out.contains("at session 1"), "{out}");
+}
+
+#[test]
+fn resume_with_box_changed_passes_the_gate() {
+    let lab = lab();
+    let id = "rebuilt";
+    plain(&lab, id);
+    let was = other_binary('0');
+    signed_start(&lab, id, &was, None);
+    let now = common::box_identity();
+    let (old, new) = match &now.binary_sha256 {
+        Reading::Read(new) => (format!("sha256:{}", "0".repeat(64)), new.clone()),
+        Reading::Unavailable(why) => panic!("{why}"),
+    };
+    let a = bin_at(&lab, id).args(["run", id]).assert().code(1);
+    assert!(
+        err(&a).contains(&format!(
+            "the box binary changed since the last session ({old} to {new}); \
+             to continue, run with --box-changed \"<reason>\""
+        )),
+        "{}",
+        err(&a)
+    );
+    let reason = "rebuilt with a fix";
+    (bin_at(&lab, id).args(["resume", id, "--box-changed", reason]))
+        .assert()
+        .code(0);
+    let starts: Vec<SessionStart> = (kind_of(&lab, id, SESSION_START).iter())
+        .map(|r| SessionStart::of(r).unwrap())
+        .collect();
+    assert_eq!(starts.len(), 2);
+    let start = &starts[1];
+    assert_eq!(start.verb, "resume");
+    assert_eq!(start.binary_sha256, now.binary_sha256);
+    assert_eq!(start.changed_from, Some(was));
+    assert_eq!(start.reason.as_deref(), Some(reason));
+    let deviations = std::fs::read_to_string(lab.home.study_dir(id).join("deviations.jsonl"));
+    assert!(deviations.unwrap().contains("\"box-changed\""));
+    // The binary that ran is the baseline now: a declaration of nothing refuses.
+    let a = (bin_at(&lab, id).args(["run", id, "--box-changed", reason]))
+        .assert()
+        .code(1);
+    assert!(
+        err(&a).contains(
+            "--box-changed was given, but the box binary is the one the last session ran"
+        ),
+        "{}",
+        err(&a)
     );
 }
 
@@ -1409,8 +1532,9 @@ fn graded(base: f64, step: f64) -> String {
 
 /// Register and run a pilot study `id` at level 0.
 fn pilot_run(lab: &Lab, id: &str, payload: &str) {
+    use common::run;
     use ignorarium::backend::level0::Level0;
-    use ignorarium::runner::{RunStatus, prepare_with, run};
+    use ignorarium::runner::{RunStatus, prepare_with};
     register_study(lab, id, two_clusters, &[], payload);
     let plan = prepare_with(
         &lab.home,
@@ -1578,8 +1702,9 @@ fn reserve_ran(
 
 #[test]
 fn no_reserve_row_runs_before_the_record() {
+    use common::run;
     use ignorarium::derived::{Resize, ResizeStratum};
-    use ignorarium::runner::{RunStatus, run};
+    use ignorarium::runner::RunStatus;
     let lab = lab();
     common::resize_pilot(&lab.home);
     // Every observation is 99 against 100: -1 %.
@@ -1635,8 +1760,8 @@ fn no_reserve_row_runs_before_the_record() {
 
 #[test]
 fn a_stopped_re_size_runs_no_reserve_row() {
+    use common::run;
     use ignorarium::derived::{Resize, ResizeStratum};
-    use ignorarium::runner::run;
     let lab = lab();
     common::resize_pilot(&lab.home);
     // Every observation is -2 %: the spread of 2 needs more clusters than the 47 there are.
@@ -1666,8 +1791,9 @@ fn a_stopped_re_size_runs_no_reserve_row() {
 
 #[test]
 fn a_resumed_run_writes_one_resize_record() {
+    use common::run;
     use ignorarium::derived::{RESIZE, Resize};
-    use ignorarium::runner::{RunStatus, run};
+    use ignorarium::runner::RunStatus;
     let lab = lab();
     common::resize_pilot(&lab.home);
     let plan = resize_study(&lab, "again", &flat("99"));
@@ -1715,7 +1841,8 @@ fn a_resumed_run_writes_one_resize_record() {
 
 #[test]
 fn a_pooled_re_size_takes_its_reserve_from_one_stratum() {
-    use ignorarium::runner::{RunStatus, run};
+    use common::run;
+    use ignorarium::runner::RunStatus;
     let lab = lab();
     common::resize_pilot(&lab.home);
     // The pooled claim's first batch spans fiction and 3 clusters in news; its reserve is
@@ -1897,8 +2024,9 @@ fn close_of_slot(lab: &Lab, id: &str) -> Value {
 
 #[test]
 fn finish_waits_for_admitted_rows_only() {
+    use common::run;
     use ignorarium::analysis::finish;
-    use ignorarium::runner::{RunStatus, run};
+    use ignorarium::runner::RunStatus;
     let lab = lab();
     common::resize_pilot(&lab.home);
     let plan = resize_study(&lab, "waits", &flat("99"));
@@ -1931,8 +2059,9 @@ fn finish_waits_for_admitted_rows_only() {
 
 #[test]
 fn a_run_study_reports_its_recorded_verdict() {
+    use common::run;
     use ignorarium::derived::Analysis;
-    use ignorarium::runner::{RunStatus, run};
+    use ignorarium::runner::RunStatus;
     let lab = lab();
     common::resize_pilot(&lab.home);
     let plan = resize_study(&lab, "told", &flat("99"));
@@ -1985,7 +2114,8 @@ fn a_run_study_reports_its_recorded_verdict() {
 
 #[test]
 fn a_broken_stream_log_refuses_the_report() {
-    use ignorarium::runner::{RunStatus, run};
+    use common::run;
+    use ignorarium::runner::RunStatus;
     let lab = lab();
     common::resize_pilot(&lab.home);
     let plan = resize_study(&lab, "told", &flat("99"));
@@ -2021,9 +2151,10 @@ fn a_broken_stream_log_refuses_the_report() {
 
 #[test]
 fn the_e_process_sees_the_first_batch_then_the_reserve_in_pin_order() {
+    use common::run;
     use evidence::rng::Rng;
     use ignorarium::derived::Estimate;
-    use ignorarium::runner::{RunStatus, run};
+    use ignorarium::runner::RunStatus;
     let lab = lab();
     common::resize_pilot(&lab.home);
     let plan = resize_study(&lab, "order", VARIED);
@@ -2062,7 +2193,8 @@ fn the_e_process_sees_the_first_batch_then_the_reserve_in_pin_order() {
 
 #[test]
 fn a_stopped_study_fails_its_claims_with_e_value_zero_and_closes_its_slot_with_zero() {
-    use ignorarium::runner::{RunStatus, run};
+    use common::run;
+    use ignorarium::runner::RunStatus;
     let lab = lab();
     common::resize_pilot(&lab.home);
     // The reason is the resize record's, after `stopped: `: a reserve too short for a spread
@@ -2117,9 +2249,10 @@ fn analysis_after_the_end(lab: &Lab, id: &str) -> ignorarium::derived::Analysis 
 
 #[test]
 fn the_analysis_record_holds_the_resize_sd_and_the_appended_sd_after_the_end() {
+    use common::run;
     use evidence::power::blinded_sd;
     use ignorarium::derived::GroupSd;
-    use ignorarium::runner::{RunStatus, run};
+    use ignorarium::runner::RunStatus;
     let sd = |s: Option<f64>| {
         vec![GroupSd {
             hypothesis: "H1".into(),
@@ -2158,8 +2291,9 @@ const CLIPPED: &str = "#!/bin/sh\ncase \"$2\" in exact) v=100;; *) h=$(printf '%
 
 #[test]
 fn the_analysis_record_counts_the_units_the_range_clipped() {
+    use common::run;
     use ignorarium::derived::GroupClip;
-    use ignorarium::runner::{RunStatus, run};
+    use ignorarium::runner::RunStatus;
     let lab = lab();
     common::resize_pilot(&lab.home);
     let plan = resize_study(&lab, "clip", CLIPPED);
@@ -2196,7 +2330,8 @@ fn the_analysis_record_counts_the_units_the_range_clipped() {
 
 #[test]
 fn unused_reserve_data_is_released_and_fresh_again() {
-    use ignorarium::runner::{RunStatus, run};
+    use common::run;
+    use ignorarium::runner::RunStatus;
     let lab = lab();
     common::resize_pilot(&lab.home);
     let plan = resize_study(&lab, "grows", &flat("99"));
@@ -2240,8 +2375,9 @@ fn unused_reserve_data_is_released_and_fresh_again() {
 
 #[test]
 fn finish_twice_appends_one_release() {
+    use common::run;
     use ignorarium::analysis::finish;
-    use ignorarium::runner::{RunStatus, run};
+    use ignorarium::runner::RunStatus;
     let lab = lab();
     common::resize_pilot(&lab.home);
     // A stopped study releases its whole reserve.
@@ -2280,7 +2416,8 @@ fn keys_of(v: &Value) -> Vec<String> {
 
 #[test]
 fn status_shows_counts_and_decision_only() {
-    use ignorarium::runner::{RunStatus, run};
+    use common::run;
+    use ignorarium::runner::RunStatus;
     // What status may not show: a spread, a mean, an e-value, the reserve size or a reason.
     let hidden = [
         "sd",

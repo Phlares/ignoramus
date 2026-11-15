@@ -84,6 +84,7 @@ struct Frozen {
     carries: Option<Carried>,
     family: Option<Lock>,
     gate: Vec<GatePrediction>,
+    box_identity: crate::identity::BoxIdentity,
 }
 
 /// The body of the `register` record. A confirmatory plan holds the stream slot `alpha`, and
@@ -95,7 +96,6 @@ fn record_body(
     filled: &[(String, Value)],
     frozen: &Frozen,
     alpha: Option<Alpha>,
-    identity: crate::identity::BoxIdentity,
 ) -> Result<Value, CliError> {
     serde_json::to_value(Register {
         spec_hash: hash.into(),
@@ -112,7 +112,7 @@ fn record_body(
         timestamp: alpha.is_some().then(|| "pending".into()),
         alpha,
         gate: frozen.gate.clone(),
-        box_identity: Some(identity),
+        box_identity: Some(frozen.box_identity.clone()),
     })
     .map_err(|e| io("register record", e))
 }
@@ -147,6 +147,25 @@ pub fn run(
     input: &mut impl BufRead,
     output: &mut impl Write,
     is_tty: bool,
+) -> Result<Done, CliError> {
+    run_as(
+        spec_path,
+        home,
+        input,
+        output,
+        is_tty,
+        &crate::identity::current(),
+    )
+}
+
+/// `run` as the box `identity`, which the register record holds under `box`.
+pub fn run_as(
+    spec_path: &Path,
+    home: &Home,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    is_tty: bool,
+    identity: &crate::identity::BoxIdentity,
 ) -> Result<Done, CliError> {
     if !is_tty {
         return Err(refusal("E-REG-001", ""));
@@ -232,6 +251,7 @@ pub fn run(
         deviations,
         carries: a.carried.clone(),
         family,
+        box_identity: identity.clone(),
     };
     let (leaf, alpha) = store(spec_path, home, &spec, &a, checked, &key, &frozen)?;
     if let (Some(approved), Some(spent)) = (checked, &alpha)
@@ -629,15 +649,7 @@ fn store(
         };
         plan_log.append(leaf, key).map_err(|e| io(log, e))?;
     }
-    let body = record_body(
-        &a.hash,
-        leaf,
-        log,
-        &a.filled,
-        frozen,
-        alpha.clone(),
-        crate::identity::current(),
-    )?;
+    let body = record_body(&a.hash, leaf, log, &a.filled, frozen, alpha.clone())?;
     records::append(
         &dir.join("records.jsonl"),
         key,
@@ -753,21 +765,12 @@ mod tests {
             }),
             family: None,
             gate: vec![],
+            box_identity: crate::identity::BoxIdentity {
+                rules_sha256: "sha256:aa".into(),
+                binary_sha256: crate::telemetry::Reading::Unavailable("no exe".into()),
+            },
         };
-        let id = crate::identity::BoxIdentity {
-            rules_sha256: "sha256:aa".into(),
-            binary_sha256: crate::telemetry::Reading::Unavailable("no exe".into()),
-        };
-        let exp = record_body(
-            "sha256:ab",
-            3,
-            "planlog",
-            &filled,
-            &frozen,
-            None,
-            id.clone(),
-        )
-        .unwrap();
+        let exp = record_body("sha256:ab", 3, "planlog", &filled, &frozen, None).unwrap();
         assert_eq!(
             exp,
             json!({"spec_hash": "sha256:ab", "leaf": 3, "log": "planlog",
@@ -788,8 +791,7 @@ mod tests {
             slot: 2,
             level: 0.01,
         };
-        let conf =
-            record_body("sha256:ab", 3, "testlog", &filled, &frozen, Some(slot), id).unwrap();
+        let conf = record_body("sha256:ab", 3, "testlog", &filled, &frozen, Some(slot)).unwrap();
         assert_eq!(conf["timestamp"], "pending");
         assert_eq!(conf["log"], "testlog");
         assert_eq!(

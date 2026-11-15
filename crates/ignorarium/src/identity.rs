@@ -44,6 +44,14 @@ pub fn current() -> BoxIdentity {
     }
 }
 
+/// A binary hash as text: the hash, or `unavailable: <why>`.
+pub fn binary_text(r: &Reading<String>) -> String {
+    match r {
+        Reading::Read(s) => s.clone(),
+        Reading::Unavailable(why) => format!("unavailable: {why}"),
+    }
+}
+
 /// True only when both sides are hash strings and equal.
 pub fn same_binary(a: &Reading<String>, b: &Reading<String>) -> bool {
     matches!((a, b), (Reading::Read(x), Reading::Read(y)) if x == y)
