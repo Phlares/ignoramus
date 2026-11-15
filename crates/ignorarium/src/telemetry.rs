@@ -251,13 +251,20 @@ impl RowView {
         })
     }
 
+    /// The `telemetry` key `k` of the row, if held.
+    fn reading(&self, k: &str) -> Option<&Value> {
+        self.telemetry.as_ref()?.get(k)
+    }
+
     /// Tick deltas of the row, one per `CPU_TICK_FIELDS` field the record holds, and `user_hz`.
     fn deltas(&self) -> Option<(f64, Vec<u64>)> {
         let c = self.telemetry.as_ref()?.get("cpu_ticks")?;
         let hz = c["user_hz"].as_u64().filter(|h| *h > 0)?;
         let counts = |k: &str| (c[k].as_array().into_iter().flatten()).filter_map(Value::as_u64);
         let d = counts("start").zip(counts("end"));
-        Some((hz as f64, d.map(|(s, e)| e.saturating_sub(s)).collect()))
+        let d: Vec<u64> = d.map(|(s, e)| e.saturating_sub(s)).collect();
+        // An old kernel gives fewer fields; a row that lacks steal or iowait is unusable.
+        (d.len() > tick_index("steal").max(tick_index("iowait"))).then_some((hz as f64, d))
     }
 
     /// Seconds of the `CPU_TICK_FIELDS` field `name`, end minus start.
@@ -276,7 +283,7 @@ impl RowView {
 }
 
 fn tick_index(name: &str) -> usize {
-    CPU_TICK_FIELDS.iter().position(|f| *f == name).unwrap_or(0)
+    (CPU_TICK_FIELDS.iter().position(|f| *f == name)).expect("a CPU_TICK_FIELDS name")
 }
 
 /// Largest and mean of `v` as JSON numbers; null when `v` is empty.
@@ -301,26 +308,28 @@ fn seconds(v: &[f64]) -> Value {
 pub fn overview(rows: &[RowView], order: &[u64], blind: bool) -> Value {
     let mut seen = BTreeSet::new();
     let rows: Vec<&RowView> = rows.iter().filter(|r| seen.insert(r.row)).collect();
-    let telemetry = |r: &RowView, k: &str| r.telemetry.as_ref().and_then(|t| t.get(k)).cloned();
 
     let mut cgroup: BTreeMap<String, u64> = BTreeMap::new();
     let mut cpus: BTreeMap<(String, String), u64> = BTreeMap::new();
     let mut ticks_unavailable = 0;
     for r in &rows {
-        if let Some(g) = telemetry(r, "cgroup").filter(Value::is_object) {
+        if let Some(g) = r.reading("cgroup").filter(|g| g.is_object()) {
             let key = match g.get("unavailable") {
                 None => "available".to_string(),
-                Some(w) => w.as_str().unwrap_or_default().to_string(),
+                Some(w) => w.as_str().unwrap_or("unavailable").to_string(),
             };
             *cgroup.entry(key).or_default() += 1;
         }
-        if let Some(h) = telemetry(r, "host_cpu").filter(|h| h.get("unavailable").is_none()) {
+        if let Some(h) = r
+            .reading("host_cpu")
+            .filter(|h| h.get("unavailable").is_none())
+        {
             let text = |k: &str| h[k].as_str().unwrap_or_default().to_string();
             *cpus
                 .entry((text("model"), text("flags_sha256")))
                 .or_default() += 1;
         }
-        if telemetry(r, "cpu_ticks").is_some() && r.deltas().is_none() {
+        if r.reading("cpu_ticks").is_some() && r.deltas().is_none() {
             ticks_unavailable += 1;
         }
     }
@@ -334,17 +343,25 @@ pub fn overview(rows: &[RowView], order: &[u64], blind: bool) -> Value {
     let cpu = |r: &RowView| r.cpu_seconds;
 
     let k = order.len().min(10);
-    let mut blocks = Vec::new();
+    let mut parts = Vec::new();
+    let mut block_of = std::collections::HashMap::new();
     let mut at = 0;
     for b in 0..k {
         let size = order.len() / k + usize::from(b < order.len() % k);
         let part = &order[at..at + size];
         at += size;
-        let held: Vec<&RowView> = rows
-            .iter()
-            .copied()
-            .filter(|r| part.contains(&r.row))
-            .collect();
+        block_of.extend(part.iter().map(|i| (*i, b)));
+        parts.push(part);
+    }
+    let mut held_by: Vec<Vec<&RowView>> = vec![Vec::new(); k];
+    for r in &rows {
+        if let Some(b) = block_of.get(&r.row) {
+            held_by[*b].push(r);
+        }
+    }
+    let mut blocks = Vec::new();
+    for (part, held) in parts.into_iter().zip(held_by) {
+        let size = part.len();
         let shares = |name: &str| -> (Value, Value) {
             spread(
                 &held

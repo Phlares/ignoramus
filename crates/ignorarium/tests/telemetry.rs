@@ -735,3 +735,18 @@ fn overview_gives_no_share_for_a_row_whose_ticks_did_not_move() {
     assert_eq!(o["blocks"][0]["steal_share_max"], json!(null));
     assert_eq!(o["steal"], json!({"rows": 1, "max_s": 0.0, "mean_s": 0.0}));
 }
+
+#[test]
+fn overview_counts_a_row_with_short_tick_arrays_as_unavailable() {
+    let t = json!({"cpu_ticks": {"user_hz": 100, "start": [0, 0, 0, 0], "end": [1, 1, 1, 1]}});
+    let o = overview(&[view(0, 1.0, 1.0, t)], &[0], true);
+    assert_eq!(o["ticks_unavailable"], 1);
+    assert_eq!(o["steal"]["rows"], 0);
+}
+
+#[test]
+fn overview_names_a_non_text_cgroup_reason_unavailable() {
+    let t = json!({"cgroup": {"unavailable": 7}});
+    let o = overview(&[view(0, 1.0, 1.0, t)], &[0], true);
+    assert_eq!(o["cgroup"], json!({"unavailable": 1}));
+}
