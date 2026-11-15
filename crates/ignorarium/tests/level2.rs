@@ -2077,9 +2077,10 @@ fn a_stopped_row_still_reads_its_leaf() {
     assert_eq!(o.cgroup, Reading::Unavailable(MISSED.into()));
 }
 
-/// MiB the VMM takes beyond guest RAM and the output disk's cache, measured on the test host
-/// (decision 0026). Zero until the first run measures it.
-const OVERHEAD_MIB: u64 = 0;
+/// MiB the VMM takes beyond guest RAM and the output disk's cache (decision 0026). Measured
+/// 2026-11-15 on the test host: a row touching 512 MiB peaked at 637 MiB, so peak minus the
+/// touched memory is 125 MiB; rounded up to 128 and 25% added.
+const OVERHEAD_MIB: u64 = 160;
 
 /// Keeps the VMM's `VmHWM`, read each tick until the row ends.
 #[derive(Default)]
@@ -2144,8 +2145,6 @@ for i in range(0, len(b), 4096): b[i] = 1' &&          head -c 1048576 /dev/zero
             "row {n}: {}",
             c.memory_peak
         );
-        if OVERHEAD_MIB > 0 {
-            assert!(c.memory_peak <= top, "row {n}: {} > {top}", c.memory_peak);
-        }
+        assert!(c.memory_peak <= top, "row {n}: {} > {top}", c.memory_peak);
     }
 }
