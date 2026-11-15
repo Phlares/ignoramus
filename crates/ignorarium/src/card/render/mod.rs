@@ -57,15 +57,15 @@ fn pct(x: f64, signed: bool) -> String {
     }
 }
 
-/// The decimals in a grid step's shortest form: 1e-4 gives 4, 0.25 gives 2, 0.5 gives 1.
-fn decimals(step: f64) -> usize {
-    (step.to_string().split_once('.')).map_or(0, |(_, d)| d.len())
+/// The decimals in a number's shortest form: 1e-4 gives 4, 0.25 gives 2, 0.5 gives 1.
+fn decimals(x: f64) -> usize {
+    (x.to_string().split_once('.')).map_or(0, |(_, d)| d.len())
 }
 
-/// A bound rounds outward to the step's decimals: up for `below`, down for `above`. The shown
-/// number never lies on the passing side of the true bound.
+/// A bound rounds outward to the decimals of its grid, the margin plus whole steps: up for
+/// `below`, down for `above`. The shown number never lies on the passing side of the true bound.
 fn bound_text(i: &Interval) -> Option<String> {
-    let d = decimals(i.grid.step);
+    let d = decimals(i.grid.step).max(i.margin.map_or(0, decimals));
     let k = 10f64.powi(d as i32);
     i.bound.map(|b| {
         let n = if i.side == "above" {

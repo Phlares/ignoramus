@@ -172,6 +172,44 @@ fn bounds_round_outward_on_the_step_grid() {
     );
 }
 
+/// Issue #72: every grid point is the margin plus whole steps, so a bound prints exactly at
+/// the margin's decimals when they exceed the step's.
+#[test]
+fn a_bound_prints_at_the_margin_decimals() {
+    let at = |margin: Option<f64>, b: f64| {
+        let mut c = card();
+        let i = &mut c.results[0].intervals[0];
+        (i.margin, i.bound) = (margin, Some(b));
+        markdown(&c)
+    };
+    let md = at(Some(0.039_221), 0.039_221);
+    assert!(md.contains("below 0.039221 "), "{md}");
+    assert!(md.contains("bound 0.039221"), "alt text: {md}");
+    assert!(at(Some(0.039_221), 0.039_221 + 3e-4).contains("below 0.039521 "));
+    assert!(
+        at(Some(0.04), 0.0403).contains("below 0.0403 "),
+        "a margin with fewer decimals keeps the step's"
+    );
+    assert!(
+        at(None, 0.039_221).contains("below 0.0393 "),
+        "a card with no margin keeps the step's decimals"
+    );
+    let mut c = card();
+    c.results[0].intervals[0].margin = Some(0.039_221);
+    c.results[0].intervals[0].bound = Some(0.039_221);
+    let tex = files(&c);
+    assert!(
+        tex.iter().any(|(_, t)| t == "0.039221"),
+        "the LaTeX value prints the same"
+    );
+}
+
+#[test]
+fn a_card_without_interval_margins_still_loads() {
+    let c = card();
+    assert!(c.results[0].intervals.iter().all(|i| i.margin.is_none()));
+}
+
 #[test]
 fn an_e_value_never_rounds_up_to_a_pass() {
     let mut c = card();

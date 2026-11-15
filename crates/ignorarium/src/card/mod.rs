@@ -63,6 +63,9 @@ pub const INTERVAL_METHOD: &str = "inverted registered e-process";
 pub struct Interval {
     pub stratum: String,
     pub side: String,
+    /// The registered margin the grid steps from; `None` in a card built before it was kept.
+    #[serde(default)]
+    pub margin: Option<f64>,
     pub estimate: f64,
     /// The tightest margin the test shows; `None` when no grid margin passes, or when the
     /// margins that pass are no interval (`contiguous` false).
@@ -87,6 +90,7 @@ impl From<&IntervalResult> for Interval {
         Interval {
             stratum: r.stratum.clone(),
             side: r.side.clone(),
+            margin: Some(r.margin),
             estimate: r.estimate,
             bound: i.margin.filter(|_| i.contiguous),
             method: INTERVAL_METHOD.into(),
@@ -481,6 +485,7 @@ mod tests {
             hypothesis: "H1".into(),
             stratum: String::new(),
             side: "below".into(),
+            margin: 0.25,
             estimate: 0.0,
             inversion: Inversion {
                 margin: Some(0.5),
@@ -494,6 +499,7 @@ mod tests {
             },
         };
         assert_eq!(Interval::from(&result(true)).bound, Some(0.5));
+        assert_eq!(Interval::from(&result(true)).margin, Some(0.25));
         let gap = Interval::from(&result(false));
         assert_eq!((gap.bound, gap.contiguous), (None, false));
     }
