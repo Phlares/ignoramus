@@ -1797,6 +1797,53 @@ fn a_firing_trigger_admits_its_children_and_they_run_after_confirmation_rows() {
     assert_eq!((p.done, p.total), (24, 24));
 }
 
+/// The labels and the summed `done` and `total` of the `conditions` lines of `status`; the
+/// sums must equal the study's own `done` and `total`.
+fn condition_lines(lab: &Lab) -> (Vec<String>, u64, u64) {
+    let s = common::status(lab, "fires");
+    let lines = s["conditions"].as_array().unwrap();
+    let sum = |k: &str| lines.iter().map(|c| c[k].as_u64().unwrap()).sum::<u64>();
+    let (done, total) = (sum("done"), sum("total"));
+    assert_eq!(
+        (done, total),
+        (s["done"].as_u64().unwrap(), s["total"].as_u64().unwrap())
+    );
+    let labels = lines.iter().map(|c| c["label"].as_str().unwrap().into());
+    (labels.collect(), done, total)
+}
+
+#[test]
+fn status_condition_lines_sum_to_rows_with_selected_and_children() {
+    let lab = lab();
+    register_study(&lab, "fires", firing, &[], STAGED);
+    assert_eq!(run(&plan_of(&lab, "fires")).unwrap(), RunStatus::Done);
+    let (labels, done, total) = condition_lines(&lab);
+    assert_eq!((done, total), (24, 24));
+    assert!(labels.contains(&"selected".to_string()), "{labels:?}");
+    let child = "arm-a~window_tokens=64".to_string();
+    assert!(labels.contains(&child), "{labels:?}");
+}
+
+#[test]
+fn blind_status_condition_lines_keep_selected_and_hide_child_parents() {
+    let lab = lab();
+    let spec = |t: String| firing(t).replace("blind = false", "blind = true");
+    register_study(&lab, "fires", spec, &[], STAGED);
+    assert_eq!(run(&plan_of(&lab, "fires")).unwrap(), RunStatus::Done);
+    let (labels, _, _) = condition_lines(&lab);
+    assert!(labels.contains(&"selected".to_string()), "{labels:?}");
+    assert!(labels.iter().all(|l| !l.contains("arm-a")), "{labels:?}");
+    let kids: Vec<_> = labels
+        .iter()
+        .filter(|l| l.contains("~window_tokens="))
+        .collect();
+    assert_eq!(kids.len(), 2, "{labels:?}");
+    assert!(
+        kids.iter().all(|l| l.starts_with("condition ")),
+        "{labels:?}"
+    );
+}
+
 #[test]
 fn child_params_are_the_parents_plus_the_operator() {
     let lab = lab();

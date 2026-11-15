@@ -156,10 +156,19 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
 
     let blind = spec.access.blind;
     let shown = shown_labels(spec, &spec_hash);
-    let conditions: Vec<Value> = shown
+    // The spec's conditions first, then every other counted condition: `selected` and the
+    // admitted children, so the lines sum to `done` and `total`. `relabelled` leaves the
+    // literal `selected` as is.
+    let spec_lines = shown
         .iter()
+        .map(|(real, label)| (real.as_str(), label.clone()));
+    let extra_lines = (p.conditions.keys())
+        .filter(|k| !shown.iter().any(|(real, _)| real == *k))
+        .map(|k| (k.as_str(), relabelled(&shown, k)));
+    let conditions: Vec<Value> = spec_lines
+        .chain(extra_lines)
         .map(|(real, label)| {
-            let (d, t) = p.conditions.get(real.as_str()).copied().unwrap_or_default();
+            let (d, t) = p.conditions.get(real).copied().unwrap_or_default();
             json!({ "label": label, "done": d, "total": t })
         })
         .collect();
