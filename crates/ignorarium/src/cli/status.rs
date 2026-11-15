@@ -462,7 +462,7 @@ fn render_telemetry(r: &Value) -> String {
     }
     for (i, b) in t["blocks"].as_array().into_iter().flatten().enumerate() {
         s.push_str(&format!(
-            "block {} (rows {}-{}): {} rows, steal share {}, iowait share {}",
+            "block {} (schedule rows from {} to {}): {} rows, steal share {}, iowait share {}",
             i + 1,
             b["first_row"],
             b["last_row"],

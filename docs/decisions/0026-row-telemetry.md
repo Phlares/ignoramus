@@ -51,13 +51,29 @@ Sources:
 - https://systemd.io/CGROUP_DELEGATION/ (`Delegate=yes`, scopes)
 - https://man7.org/linux/man-pages/man7/cgroup_namespaces.7.html (a new cgroup namespace is rooted at the creator's cgroup)
 - https://man7.org/linux/man-pages/man5/proc_stat.5.html (the `cpu` line of `/proc/stat`)
+- FDA (2019), "Adaptive Designs for Clinical Trials of Drugs and Biologics", https://www.fda.gov/media/78495/download (section VII, limited access to comparative interim results)
 
 ## Reader
 
-`ignorarium status <id> --telemetry` prints what the row records hold about the host. It prints the cgroup state counts, the host CPU models, steal and iowait seconds per row, and ten blocks of the schedule with each block's steal and iowait share. `--json` prints the same figures.
+`ignorarium status <id> --telemetry` prints what the row records hold about the host. `--json` prints the same figures.
 
-The command reads verified records. It copies only the `telemetry` key and the two time fields of each row record. It never copies `values`, `output_hash`, `outputs` or `data_hashes`. It works while a run holds the run lock.
+It prints these figures:
 
-A blind study prints no per-block wall or CPU figure. A row index joins to a condition through the schedule. Row time can track an outcome. A block of row times would let a blind reader infer the condition. Steal and iowait shares come from host counters, not from the row's result. They stay. This follows the FDA rule that interim results of an adaptive study stay hidden from those who could change its conduct (FDA 2019, "Adaptive Designs for Clinical Trials of Drugs and Biologics", section VII, https://www.fda.gov/media/78495/download).
+- The total row count.
+- The cgroup states, with a row count for each.
+- Each host CPU model and flags hash, with a row count.
+- Steal seconds per row and iowait seconds per row: largest and mean, each with its row count.
+- The rows with no usable CPU ticks.
+- Wall seconds per row and CPU seconds per row for the whole study: largest and mean.
+- Ten blocks of the schedule. Each block prints the rows recorded, the first and last row of the block in schedule order, and the steal share and iowait share: largest and mean.
+- When the study is not blind, each block also prints wall seconds per row and CPU seconds per row: largest and mean.
+
+The two numbers of a block are the first and last row of the block in schedule order. Rows run by stage, cluster, then condition. The two numbers need not be consecutive, and the first can exceed the last.
+
+The command reads verified records. For each row record it copies the row index, the `telemetry` key and the wall and CPU seconds. It never copies `values`, `output_hash`, `outputs` or `data_hashes`. It works while a run holds the run lock.
+
+A blind study prints no per-block wall or CPU figure. A row index joins to a condition through the schedule, and row time can track an outcome. A block of row times would let a blind reader infer the condition. This follows the rule that comparative interim results stay limited to people independent of the study's conduct (FDA 2019, section VII). Steal and iowait shares come from host counters, not from a row's result. They stay.
+
+The whole-study wall and CPU figures still print in a blind study. They join to no condition, so no condition's time can be read off them.
 
 No decision reads this output. Nothing in `output_hash`, `compare`, charge, schedule order or budgets uses it.
