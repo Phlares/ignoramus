@@ -3,7 +3,9 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-const SUBDIRS: [&str; 5] = ["keys", "planlog", "testlog", "studies", "stream"];
+/// The home folder that holds one folder per study.
+pub const STUDIES: &str = "studies";
+const SUBDIRS: [&str; 5] = ["keys", "planlog", "testlog", STUDIES, "stream"];
 
 #[derive(Debug)]
 pub enum HomeError {
@@ -82,7 +84,7 @@ impl Home {
     }
 
     pub fn study_dir(&self, id: &str) -> PathBuf {
-        self.root.join("studies").join(id)
+        self.root.join(STUDIES).join(id)
     }
 }
 

@@ -31,7 +31,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 /// The version of the card's JSON form.
-pub const CARD_VERSION: u32 = 1;
+pub const CARD_VERSION: u32 = 2;
 
 /// The `opened` record that marks the card as read. `build` leaves it zeroed; the caller that
 /// appends the record fills it in.
@@ -204,6 +204,32 @@ pub fn deviation_table(
     signed.chain(recorded).chain(unsigned).collect()
 }
 
+/// The box that built the card, which may be a later box than the one that ran the rows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Builder {
+    pub version: Field<String>,
+    pub binary_sha256: Field<String>,
+}
+
+impl Builder {
+    /// The running binary. A binary it cannot read leaves the hash missing.
+    fn this() -> Builder {
+        let hash = std::env::current_exe().and_then(|p| crate::canon::sha256_file(&p));
+        Builder {
+            version: Field::of(Some(env!("CARGO_PKG_VERSION").into()), None),
+            binary_sha256: Field::of(hash.ok(), None),
+        }
+    }
+
+    /// A card built before the builder was recorded.
+    fn unknown() -> Builder {
+        Builder {
+            version: Field::of(None, None),
+            binary_sha256: Field::of(None, None),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Card {
     pub card_version: u32,
@@ -231,6 +257,8 @@ pub struct Card {
     pub outside_source: Option<sections::Source>,
     pub recipe: Recipe,
     pub citation: Citation,
+    #[serde(default = "Builder::unknown")]
+    pub builder: Builder,
 }
 
 impl Card {
@@ -458,6 +486,7 @@ pub fn build(
         surprises: sections::surprises(log),
         recipe,
         citation,
+        builder: Builder::this(),
         cost: sections::cost(log, spec),
         runs: sections::runs(log, events.as_ref()),
         outside,

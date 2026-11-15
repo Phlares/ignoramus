@@ -192,10 +192,10 @@ fn results_table(c: &Card) -> Table {
                 r.e_value.map_or_else(String::new, e_text),
                 r.clusters.to_string(),
                 r.units.to_string(),
-                if r.registered {
-                    "registered"
-                } else {
-                    "post hoc"
+                match (r.registered, r.descriptive) {
+                    (false, _) => "post hoc",
+                    (true, true) => "descriptive",
+                    (true, false) => "registered",
                 }
                 .into(),
             ]

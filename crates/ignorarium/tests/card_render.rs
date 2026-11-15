@@ -14,11 +14,12 @@ fn card() -> Card {
     serde_json::from_str(&text).unwrap()
 }
 
-/// The card with its first interval of `H1`'s code row given `bound`.
+/// The card with its first interval of `H1`'s code row given `bound`, and no margin, so the
+/// bound prints at the step's decimals.
 fn with_bound(bound: Option<f64>, contiguous: bool) -> Card {
     let mut c = card();
     let i = &mut c.results[0].intervals[0];
-    (i.bound, i.contiguous) = (bound, contiguous);
+    (i.bound, i.contiguous, i.margin) = (bound, contiguous, None);
     c
 }
 
@@ -111,11 +112,12 @@ fn markdown_sections_follow_design_order() {
     assert!(at.windows(2).all(|w| w[0] < w[1]), "{at:?}");
 }
 
-/// The card with the code row's `below` bound `b` at grid step `step`, on side `side`.
+/// The card with the code row's `below` bound `b` at grid step `step`, on side `side`, and no
+/// margin.
 fn rounded(side: &str, b: f64, step: f64) -> String {
     let mut c = card();
     let i = &mut c.results[0].intervals[0];
-    (i.side, i.bound, i.grid.step) = (side.into(), Some(b), step);
+    (i.side, i.bound, i.grid.step, i.margin) = (side.into(), Some(b), step, None);
     markdown(&c)
 }
 
@@ -204,10 +206,39 @@ fn a_bound_prints_at_the_margin_decimals() {
     );
 }
 
+/// A card built before #72 and #80 lacks their fields and still loads, with the defaults.
 #[test]
-fn a_card_without_interval_margins_still_loads() {
-    let c = card();
-    assert!(c.results[0].intervals.iter().all(|i| i.margin.is_none()));
+fn a_card_built_before_the_audit_fields_still_loads() {
+    let mut v: serde_json::Value = serde_json::to_value(card()).unwrap();
+    v.as_object_mut().unwrap().remove("builder");
+    v["header"].as_object_mut().unwrap().remove("population");
+    v["recipe"]["manifest"]
+        .as_object_mut()
+        .unwrap()
+        .remove("folder");
+    for r in v["results"].as_array_mut().unwrap() {
+        r.as_object_mut().unwrap().remove("descriptive");
+        for i in r["intervals"].as_array_mut().unwrap() {
+            i.as_object_mut().unwrap().remove("margin");
+        }
+    }
+    let c: Card = serde_json::from_value(v).unwrap();
+    assert!(c.results.iter().all(|r| !r.descriptive));
+    assert!((c.results.iter().flat_map(|r| &r.intervals)).all(|i| i.margin.is_none()));
+    assert_eq!(
+        (
+            c.header.population.as_str(),
+            c.recipe.manifest.folder.as_str()
+        ),
+        ("", "")
+    );
+    let md = markdown(&c);
+    assert!(
+        md.contains(
+            "Card builder: version not in the records, binary SHA-256 not in the records\n"
+        ),
+        "{md}"
+    );
 }
 
 #[test]

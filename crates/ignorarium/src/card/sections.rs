@@ -34,8 +34,8 @@ const AGENT_LEVEL: u8 = 2;
 pub const LABEL_NOT_COMPUTED: &str = "label not computed";
 /// The results note of a quantile claim (ruling R8).
 pub const NO_QUANTILE_INTERVAL: &str = "the interval is not built for quantile claims";
-/// The files of the study folder the card lists by name, in order. Every file under `PREREG`
-/// follows them.
+/// The files of the study folder the card lists by name, in order. Every file under each of
+/// `TREES` follows them.
 pub const LISTED: [&str; 4] = [
     "gaps.md",
     "decisions.md",
@@ -44,6 +44,10 @@ pub const LISTED: [&str; 4] = [
 ];
 /// The study folder's tree of preregistered documents, among them the statement.
 pub const PREREG: &str = "prereg";
+/// The study folder's tree of descriptive outputs: files no registered test reads.
+pub const DESCRIPTIVE: &str = "descriptive";
+/// The trees the card lists file by file, in order.
+pub const TREES: [&str; 2] = [PREREG, DESCRIPTIVE];
 /// Why an outside file is missing when no `--study-folder` is given.
 pub const NO_STUDY_FOLDER: &str = "no study folder given";
 /// Why a link in the study folder is missing from the list.
@@ -135,16 +139,16 @@ impl OutsideFiles {
     }
 }
 
-/// The paths under `PREREG` in `dir` that are files or links, sorted. A link is not entered.
-/// Refuses what the manifest walk refuses.
-fn prereg(dir: &Path) -> Result<Vec<String>, String> {
+/// The paths under tree `root` of `dir` that are files or links, sorted; none when the tree is
+/// absent. A link is not entered. Refuses what the manifest walk refuses.
+fn tree(dir: &Path, root: &str) -> Result<Vec<String>, String> {
     let mut found = vec![];
-    let mut pending = vec![(dir.join(PREREG), PREREG.to_string())];
+    let mut pending = vec![(dir.join(root), root.to_string())];
     while let Some((full, rel)) = pending.pop() {
         plain(&rel, "the path")?;
         let kind = match std::fs::symlink_metadata(&full) {
             Ok(meta) => meta.file_type(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound && rel == PREREG => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && rel == root => continue,
             Err(e) => return Err(format!("{rel}: {e}")),
         };
         if kind.is_dir() {
@@ -227,7 +231,9 @@ pub fn outside(dir: Option<&Path>) -> Result<(OutsideFiles, Option<Source>), Str
     if inside != "true" {
         return Err(not_inside(""));
     }
-    let names = LISTED.map(String::from).into_iter().chain(prereg(dir)?);
+    let trees = TREES.iter().map(|t| tree(dir, t));
+    let trees = trees.collect::<Result<Vec<_>, _>>()?;
+    let names = LISTED.map(String::from).into_iter().chain(trees.concat());
     let files = names
         .map(|name| listed(dir, &name))
         .collect::<Result<Vec<_>, _>>()?;
@@ -281,6 +287,9 @@ pub struct Header {
     pub registered_at: String,
     /// An outside time stamp of the registration; a confirmatory plan waits for one.
     pub timestamp: Field<String>,
+    /// The plan's `question.population`: the frame every claim covers.
+    #[serde(default)]
+    pub population: String,
 }
 
 /// The header of a study whose register record `own` was written at `registered_at`.
@@ -291,6 +300,7 @@ pub fn header(own: &Register, registered_at: &str, spec: &Spec) -> Header {
         spec_hash: own.spec_hash.clone(),
         registered_at: registered_at.into(),
         timestamp: Field::of(own.timestamp.clone().filter(|t| t != PENDING), None),
+        population: spec.question.population.clone(),
     }
 }
 
@@ -375,6 +385,9 @@ pub struct ResultRow {
     pub note: Option<String>,
     /// The outcome is registered.
     pub registered: bool,
+    /// No registered claim is held in this group: the row carries no claim.
+    #[serde(default)]
+    pub descriptive: bool,
 }
 
 pub fn results(after: &[Record], spec: &Spec, intervals: &[IntervalResult]) -> Vec<ResultRow> {
@@ -384,6 +397,9 @@ pub fn results(after: &[Record], spec: &Spec, intervals: &[IntervalResult]) -> V
             let h = (spec.question.hypotheses.iter()).find(|h| h.id == e.hypothesis);
             let outcome = spec.outcomes.iter().find(|o| o.id == e.outcome);
             let log_ratio = outcome.is_some_and(|o| o.paired == Paired::LogRatio);
+            let claimed = h.is_some_and(|h| {
+                h.claim.is_some() && claim_strata(h).contains(&e.stratum.as_str())
+            });
             let quantile = h.is_some_and(|h| {
                 h.claim.is_some() && matches!(h.statistic, Some(StatisticSpec::Quantile(_)))
             });
@@ -402,6 +418,7 @@ pub fn results(after: &[Record], spec: &Spec, intervals: &[IntervalResult]) -> V
                 intervals,
                 note: quantile.then(|| NO_QUANTILE_INTERVAL.into()),
                 registered: outcome.is_some_and(|o| o.registered),
+                descriptive: !claimed,
                 hypothesis: e.hypothesis,
                 stratum: e.stratum,
                 outcome: e.outcome,
