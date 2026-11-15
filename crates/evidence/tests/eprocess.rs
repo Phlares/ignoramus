@@ -303,12 +303,76 @@ const UNIT: Score = Score::Bounded {
     mean: 0.0,
 };
 
+/// Scores that rise, meet the far end twice, then rise again, so the caps part ways.
+const MIXED: [f64; 12] = [
+    -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, 1.0, 1.0, -0.8, -0.8, 0.9, -0.3,
+];
+
+fn capped(tail: Tail, stop: f64, caps: &[f64]) -> EProcess {
+    EProcess::with_caps(UNIT, tail, stop, caps).unwrap()
+}
+
+/// The value after each score of `MIXED` and the peak, as the e-process gave them when its one
+/// cap was a constant (commit b7f970b). An Upper test reads the scores reversed and gives the
+/// values of the Lower one. The tolerance is four units in the last place, for a platform
+/// whose `exp` or `ln_1p` rounds another way.
 #[test]
-fn with_cap_at_max_bet_is_new() {
-    let xs = [-0.5, -0.9, 0.3, -0.2, 1.0, -1.0, -0.7];
-    let mut a = EProcess::new(UNIT, Tail::Lower, f64::INFINITY).unwrap();
-    let mut b = EProcess::with_cap(UNIT, Tail::Lower, f64::INFINITY, MAX_BET).unwrap();
-    assert_eq!(run(&mut a, &xs), run(&mut b, &xs));
+fn new_gives_the_values_of_the_one_built_in_cap() {
+    const ONE_SIDE: ([u64; 12], u64) = (
+        [
+            0x3ff0000000000000,
+            0x3ff3333333333333,
+            0x3ff9999999999999,
+            0x400199999999999a,
+            0x4008333333333332,
+            0x4010a33333333332,
+            0x3ff0a33333333332,
+            0x3fdc857c57c57c56,
+            0x3fe0cbc389055d22,
+            0x3fe5805ded2ab9f7,
+            0x3fd997e92879b909,
+            0x3fdb92f68a64d7ac,
+        ],
+        0x4010a33333333332,
+    );
+    const BOTH: ([u64; 12], u64) = (
+        [
+            0x3ff0000000000000,
+            0x3ff199999999999a,
+            0x3ff4cccccccccccd,
+            0x3ff999999999999a,
+            0x4000199999999999,
+            0x4004a33333333332,
+            0x3ff0519999999999,
+            0x3fe7215f15f15f16,
+            0x3fe865e1c482ae91,
+            0x3feac02ef6955cfc,
+            0x3fe665fa4a1e6e42,
+            0x3fe6e4bda29935eb,
+        ],
+        0x4004a33333333332,
+    );
+    let same = |got: f64, bits: u64| {
+        let want = f64::from_bits(bits);
+        assert!(
+            (got - want).abs() <= 4.0 * f64::EPSILON * want,
+            "{got} != {want}"
+        );
+    };
+    for (tail, sign, (values, peak)) in [
+        (Tail::Lower, 1.0, ONE_SIDE),
+        (Tail::Upper, -1.0, ONE_SIDE),
+        (Tail::Both, 1.0, BOTH),
+    ] {
+        let mut p = EProcess::new(UNIT, tail, f64::INFINITY).unwrap();
+        for (got, bits) in run(&mut p, &MIXED.map(|x| sign * x))
+            .into_iter()
+            .zip(values)
+        {
+            same(got, bits);
+        }
+        same(p.peak(), peak);
+    }
 }
 
 #[test]
@@ -316,7 +380,7 @@ fn the_cap_bounds_every_bet() {
     // Scores of -1/2 push the Lower bet past 1 from the fourth on, so it bets the cap: a
     // further -1/2 multiplies wealth by 1 + cap / 2, and a score at the far end by 1 - cap.
     for cap in [0.5, 0.9] {
-        let mut p = EProcess::with_cap(UNIT, Tail::Lower, f64::INFINITY, cap).unwrap();
+        let mut p = capped(Tail::Lower, f64::INFINITY, &[cap]);
         let v = run(&mut p, &[vec![-0.5; 10], vec![1.0]].concat());
         close(v[9] / v[8], 1.0 + cap / 2.0);
         close(v[10] / v[9], 1.0 - cap);
@@ -324,29 +388,15 @@ fn the_cap_bounds_every_bet() {
 }
 
 #[test]
-fn a_cap_outside_0_to_1_is_refused() {
+fn a_bad_list_of_caps_is_refused() {
+    let refused = |caps: &[f64]| {
+        let p = EProcess::with_caps(UNIT, Tail::Lower, f64::INFINITY, caps);
+        assert_eq!(p.unwrap_err(), Error::Parameter("cap"), "{caps:?}");
+    };
+    refused(&[]);
     for cap in [0.0, 1.0, -0.1, 1.5, f64::NAN, f64::INFINITY] {
-        let p = EProcess::with_cap(UNIT, Tail::Lower, f64::INFINITY, cap);
-        assert_eq!(p.unwrap_err(), Error::Parameter("cap"), "{cap}");
-        let p = EProcess::with_caps(UNIT, Tail::Lower, f64::INFINITY, &[0.5, cap]);
-        assert_eq!(p.unwrap_err(), Error::Parameter("cap"), "{cap}");
-    }
-    let none = EProcess::with_caps(UNIT, Tail::Lower, f64::INFINITY, &[]);
-    assert_eq!(none.unwrap_err(), Error::Parameter("cap"));
-}
-
-/// Scores that rise, meet the far end twice, then rise again, so the caps part ways.
-const MIXED: [f64; 12] = [
-    -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, 1.0, 1.0, -0.8, -0.8, 0.9, -0.3,
-];
-
-#[test]
-fn one_cap_in_the_list_is_with_cap() {
-    for tail in [Tail::Lower, Tail::Both] {
-        let mut a = EProcess::with_cap(UNIT, tail, f64::INFINITY, 0.9).unwrap();
-        let mut b = EProcess::with_caps(UNIT, tail, f64::INFINITY, &[0.9]).unwrap();
-        assert_eq!(run(&mut a, &MIXED), run(&mut b, &MIXED));
-        assert_eq!(a.peak(), b.peak());
+        refused(&[cap]);
+        refused(&[0.5, cap]);
     }
 }
 
@@ -358,31 +408,47 @@ fn several_caps_give_the_mean_of_their_e_values() {
         let sign = if tail == Tail::Upper { -1.0 } else { 1.0 };
         let xs = MIXED.map(|x| sign * x);
         let each: Vec<Vec<f64>> = (caps.iter())
-            .map(|&c| {
-                let mut p = EProcess::with_cap(UNIT, tail, f64::INFINITY, c).unwrap();
-                run(&mut p, &xs)
-            })
+            .map(|&c| run(&mut capped(tail, f64::INFINITY, &[c]), &xs))
             .collect();
-        let mut p = EProcess::with_caps(UNIT, tail, f64::INFINITY, &caps).unwrap();
-        let mixed = run(&mut p, &xs);
+        let mixed = run(&mut capped(tail, f64::INFINITY, &caps), &xs);
         for (i, &v) in mixed.iter().enumerate() {
             close(v, (each[0][i] + each[1][i] + each[2][i]) / 3.0);
         }
         // The caps do part ways on these scores.
         assert!((each[0][11] - each[2][11]).abs() > 0.05, "{each:?}");
-        // The peak is the largest mean, not the mean of each cap's own peak.
-        let peak = mixed.iter().copied().fold(1.0, f64::max);
-        close(p.peak(), peak);
     }
+}
+
+/// After six rising scores, a score at the far end costs the cap of 0.9 nine tenths of its
+/// wealth and the cap of 1/2 one half. Four more rising scores carry the lower cap past its
+/// old peak and leave the higher one below its own, so the two peak at different scores.
+#[test]
+fn the_peak_is_the_largest_mean_not_the_mean_of_the_peaks() {
+    let xs = [vec![-0.5; 6], vec![1.0], vec![-0.5; 4]].concat();
+    let caps = [0.5, 0.9];
+    let peaks: Vec<f64> = (caps.iter())
+        .map(|&c| {
+            let mut p = capped(Tail::Lower, f64::INFINITY, &[c]);
+            run(&mut p, &xs);
+            p.peak()
+        })
+        .collect();
+    let mut p = capped(Tail::Lower, f64::INFINITY, &caps);
+    let largest = run(&mut p, &xs).into_iter().fold(1.0, f64::max);
+    close(p.peak(), largest);
+    close(p.p_value(), 1.0 / largest);
+    assert!(
+        largest < (peaks[0] + peaks[1]) / 2.0 - 0.1,
+        "{largest} {peaks:?}"
+    );
 }
 
 #[test]
 fn stop_freezes_the_mean_over_caps() {
     let caps = [0.5, 0.9];
-    let mut free = EProcess::with_caps(UNIT, Tail::Lower, f64::INFINITY, &caps).unwrap();
-    let values = run(&mut free, &[-0.9; 12]);
+    let values = run(&mut capped(Tail::Lower, f64::INFINITY, &caps), &[-0.9; 12]);
     let first = values.iter().position(|&v| v >= 20.0).unwrap();
-    let mut p = EProcess::with_caps(UNIT, Tail::Lower, 20.0, &caps).unwrap();
+    let mut p = capped(Tail::Lower, 20.0, &caps);
     let stopped = run(&mut p, &[-0.9; 12]);
     assert!(p.stopped());
     assert_eq!(stopped[first], values[first]);

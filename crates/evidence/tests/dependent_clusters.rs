@@ -26,9 +26,9 @@ use evidence::Tail;
 use evidence::claim::{Bound, Statistic, e_values, order};
 use evidence::rng::Rng;
 use evidence::sim::Estimate;
-use std::thread;
-use support::seed;
+use support::{par_map, seed};
 
+const CLUSTERS: usize = 320;
 const LEVELS: [f64; 2] = [0.005, 0.05];
 const STAT: Statistic = Statistic::Mean { lo: -1.0, hi: 1.0 };
 const BOUND: Bound = Bound {
@@ -50,7 +50,6 @@ enum Order {
 
 #[derive(Debug, Clone, Copy)]
 struct Scenario {
-    clusters: usize,
     groups: usize,
     sd: f64,
     share: f64,
@@ -66,24 +65,33 @@ impl Scenario {
             self.order,
             self.sd,
             self.groups,
-            self.clusters / self.groups,
+            CLUSTERS / self.groups,
             self.share
+        )
+    }
+
+    /// The sd of a group shift and of a cluster within its group.
+    fn parts(&self) -> (f64, f64) {
+        (
+            self.sd * self.share.sqrt(),
+            self.sd * (1.0 - self.share).sqrt(),
         )
     }
 
     /// One replicate's cluster observations in test order.
     fn draw(&self, rng: &mut Rng) -> Vec<f64> {
-        let between = self.sd * self.share.sqrt();
-        let within = self.sd * (1.0 - self.share).sqrt();
-        let mut xs = Vec::with_capacity(self.clusters);
+        let (between, within) = self.parts();
+        let mut xs = Vec::with_capacity(CLUSTERS);
         for _ in 0..self.groups {
             let shift = between * rng.normal();
-            let own = (0..self.clusters / self.groups).map(|_| shift + within * rng.normal());
+            let own = (0..CLUSTERS / self.groups).map(|_| shift + within * rng.normal());
             xs.extend(own.map(|x| x.clamp(-1.0, 1.0)));
         }
         if self.null == Null::Set {
             let mean = xs.iter().sum::<f64>() / xs.len() as f64;
-            // The clamp can move a value at an end of the range; at these spreads none is near.
+            // The clamp moves a value only when the first clamp left one at an end of the
+            // range, which the wide spread does in a few replicates; the mean then misses 0
+            // by a small amount.
             xs.iter_mut()
                 .for_each(|x| *x = (*x - mean).clamp(-1.0, 1.0));
         }
@@ -110,7 +118,6 @@ fn counts(s: &Scenario, reps: u32) -> [[u32; 2]; 2] {
 
 fn base(null: Null, order: Order) -> Scenario {
     Scenario {
-        clusters: 320,
         groups: 4,
         sd: 0.25,
         share: 0.5,
@@ -126,17 +133,30 @@ fn clusters_of_a_group_share_its_shift() {
         ..base(Null::Population, Order::Grouped)
     };
     let xs = whole.draw(&mut Rng::from_seed(seed("shift")));
-    assert_eq!(xs.len(), 320);
-    for group in xs.chunks(80) {
+    assert_eq!(xs.len(), CLUSTERS);
+    for group in xs.chunks(CLUSTERS / 4) {
         assert!(group.iter().all(|&x| x == group[0]), "{group:?}");
     }
-    assert!(xs[0] != xs[80] && xs[80] != xs[160]);
+    assert!(xs[0] != xs[CLUSTERS / 4] && xs[CLUSTERS / 4] != xs[CLUSTERS / 2]);
     let none = Scenario {
         share: 0.0,
         ..whole
     };
     let xs = none.draw(&mut Rng::from_seed(seed("shift")));
     assert!(xs[0] != xs[1]);
+}
+
+#[test]
+fn the_shift_holds_its_share_of_the_variance() {
+    for share in [0.0, 0.1, 0.5, 1.0] {
+        let s = Scenario {
+            share,
+            ..base(Null::Population, Order::Grouped)
+        };
+        let (between, within) = s.parts();
+        assert!((between * between - share * s.sd * s.sd).abs() < 1e-15);
+        assert!((between * between + within * within - s.sd * s.sd).abs() < 1e-15);
+    }
 }
 
 #[test]
@@ -190,7 +210,7 @@ fn grid() -> Vec<Scenario> {
                 };
                 // The control: every cluster is its own group.
                 out.push(Scenario {
-                    groups: 320,
+                    groups: CLUSTERS,
                     share: 0.0,
                     ..s
                 });
@@ -207,15 +227,10 @@ fn grid() -> Vec<Scenario> {
 
 #[test]
 #[ignore = "long: 100,000 replicates of 320 clusters per scenario; run in release mode"]
-fn the_independent_control_keeps_its_level_and_every_share_is_printed() {
+fn the_independent_controls_keep_their_level_and_every_share_is_printed() {
     const REPS: u32 = 100_000;
     let scenarios = grid();
-    let results: Vec<_> = thread::scope(|scope| {
-        let handles: Vec<_> = (scenarios.iter())
-            .map(|s| scope.spawn(move || counts(s, REPS)))
-            .collect();
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    });
+    let results = par_map(&scenarios, |s| counts(s, REPS));
     println!("{REPS} replicates per scenario; share (upper end of its 95% interval)");
     println!("scenario | pass at 0.005 | reached at 0.005 | pass at 0.05 | reached at 0.05");
     for (s, n) in scenarios.iter().zip(&results) {
@@ -228,7 +243,8 @@ fn the_independent_control_keeps_its_level_and_every_share_is_printed() {
         println!("{} | {}", s.name(), cells.join(" | "));
     }
     for (s, n) in scenarios.iter().zip(&results) {
-        if s.groups == s.clusters && s.null == Null::Population {
+        // With every cluster its own group, each null and each order is a valid null.
+        if s.groups == CLUSTERS {
             for (k, &level) in n.iter().zip(&LEVELS) {
                 let reached = Estimate::of(f64::from(k[1]), REPS as usize);
                 assert!(reached.holds(level), "{}: {reached:?}", s.name());

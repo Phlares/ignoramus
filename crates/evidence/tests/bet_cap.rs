@@ -3,24 +3,26 @@
 //! `cargo test -p evidence --release --test bet_cap -- --ignored --nocapture`.
 //!
 //! Score units: a "mean below 0" claim on [-1, 1] at level 0.005, so an observation is its own
-//! score. A scenario draws each cluster observation at the ceiling, +1, with chance `ceiling`,
-//! and otherwise normal with sd `spread` about -`gap`, clipped to the range. Its null twin
-//! moves the normal part so the mean of all observations is 0.
+//! score. A law draws each cluster observation at the ceiling, +1, with chance `ceiling`, and
+//! otherwise normal with sd `spread` about a mean, clipped to the range. A power scenario puts
+//! that mean at -`gap`. The null of a law puts it where the mean of all observations is 0, so
+//! a null does not depend on the gap.
 //!
 //! Candidates: the caps 1/2, 3/4 and 0.9, and the three together (`EProcess::with_caps`: the
-//! mean of their e-values, which is an e-value too). Every candidate reads the same draws.
+//! mean of their e-values). Every candidate reads the same draws.
 //!
 //! Power: per candidate and target, the smallest count of clusters at which the share of
 //! replicates with an e-value of at least 1 / level reaches the target. One path per replicate
-//! serves every count, since a prefix of independent draws has the law of a shorter study.
+//! serves every count, since a prefix of independent draws has the law of a shorter study. The
+//! count is the first one at which a simulated share touches the target, so it sits a little
+//! below the true count; the lowest and highest batch beside it show the noise.
 //! Null: the share of replicates whose e-value reaches 1 / level at any count up to the
 //! horizon. Ville's inequality bounds that share by the level, and it bounds every fixed count.
 //! A candidate keeps the level when the upper end of the share's 95% interval is at most the
-//! level. With ceiling units the share lies near the bound, so those nulls take 500,000
-//! replicates; the others take 20,000.
+//! level. With ceiling units the share lies near the bound, so those nulls take 1,500,000
+//! replicates; the others take 60,000.
 //!
-//! Seeds: batch b of scenario `name` runs on `seed("power/<name>/<b>")` or
-//! `seed("null/<name>/<b>")`.
+//! Seeds: batch b runs on `seed("power/<scenario>/<b>")` or `seed("null/<law>/<b>")`.
 mod support;
 
 use evidence::Tail;
@@ -28,16 +30,18 @@ use evidence::claim::{Bound, Statistic, e_value};
 use evidence::eprocess::{EProcess, MAX_BET, Score};
 use evidence::rng::Rng;
 use evidence::sim::Estimate;
-use std::thread;
-use support::seed;
+use std::ops::Range;
+use support::{par_map, seed};
 
 const LEVEL: f64 = 0.005;
 const CAPS: [f64; 3] = [0.5, MAX_BET, 0.9];
-const NAMES: [&str; 4] = ["1/2", "3/4", "0.9", "mixture"];
+/// Each cap alone, then the three together.
+const N: usize = CAPS.len() + 1;
+const NAMES: [&str; N] = ["1/2", "3/4", "0.9", "mixture"];
 /// One stratum's share of a joint power of 0.8 over 1, 2 and 4 strata.
 const TARGETS: [f64; 3] = [0.8, 0.894427, 0.945742];
-/// The most clusters per stratum the power gate's search tries (`power::CAP`).
-const HORIZON: usize = 16_384;
+const HORIZON: usize = evidence::power::CAP as usize;
+const BATCH: u32 = 1_000;
 const SCORE: Score = Score::Bounded {
     lo: -1.0,
     hi: 1.0,
@@ -45,18 +49,14 @@ const SCORE: Score = Score::Bounded {
 };
 
 #[derive(Clone, Copy)]
-struct Scenario {
-    gap: f64,
+struct Law {
     spread: f64,
     ceiling: f64,
 }
 
-impl Scenario {
+impl Law {
     fn name(&self) -> String {
-        format!(
-            "gap {}, spread {}, ceiling {}",
-            self.gap, self.spread, self.ceiling
-        )
+        format!("spread {}, ceiling {}", self.spread, self.ceiling)
     }
 
     /// The mean of the normal part that puts the mean of all observations at 0.
@@ -73,8 +73,20 @@ impl Scenario {
     }
 }
 
-/// The four candidates over one path: each cap alone, then the three together.
-struct Candidates([EProcess; 4]);
+#[derive(Clone, Copy)]
+struct Scenario {
+    gap: f64,
+    law: Law,
+}
+
+impl Scenario {
+    fn name(&self) -> String {
+        format!("gap {}, {}", self.gap, self.law.name())
+    }
+}
+
+/// The candidates over one path.
+struct Candidates([EProcess; N]);
 
 impl Candidates {
     fn new() -> Candidates {
@@ -88,12 +100,18 @@ impl Candidates {
         ])
     }
 
-    /// Each candidate's e-value after `x`.
-    fn observe(&mut self, x: f64) -> [f64; 4] {
-        self.0.each_mut().map(|p| {
+    fn observe(&mut self, x: f64) {
+        for p in &mut self.0 {
             p.observe(x).unwrap();
-            p.value()
-        })
+        }
+    }
+
+    fn values(&self) -> [f64; N] {
+        self.0.each_ref().map(EProcess::value)
+    }
+
+    fn peaks(&self) -> [f64; N] {
+        self.0.each_ref().map(EProcess::peak)
     }
 }
 
@@ -103,14 +121,14 @@ fn reaches(e: f64) -> bool {
 
 /// `passed[c][n]`: the replicates in which candidate c reaches 1 / level after exactly n
 /// observations about -`gap`.
-fn passes(s: &Scenario, reps: u32, horizon: usize, seed: [u8; 32]) -> [Vec<u32>; 4] {
+fn passes(s: &Scenario, reps: u32, horizon: usize, seed: [u8; 32]) -> [Vec<u32>; N] {
     let mut rng = Rng::from_seed(seed);
-    let mut passed = [(); 4].map(|()| vec![0; horizon + 1]);
+    let mut passed = [(); N].map(|()| vec![0; horizon + 1]);
     for _ in 0..reps {
         let mut c = Candidates::new();
         for n in 1..=horizon {
-            let v = c.observe(s.draw(-s.gap, &mut rng));
-            for (p, v) in passed.iter_mut().zip(v) {
+            c.observe(s.law.draw(-s.gap, &mut rng));
+            for (p, v) in passed.iter_mut().zip(c.values()) {
                 p[n] += u32::from(reaches(v));
             }
         }
@@ -118,31 +136,41 @@ fn passes(s: &Scenario, reps: u32, horizon: usize, seed: [u8; 32]) -> [Vec<u32>;
     passed
 }
 
-/// The replicates of the null twin in which each candidate reaches 1 / level at any count up
-/// to `horizon`.
-fn crossed(s: &Scenario, reps: u32, horizon: usize, seed: [u8; 32]) -> [u32; 4] {
+/// The replicates in which each candidate reaches 1 / level at any count up to `horizon`,
+/// with the normal part about `mean`.
+fn crossed(law: &Law, mean: f64, reps: u32, horizon: usize, seed: [u8; 32]) -> [u32; N] {
     let mut rng = Rng::from_seed(seed);
-    let mut crossed = [0; 4];
+    let mut crossed = [0; N];
     for _ in 0..reps {
         let mut c = Candidates::new();
-        let mut ever = [false; 4];
         for _ in 0..horizon {
-            let v = c.observe(s.draw(s.null_mean(), &mut rng));
-            for (e, v) in ever.iter_mut().zip(v) {
-                *e |= reaches(v);
-            }
+            c.observe(law.draw(mean, &mut rng));
         }
-        for (k, e) in crossed.iter_mut().zip(ever) {
-            *k += u32::from(e);
+        for (k, peak) in crossed.iter_mut().zip(c.peaks()) {
+            *k += u32::from(reaches(peak));
         }
     }
     crossed
+}
+
+/// The pass counts of several batches, summed per candidate and count.
+fn pool(batches: &[[Vec<u32>; N]]) -> [Vec<u32>; N] {
+    std::array::from_fn(|c| {
+        (0..batches[0][c].len())
+            .map(|n| batches.iter().map(|b| b[c][n]).sum())
+            .collect()
+    })
 }
 
 /// The smallest count at which the pass share reaches `target`.
 fn needed(passed: &[u32], reps: u32, target: f64) -> Option<usize> {
     (passed.iter()).position(|&k| f64::from(k) / f64::from(reps) >= target)
 }
+
+const SHARP: Law = Law {
+    spread: 0.3,
+    ceiling: 0.01,
+};
 
 #[test]
 fn the_cap_in_force_gives_the_claim_test() {
@@ -151,15 +179,11 @@ fn the_cap_in_force_gives_the_claim_test() {
         tail: Tail::Lower,
         margin: 0.0,
     };
-    let s = Scenario {
-        gap: 0.03,
-        spread: 0.3,
-        ceiling: 0.01,
-    };
     let mut rng = Rng::from_seed(seed("claim"));
-    let obs: Vec<f64> = (0..400).map(|_| s.draw(-s.gap, &mut rng)).collect();
+    let obs: Vec<f64> = (0..400).map(|_| SHARP.draw(-0.03, &mut rng)).collect();
     let mut c = Candidates::new();
-    let last = obs.iter().map(|&x| c.observe(x)).last().unwrap();
+    obs.iter().for_each(|&x| c.observe(x));
+    let last = c.values();
     assert_eq!(last[1], e_value(&stat, &bound, &obs).unwrap());
     assert!(last[0] != last[1] && last[2] != last[1], "{last:?}");
     let mean = (last[0] + last[1] + last[2]) / 3.0;
@@ -174,9 +198,25 @@ fn needed_is_the_first_count_at_the_target() {
 }
 
 #[test]
-fn the_null_twin_has_mean_zero() {
-    let s = Scenario {
-        gap: 0.03,
+fn pool_sums_the_batches_per_candidate_and_count() {
+    let batch = |k: u32| std::array::from_fn(|c| vec![k, k * 10 + c as u32]);
+    let pooled = pool(&[batch(1), batch(2), batch(4)]);
+    for (c, counts) in pooled.iter().enumerate() {
+        assert_eq!(counts, &vec![7, 70 + 3 * c as u32]);
+    }
+}
+
+#[test]
+fn the_null_of_a_law_has_mean_zero() {
+    for ceiling in [0.0, 0.005, 0.01, 0.2] {
+        let law = Law {
+            spread: 0.02,
+            ceiling,
+        };
+        let mean = ceiling + (1.0 - ceiling) * law.null_mean();
+        assert!(mean.abs() < 1e-15, "{ceiling}: {mean}");
+    }
+    let law = Law {
         spread: 0.02,
         ceiling: 0.01,
     };
@@ -184,7 +224,7 @@ fn the_null_twin_has_mean_zero() {
     let n = 400_000;
     let (mut sum, mut top) = (0.0, 0);
     for _ in 0..n {
-        let x = s.draw(s.null_mean(), &mut rng);
+        let x = law.draw(law.null_mean(), &mut rng);
         sum += x;
         top += u32::from(x == 1.0);
     }
@@ -192,7 +232,40 @@ fn the_null_twin_has_mean_zero() {
     let mean = sum / f64::from(n);
     assert!(mean.abs() < 0.0008, "{mean}");
     let share = f64::from(top) / f64::from(n);
-    assert!((share - s.ceiling).abs() < 0.001, "{share}");
+    assert!((share - law.ceiling).abs() < 0.001, "{share}");
+}
+
+/// A path can reach 1 / level and fall below it again at a ceiling unit, so more paths reach
+/// it at some count than hold it at the last one.
+#[test]
+fn crossed_counts_the_paths_that_reach_the_level_at_any_count() {
+    let law = Law {
+        spread: 0.3,
+        ceiling: 0.03,
+    };
+    let (reps, horizon, mean) = (300, 200, -0.12);
+    let got = crossed(&law, mean, reps, horizon, seed("crossed"));
+    let mut rng = Rng::from_seed(seed("crossed"));
+    let (mut ever, mut last) = ([0; N], [0; N]);
+    for _ in 0..reps {
+        let mut c = Candidates::new();
+        let mut any = [false; N];
+        for _ in 0..horizon {
+            c.observe(law.draw(mean, &mut rng));
+            for (a, v) in any.iter_mut().zip(c.values()) {
+                *a |= reaches(v);
+            }
+        }
+        for (i, v) in c.values().into_iter().enumerate() {
+            ever[i] += u32::from(any[i]);
+            last[i] += u32::from(reaches(v));
+        }
+    }
+    assert_eq!(got, ever);
+    let pairs = || ever.iter().zip(&last);
+    assert!(pairs().all(|(e, l)| e >= l), "{ever:?} {last:?}");
+    assert!(pairs().any(|(e, l)| e > l), "{ever:?} {last:?}");
+    assert!(ever.iter().all(|&e| 0 < e && e < reps), "{ever:?}");
 }
 
 /// Decision 0022 reports about 400 and 281 clusters at caps 1/2 and 3/4 for a claim with this
@@ -201,8 +274,10 @@ fn the_null_twin_has_mean_zero() {
 fn without_ceiling_units_a_higher_cap_needs_fewer_clusters() {
     let s = Scenario {
         gap: 0.0297,
-        spread: 0.0266,
-        ceiling: 0.0,
+        law: Law {
+            spread: 0.0266,
+            ceiling: 0.0,
+        },
     };
     let reps = 400;
     let passed = passes(&s, reps, 600, seed("smoke"));
@@ -214,77 +289,64 @@ fn without_ceiling_units_a_higher_cap_needs_fewer_clusters() {
     assert!((360..=440).contains(&n[0]), "{n:?}");
 }
 
-/// The gaps of the claims on file over their score scale, the spread of the finished study's
-/// two strata over it, and decision 0022's ceiling shares.
-fn grid() -> Vec<Scenario> {
+/// Decision 0022's ceiling shares, and the spread of the finished study's two strata over the
+/// score scale.
+fn laws() -> Vec<Law> {
     let mut out = Vec::new();
     for ceiling in [0.0, 0.005, 0.01] {
-        for gap in [0.0142, 0.0220, 0.0297] {
-            for spread in [0.0172, 0.0266] {
-                out.push(Scenario {
-                    gap,
-                    spread,
-                    ceiling,
-                });
-            }
+        for spread in [0.0172, 0.0266] {
+            out.push(Law { spread, ceiling });
         }
     }
     out
 }
 
-fn cell(n: Option<usize>) -> String {
-    n.map_or("none".into(), |n| n.to_string())
-}
-
-type Counts = [Option<usize>; 4];
-
-/// The null crossings of scenario `s` over `batches`, each of `batch` replicates.
-fn nulls_of(s: &Scenario, batch: u32, batches: std::ops::Range<u32>) -> [u32; 4] {
-    let mut null = [0; 4];
-    for b in batches {
-        let k = crossed(s, batch, HORIZON, seed(&format!("null/{}/{b}", s.name())));
-        for (n, k) in null.iter_mut().zip(k) {
-            *n += k;
+/// Every law at the gaps of the claims on file over their score scale.
+fn grid() -> Vec<Scenario> {
+    let mut out = Vec::new();
+    for law in laws() {
+        for gap in [0.0142, 0.0220, 0.0297] {
+            out.push(Scenario { gap, law });
         }
     }
-    null
+    out
 }
 
-/// With ceiling units the null twins sit close to Ville's bound, and 20,000 replicates cannot
-/// place a share below the level. Batches 0 to 19 are those of the test below.
 #[test]
-#[ignore = "long: 500,000 null replicates of 16,384 clusters for each of 12 scenarios; run in release mode"]
-fn the_ceiling_nulls_keep_the_level_at_500_000_replicates() {
-    const BATCH: u32 = 1_000;
+#[ignore = "long: 1,500,000 null replicates of 16,384 clusters for each of 4 laws with ceiling units, 60,000 for each of 2 without; run in release mode"]
+fn every_candidate_keeps_the_level() {
     const CHUNK: u32 = 100;
-    const CHUNKS: u32 = 5;
-    let scenarios: Vec<Scenario> = grid().into_iter().filter(|s| s.ceiling > 0.0).collect();
-    let results: Vec<[u32; 4]> = thread::scope(|scope| {
-        let handles: Vec<Vec<_>> = (scenarios.iter())
-            .map(|s| {
-                (0..CHUNKS)
-                    .map(|c| scope.spawn(move || nulls_of(s, BATCH, c * CHUNK..(c + 1) * CHUNK)))
-                    .collect()
-            })
-            .collect();
-        (handles.into_iter())
-            .map(|chunks| {
-                chunks.into_iter().fold([0; 4], |mut sum, h| {
-                    for (n, k) in sum.iter_mut().zip(h.join().unwrap()) {
-                        *n += k;
-                    }
-                    sum
-                })
-            })
-            .collect()
+    let laws = laws();
+    let batches = |law: &Law| if law.ceiling > 0.0 { 1_500 } else { 60 };
+    let chunks: Vec<(usize, Range<u32>)> = (laws.iter().enumerate())
+        .flat_map(|(i, law)| {
+            (0..batches(law))
+                .step_by(CHUNK as usize)
+                .map(move |from| (i, from..(from + CHUNK).min(batches(law))))
+        })
+        .collect();
+    let counts = par_map(&chunks, |(i, range)| {
+        let law = &laws[*i];
+        range.clone().fold([0; N], |mut sum, b| {
+            let name = format!("null/{}/{b}", law.name());
+            let k = crossed(law, law.null_mean(), BATCH, HORIZON, seed(&name));
+            sum.iter_mut().zip(k).for_each(|(n, k)| *n += k);
+            sum
+        })
     });
-    let reps = (BATCH * CHUNK * CHUNKS) as usize;
     println!(
-        "null: replicates of {reps} that reach 1 / {LEVEL} at any count up to {HORIZON}: count, share (upper end of its 95% interval)"
+        "null: replicates that reach 1 / {LEVEL} at any count up to {HORIZON}: count, share (upper end of its 95% interval)"
     );
-    println!("scenario | {}", NAMES.join(" | "));
+    println!("law | replicates | {}", NAMES.join(" | "));
     let mut holds = true;
-    for (s, null) in scenarios.iter().zip(&results) {
+    for (i, law) in laws.iter().enumerate() {
+        let mut null = [0; N];
+        for ((j, _), k) in chunks.iter().zip(&counts) {
+            if *j == i {
+                null.iter_mut().zip(k).for_each(|(n, k)| *n += k);
+            }
+        }
+        let reps = (BATCH * batches(law)) as usize;
         let cells: Vec<String> = (null.iter())
             .map(|&k| {
                 let e = Estimate::of(f64::from(k), reps);
@@ -292,7 +354,7 @@ fn the_ceiling_nulls_keep_the_level_at_500_000_replicates() {
                 format!("{k}, {:.5} ({:.5})", e.mean, e.upper)
             })
             .collect();
-        println!("{} | {}", s.name(), cells.join(" | "));
+        println!("{} | {reps} | {}", law.name(), cells.join(" | "));
     }
     assert!(
         holds,
@@ -300,98 +362,48 @@ fn the_ceiling_nulls_keep_the_level_at_500_000_replicates() {
     );
 }
 
-/// One scenario: the null crossings, then per target the pooled counts and each batch's.
-fn scenario(
-    s: &Scenario,
-    batch: u32,
-    nulls: u32,
-    powers: u32,
-) -> ([u32; 4], Vec<(Counts, Vec<Counts>)>) {
-    let null = nulls_of(s, batch, 0..nulls);
-    let batches: Vec<_> = (0..powers)
-        .map(|b| passes(s, batch, HORIZON, seed(&format!("power/{}/{b}", s.name()))))
-        .collect();
-    let per_target = (TARGETS.iter())
-        .map(|&t| {
-            let pooled = [0, 1, 2, 3].map(|c| {
-                let sum: Vec<u32> = (0..=HORIZON)
-                    .map(|n| batches.iter().map(|p| p[c][n]).sum())
-                    .collect();
-                needed(&sum, batch * powers, t)
-            });
-            let each = (batches.iter())
-                .map(|p| [0, 1, 2, 3].map(|c| needed(&p[c], batch, t)))
-                .collect();
-            (pooled, each)
-        })
-        .collect();
-    (null, per_target)
+fn cell(n: Option<usize>) -> String {
+    n.map_or("none".into(), |n| n.to_string())
 }
 
 #[test]
-#[ignore = "long: 4,000 power replicates of 16,384 clusters per scenario, and 20,000 null ones without ceiling units; run in release mode"]
-fn every_candidate_keeps_the_level_and_the_counts_are_printed() {
-    const BATCH: u32 = 1_000;
-    const NULLS: u32 = 20;
-    const POWERS: u32 = 4;
-    // The nulls with ceiling units need the 500,000 replicates of the test above.
-    let nulls = |s: &Scenario| if s.ceiling > 0.0 { 0 } else { NULLS };
+#[ignore = "long: 4,000 power replicates of 16,384 clusters for each of 18 scenarios; prints and asserts nothing; run in release mode"]
+fn the_clusters_needed_are_printed() {
+    const BATCHES: u32 = 4;
     let scenarios = grid();
-    let results: Vec<_> = thread::scope(|scope| {
-        let handles: Vec<_> = (scenarios.iter())
-            .map(|s| scope.spawn(move || scenario(s, BATCH, nulls(s), POWERS)))
-            .collect();
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    let results = par_map(&scenarios, |s| {
+        (0..BATCHES)
+            .map(|b| passes(s, BATCH, HORIZON, seed(&format!("power/{}/{b}", s.name()))))
+            .collect::<Vec<_>>()
     });
-
-    let null_reps = (BATCH * NULLS) as usize;
     println!(
-        "null: share of {null_reps} replicates that reach 1 / {LEVEL} at any count up to {HORIZON} (upper end of its 95% interval)"
-    );
-    println!("scenario | {}", NAMES.join(" | "));
-    let mut holds = true;
-    for (s, (null, _)) in scenarios.iter().zip(&results) {
-        if nulls(s) == 0 {
-            continue;
-        }
-        let cells: Vec<String> = (null.iter())
-            .map(|&k| {
-                let e = Estimate::of(f64::from(k), null_reps);
-                holds &= e.holds(LEVEL);
-                format!("{:.5} ({:.5})", e.mean, e.upper)
-            })
-            .collect();
-        println!("{} | {}", s.name(), cells.join(" | "));
-    }
-
-    println!(
-        "power: clusters needed, pooled over {POWERS} batches of {BATCH} [lowest to highest batch]"
+        "power: clusters needed, pooled over {BATCHES} batches of {BATCH} [lowest to highest batch]"
     );
     println!(
         "scenario | target | {} | best | ratio to the best",
         NAMES.join(" | ")
     );
-    // Per candidate: its largest ratio to the best count, and the cells it never reaches while
-    // another candidate does.
-    let mut worst = [1.0f64; 4];
-    let mut out = [0u32; 4];
-    for (s, (_, per_target)) in scenarios.iter().zip(&results) {
-        for (&t, (pooled, each)) in TARGETS.iter().zip(per_target) {
-            let cells: Vec<String> = (0..4)
-                .map(|c| {
-                    let ends = each.iter().map(|b| b[c].unwrap_or(usize::MAX));
-                    let end = |n: Option<usize>| cell(n.filter(|&n| n != usize::MAX));
-                    format!(
-                        "{} [{} to {}]",
-                        cell(pooled[c]),
-                        end(ends.clone().min()),
-                        end(ends.max())
-                    )
-                })
-                .collect();
-            let best = pooled.iter().flatten().min().copied();
-            let ratios: Vec<String> = (0..4)
-                .map(|c| match (pooled[c], best) {
+    // Per candidate: its largest ratio to the best count over the cells it reaches, and the
+    // cells it never reaches while another candidate does.
+    let (mut worst, mut out, mut unreached) = ([1.0f64; N], [0u32; N], 0);
+    for (s, batches) in scenarios.iter().zip(&results) {
+        let pooled = pool(batches);
+        for &t in &TARGETS {
+            let count: [Option<usize>; N] =
+                std::array::from_fn(|c| needed(&pooled[c], BATCH * BATCHES, t));
+            let best = count.iter().flatten().min().copied();
+            unreached += u32::from(best.is_none());
+            let (mut cells, mut ratios) = (Vec::new(), Vec::new());
+            for c in 0..N {
+                let each = || batches.iter().map(|b| needed(&b[c], BATCH, t));
+                let last = |n: &Option<usize>| n.unwrap_or(usize::MAX);
+                cells.push(format!(
+                    "{} [{} to {}]",
+                    cell(count[c]),
+                    cell(each().min_by_key(last).unwrap()),
+                    cell(each().max_by_key(last).unwrap())
+                ));
+                ratios.push(match (count[c], best) {
                     (Some(n), Some(b)) => {
                         let r = n as f64 / b as f64;
                         worst[c] = worst[c].max(r);
@@ -402,8 +414,8 @@ fn every_candidate_keeps_the_level_and_the_counts_are_printed() {
                         "out".into()
                     }
                     _ => "-".into(),
-                })
-                .collect();
+                });
+            }
             println!(
                 "{} | {t} | {} | {} | {}",
                 s.name(),
@@ -413,12 +425,11 @@ fn every_candidate_keeps_the_level_and_the_counts_are_printed() {
             );
         }
     }
-    println!("candidate | largest ratio to the best | cells it never reaches while another does");
-    for c in 0..4 {
+    println!(
+        "candidate | largest ratio to the best, over the cells it reaches | cells it never reaches while another does"
+    );
+    for c in 0..N {
         println!("{} | {:.3} | {}", NAMES[c], worst[c], out[c]);
     }
-    assert!(
-        holds,
-        "a candidate's null share has an upper end above the level"
-    );
+    println!("cells no candidate reaches within {HORIZON} clusters: {unreached}");
 }

@@ -1,4 +1,5 @@
 //! Shared by the long simulation suites.
+use std::thread;
 
 /// The seed for `text`: four splitmix64 outputs from its FNV-1a hash, so each scenario and
 /// batch has its own.
@@ -16,4 +17,12 @@ pub fn seed(text: &str) -> [u8; 32] {
         chunk.copy_from_slice(&(z ^ (z >> 31)).to_le_bytes());
     }
     out
+}
+
+/// `f` of each item, each on its own thread, in the order of `items`.
+pub fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    thread::scope(|scope| {
+        let handles: Vec<_> = items.iter().map(|x| scope.spawn(|| f(x))).collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    })
 }
