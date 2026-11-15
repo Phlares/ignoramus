@@ -9,7 +9,7 @@ use ignorarium::backend::level1::Level1;
 use ignorarium::backend::{Backend, Exit, RowJob, RowOutcome};
 use ignorarium::canon::sha256_hex;
 use ignorarium::telemetry::{
-    CpuTicks, HostCpu, Reading, cpu_ticks, cpu_ticks_of, host_cpu_of, record,
+    CpuTicks, HostCpu, Reading, RowView, cpu_ticks, cpu_ticks_of, host_cpu_of, overview, record,
 };
 use serde_json::json;
 use std::cell::RefCell;
@@ -555,4 +555,183 @@ fn a_row_gives_the_same_exit_and_hash_with_and_without_its_cgroup() {
         assert_eq!(leaf.exit, no_leaf.exit, "level {level}");
         assert_eq!(leaf.output_hash, no_leaf.output_hash, "level {level}");
     }
+}
+
+fn view(row: u64, wall: f64, cpu: f64, telemetry: serde_json::Value) -> RowView {
+    RowView {
+        row,
+        wall_seconds: Some(wall),
+        cpu_seconds: Some(cpu),
+        telemetry: Some(telemetry),
+    }
+}
+
+fn ticks_telemetry(start: [u64; 10], end: [u64; 10]) -> serde_json::Value {
+    json!({
+        "host_cpu": {"model": "M", "flags_sha256": "f"},
+        "cpu_ticks": {"user_hz": 100, "start": start, "end": end},
+        "cgroup": {"unavailable": "x"},
+    })
+}
+
+#[test]
+fn overview_counts_cgroup_states_and_host_cpus() {
+    let cg = |c: serde_json::Value, model: &str| json!({"host_cpu": {"model": model, "flags_sha256": "f"}, "cgroup": c});
+    let rows = [
+        view(0, 1.0, 1.0, cg(json!({"cpu_stat": {}}), "A")),
+        view(1, 1.0, 1.0, cg(json!({"cpu_stat": {}}), "A")),
+        view(
+            2,
+            1.0,
+            1.0,
+            cg(json!({"unavailable": "level 2 rows run in a machine"}), "B"),
+        ),
+    ];
+    let o = overview(&rows, &[0, 1, 2], true);
+    assert_eq!(o["rows"], 3);
+    assert_eq!(
+        o["cgroup"],
+        json!({"available": 2, "level 2 rows run in a machine": 1})
+    );
+    assert_eq!(
+        o["host_cpu"],
+        json!([
+            {"model": "A", "flags_sha256": "f", "rows": 2},
+            {"model": "B", "flags_sha256": "f", "rows": 1},
+        ])
+    );
+}
+
+#[test]
+fn overview_steal_is_tick_delta_over_user_hz() {
+    let mut start = [0; 10];
+    let mut end = [0; 10];
+    start[7] = 100;
+    end[7] = 300;
+    let r = view(0, 1.0, 1.0, ticks_telemetry(start, end));
+    let mut end2 = end;
+    end2[7] = 200;
+    let r2 = view(1, 1.0, 1.0, ticks_telemetry(start, end2));
+    let o = overview(&[r, r2], &[0, 1], true);
+    assert_eq!(o["steal"], json!({"rows": 2, "max_s": 2.0, "mean_s": 1.5}));
+    assert_eq!(o["iowait"], json!({"rows": 2, "max_s": 0.0, "mean_s": 0.0}));
+    assert_eq!(o["ticks_unavailable"], 0);
+}
+
+#[test]
+fn overview_counts_rows_without_usable_ticks() {
+    let r = view(
+        0,
+        1.0,
+        1.0,
+        json!({"cpu_ticks": {"unavailable": "no /proc/stat"}}),
+    );
+    let o = overview(&[r], &[0], true);
+    assert_eq!(o["ticks_unavailable"], 1);
+    assert_eq!(
+        o["steal"],
+        json!({"rows": 0, "max_s": null, "mean_s": null})
+    );
+}
+
+#[test]
+fn overview_share_is_field_delta_over_all_fields() {
+    let mut end = [0; 10];
+    end[0] = 60;
+    end[4] = 10; // iowait
+    end[7] = 30; // steal
+    let r = view(0, 1.0, 1.0, ticks_telemetry([0; 10], end));
+    let o = overview(&[r], &[0], true);
+    let b = &o["blocks"][0];
+    assert_eq!(b["steal_share_max"], 0.3);
+    assert_eq!(b["steal_share_mean"], 0.3);
+    assert_eq!(b["iowait_share_max"], 0.1);
+    assert_eq!(b["iowait_share_mean"], 0.1);
+}
+
+#[test]
+fn overview_blocks_are_ten_stable_parts() {
+    let order: Vec<u64> = (0..23).collect();
+    let sizes = |o: &serde_json::Value| -> Vec<u64> {
+        let a = o["blocks"].as_array().unwrap();
+        a.iter()
+            .map(|b| b["last_row"].as_u64().unwrap() - b["first_row"].as_u64().unwrap() + 1)
+            .collect()
+    };
+    let want = vec![3, 3, 3, 2, 2, 2, 2, 2, 2, 2];
+    let none = overview(&[], &order, false);
+    assert_eq!(sizes(&none), want);
+    assert_eq!(none["blocks"][0]["rows"], 0);
+    assert_eq!(none["blocks"][0]["steal_share_max"], json!(null));
+    let all: Vec<RowView> = order
+        .iter()
+        .map(|i| view(*i, 1.0, 1.0, ticks_telemetry([0; 10], [1; 10])))
+        .collect();
+    let full = overview(&all, &order, false);
+    assert_eq!(sizes(&full), want);
+    assert_eq!(full["blocks"][0]["rows"], 3);
+    assert_eq!(full["blocks"][9]["first_row"], 21);
+    let few = overview(&[], &[5, 6, 7], false);
+    assert_eq!(few["blocks"].as_array().unwrap().len(), 3);
+    assert_eq!(overview(&[], &[], false)["blocks"], json!([]));
+}
+
+#[test]
+fn overview_blind_blocks_carry_no_wall_or_cpu() {
+    let r = view(0, 4.0, 2.0, ticks_telemetry([0; 10], [1; 10]));
+    let blind = overview(std::slice::from_ref(&r), &[0], true);
+    let b = blind["blocks"][0].as_object().unwrap();
+    for k in ["wall_max_s", "wall_mean_s", "cpu_max_s", "cpu_mean_s"] {
+        assert!(!b.contains_key(k), "{k}");
+    }
+    let open = overview(&[r], &[0], false);
+    assert_eq!(open["blocks"][0]["wall_max_s"], 4.0);
+    assert_eq!(open["blocks"][0]["cpu_mean_s"], 2.0);
+    assert_eq!(open["wall"], json!({"max_s": 4.0, "mean_s": 4.0}));
+}
+
+#[test]
+fn overview_keeps_the_first_record_of_a_row() {
+    let first = view(0, 1.0, 1.0, ticks_telemetry([0; 10], [1; 10]));
+    let again = view(0, 9.0, 9.0, ticks_telemetry([0; 10], [1; 10]));
+    let o = overview(&[first, again], &[0], false);
+    assert_eq!(o["rows"], 1);
+    assert_eq!(o["wall"]["max_s"], 1.0);
+}
+
+#[test]
+fn row_view_takes_row_records_only() {
+    use ignorarium::records::Record;
+    let rec = |kind: &str| Record {
+        seq: 1,
+        prev: String::new(),
+        study: "s".into(),
+        row: Some(4),
+        kind: kind.into(),
+        body: json!({"wall_seconds": 2.5, "cpu_seconds": 1.5, "telemetry": {"a": 1}, "other": 1}),
+        ts: String::new(),
+    };
+    assert!(RowView::of(&rec("spend")).is_none());
+    let v = RowView::of(&rec("row")).unwrap();
+    assert_eq!(
+        (v.row, v.wall_seconds, v.cpu_seconds, v.telemetry),
+        (4, Some(2.5), Some(1.5), Some(json!({"a": 1})))
+    );
+}
+
+#[test]
+fn overview_treats_a_zero_tick_rate_as_unusable() {
+    let t = json!({"cpu_ticks": {"user_hz": 0, "start": vec![0; 10], "end": vec![1; 10]}});
+    let o = overview(&[view(0, 1.0, 1.0, t)], &[0], true);
+    assert_eq!(o["ticks_unavailable"], 1);
+    assert_eq!(o["steal"]["rows"], 0);
+}
+
+#[test]
+fn overview_gives_no_share_for_a_row_whose_ticks_did_not_move() {
+    let r = view(0, 1.0, 1.0, ticks_telemetry([5; 10], [5; 10]));
+    let o = overview(&[r], &[0], true);
+    assert_eq!(o["blocks"][0]["rows"], 1);
+    assert_eq!(o["blocks"][0]["steal_share_max"], json!(null));
+    assert_eq!(o["steal"], json!({"rows": 1, "max_s": 0.0, "mean_s": 0.0}));
 }

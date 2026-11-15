@@ -227,3 +227,168 @@ impl Totals {
         t
     }
 }
+
+/// The four fields of a row record that the overview reads.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RowView {
+    pub row: u64,
+    pub wall_seconds: Option<f64>,
+    pub cpu_seconds: Option<f64>,
+    pub telemetry: Option<Value>,
+}
+
+impl RowView {
+    /// The view of a row record; `None` for any other record.
+    pub fn of(r: &crate::records::Record) -> Option<RowView> {
+        if r.kind != "row" {
+            return None;
+        }
+        Some(RowView {
+            row: r.row?,
+            wall_seconds: r.body["wall_seconds"].as_f64(),
+            cpu_seconds: r.body["cpu_seconds"].as_f64(),
+            telemetry: r.body.get("telemetry").cloned(),
+        })
+    }
+
+    /// Tick deltas of the row, one per `CPU_TICK_FIELDS` field the record holds, and `user_hz`.
+    fn deltas(&self) -> Option<(f64, Vec<u64>)> {
+        let c = self.telemetry.as_ref()?.get("cpu_ticks")?;
+        let hz = c["user_hz"].as_u64().filter(|h| *h > 0)?;
+        let counts = |k: &str| (c[k].as_array().into_iter().flatten()).filter_map(Value::as_u64);
+        let d = counts("start").zip(counts("end"));
+        Some((hz as f64, d.map(|(s, e)| e.saturating_sub(s)).collect()))
+    }
+
+    /// Seconds of the `CPU_TICK_FIELDS` field `name`, end minus start.
+    fn tick_seconds(&self, name: &str) -> Option<f64> {
+        let (hz, d) = self.deltas()?;
+        Some(*d.get(tick_index(name))? as f64 / hz)
+    }
+
+    /// The delta of `name` over the sum of every field's delta; `None` when no tick passed.
+    fn tick_share(&self, name: &str) -> Option<f64> {
+        let (_, d) = self.deltas()?;
+        let total: u64 = d.iter().sum();
+        let own = *d.get(tick_index(name))?;
+        (total > 0).then(|| own as f64 / total as f64)
+    }
+}
+
+fn tick_index(name: &str) -> usize {
+    CPU_TICK_FIELDS.iter().position(|f| *f == name).unwrap_or(0)
+}
+
+/// Largest and mean of `v` as JSON numbers; null when `v` is empty.
+fn spread(v: &[f64]) -> (Value, Value) {
+    if v.is_empty() {
+        return (Value::Null, Value::Null);
+    }
+    let max = v.iter().copied().fold(f64::MIN, f64::max);
+    (json!(max), json!(v.iter().sum::<f64>() / v.len() as f64))
+}
+
+/// `{rows, max_s, mean_s}` of `v`.
+fn seconds(v: &[f64]) -> Value {
+    let (max_s, mean_s) = spread(v);
+    json!({ "rows": v.len(), "max_s": max_s, "mean_s": mean_s })
+}
+
+/// A report on the telemetry of `rows`, in blocks of `order`. A block is one of ten
+/// consecutive parts of `order` whose sizes differ by at most one, so its edges depend on
+/// `order` alone. `blind` leaves wall and cpu seconds out of the blocks. The first view of a
+/// row index counts.
+pub fn overview(rows: &[RowView], order: &[u64], blind: bool) -> Value {
+    let mut seen = BTreeSet::new();
+    let rows: Vec<&RowView> = rows.iter().filter(|r| seen.insert(r.row)).collect();
+    let telemetry = |r: &RowView, k: &str| r.telemetry.as_ref().and_then(|t| t.get(k)).cloned();
+
+    let mut cgroup: BTreeMap<String, u64> = BTreeMap::new();
+    let mut cpus: BTreeMap<(String, String), u64> = BTreeMap::new();
+    let mut ticks_unavailable = 0;
+    for r in &rows {
+        if let Some(g) = telemetry(r, "cgroup").filter(Value::is_object) {
+            let key = match g.get("unavailable") {
+                None => "available".to_string(),
+                Some(w) => w.as_str().unwrap_or_default().to_string(),
+            };
+            *cgroup.entry(key).or_default() += 1;
+        }
+        if let Some(h) = telemetry(r, "host_cpu").filter(|h| h.get("unavailable").is_none()) {
+            let text = |k: &str| h[k].as_str().unwrap_or_default().to_string();
+            *cpus
+                .entry((text("model"), text("flags_sha256")))
+                .or_default() += 1;
+        }
+        if telemetry(r, "cpu_ticks").is_some() && r.deltas().is_none() {
+            ticks_unavailable += 1;
+        }
+    }
+
+    let secs =
+        |name: &str| -> Vec<f64> { rows.iter().filter_map(|r| r.tick_seconds(name)).collect() };
+    let all = |f: fn(&RowView) -> Option<f64>, rs: &[&RowView]| -> Vec<f64> {
+        rs.iter().filter_map(|r| f(r)).collect()
+    };
+    let wall = |r: &RowView| r.wall_seconds;
+    let cpu = |r: &RowView| r.cpu_seconds;
+
+    let k = order.len().min(10);
+    let mut blocks = Vec::new();
+    let mut at = 0;
+    for b in 0..k {
+        let size = order.len() / k + usize::from(b < order.len() % k);
+        let part = &order[at..at + size];
+        at += size;
+        let held: Vec<&RowView> = rows
+            .iter()
+            .copied()
+            .filter(|r| part.contains(&r.row))
+            .collect();
+        let shares = |name: &str| -> (Value, Value) {
+            spread(
+                &held
+                    .iter()
+                    .filter_map(|r| r.tick_share(name))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let (steal_max, steal_mean) = shares("steal");
+        let (io_max, io_mean) = shares("iowait");
+        let mut block = json!({
+            "first_row": part[0],
+            "last_row": part[size - 1],
+            "rows": held.len(),
+            "steal_share_max": steal_max,
+            "steal_share_mean": steal_mean,
+            "iowait_share_max": io_max,
+            "iowait_share_mean": io_mean,
+        });
+        if !blind {
+            let (wall_max, wall_mean) = spread(&all(wall, &held));
+            let (cpu_max, cpu_mean) = spread(&all(cpu, &held));
+            block["wall_max_s"] = wall_max;
+            block["wall_mean_s"] = wall_mean;
+            block["cpu_max_s"] = cpu_max;
+            block["cpu_mean_s"] = cpu_mean;
+        }
+        blocks.push(block);
+    }
+
+    let (wall_max, wall_mean) = spread(&all(wall, &rows));
+    let (cpu_max, cpu_mean) = spread(&all(cpu, &rows));
+    json!({
+        "rows": rows.len(),
+        "cgroup": cgroup,
+        "host_cpu": cpus
+            .into_iter()
+            .map(|((model, flags_sha256), n)| json!({"model": model, "flags_sha256": flags_sha256, "rows": n}))
+            .collect::<Vec<_>>(),
+        "steal": seconds(&secs("steal")),
+        "iowait": seconds(&secs("iowait")),
+        "ticks_unavailable": ticks_unavailable,
+        "wall": {"max_s": wall_max, "mean_s": wall_mean},
+        "cpu": {"max_s": cpu_max, "mean_s": cpu_mean},
+        "blocks": blocks,
+    })
+}

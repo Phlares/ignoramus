@@ -1671,6 +1671,7 @@ fn a_trigger_that_does_not_fire_runs_no_child_and_finishes() {
     let all = common::records_of(&lab, "spawn-wait");
     let p = ignorarium::runner::progress(&lab.home, "spawn-wait", &all).unwrap();
     assert_eq!((p.done, p.total), (12, 12));
+    assert_eq!(p.indices, ran);
 }
 
 /// The spec text with a selection input of one unit at each of `paths`, before `[pins]`.

@@ -756,6 +756,8 @@ pub struct Progress {
     pub spec: Spec,
     pub spec_hash: [u8; 32],
     pub total: usize,
+    /// The row indices counted in `total`, in schedule order.
+    pub indices: Vec<u64>,
     pub done: usize,
     /// Condition id to (rows done, rows scheduled).
     pub conditions: BTreeMap<String, (u64, u64)>,
@@ -804,6 +806,7 @@ pub fn progress(
         spec,
         spec_hash,
         total: rows.len(),
+        indices: rows.iter().map(|r| r.index).collect(),
         done: seen.len(),
         conditions,
         voided: tally.voided,
