@@ -83,9 +83,10 @@ fn header_section(c: &Card) -> String {
 }
 
 fn claim_section(c: &Card) -> String {
+    let population = format!("Population: {}", field(&c.header.population, |p| p.clone()));
     list(
-        (c.claims.iter())
-            .map(|l| {
+        std::iter::once(population)
+            .chain((c.claims.iter()).map(|l| {
                 let statistic = match l.statistic {
                     Some(StatisticSpec::Mean([lo, hi])) => format!("mean clipped to [{lo}, {hi}]"),
                     Some(StatisticSpec::Quantile(q)) => format!("quantile {q}"),
@@ -115,7 +116,7 @@ fn claim_section(c: &Card) -> String {
                     "{} ({}): {said}claim {claim}; {statistic}{level}{pass}",
                     l.hypothesis, l.outcome
                 )
-            })
+            }))
             .collect(),
     )
 }
@@ -221,6 +222,15 @@ fn setup_section(c: &Card) -> String {
         "Agent SHA-256: {}",
         field(&k.agent_sha256, |v| names(v))
     ));
+    if !k.unreadable.is_empty() {
+        let counts: Vec<String> = (k.unreadable.iter())
+            .map(|(key, n)| format!("{key} {n}"))
+            .collect();
+        l.push(format!(
+            "Unreadable row values, rows per key: {}",
+            names(&counts)
+        ));
+    }
     l.push(format!("Virtual CPUs: {}", field(&k.vcpus, u32::to_string)));
     l.push(format!(
         "Row memory cap (MiB): {}",
@@ -384,6 +394,18 @@ fn recipe_section(c: &Card) -> String {
         "Box binary SHA-256: {}",
         field(&r.box_binary_sha256, |v| v.clone())
     ));
+    let b = &c.builder;
+    let differs = match (&b.version, &r.box_version) {
+        (Field::Recorded { value: a }, Field::Recorded { value: z }) if a != z => {
+            " (not the box version that ran the study)"
+        }
+        _ => "",
+    };
+    l.push(format!(
+        "Card builder: version {}, binary SHA-256 {}{differs}",
+        field(&b.version, |v| v.clone()),
+        field(&b.binary_sha256, |v| v.clone())
+    ));
     l.push(format!(
         "Bundle DOI: {}",
         field(&r.bundle_doi, |v| v.clone())
@@ -399,7 +421,17 @@ fn recipe_section(c: &Card) -> String {
         "Manifest: {} files, list SHA-256 {}",
         m.files, m.list_sha256
     ));
-    format!("Command:\n\n{}\n\n{}", fence(&r.command, ""), list(l))
+    let check = format!(
+        "(cd <box home>/{}/{} && sha256sum -c) < <card folder>/manifest.sha256",
+        crate::home::STUDIES,
+        c.study
+    );
+    format!(
+        "Command:\n\n{}\n\n{}\nmanifest.sha256 names the files of the study's folder in the box home. Check them there:\n\n{}\n",
+        fence(&r.command, ""),
+        list(l),
+        fence(&check, "")
+    )
 }
 
 fn fenced_field(f: &Field<String>, lang: &str) -> String {

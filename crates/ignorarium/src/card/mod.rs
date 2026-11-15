@@ -31,7 +31,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 /// The version of the card's JSON form.
-pub const CARD_VERSION: u32 = 1;
+pub const CARD_VERSION: u32 = 2;
 
 /// The `opened` record that marks the card as read. `build` leaves it zeroed; the caller that
 /// appends the record fills it in.
@@ -63,6 +63,9 @@ pub const INTERVAL_METHOD: &str = "inverted registered e-process";
 pub struct Interval {
     pub stratum: String,
     pub side: String,
+    /// The registered margin the grid steps from; `None` in a card built before it was kept.
+    #[serde(default)]
+    pub margin: Option<f64>,
     pub estimate: f64,
     /// The tightest margin the test shows; `None` when no grid margin passes, or when the
     /// margins that pass are no interval (`contiguous` false).
@@ -87,6 +90,7 @@ impl From<&IntervalResult> for Interval {
         Interval {
             stratum: r.stratum.clone(),
             side: r.side.clone(),
+            margin: Some(r.margin),
             estimate: r.estimate,
             bound: i.margin.filter(|_| i.contiguous),
             method: INTERVAL_METHOD.into(),
@@ -200,6 +204,33 @@ pub fn deviation_table(
     signed.chain(recorded).chain(unsigned).collect()
 }
 
+/// The box that built the card, which may be a later box than the one that ran the rows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Builder {
+    pub version: Field<String>,
+    pub binary_sha256: Field<String>,
+}
+
+impl Builder {
+    /// The running binary, read through `/proc/self/exe` so a binary replaced on disk since
+    /// the start is not the one hashed. A binary it cannot read leaves the hash missing.
+    fn this() -> Builder {
+        let hash = crate::canon::sha256_file(Path::new("/proc/self/exe"));
+        Builder {
+            version: Field::of(Some(env!("CARGO_PKG_VERSION").into()), None),
+            binary_sha256: Field::of(hash.ok(), None),
+        }
+    }
+
+    /// A card built before the builder was recorded.
+    fn unknown() -> Builder {
+        Builder {
+            version: Field::of(None, None),
+            binary_sha256: Field::of(None, None),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Card {
     pub card_version: u32,
@@ -227,6 +258,8 @@ pub struct Card {
     pub outside_source: Option<sections::Source>,
     pub recipe: Recipe,
     pub citation: Citation,
+    #[serde(default = "Builder::unknown")]
+    pub builder: Builder,
 }
 
 impl Card {
@@ -454,6 +487,7 @@ pub fn build(
         surprises: sections::surprises(log),
         recipe,
         citation,
+        builder: Builder::this(),
         cost: sections::cost(log, spec),
         runs: sections::runs(log, events.as_ref()),
         outside,
@@ -481,6 +515,7 @@ mod tests {
             hypothesis: "H1".into(),
             stratum: String::new(),
             side: "below".into(),
+            margin: 0.25,
             estimate: 0.0,
             inversion: Inversion {
                 margin: Some(0.5),
@@ -494,6 +529,7 @@ mod tests {
             },
         };
         assert_eq!(Interval::from(&result(true)).bound, Some(0.5));
+        assert_eq!(Interval::from(&result(true)).margin, Some(0.25));
         let gap = Interval::from(&result(false));
         assert_eq!((gap.bound, gap.contiguous), (None, false));
     }
