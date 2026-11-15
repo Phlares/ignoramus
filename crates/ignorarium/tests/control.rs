@@ -1144,11 +1144,11 @@ fn a_later_stop_fills_in_what_an_earlier_one_could_not_write() {
     let lab = lab();
     let dir = plain(&lab, "repair");
     assert_eq!(go(&plan_of(&lab, "repair")).unwrap(), RunStatus::Done);
-    // A corrupt schedule: the stop record and the state land, the deviation row cannot.
-    let schedule = std::fs::read(dir.join("schedule.json")).unwrap();
-    std::fs::write(dir.join("schedule.json"), "{").unwrap();
+    // A corrupt spec: the stop record and the state land, the deviation row cannot.
+    let spec = std::fs::read(dir.join("spec.toml")).unwrap();
+    std::fs::write(dir.join("spec.toml"), "{").unwrap();
     let err = try_stop(&lab.home, "repair", "late").unwrap_err();
-    assert!(err.to_string().contains("schedule.json"), "{err}");
+    assert!(err.to_string().contains("spec"), "{err}");
     assert_eq!(kind_of(&lab, "repair", "stop").len(), 1);
     assert_eq!(
         state_of(&lab, "repair"),
@@ -1156,8 +1156,8 @@ fn a_later_stop_fills_in_what_an_earlier_one_could_not_write() {
     );
     assert!(deviations_of(&lab, "repair").is_empty());
     assert!(named(&events_of(&dir), "run.stop").is_empty());
-    // With the schedule back, the next call writes only what is missing.
-    std::fs::write(dir.join("schedule.json"), &schedule).unwrap();
+    // With the spec back, the next call writes only what is missing.
+    std::fs::write(dir.join("spec.toml"), &spec).unwrap();
     let rec = send_stop(&lab.home, "repair", "again").unwrap();
     assert_eq!(rec.body["why"], "late");
     let devs = deviations_of(&lab, "repair");

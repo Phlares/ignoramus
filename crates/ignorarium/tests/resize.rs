@@ -186,6 +186,62 @@ fn admitted(spec: &Spec, r: &Resize) -> Vec<String> {
     paths
 }
 
+/// The reference at 100 and `arm-a` at 99 on every unit: the re-size admits some reserve rows.
+const FLAT: &str = "#!/bin/sh\ncase \"$2\" in exact) v=100;; *) v=99;; esac\nprintf '{\"ppl\": %s}' \"$v\" > \"$IGNORARIUM_OUT/values.json\"\n";
+
+#[test]
+fn a_stop_after_the_last_admitted_row_is_after_collection() {
+    use ignorarium::backend::level0::Level0;
+    use ignorarium::control::{RunLock, Timing};
+    use ignorarium::runner::{RunStatus, prepare_with};
+    let lab = common::lab();
+    common::resize_pilot(&lab.home);
+    let files = common::reserve_files(32);
+    let before: Vec<(&str, &str)> = files.iter().map(|(p, t)| (&p[..], &t[..])).collect();
+    let dir = common::register_study(&lab, "rs-stop", common::resize_plan(32), &before, FLAT);
+    let root = common::work_of(&lab.home, "rs-stop");
+    let plan = prepare_with(&lab.home, "rs-stop", &root, vec![Box::new(Level0)]).unwrap();
+    assert_eq!(common::run(&plan).unwrap(), RunStatus::Done);
+    let ran = common::kind_of(&lab, "rs-stop", "row").len();
+    assert!(
+        ran < plan.schedule.rows.len(),
+        "the re-size leaves rows out"
+    );
+    let key = ignorarium::keys::load(&lab.home).unwrap().unwrap();
+    let lock = RunLock::try_take(&lab.home, "rs-stop").unwrap().unwrap();
+    lock.stop(&key, "x", None).unwrap();
+    let rows = common::deviations_of(&dir);
+    let stop = rows.iter().find(|r| r.kind == "stop").unwrap();
+    assert_eq!(stop.timing, Timing::AfterCollectionBeforeAccess);
+}
+
+#[test]
+fn dropping_the_last_record_leaves_a_log_that_verifies() {
+    let lab = common::lab();
+    common::resize_pilot(&lab.home);
+    let files = common::reserve_files(32);
+    let before: Vec<(&str, &str)> = files.iter().map(|(p, t)| (&p[..], &t[..])).collect();
+    let dir = common::register_study(&lab, "rs-drop", common::resize_plan(32), &before, FLAT);
+    let root = common::work_of(&lab.home, "rs-drop");
+    let plan = ignorarium::runner::prepare_with(
+        &lab.home,
+        "rs-drop",
+        &root,
+        vec![Box::new(ignorarium::backend::level0::Level0)],
+    )
+    .unwrap();
+    common::run(&plan).unwrap();
+    let key = ignorarium::keys::load(&lab.home).unwrap().unwrap();
+    let log = dir.join("records.jsonl");
+    let read = || ignorarium::records::read_all(&log, &key.verifying_key()).unwrap();
+    let n = read().len();
+    common::drop_last_record(&dir);
+    assert_eq!(read().len(), n - 1);
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(text.ends_with('\n'), "{text:?}");
+    assert_eq!(text.lines().count(), n - 1);
+}
+
 #[test]
 fn the_count_uses_the_uncentred_sd_of_the_first_batch() {
     let spec = spec_of(&study(30, 16));

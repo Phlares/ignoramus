@@ -79,6 +79,15 @@ pub fn deviations_of(dir: &Path) -> Vec<ignorarium::control::DeviationRow> {
     }
 }
 
+/// Cut the last record of the study folder's `records.jsonl`. The chain links backwards, so the
+/// rest still verifies.
+pub fn drop_last_record(dir: &Path) {
+    let log = dir.join("records.jsonl");
+    let text = std::fs::read_to_string(&log).unwrap();
+    let keep = text.trim_end().rfind('\n').map_or(0, |i| i + 1);
+    std::fs::write(&log, &text[..keep]).unwrap();
+}
+
 /// `runner::run` as the suite's box.
 pub fn run(plan: &RunPlan) -> Result<RunStatus, RunError> {
     runner::run_as(plan, box_identity())

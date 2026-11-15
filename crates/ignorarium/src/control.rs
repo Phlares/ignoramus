@@ -246,7 +246,7 @@ impl RunLock {
         let why = record.body["why"].as_str().unwrap_or(reason);
         State::Stopped(why.into()).write(home, id)?;
         if !logged(&dir.join("deviations.jsonl"), "kind", "stop")? {
-            deviation(home, id, &stop_deviation(&dir, &record.body)?)?;
+            deviation(home, id, &stop_deviation(home, id, &all, &record.body)?)?;
         }
         if !logged(&dir.join("events.jsonl"), "name", "run.stop")? {
             let hash = all
@@ -524,14 +524,18 @@ impl From<VerifyError> for ControlError {
     }
 }
 
-/// The deviation row for a stop, from its signed record.
-fn stop_deviation(dir: &Path, body: &Value) -> io::Result<DeviationRow> {
+/// The deviation row for a stop, from its signed record. The total is the rows that run.
+fn stop_deviation(home: &Home, id: &str, all: &[Record], body: &Value) -> io::Result<DeviationRow> {
     let text = |k: &str| body[k].as_str().unwrap_or_default();
     let done = body["rows_done"].as_u64().unwrap_or(0);
     let timing = Timing::of_stop(
         usize::try_from(done).unwrap_or(usize::MAX),
         !body["in_flight"].is_null(),
-        || scheduled_rows(dir),
+        || {
+            crate::runner::progress(home, id, all)
+                .map(|p| p.total)
+                .map_err(io::Error::other)
+        },
     )?;
     Ok(DeviationRow {
         kind: "stop".into(),
@@ -557,19 +561,6 @@ fn logged(path: &Path, key: &str, value: &str) -> io::Result<bool> {
     Ok(text
         .lines()
         .any(|l| serde_json::from_str::<Value>(l).is_ok_and(|v| v[key] == value)))
-}
-
-/// Rows in the written schedule. A missing or broken schedule is an error.
-fn scheduled_rows(dir: &Path) -> io::Result<usize> {
-    let fail = |e: &dyn fmt::Display| {
-        io::Error::other(format!("cannot count the rows of schedule.json: {e}"))
-    };
-    let bytes = fs::read(dir.join("schedule.json")).map_err(|e| fail(&e))?;
-    let v: Value = serde_json::from_slice(&bytes).map_err(|e| fail(&e))?;
-    v["rows"]
-        .as_array()
-        .map(Vec::len)
-        .ok_or_else(|| fail(&"no rows array"))
 }
 
 /// `study.label` of the stored spec, or `unknown`: a stop never fails on an unreadable spec.
