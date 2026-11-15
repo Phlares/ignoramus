@@ -11,12 +11,14 @@ Decision:
 - **Accident, not tampering.** The hashes catch accidents: a wrong binary, or a rebuilt one. They do not catch tampering. A party who can change the binary can change the hash it reports. Catching that needs an outside anchor for the hash and an independent rebuild. The box has neither yet.
 - **No reproducibility level.** The box claims none. It does not state that the same source gives the same binary, as the definition at reproducible-builds.org requires.
 
+Record. `register` writes both hashes into the register record, under `box`. `verify --study` prints them, or `not recorded` for a record written before the field existed. An older box reads a register record that holds `box` as no register (`deny_unknown_fields`), as for `gate`.
+
 Evidence: in the acceptance run, the box binary's hash was written into the decision log by hand. It was compared by hand during the run. No code did either step.
 
 ## Gate
 
 Added with #81.
 
-Sources:
+## Sources
 
 - Reproducible Builds, "Definition": https://reproducible-builds.org/docs/definition/

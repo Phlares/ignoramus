@@ -1395,3 +1395,39 @@ fn a_resized_plans_record_holds_its_reserve_and_one_curve_per_margin() {
     assert_eq!(g["curve"], shown["power"][0]["curve"]);
     assert_eq!(g["groups"][0]["reserve"].as_array().unwrap().len(), 30);
 }
+
+#[test]
+fn register_writes_the_box_identity() {
+    let (f, spec) = setup("numeric-ablation", same);
+    go(&f, &spec, &answer(&spec), true).0.unwrap();
+    let rp = f.home.study_dir("my-study").join("records.jsonl");
+    let body = &records(&rp)[0]["record"]["body"];
+    assert_eq!(
+        body["box"]["rules_sha256"],
+        ignorarium::identity::rules_sha256()
+    );
+    let binary = &body["box"]["binary_sha256"];
+    assert!(
+        binary.as_str().is_some_and(|s| s.starts_with("sha256:"))
+            || binary["unavailable"].is_string(),
+        "{binary}"
+    );
+}
+
+#[test]
+fn a_register_record_without_box_still_reads() {
+    let (f, spec) = setup("numeric-ablation", same);
+    go(&f, &spec, &answer(&spec), true).0.unwrap();
+    let rp = f.home.study_dir("my-study").join("records.jsonl");
+    let key = keys::load(&f.home).unwrap().unwrap();
+    let mut all = ignorarium::records::read_all(&rp, &key.verifying_key()).unwrap();
+    assert!(
+        ignorarium::derived::Register::of(&all[0])
+            .unwrap()
+            .box_identity
+            .is_some()
+    );
+    all[0].body.as_object_mut().unwrap().remove("box");
+    let r = ignorarium::derived::Register::of(&all[0]).unwrap();
+    assert_eq!(r.box_identity, None);
+}

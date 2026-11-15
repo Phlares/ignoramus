@@ -2225,3 +2225,46 @@ fn status_shows_counts_and_decision_only() {
     let want = format!("resize: stop\nresize pooled: first {FIRST}, needed n/a, appended 0\n");
     assert!(text(&a).contains(&want), "{}", text(&a));
 }
+
+#[test]
+fn verify_prints_the_registered_box() {
+    let lab = lab();
+    plain(&lab, "boxed");
+    let a = bin(&lab)
+        .args(["verify", "--study", "boxed"])
+        .assert()
+        .code(0);
+    let want = format!(
+        "registered box: rules {}, binary ",
+        ignorarium::identity::rules_sha256()
+    );
+    assert!(text(&a).contains(&want), "{}", text(&a));
+}
+
+#[test]
+fn verify_says_not_recorded_for_an_old_register() {
+    let lab = lab();
+    plain(&lab, "oldbox");
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let dir = lab.home.study_dir("oldbox");
+    let log = dir.join("records.jsonl");
+    let mut body = kind_of(&lab, "oldbox", "register")[0].body.clone();
+    body.as_object_mut().unwrap().remove("box");
+    std::fs::rename(&log, dir.join("records.old")).unwrap();
+    let draft = ignorarium::records::RecordDraft {
+        study: "oldbox".into(),
+        row: None,
+        kind: "register".into(),
+        body,
+    };
+    ignorarium::records::append(&log, &key, draft).unwrap();
+    let a = bin(&lab)
+        .args(["verify", "--study", "oldbox"])
+        .assert()
+        .code(0);
+    assert!(
+        text(&a).contains("registered box: not recorded"),
+        "{}",
+        text(&a)
+    );
+}

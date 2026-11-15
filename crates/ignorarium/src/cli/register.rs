@@ -111,6 +111,7 @@ fn record_body(
         timestamp: alpha.is_some().then(|| "pending".into()),
         alpha,
         gate: frozen.gate.clone(),
+        box_identity: Some(crate::identity::current()),
     })
     .map_err(|e| io("register record", e))
 }
@@ -757,7 +758,8 @@ mod tests {
                    "deviations": [{ "from": "pilot", "reason": "r", "timing": "after-results",
                                     "differs": ["environment"] }],
                    "carries": { "study": "pilot", "record": "ab".repeat(32) },
-                   "alpha": null})
+                   "alpha": null,
+                   "box": serde_json::to_value(crate::identity::current()).unwrap()})
         );
         let slot = Alpha {
             log: "testlog".into(),

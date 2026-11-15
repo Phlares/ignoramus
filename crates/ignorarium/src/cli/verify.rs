@@ -53,7 +53,11 @@ pub fn run(ctx: &Ctx, study: Option<&str>) -> Run {
         } else if let Some(k) = &key {
             match records::verify(&dir.join("records.jsonl"), &k.verifying_key()) {
                 Ok(0) => failed.push(format!("study {id}: no register record")),
-                Ok(n) => out(&format!("study {id}: {n} records\n"))?,
+                Ok(n) => {
+                    out(&format!("study {id}: {n} records\n"))?;
+                    let shown = registered_box(&dir, &k.verifying_key());
+                    out(&format!("registered box: {shown}\n"))?;
+                }
                 Err(e) => failed.push(format!("study {id}: {e}")),
             }
         }
@@ -65,5 +69,25 @@ pub fn run(ctx: &Ctx, study: Option<&str>) -> Run {
             "verify failed: {}",
             failed.join("; ")
         )))
+    }
+}
+
+/// The box identity the study's register record holds, as text; `not recorded` for a record
+/// written before the field existed.
+fn registered_box(dir: &std::path::Path, key: &ed25519_dalek::VerifyingKey) -> String {
+    let register = records::read_all(&dir.join("records.jsonl"), key)
+        .ok()
+        .and_then(|all| all.iter().find_map(crate::derived::Register::of))
+        .and_then(|r| r.box_identity);
+    match register {
+        Some(b) => format!(
+            "rules {}, binary {}",
+            b.rules_sha256,
+            match &b.binary_sha256 {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            }
+        ),
+        None => "not recorded".into(),
     }
 }
