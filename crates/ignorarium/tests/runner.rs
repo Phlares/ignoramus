@@ -7,7 +7,7 @@ use common::{
 use ignorarium::backend::cgroup::rows_parent;
 use ignorarium::backend::level0::Level0;
 use ignorarium::backend::selftest::SelfTest;
-use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome, Watch};
+use ignorarium::backend::{Backend, Exit, Machine, Probe, RowJob, RowOutcome, Watch};
 use ignorarium::budget::{Cost, FakeMeter, MeterError};
 use ignorarium::canon::sha256_hex;
 use ignorarium::control::{DeviationRow, State, Timing};
@@ -3809,6 +3809,7 @@ fn outcome(cpu: f64, wall: f64, ended: bool, unknown: bool) -> RowOutcome {
         output_links: Vec::new(),
         box_cpu_seconds: 0.0,
         cgroup: Reading::Unavailable("stub".into()),
+        machine: None,
     }
 }
 
@@ -5653,6 +5654,7 @@ fn a_row_without_a_delegated_cgroup_records_why_and_runs_as_before() {
 struct Shaped {
     attempts: RefCell<VecDeque<(Exit, SelfTest)>>,
     selftest: SelfTest,
+    machine: Option<Machine>,
 }
 
 impl Backend for Shaped {
@@ -5669,7 +5671,10 @@ impl Backend for Shaped {
         Probe::Available
     }
     fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> std::io::Result<RowOutcome> {
-        let o = Level0.run_row(job, watch)?;
+        let o = RowOutcome {
+            machine: self.machine,
+            ..Level0.run_row(job, watch)?
+        };
         Ok(match self.attempts.borrow_mut().pop_front() {
             Some((exit, t)) => RowOutcome {
                 exit,
@@ -5699,6 +5704,7 @@ fn shaped(attempts: Vec<(Exit, SelfTest)>) -> Shaped {
     Shaped {
         attempts: RefCell::new(attempts.into()),
         selftest: blocked(),
+        machine: None,
     }
 }
 
@@ -5727,7 +5733,10 @@ fn a_retried_row_records_its_last_self_test() {
     };
     plan.backend = Box::new(shaped(vec![(Exit::Infra("self-test failed".into()), open)]));
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
-    let first = rows_of(&lab, "st-retry").into_iter().find(|r| r.row == Some(0)).unwrap();
+    let first = rows_of(&lab, "st-retry")
+        .into_iter()
+        .find(|r| r.row == Some(0))
+        .unwrap();
     assert_eq!(first.body["attempts"], 2, "{}", first.body);
     assert_eq!(first.body["selftest"]["failed"], serde_json::json!([]));
 }
@@ -5740,5 +5749,31 @@ fn level_0_rows_have_no_self_test_key() {
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
     for r in rows_of(&lab, "st0") {
         assert!(r.body.get("selftest").is_none(), "{}", r.body);
+    }
+}
+
+#[test]
+fn row_records_hold_the_machine() {
+    let lab = lab();
+    plain(&lab, "vm");
+    let mut plan = plan_of(&lab, "vm");
+    plan.backend = Box::new(Shaped {
+        machine: Some(Machine {
+            vcpus: 2,
+            mem_mib: 2841,
+        }),
+        ..shaped(vec![])
+    });
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    for r in rows_of(&lab, "vm") {
+        assert_eq!(r.body["vcpus"], 2, "{}", r.body);
+        assert_eq!(r.body["vm_mem_mib"], 2841, "{}", r.body);
+    }
+    plain(&lab, "novm");
+    let mut plan = plan_of(&lab, "novm");
+    plan.backend = Box::new(shaped(vec![]));
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    for r in rows_of(&lab, "novm") {
+        assert!(r.body.get("vcpus").is_none() && r.body.get("vm_mem_mib").is_none());
     }
 }

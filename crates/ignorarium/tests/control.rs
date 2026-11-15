@@ -655,6 +655,7 @@ impl Backend for StopThenFail {
             output_links: Vec::new(),
             box_cpu_seconds: 0.0,
             cgroup: Reading::Unavailable("stub".into()),
+            machine: None,
         })
     }
 }
@@ -1042,6 +1043,7 @@ impl Backend for StopThenBlind {
             output_links: Vec::new(),
             box_cpu_seconds: 0.0,
             cgroup: Reading::Unavailable("stub".into()),
+            machine: None,
         })
     }
 }

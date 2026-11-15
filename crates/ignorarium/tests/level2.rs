@@ -10,7 +10,7 @@ use ignorarium::backend::level2::{
 };
 use ignorarium::backend::selftest::SelfTest;
 use ignorarium::backend::{
-    Backend, Exit, Probe, RowJob, RowOutcome, TIMEOUT_CODE, Watch, output_hash, rootfs,
+    Backend, Exit, Machine, Probe, RowJob, RowOutcome, TIMEOUT_CODE, Watch, output_hash, rootfs,
 };
 use ignorarium::runner::{self, RunError, RunStatus};
 use ignorarium::store::Store;
@@ -1281,6 +1281,34 @@ fn a_stop_kills_the_vm() {
     let stop = watch.stop_at.get().expect("the guest never connected");
     assert!(returned.duration_since(stop) < Duration::from_secs(3));
     assert!(group_gone(watch.pid.get().unwrap()));
+}
+
+#[test]
+fn a_level2_row_names_its_machine() {
+    let Some(r) = ready() else { return };
+    let (_d, job) = row(&r, "true", LONG);
+    let o = r.level2.run_row(&job, &|| true).unwrap();
+    assert_eq!(o.exit, Exit::Ok, "{o:?}");
+    assert_eq!(o.machine, Some(r.level2.machine_of(&job)));
+}
+
+#[test]
+fn the_machine_is_the_vcpus_and_the_vm_memory() {
+    let b = Level2::with(PathBuf::new(), PathBuf::new(), PathBuf::new());
+    let job = RowJob {
+        memory_mib: Some(2048),
+        ..RowJob::default()
+    };
+    assert_eq!(
+        b.machine_of(&job),
+        Machine {
+            vcpus: b.cpus(),
+            mem_mib: 2841
+        }
+    );
+    // A row that ends before its machine is built names none.
+    let o = b.run_row(&RowJob::default(), &|| true).unwrap();
+    assert_eq!(o.machine, None, "{o:?}");
 }
 
 #[test]

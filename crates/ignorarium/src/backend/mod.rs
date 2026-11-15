@@ -88,6 +88,15 @@ pub struct RowOutcome {
     pub box_cpu_seconds: f64,
     /// The row's cgroup counters, or why there are none. Observation only.
     pub cgroup: Reading<CgroupCounters>,
+    /// The machine the row ran in: level 2 only.
+    pub machine: Option<Machine>,
+}
+
+/// The size of a level-2 row's machine.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Machine {
+    pub vcpus: u32,
+    pub mem_mib: u32,
 }
 
 impl RowOutcome {
@@ -105,6 +114,7 @@ impl RowOutcome {
             output_links: Vec::new(),
             box_cpu_seconds: 0.0,
             cgroup: Reading::Unavailable(NO_LEAF.into()),
+            machine: None,
         }
     }
 }
@@ -218,6 +228,7 @@ pub fn outcome(
         output_links: Vec::new(),
         box_cpu_seconds: 0.0,
         cgroup: Reading::Unavailable(NO_LEAF.into()),
+        machine: None,
     }
 }
 

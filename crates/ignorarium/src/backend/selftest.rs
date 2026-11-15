@@ -52,7 +52,11 @@ impl SelfTest {
 
     /// `blocked` or `open`: the probe cannot tell a denied connect from a missing network.
     pub fn connect_state(&self) -> &'static str {
-        if self.connect_blocked { "blocked" } else { "open" }
+        if self.connect_blocked {
+            "blocked"
+        } else {
+            "open"
+        }
     }
 
     /// `denied`, `absent` or `open`; `blocked` or `open` for the guest's path to the host.

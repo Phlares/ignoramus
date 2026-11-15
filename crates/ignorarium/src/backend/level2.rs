@@ -5,7 +5,7 @@
 use super::cgroup::IN_MACHINE;
 use super::rootfs;
 use super::selftest::{Call, SelfTest};
-use super::{Backend, Exit, Probe, RowJob, RowOutcome, TIMEOUT_CODE, Watch};
+use super::{Backend, Exit, Machine, Probe, RowJob, RowOutcome, TIMEOUT_CODE, Watch};
 use crate::files::temp_beside;
 use crate::telemetry::Reading;
 use ignorarium_guest::agent::steps::meminfo_kb;
@@ -105,6 +105,14 @@ impl Level2 {
     /// The guest memory of `job`'s machine, in MiB: `mem_mib` when the row declares no
     /// memory; otherwise the cap, the `/out` and `/tmp` tmpfs and `GUEST_MIB`, which the host
     /// checks every machine against.
+    /// The machine `job`'s row runs in.
+    pub fn machine_of(&self, job: &RowJob) -> Machine {
+        Machine {
+            vcpus: self.cpus,
+            mem_mib: self.vm_mem_mib(job),
+        }
+    }
+
     pub fn vm_mem_mib(&self, job: &RowJob) -> u32 {
         match job.data_limit() {
             None => self.mem_mib,
@@ -219,13 +227,14 @@ impl Level2 {
             Ok(s) => s,
             Err(e) => return infra(format!("cannot make the row's scratch folder: {e}")),
         };
+        let machine = self.machine_of(job);
         let vm = Vm {
             vmm: self.vmm.clone(),
             kernel: self.kernel.clone(),
             initramfs: scratch.0.join("initramfs.cpio"),
             rootfs,
-            cpus: self.cpus,
-            mem_mib: self.vm_mem_mib(job),
+            cpus: machine.vcpus,
+            mem_mib: machine.mem_mib,
             out_mib: self.out_mib,
             boot_timeout: self.boot_timeout,
             exit_timeout: self.exit_timeout,
@@ -239,6 +248,7 @@ impl Level2 {
         let res = host::run_row(&vm, &host_job, &scratch.0.join("work"), &counted);
         let (mut o, timings) = ended(res);
         o.box_cpu_seconds = counted.cpu.get();
+        o.machine = Some(machine);
         (o, timings)
     }
 }

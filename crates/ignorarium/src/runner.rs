@@ -2000,6 +2000,10 @@ fn attempt_row(
     if let Some(t) = &outcome.selftest {
         body["selftest"] = t.record();
     }
+    if let Some(m) = &outcome.machine {
+        body["vcpus"] = json!(m.vcpus);
+        body["vm_mem_mib"] = json!(m.mem_mib);
+    }
     let (start, end) = &ticks;
     body["telemetry"] =
         telemetry::record(telemetry::host_cpu(), start, end, &outcome.cgroup, &|w| {
