@@ -65,6 +65,9 @@ impl<F: Fn() -> bool> Watch for F {
     }
 }
 
+/// A hook on the VMM's command before it starts.
+pub type PreSpawn = Box<dyn Fn(&mut Command) + Send + Sync>;
+
 pub struct Vm {
     pub vmm: PathBuf,
     pub kernel: PathBuf,
@@ -78,7 +81,7 @@ pub struct Vm {
     pub report_slack: Duration,
     pub serial_log: Option<PathBuf>,
     /// Shapes the VMM's command before it starts, such as moving it into a cgroup.
-    pub pre_spawn: Option<Box<dyn Fn(&mut Command) + Send + Sync>>,
+    pub pre_spawn: Option<PreSpawn>,
 }
 
 pub struct HostJob {
