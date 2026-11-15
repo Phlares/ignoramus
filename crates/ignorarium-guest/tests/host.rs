@@ -39,7 +39,7 @@ struct Rig {
     src: PathBuf,
     work: PathBuf,
     out: PathBuf,
-    vm: Vm,
+    vm: Vm<'static>,
     job: HostJob,
 }
 
@@ -80,6 +80,7 @@ impl Rig {
             exit_timeout: ms(50),
             report_slack: Duration::from_secs(5),
             serial_log: None,
+            pre_spawn: None,
         };
         let job = HostJob {
             argv: vec!["/bin/prog".into(), "--x".into()],
@@ -1424,4 +1425,40 @@ fn output_links_come_back_as_data() {
     let made = fs::symlink_metadata(rig.out.join("abs"));
     assert_eq!(made.unwrap_err().kind(), ErrorKind::NotFound);
     rig.pid_gone();
+}
+
+/// A fake VMM that writes `$IGN_HOOK_MARK` beside its pid file, then sleeps.
+fn marking() -> Rig {
+    Rig::new(&format!(
+        "printf %s \"$IGN_HOOK_MARK\" > $PIDFILE.mark
+echo $$ > $PIDFILE
+{SLEEPER}"
+    ))
+}
+
+fn mark_of(rig: &Rig) -> String {
+    fs::read_to_string(rig.root.path().join("vmm.pid.mark")).unwrap()
+}
+
+#[test]
+fn the_pre_spawn_hook_shapes_the_vmm_command() {
+    let mut rig = marking();
+    rig.vm.pre_spawn = Some(Box::new(|c: &mut std::process::Command| {
+        c.env("IGN_HOOK_MARK", "yes");
+    }));
+    let h = good_guest(&rig);
+    let res = rig.run();
+    h.join().unwrap();
+    res.unwrap();
+    assert_eq!(mark_of(&rig), "yes");
+}
+
+#[test]
+fn no_hook_leaves_the_vmm_command_as_before() {
+    let rig = marking();
+    let h = good_guest(&rig);
+    let res = rig.run();
+    h.join().unwrap();
+    assert_eq!(res.unwrap().output_hash, rig.src_hash());
+    assert_eq!(mark_of(&rig), "");
 }

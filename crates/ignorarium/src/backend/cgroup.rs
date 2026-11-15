@@ -23,7 +23,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// The reason a row records when its first process never entered its leaf.
 pub const MISSED: &str = "the row did not enter its cgroup";
 /// The reason every level 2 row records.
-pub const IN_MACHINE: &str = "level 2 rows run in a machine";
 /// The `cpu.stat` lines kept. Throttling lines need the `cpu` controller, which the box never
 /// enables.
 const CPU_KEPT: [&str; 3] = ["usage_usec", "user_usec", "system_usec"];

@@ -184,8 +184,40 @@ pub struct Totals {
     /// Seconds of each `CPU_TICK_FIELDS` field, end minus start. The counts are host-wide, so
     /// rows that ran at the same time count the same seconds.
     pub cpu_ticks: Summed<BTreeMap<String, f64>>,
+    /// The cgroup figures of rows below level 2, under the keys cards have always used.
+    #[serde(flatten)]
+    pub process: CgroupTotals,
+    /// The cgroup figures of level 2 rows: the VMM with the guest it runs. `None` when no row
+    /// ran at level 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<CgroupTotals>,
+}
+
+/// Rows below level 2 run their processes in the row cgroup; level 2 rows run a machine
+/// there, so their figures never add to the others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LevelClass {
+    Process,
+    Machine,
+}
+
+impl LevelClass {
+    /// The class of a row record's `isolation`; a record without one predates level 2.
+    pub fn of(isolation: Option<u64>) -> LevelClass {
+        match isolation {
+            Some(2..) => LevelClass::Machine,
+            _ => LevelClass::Process,
+        }
+    }
+}
+
+/// The cgroup readings of one level class, added up.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CgroupTotals {
     /// Each `cpu_stat.<line>` (microseconds) and `memory_events.<line>`, summed.
-    pub cgroup: Summed<BTreeMap<String, f64>>,
+    #[serde(rename = "cgroup")]
+    pub summed: Summed<BTreeMap<String, f64>>,
     /// The largest `memory_peak`, in bytes.
     pub memory_peak_max: Option<u64>,
 }
@@ -225,14 +257,18 @@ impl Totals {
                     t.cpu_ticks.unavailable += 1;
                 }
             }
-            if let Some(g) = reading(&mut t.cgroup, telemetry, "cgroup") {
+            let into = match LevelClass::of(body["isolation"].as_u64()) {
+                LevelClass::Process => &mut t.process,
+                LevelClass::Machine => t.machine.get_or_insert_default(),
+            };
+            if let Some(g) = reading(&mut into.summed, telemetry, "cgroup") {
                 for part in ["cpu_stat", "memory_events"] {
                     for (k, v) in g[part].as_object().into_iter().flatten() {
-                        let total = t.cgroup.value.entry(format!("{part}.{k}")).or_default();
+                        let total = into.summed.value.entry(format!("{part}.{k}")).or_default();
                         *total += v.as_f64().unwrap_or_default();
                     }
                 }
-                t.memory_peak_max = t.memory_peak_max.max(g["memory_peak"].as_u64());
+                into.memory_peak_max = into.memory_peak_max.max(g["memory_peak"].as_u64());
             }
         }
         t.host_cpu.value = models.into_iter().collect();
@@ -303,6 +339,7 @@ pub struct RowView {
     pub host_cpu: Seen<(String, String)>,
     /// `Read` when the row's cgroup counters were read.
     pub cgroup: Seen<()>,
+    pub class: LevelClass,
 }
 
 /// `user_hz` and the per-field tick deltas of a `cpu_ticks` reading. `None` when the rate is
@@ -333,6 +370,7 @@ impl RowView {
                 Some((text(h, "model"), text(h, "flags_sha256")))
             }),
             cgroup: Seen::of(t, "cgroup", |g| g.is_object().then_some(())),
+            class: LevelClass::of(r.body["isolation"].as_u64()),
         })
     }
 
@@ -384,7 +422,7 @@ pub fn overview(rows: &[RowView], order: &[u64], blind: bool) -> Value {
     let mut seen = BTreeSet::new();
     let rows: Vec<&RowView> = rows.iter().filter(|r| seen.insert(r.row)).collect();
 
-    let mut cgroup: BTreeMap<String, u64> = BTreeMap::new();
+    let mut cgroup: BTreeMap<LevelClass, BTreeMap<String, u64>> = BTreeMap::new();
     let mut cpus: BTreeMap<(String, String), u64> = BTreeMap::new();
     let (mut no_cpu, mut no_ticks) = (Missing::default(), Missing::default());
     for r in &rows {
@@ -393,7 +431,7 @@ pub fn overview(rows: &[RowView], order: &[u64], blind: bool) -> Value {
             Seen::Unavailable(why) => why.clone(),
             Seen::NotRecorded => "not recorded".to_string(),
         };
-        *cgroup.entry(state).or_default() += 1;
+        *cgroup.entry(r.class).or_default().entry(state).or_default() += 1;
         if let Some(cpu) = r.host_cpu.counted(&mut no_cpu) {
             *cpus.entry(cpu.clone()).or_default() += 1;
         }
@@ -441,9 +479,10 @@ pub fn overview(rows: &[RowView], order: &[u64], blind: bool) -> Value {
         blocks.push(block);
     }
 
-    json!({
+    let machine = cgroup.remove(&LevelClass::Machine);
+    let mut out = json!({
         "rows": rows.len(),
-        "cgroup": cgroup,
+        "cgroup": cgroup.remove(&LevelClass::Process).unwrap_or_default(),
         "host_cpu": cpus
             .into_iter()
             .map(|((model, flags_sha256), n)| json!({"model": model, "flags_sha256": flags_sha256, "rows": n}))
@@ -455,5 +494,9 @@ pub fn overview(rows: &[RowView], order: &[u64], blind: bool) -> Value {
         "wall_s": wall(&rows),
         "cpu_s": cpu(&rows),
         "blocks": blocks,
-    })
+    });
+    if let Some(m) = machine {
+        out["cgroup_machine"] = json!(m);
+    }
+    out
 }

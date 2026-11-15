@@ -65,7 +65,10 @@ impl<F: Fn() -> bool> Watch for F {
     }
 }
 
-pub struct Vm {
+/// A hook on the VMM's command, called once, just before the VMM starts.
+pub type PreSpawn<'a> = Box<dyn Fn(&mut Command) + 'a>;
+
+pub struct Vm<'a> {
     pub vmm: PathBuf,
     pub kernel: PathBuf,
     pub initramfs: PathBuf,
@@ -77,6 +80,8 @@ pub struct Vm {
     pub exit_timeout: Duration,
     pub report_slack: Duration,
     pub serial_log: Option<PathBuf>,
+    /// Shapes the VMM's command before it starts, such as moving it into a cgroup.
+    pub pre_spawn: Option<PreSpawn<'a>>,
 }
 
 pub struct HostJob {
@@ -596,6 +601,9 @@ pub fn run_row(
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log);
+    if let Some(hook) = &vm.pre_spawn {
+        hook(&mut cmd);
+    }
     let mut vmm = Vmm::spawn(&mut cmd, watch)
         .map_err(|e| VmError::Boot(format!("cannot start {}: {e}", vm.vmm.display())))?;
 

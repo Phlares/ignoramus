@@ -1039,6 +1039,7 @@ impl Backend for BreakEvents {
             io_uring_blocked: true,
             vsock_absent: false,
             io_uring_absent: false,
+            host_path: false,
         };
         Ok(RowOutcome {
             exit: self.exit.clone(),
@@ -1051,6 +1052,7 @@ impl Backend for BreakEvents {
             output_links: Vec::new(),
             box_cpu_seconds: 0.0,
             cgroup: Reading::Unavailable("stub".into()),
+            machine: None,
         })
     }
 }
@@ -1183,6 +1185,7 @@ impl Backend for BreakAtRetry {
             output_links: Vec::new(),
             box_cpu_seconds: 0.0,
             cgroup: Reading::Unavailable("stub".into()),
+            machine: None,
         })
     }
 }

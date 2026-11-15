@@ -8,6 +8,7 @@ use crate::card::Card;
 use crate::card::readings::NOT_READ;
 use crate::card::sections::{Field, Pick, UNRECORDED};
 use crate::spec::model::{SelectionRule, StatisticSpec};
+use crate::telemetry::CgroupTotals;
 
 fn md_table(t: &Table) -> String {
     let line = |cells: Vec<String>| format!("| {} |\n", cells.join(" | "));
@@ -245,7 +246,9 @@ fn setup_section(c: &Card) -> String {
             names(&counts)
         ));
     }
-    l.push(format!("Virtual CPUs: {}", field(&k.vcpus, u32::to_string)));
+    let numbers = |v: &Vec<u32>| names(&v.iter().map(u32::to_string).collect::<Vec<_>>());
+    l.push(format!("Virtual CPUs: {}", field(&k.vcpus, numbers)));
+    l.push(format!("VM memory, MiB: {}", field(&k.vm_mem_mib, numbers)));
     l.push(format!(
         "Row memory cap (MiB): {}",
         field(&k.memory_cap_mib, u32::to_string)
@@ -323,10 +326,11 @@ fn surprises_section(c: &Card) -> String {
 
 fn cost_section(c: &Card) -> String {
     let (k, t) = (&c.cost, &c.cost.telemetry);
-    let peak = t
-        .memory_peak_max
-        .map_or_else(|| "none read".into(), |m| m.to_string());
-    list(vec![
+    let peak = |c: &CgroupTotals| {
+        c.memory_peak_max
+            .map_or_else(|| "none read".into(), |m| m.to_string())
+    };
+    let mut l = vec![
         format!(
             "CPU seconds: {}; budget {} CPU hours",
             k.cpu_seconds, k.budget.cpu_hours
@@ -359,9 +363,23 @@ fn cost_section(c: &Card) -> String {
             "Host CPU ticks summed over rows, seconds (rows that ran at the same time each count the same host ticks): {}",
             word(&t.cpu_ticks.value)
         ),
-        format!("Cgroup counters: {}", word(&t.cgroup.value)),
-        format!("Peak memory, bytes: {peak}"),
-    ])
+    ];
+    let below = &t.process.summed;
+    if t.machine.is_none() || below.read + below.unavailable > 0 {
+        l.push(format!("Cgroup counters: {}", word(&below.value)));
+        l.push(format!("Peak memory, bytes: {}", peak(&t.process)));
+    }
+    if let Some(m) = &t.machine {
+        l.push(format!(
+            "Cgroup counters, level 2 (VMM and guest): {}",
+            word(&m.summed.value)
+        ));
+        l.push(format!(
+            "VM total (guest RAM touched + VMM), bytes: {}",
+            peak(m)
+        ));
+    }
+    list(l)
 }
 
 fn runs_section(c: &Card) -> String {
@@ -384,6 +402,23 @@ fn runs_section(c: &Card) -> String {
             a.exit.clone().unwrap_or_default()
         )
     }));
+    l.push(format!(
+        "Sandbox self-test: {}",
+        field(&r.selftest, |t| {
+            let each: Vec<String> = (t.failed.iter())
+                .map(|(name, n)| format!("{name}: {n}"))
+                .collect();
+            let which = if each.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", names(&each))
+            };
+            format!(
+                "{} passed, {} failed{which}, {} at level 0 (no sandbox), {} not recorded",
+                t.passed, t.failed_rows, t.level0, t.not_recorded
+            )
+        })
+    ));
     let open = match r.sessions_without_end {
         Some(k) if k > 0 => format!(", {k} without an end record"),
         _ => String::new(),

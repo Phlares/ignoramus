@@ -64,6 +64,7 @@
 - Launcher: cloud-hypervisor v41.0
 - Agent SHA-256: abababababababababababababababababababababababababababababababab
 - Virtual CPUs: not in the records
+- VM memory, MiB: not in the records
 - Row memory cap (MiB): 2304
 - Values the box defaulted: \[\]
 - File gaps.md: absent
@@ -100,6 +101,7 @@
 ## Runs
 
 - confirmation: 80 rows ok
+- Sandbox self-test: not in the records
 - Run sessions: not in the records (see events.jsonl)
 
 Executions recorded nowhere cannot be listed.

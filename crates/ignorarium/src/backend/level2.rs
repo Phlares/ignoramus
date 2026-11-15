@@ -2,10 +2,10 @@
 //! `ignorarium_guest::host::run_row`. The environment, the inputs and the payload's folder
 //! reach the guest as read-only disks; the outputs come back as a pack. Cloud Hypervisor:
 //! <https://github.com/cloud-hypervisor/cloud-hypervisor>.
-use super::cgroup::IN_MACHINE;
+use super::cgroup::RowCgroup;
 use super::rootfs;
 use super::selftest::{Call, SelfTest};
-use super::{Backend, Exit, Probe, RowJob, RowOutcome, TIMEOUT_CODE, Watch};
+use super::{Backend, Exit, Machine, Probe, RowJob, RowOutcome, TIMEOUT_CODE, Watch};
 use crate::files::temp_beside;
 use crate::telemetry::Reading;
 use ignorarium_guest::agent::steps::meminfo_kb;
@@ -17,7 +17,7 @@ use ignorarium_guest::tree;
 use rustix::io::Errno;
 use rustix::process::{Pid, geteuid, test_kill_process};
 use sha2::{Digest, Sha256};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fs;
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
@@ -102,6 +102,14 @@ impl Level2 {
         }
     }
 
+    /// The machine `job`'s row runs in.
+    pub fn machine_of(&self, job: &RowJob) -> Machine {
+        Machine {
+            vcpus: self.cpus,
+            mem_mib: self.vm_mem_mib(job),
+        }
+    }
+
     /// The guest memory of `job`'s machine, in MiB: `mem_mib` when the row declares no
     /// memory; otherwise the cap, the `/out` and `/tmp` tmpfs and `GUEST_MIB`, which the host
     /// checks every machine against.
@@ -178,7 +186,14 @@ impl Level2 {
     /// Runs one row and returns its outcome, with the host's timings when the machine ran to
     /// a report. The rootfs disk and the boot count toward the row's wall time, not the
     /// payload's.
-    pub fn run_timed(&self, job: &RowJob, watch: &dyn Watch) -> (RowOutcome, Option<Timings>) {
+    /// The row, run in the leaf `leaf` makes just before the VMM starts, and the host's
+    /// timings. A row that ends before then makes no leaf.
+    pub fn run_timed(
+        &self,
+        job: &RowJob,
+        watch: &dyn Watch,
+        leaf: impl FnOnce() -> Result<RowCgroup, String>,
+    ) -> (RowOutcome, Option<Timings>) {
         let start = Instant::now();
         let wall = || start.elapsed().as_secs_f64();
         let ended = |res: Result<VmOutcome, VmError>| {
@@ -219,18 +234,31 @@ impl Level2 {
             Ok(s) => s,
             Err(e) => return infra(format!("cannot make the row's scratch folder: {e}")),
         };
+        let machine = self.machine_of(job);
+        // The host calls the hook once, after it built the disks, so a row that fails or stops
+        // before the VMM starts makes no leaf.
+        let leaf = RefCell::new(Some(leaf));
+        let made: RefCell<Option<Result<RowCgroup, String>>> = RefCell::new(None);
+        let hook = |cmd: &mut Command| {
+            let made_now = leaf.borrow_mut().take().map(|f| f());
+            if let Some(Ok(l)) = &made_now {
+                l.enter(cmd);
+            }
+            *made.borrow_mut() = made_now;
+        };
         let vm = Vm {
             vmm: self.vmm.clone(),
             kernel: self.kernel.clone(),
             initramfs: scratch.0.join("initramfs.cpio"),
             rootfs,
-            cpus: self.cpus,
-            mem_mib: self.vm_mem_mib(job),
+            cpus: machine.vcpus,
+            mem_mib: machine.mem_mib,
             out_mib: self.out_mib,
             boot_timeout: self.boot_timeout,
             exit_timeout: self.exit_timeout,
             report_slack: self.report_slack,
             serial_log: None,
+            pre_spawn: Some(Box::new(hook)),
         };
         let counted = Counted {
             watch,
@@ -239,6 +267,10 @@ impl Level2 {
         let res = host::run_row(&vm, &host_job, &scratch.0.join("work"), &counted);
         let (mut o, timings) = ended(res);
         o.box_cpu_seconds = counted.cpu.get();
+        o.machine = Some(machine);
+        if let Some(made) = made.take() {
+            o.cgroup = made.map_or_else(Reading::Unavailable, RowCgroup::finish);
+        }
         (o, timings)
     }
 }
@@ -367,15 +399,8 @@ impl Backend for Level2 {
         })
     }
 
-    fn row_cgroup(&self) -> Result<(), String> {
-        Err(IN_MACHINE.into())
-    }
-
     fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> io::Result<RowOutcome> {
-        Ok(RowOutcome {
-            cgroup: Reading::Unavailable(IN_MACHINE.into()),
-            ..self.run_timed(job, watch).0
-        })
+        Ok(self.run_timed(job, watch, RowCgroup::make).0)
     }
 }
 
@@ -430,6 +455,7 @@ pub fn selftest_of(t: &proto::SelfTest) -> SelfTest {
         io_uring_blocked: io_uring != Call::Open,
         vsock_absent: false,
         io_uring_absent: io_uring == Call::Absent,
+        host_path: true,
     }
 }
 

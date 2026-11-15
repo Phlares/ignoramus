@@ -3,6 +3,7 @@
 //! cannot run level 2.
 mod common;
 use common::{in_child, is_child, write_exec};
+use ignorarium::backend::cgroup::{MISSED, RowCgroup};
 use ignorarium::backend::level0::Level0;
 use ignorarium::backend::level1::Level1;
 use ignorarium::backend::level2::{
@@ -10,7 +11,7 @@ use ignorarium::backend::level2::{
 };
 use ignorarium::backend::selftest::SelfTest;
 use ignorarium::backend::{
-    Backend, Exit, Probe, RowJob, RowOutcome, TIMEOUT_CODE, Watch, output_hash, rootfs,
+    Backend, Exit, Machine, Probe, RowJob, RowOutcome, TIMEOUT_CODE, Watch, output_hash, rootfs,
 };
 use ignorarium::runner::{self, RunError, RunStatus};
 use ignorarium::store::Store;
@@ -324,17 +325,6 @@ fn launcher_reads_the_hypervisor_version() {
 }
 
 #[test]
-fn a_level2_row_records_its_cgroup_as_unavailable() {
-    let b = Level2::with(PathBuf::new(), PathBuf::new(), PathBuf::new());
-    let why = "level 2 rows run in a machine";
-    assert_eq!(b.row_cgroup(), Err(why.into()));
-    // A row that fails before its machine starts records the same reason.
-    let o = b.run_row(&RowJob::default(), &|| true).unwrap();
-    assert!(matches!(o.exit, Exit::Infra(_)), "{:?}", o.exit);
-    assert_eq!(o.cgroup, Reading::Unavailable(why.into()));
-}
-
-#[test]
 fn guest_job_maps_paths_and_argv() {
     let d = TempDir::new().unwrap();
     let payload = d.path().join("payload");
@@ -426,6 +416,7 @@ fn mapped(connect: bool, vsock: bool) -> SelfTest {
         io_uring_blocked: true,
         vsock_absent: false,
         io_uring_absent: false,
+        host_path: true,
     }
 }
 
@@ -442,6 +433,14 @@ fn selftest_of_maps_the_guest_checks() {
     assert_eq!(with(|g| g.route_blocked = false), ["connect"]);
     assert_eq!(with(|g| g.only_loopback = false), ["connect"]);
     assert_eq!(with(|g| g.host_path_blocked = false), ["vsock"]);
+    // At level 2 the vsock check is the guest's path to the host: blocked or open.
+    assert!(t.host_path);
+    assert_eq!(t.vsock_state(), "blocked");
+    let open = selftest_of(&proto::SelfTest {
+        host_path_blocked: false,
+        ..passing()
+    });
+    assert_eq!(open.vsock_state(), "open");
     // io_uring, as level 1 reads the same call.
     let io_uring = |errno: Option<i32>| {
         selftest_of(&proto::SelfTest {
@@ -895,7 +894,7 @@ fn a_row_without_an_environment_is_infra_before_any_vm() {
     };
     assert_eq!(b.level(), 2);
     let watch = Leaders::default();
-    let (o, timings) = b.run_timed(&job, &watch);
+    let (o, timings) = b.run_timed(&job, &watch, || panic!("no leaf before the machine"));
     assert_eq!(
         o.exit,
         Exit::Infra("level 2 runs rows in an environment image; this study has none".into())
@@ -1272,6 +1271,34 @@ fn a_stop_kills_the_vm() {
     let stop = watch.stop_at.get().expect("the guest never connected");
     assert!(returned.duration_since(stop) < Duration::from_secs(3));
     assert!(group_gone(watch.pid.get().unwrap()));
+}
+
+#[test]
+fn a_level2_row_names_its_machine() {
+    let Some(r) = ready() else { return };
+    let (_d, job) = row(&r, "true", LONG);
+    let o = r.level2.run_row(&job, &|| true).unwrap();
+    assert_eq!(o.exit, Exit::Ok, "{o:?}");
+    assert_eq!(o.machine, Some(r.level2.machine_of(&job)));
+}
+
+#[test]
+fn the_machine_is_the_vcpus_and_the_vm_memory() {
+    let b = Level2::with(PathBuf::new(), PathBuf::new(), PathBuf::new());
+    let job = RowJob {
+        memory_mib: Some(2048),
+        ..RowJob::default()
+    };
+    assert_eq!(
+        b.machine_of(&job),
+        Machine {
+            vcpus: b.cpus(),
+            mem_mib: 2841
+        }
+    );
+    // A row that ends before its machine is built names none.
+    let o = b.run_row(&RowJob::default(), &|| true).unwrap();
+    assert_eq!(o.machine, None, "{o:?}");
 }
 
 #[test]
@@ -1836,7 +1863,7 @@ impl Backend for Timed {
         self.inner.cpus()
     }
     fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> io::Result<RowOutcome> {
-        let (o, timings) = self.inner.run_timed(job, watch);
+        let (o, timings) = self.inner.run_timed(job, watch, RowCgroup::make);
         if let Some(t) = timings {
             self.boots.borrow_mut().push(t.boot.as_secs_f64());
         }
@@ -1946,4 +1973,204 @@ fn overhead_through_the_runner() {
     report("l2_row", l2_rows, &l2);
     report("l2_boot", l2_rows, &boot);
     report("l2_minus_l1", l2_rows, &diff);
+}
+
+#[test]
+fn level2_reports_the_row_cgroup_like_level1() {
+    assert_eq!(Level2::new().row_cgroup(), Level0.row_cgroup());
+}
+
+#[test]
+fn a_row_that_fails_before_the_vm_makes_no_leaf() {
+    let b = Level2::with(PathBuf::new(), PathBuf::new(), PathBuf::new());
+    let (o, _) = b.run_timed(&RowJob::default(), &|| true, || panic!("no leaf"));
+    assert_eq!(o.cgroup, RowOutcome::failed(Exit::Ok, 0.0).cgroup);
+}
+
+/// A leaf in a temp folder that reads as never entered: its `cgroup.procs` cannot be
+/// written, and its counters read zero.
+fn unwritable_leaf(d: &Path) -> RowCgroup {
+    fs::write(
+        d.join("memory.peak"),
+        "0
+",
+    )
+    .unwrap();
+    fs::write(
+        d.join("memory.events"),
+        "oom_kill 0
+",
+    )
+    .unwrap();
+    fs::write(
+        d.join("cpu.stat"),
+        "usage_usec 0
+",
+    )
+    .unwrap();
+    fs::write(d.join("cgroup.procs"), "").unwrap();
+    fs::set_permissions(d.join("cgroup.procs"), Permissions::from_mode(0o444)).unwrap();
+    RowCgroup::at(d.into())
+}
+
+#[test]
+fn a_level2_row_reads_its_cgroup() {
+    let Some(r) = ready() else { return };
+    if common::skip_cgroup() {
+        return;
+    }
+    let (_d, job) = row(&r, "true", LONG);
+    let o = r.level2.run_row(&job, &|| true).unwrap();
+    assert_eq!(o.exit, Exit::Ok, "{o:?}");
+    let Reading::Read(c) = &o.cgroup else {
+        panic!("{:?}", o.cgroup)
+    };
+    assert!(c.memory_peak > 0 && c.cpu_stat["usage_usec"] > 0, "{c:?}");
+}
+
+#[test]
+fn a_leaf_that_cannot_be_made_keeps_the_row() {
+    let Some(r) = ready() else { return };
+    let (_d, job) = row(&r, "true", LONG);
+    let (o, _) = r
+        .level2
+        .run_timed(&job, &|| true, || Err("no leaf here".into()));
+    assert_eq!(o.exit, Exit::Ok, "{o:?}");
+    assert_eq!(o.cgroup, Reading::Unavailable("no leaf here".into()));
+}
+
+#[test]
+fn a_hook_that_cannot_move_the_vmm_reads_missed() {
+    let Some(r) = ready() else { return };
+    let (_d, job) = row(&r, "true", LONG);
+    let leaf = TempDir::new().unwrap();
+    let (o, _) = r
+        .level2
+        .run_timed(&job, &|| true, || Ok(unwritable_leaf(leaf.path())));
+    assert_eq!(o.exit, Exit::Ok, "{o:?}");
+    assert_eq!(o.cgroup, Reading::Unavailable(MISSED.into()));
+}
+
+/// Says stop once the VMM has started.
+#[derive(Default)]
+struct StopOnStart(Cell<bool>);
+
+impl Watch for StopOnStart {
+    fn tick(&self) -> bool {
+        !self.0.get()
+    }
+    fn started(&self, _: u32) {
+        self.0.set(true);
+    }
+}
+
+#[test]
+fn a_stopped_row_still_reads_its_leaf() {
+    let Some(r) = ready() else { return };
+    let (_d, job) = row(&r, "sleep 30", LONG);
+    let leaf = TempDir::new().unwrap();
+    let watch = StopOnStart::default();
+    let (o, _) = r
+        .level2
+        .run_timed(&job, &watch, || Ok(unwritable_leaf(leaf.path())));
+    assert_eq!(o.exit, Exit::Stopped, "{o:?}");
+    assert_eq!(o.cgroup, Reading::Unavailable(MISSED.into()));
+}
+
+/// MiB the VMM takes beyond guest RAM and the output disk's cache (decision 0026). Measured
+/// 2026-11-15 on the test host: a row touching 512 MiB peaked at 637 MiB, so peak minus the
+/// touched memory is 125 MiB; rounded up to 128 and 25% added.
+const OVERHEAD_MIB: u64 = 160;
+
+/// Keeps the VMM's `VmHWM`, read each tick until the row ends.
+#[derive(Default)]
+struct HighWater {
+    pid: Cell<Option<u32>>,
+    kib: Cell<u64>,
+}
+
+impl Watch for HighWater {
+    fn tick(&self) -> bool {
+        let status =
+            (self.pid.get()).and_then(|p| fs::read_to_string(format!("/proc/{p}/status")).ok());
+        let hwm = (status.iter().flat_map(|s| s.lines()))
+            .find_map(|l| l.strip_prefix("VmHWM:"))
+            .and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok());
+        self.kib.set(self.kib.get().max(hwm.unwrap_or(0)));
+        true
+    }
+    fn started(&self, pid: u32) {
+        self.pid.set(Some(pid));
+    }
+}
+
+/// The row's peak sits between the guest memory its payload touched and the machine's memory
+/// plus the output disk plus the VMM's overhead. The first row reads the rootfs disk into the
+/// page cache and is reported, not checked.
+#[test]
+fn level2_row_peak_lies_within_the_machine_bounds() {
+    let Some(r) = ready() else { return };
+    if common::skip_cgroup() {
+        return;
+    }
+    const TOUCHED_MIB: u64 = 512;
+    let touch = format!(
+        "python3 -c 'b = bytearray({TOUCHED_MIB} << 20)
+for i in range(0, len(b), 4096): b[i] = 1' &&          head -c 1048576 /dev/zero > \"$IGNORARIUM_OUT/o\""
+    );
+    let mib = 1u64 << 20;
+    for (n, script) in ["true", &touch, &touch, &touch].into_iter().enumerate() {
+        let (_d, mut job) = row(&r, script, LONG);
+        job.memory_mib = Some(1024);
+        let watch = HighWater::default();
+        let o = r.level2.run_row(&job, &watch).unwrap();
+        assert_eq!(o.exit, Exit::Ok, "{o:?}");
+        let Reading::Read(c) = &o.cgroup else {
+            panic!("{:?}", o.cgroup)
+        };
+        let vm = u64::from(r.level2.vm_mem_mib(&job));
+        let top = (vm + r.level2.out_mib + OVERHEAD_MIB) * mib;
+        println!(
+            "row {n}: memory_peak {} B, vm_mem_mib {vm}, out_mib {}, VMM VmHWM {} kB, peak - vm {} MiB",
+            c.memory_peak,
+            r.level2.out_mib,
+            watch.kib.get(),
+            (c.memory_peak as i64 - (vm * mib) as i64) >> 20,
+        );
+        if n == 0 || script == "true" {
+            continue;
+        }
+        assert!(
+            c.memory_peak >= TOUCHED_MIB * mib,
+            "row {n}: {}",
+            c.memory_peak
+        );
+        assert!(c.memory_peak <= top, "row {n}: {} > {top}", c.memory_peak);
+    }
+}
+
+/// Says go on for the first `n` ticks, then stop.
+struct StopAfter {
+    n: Cell<u32>,
+}
+
+impl Watch for StopAfter {
+    fn tick(&self) -> bool {
+        let left = self.n.get();
+        self.n.set(left.saturating_sub(1));
+        left > 0
+    }
+}
+
+#[test]
+fn a_stop_while_the_disks_build_makes_no_leaf() {
+    let Some(r) = ready() else { return };
+    let (_d, job) = row(&r, "true", LONG);
+    // run_timed ticks twice before the host builds the disks; the host's first tick stops.
+    let watch = StopAfter { n: Cell::new(2) };
+    let (o, _) = r
+        .level2
+        .run_timed(&job, &watch, || panic!("no leaf before the spawn"));
+    assert_eq!(o.exit, Exit::Stopped, "{o:?}");
+    assert_eq!(o.cgroup, RowOutcome::failed(Exit::Ok, 0.0).cgroup);
 }
