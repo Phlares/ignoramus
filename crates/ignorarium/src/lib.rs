@@ -16,6 +16,7 @@ pub mod events;
 pub mod family;
 pub mod files;
 pub mod home;
+pub mod identity;
 pub mod inputs;
 pub mod keys;
 pub mod machine;

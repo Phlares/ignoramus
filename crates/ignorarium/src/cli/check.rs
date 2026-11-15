@@ -5,6 +5,7 @@ use crate::diag::{Diagnostic, Severity, printable, render_human};
 use crate::estimate::{self, Estimate, defaults_json, estimate};
 use crate::family;
 use crate::home::Home;
+use crate::identity;
 use crate::inputs;
 use crate::keys;
 use crate::machine::Machine;
@@ -562,6 +563,7 @@ fn render(a: &Assessed) -> String {
         s.push_str(&format!("{line}\n"));
     }
     s.push_str(&format!("spec: {}\n", a.hash));
+    s.push_str(&format!("rules: {}\n", identity::rules_sha256()));
     s
 }
 
@@ -634,6 +636,7 @@ fn render_json(a: &Assessed) -> Result<String, CliError> {
         "derivative_set": derivative,
         "defaults": defaults_json(&a.filled),
         "hash": a.hash,
+        "rules_sha256": identity::rules_sha256(),
     });
     serde_json::to_string_pretty(&v).map_err(|e| CliError::usage(e.to_string()))
 }

@@ -309,12 +309,13 @@ pub fn load(path: &Path) -> Result<Vec<Rule>, RulesError> {
     parse(&std::fs::read_to_string(path).map_err(RulesError::Io)?)
 }
 
+/// The text of `rules/v0.toml`, as embedded.
+pub const RULES_TOML: &str = include_str!("../../../../rules/v0.toml");
+
 /// The rules in `rules/v0.toml`, compiled once.
 pub fn builtin() -> &'static [Rule] {
     static BUILTIN: OnceLock<Vec<Rule>> = OnceLock::new();
-    BUILTIN.get_or_init(|| {
-        parse(include_str!("../../../../rules/v0.toml")).expect("embedded v0.toml is valid")
-    })
+    BUILTIN.get_or_init(|| parse(RULES_TOML).expect("embedded v0.toml is valid"))
 }
 
 fn parse(text: &str) -> Result<Vec<Rule>, RulesError> {
