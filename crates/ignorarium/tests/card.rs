@@ -3,7 +3,8 @@ mod common;
 use common::{Lab, commit_all, estimate, finished_with, git, instrument, lab, plant, study_repo};
 use ignorarium::canon::sha256_hex;
 use ignorarium::card::sections::{
-    Attempt, Field, Listed, NOT_APPLICABLE, NOT_IN_RECORDS, Outside, ROW_SEED, Source, UNRECORDED,
+    Attempt, Field, Listed, NOT_APPLICABLE, NOT_IN_RECORDS, Outside, ROW_SEED, SelfTestTally,
+    Source, UNRECORDED,
 };
 use ignorarium::card::{self, Card};
 use ignorarium::derived::GatePrediction;
@@ -567,17 +568,20 @@ fn missing_field_prints_not_in_records() {
         path: "events.jsonl".into(),
         sha256: sha256_hex(&std::fs::read(&events).unwrap()),
     };
-    assert_eq!(stack.agent_sha256, Field::Missing { link: Some(link) });
+    assert_eq!(
+        stack.agent_sha256,
+        Field::Missing {
+            link: Some(link.clone())
+        }
+    );
     assert_eq!(stack.agent_sha256.shown(|v| v.join(", ")), NOT_IN_RECORDS);
     assert_eq!(NOT_IN_RECORDS, "not in the records");
-    assert_eq!(stack.vcpus, Field::Missing { link: None });
-    assert_eq!(stack.vcpus.shown(|v| v.to_string()), NOT_IN_RECORDS);
+    // Level 2 rows from before the key existed: the run log is where to look.
+    assert_eq!(stack.vcpus, Field::Missing { link: Some(link) });
+    assert_eq!(stack.vcpus.shown(|v| format!("{v:?}")), NOT_IN_RECORDS);
     assert_eq!(stack.launcher.shown(|v| v.join(", ")), LAUNCHER);
     let json = serde_json::to_value(&card).unwrap();
-    assert_eq!(
-        json["setup"]["stack"]["vcpus"],
-        json!({ "state": "missing", "link": null })
-    );
+    assert_eq!(json["setup"]["stack"]["vcpus"]["state"], "missing");
 }
 
 const FIXED: [&str; 4] = ["gaps.md", "decisions.md", "deviations.toml", "CITATION.cff"];
@@ -1495,4 +1499,87 @@ fn observations_csv_recomputes_interval() {
         }
     }
     assert_eq!(checked, 2);
+}
+
+#[test]
+fn stack_reads_vcpus_and_vm_memory() {
+    let lab = lab();
+    let machine = json!({ "isolation": 2, "launcher": LAUNCHER, "vcpus": 2, "vm_mem_mib": 2841 });
+    let mut bodies = bodies(&lab, MEAN, machine);
+    let first = bodies.iter_mut().find(|(k, _)| *k == "row").unwrap();
+    first.1["vm_mem_mib"] = json!(3105);
+    plant(&lab.home, ID, &bodies);
+    let stack = card_of(&lab).setup.stack;
+    assert_eq!(stack.vcpus, recorded(vec![2]));
+    assert_eq!(stack.vm_mem_mib, recorded(vec![2841, 3105]));
+    let md = card::render::markdown(&card_of(&lab));
+    assert!(
+        md.contains(
+            "- Virtual CPUs: 2
+"
+        ),
+        "{md}"
+    );
+    assert!(
+        md.contains(
+            "- VM memory, MiB: 2841, 3105
+"
+        ),
+        "{md}"
+    );
+    // Level 2 rows from before the keys existed.
+    let lab = self::lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let stack = card_of(&lab).setup.stack;
+    assert!(
+        matches!(stack.vcpus, Field::Missing { .. }),
+        "{:?}",
+        stack.vcpus
+    );
+    assert!(matches!(stack.vm_mem_mib, Field::Missing { .. }));
+    // Rows below level 2 run in no machine.
+    let lab = self::lab();
+    fixture(&lab, MEAN, json!({ "isolation": 1 }));
+    let stack = card_of(&lab).setup.stack;
+    assert_eq!(stack.vcpus, Field::NotApplicable);
+    assert_eq!(stack.vm_mem_mib, Field::NotApplicable);
+}
+
+#[test]
+fn self_test_tally_adds_up_to_the_rows() {
+    let lab = lab();
+    let mut bodies = bodies(&lab, MEAN, json!({ "isolation": 1 }));
+    let passed =
+        json!({"connect": "blocked", "vsock": "denied", "io_uring": "denied", "failed": []});
+    let failed =
+        json!({"connect": "blocked", "vsock": "open", "io_uring": "denied", "failed": ["vsock"]});
+    let mut rows: Vec<&mut Value> = (bodies.iter_mut())
+        .filter(|(k, _)| *k == "row")
+        .map(|(_, b)| b)
+        .collect();
+    let n = rows.len() as u64;
+    assert!(n >= 5);
+    rows[0]["isolation"] = json!(0);
+    // rows[1]: a level 1 row from before the key existed.
+    rows[2]["selftest"] = failed;
+    for r in rows.iter_mut().skip(3) {
+        r["selftest"] = passed.clone();
+    }
+    plant(&lab.home, ID, &bodies);
+    let card = card_of(&lab);
+    let want = SelfTestTally {
+        passed: n - 3,
+        failed_rows: 1,
+        failed: [("vsock".to_string(), 1)].into(),
+        level0: 1,
+        not_recorded: 1,
+    };
+    assert_eq!(card.runs.selftest, recorded(want));
+    let md = card::render::markdown(&card);
+    let line = format!(
+        "- Sandbox self-test: {} passed, 1 failed (vsock: 1), 1 at level 0 (no sandbox), 1 not recorded
+",
+        n - 3
+    );
+    assert!(md.contains(&line), "{md}");
 }

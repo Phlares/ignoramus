@@ -245,7 +245,9 @@ fn setup_section(c: &Card) -> String {
             names(&counts)
         ));
     }
-    l.push(format!("Virtual CPUs: {}", field(&k.vcpus, u32::to_string)));
+    let numbers = |v: &Vec<u32>| names(&v.iter().map(u32::to_string).collect::<Vec<_>>());
+    l.push(format!("Virtual CPUs: {}", field(&k.vcpus, numbers)));
+    l.push(format!("VM memory, MiB: {}", field(&k.vm_mem_mib, numbers)));
     l.push(format!(
         "Row memory cap (MiB): {}",
         field(&k.memory_cap_mib, u32::to_string)
@@ -384,6 +386,23 @@ fn runs_section(c: &Card) -> String {
             a.exit.clone().unwrap_or_default()
         )
     }));
+    l.push(format!(
+        "Sandbox self-test: {}",
+        field(&r.selftest, |t| {
+            let each: Vec<String> = (t.failed.iter())
+                .map(|(name, n)| format!("{name}: {n}"))
+                .collect();
+            let which = if each.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", each.join(", "))
+            };
+            format!(
+                "{} passed, {} failed{which}, {} at level 0 (no sandbox), {} not recorded",
+                t.passed, t.failed_rows, t.level0, t.not_recorded
+            )
+        })
+    ));
     let open = match r.sessions_without_end {
         Some(k) if k > 0 => format!(", {k} without an end record"),
         _ => String::new(),

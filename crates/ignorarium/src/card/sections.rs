@@ -530,8 +530,10 @@ pub struct Stack {
     pub isolation: Field<Vec<u8>>,
     pub launcher: Field<Vec<String>>,
     pub agent_sha256: Field<Vec<String>>,
-    /// The box's machine config holds it; no record does.
-    pub vcpus: Field<u32>,
+    /// Level 2 rows: each vCPU count and machine memory the rows name, sorted.
+    pub vcpus: Field<Vec<u32>>,
+    #[serde(default = "missing")]
+    pub vm_mem_mib: Field<Vec<u32>>,
     /// The plan's `row_memory_mib`.
     pub memory_cap_mib: Field<u32>,
     /// Per key above, the row records whose value does not parse; keys with none are left out.
@@ -562,19 +564,33 @@ fn from_rows<T: Ord + DeserializeOwned>(
     (!values.is_empty()).then(|| values.into_iter().collect())
 }
 
+/// A value only level 2 rows hold: not applicable when every row ran below level 2.
+fn in_machine<T: Ord + DeserializeOwned>(
+    log: &Log,
+    key: &str,
+    agentless: bool,
+    events: Option<&Outside>,
+    unreadable: &mut BTreeMap<String, u64>,
+) -> Field<Vec<T>> {
+    match from_rows(log, key, unreadable) {
+        None if agentless => Field::NotApplicable,
+        found => Field::of(found, events),
+    }
+}
+
 pub fn stack(log: &Log, spec: &Spec, events: Option<&Outside>) -> Stack {
     let mut unreadable = BTreeMap::new();
     let levels: Option<Vec<u8>> = from_rows(log, "isolation", &mut unreadable);
     let agentless = (levels.as_ref()).is_some_and(|l| l.iter().all(|l| *l < AGENT_LEVEL));
-    let agent_sha256 = match from_rows(log, "agent_sha256", &mut unreadable) {
-        None if agentless => Field::NotApplicable,
-        found => Field::of(found, events),
-    };
+    let agent_sha256 = in_machine(log, "agent_sha256", agentless, events, &mut unreadable);
+    let vcpus = in_machine(log, "vcpus", agentless, events, &mut unreadable);
+    let vm_mem_mib = in_machine(log, "vm_mem_mib", agentless, events, &mut unreadable);
     Stack {
         isolation: Field::of(levels, events),
         launcher: Field::of(from_rows(log, "launcher", &mut unreadable), events),
         agent_sha256,
-        vcpus: Field::of(None, None),
+        vcpus,
+        vm_mem_mib,
         memory_cap_mib: Field::of(spec.design.row_memory_mib, None),
         unreadable,
     }
@@ -753,6 +769,44 @@ pub struct Runs {
     pub sessions_unreadable: Option<u64>,
     /// The reason in the study's `stop` record.
     pub stopped: Option<String>,
+    /// The rows by their self-test; `Missing` on a card built before it.
+    #[serde(default = "missing")]
+    pub selftest: Field<SelfTestTally>,
+}
+
+/// The row records by the self-test of their last attempt. The four counts add up to the
+/// row records.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SelfTestTally {
+    pub passed: u64,
+    pub failed_rows: u64,
+    /// Per check name, the rows where it failed.
+    pub failed: BTreeMap<String, u64>,
+    /// Rows at level 0, which runs no sandbox.
+    pub level0: u64,
+    /// Rows with no `selftest` key: written before it existed, or the self-test said nothing.
+    pub not_recorded: u64,
+}
+
+impl SelfTestTally {
+    fn of(log: &Log) -> SelfTestTally {
+        let mut t = SelfTestTally::default();
+        for r in rows(log) {
+            let names = r.body["selftest"]["failed"].as_array();
+            match names {
+                _ if r.body["isolation"] == 0 => t.level0 += 1,
+                None => t.not_recorded += 1,
+                Some(n) if n.is_empty() => t.passed += 1,
+                Some(n) => {
+                    t.failed_rows += 1;
+                    for name in n.iter().filter_map(Value::as_str) {
+                        *t.failed.entry(name.into()).or_default() += 1;
+                    }
+                }
+            }
+        }
+        t
+    }
 }
 
 pub fn runs(log: &Log, events: Option<&Outside>) -> Runs {
@@ -783,5 +837,8 @@ pub fn runs(log: &Log, events: Option<&Outside>) -> Runs {
         sessions_without_end: some(held.without_end),
         sessions_unreadable: some(held.unreadable),
         stopped: crate::cli::stopped_why(&log.records),
+        selftest: Field::Recorded {
+            value: SelfTestTally::of(log),
+        },
     }
 }
