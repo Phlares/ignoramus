@@ -3607,6 +3607,23 @@ fn a_resumed_run_writes_run_resume_and_no_second_run_start() {
     assert_eq!(resumes[0]["attrs"]["launcher"], "process");
 }
 
+#[test]
+fn a_run_paused_before_its_first_row_starts_again_with_run_start() {
+    let lab = lab();
+    let dir = plain(&lab, "nofirst");
+    let control = ignorarium::control::ControlFile::of(&lab.home, "nofirst");
+    control.request_pause().unwrap();
+    let plan = plan_of(&lab, "nofirst");
+    assert!(matches!(run(&plan).unwrap(), RunStatus::Paused(_)));
+    assert!(rows_of(&lab, "nofirst").is_empty());
+    // The first run left a session pair and no row: the second is still a start.
+    control.request_resume().unwrap();
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let ev = events_of(&dir);
+    assert_eq!(named(&ev, "run.start").len(), 2);
+    assert!(named(&ev, "run.resume").is_empty());
+}
+
 fn outcome(cpu: f64, wall: f64, ended: bool, unknown: bool) -> RowOutcome {
     RowOutcome {
         exit: Exit::Ok,
@@ -3775,11 +3792,7 @@ fn keep_records(dir: &std::path::Path, n: usize) {
         .take_while(|line| {
             let keep = left > 0;
             let stored: serde_json::Value = serde_json::from_str(line).unwrap();
-            if !stored["record"]["kind"]
-                .as_str()
-                .unwrap()
-                .starts_with("session.")
-            {
+            if !common::is_session(stored["record"]["kind"].as_str().unwrap()) {
                 left = left.saturating_sub(1);
             }
             keep

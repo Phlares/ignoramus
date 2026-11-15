@@ -157,15 +157,16 @@ pub fn records_of(lab: &Lab, id: &str) -> Vec<records::Record> {
     (records::read_log(&path, &key.verifying_key()).unwrap()).restored()
 }
 
-/// True for a `session.start` or `session.end` record: the pair each run adds around its work.
-pub fn is_session(r: &records::Record) -> bool {
-    r.kind.starts_with("session.")
+/// True for the kind of a `session.start` or `session.end` record: the pair each run adds
+/// around its work.
+pub fn is_session(kind: &str) -> bool {
+    kind == derived::SESSION_START || kind == derived::SESSION_END
 }
 
 /// `records_of` without the session records.
 pub fn study_records_of(lab: &Lab, id: &str) -> Vec<records::Record> {
     let mut all = records_of(lab, id);
-    all.retain(|r| !is_session(r));
+    all.retain(|r| !is_session(&r.kind));
     all
 }
 

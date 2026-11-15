@@ -13,7 +13,7 @@ use ignorarium::control::{ControlFile, RunLock, Signal, State};
 use ignorarium::derived::{Register, SESSION_END, SESSION_START, SessionEnd, SessionStart};
 use ignorarium::estimate::apply_defaults;
 use ignorarium::spec::model::Spec;
-use ignorarium::{keys, view};
+use ignorarium::{keys, records, view};
 use serde_json::Value;
 use std::path::Path;
 use std::time::Duration;
@@ -36,13 +36,13 @@ fn a_register_record_that_does_not_parse_is_not_a_registered_study() {
     let key = keys::load(&lab.home).unwrap().unwrap();
     let log = dir.join("records.jsonl");
     std::fs::rename(&log, dir.join("records.old")).unwrap();
-    let draft = ignorarium::records::RecordDraft {
+    let draft = records::RecordDraft {
         study: "noroot".into(),
         row: None,
         kind: "register".into(),
         body: serde_json::json!({"spec_hash": "sha256:ab", "leaf": 1, "log": "planlog", "defaults": []}),
     };
-    ignorarium::records::append(&log, &key, draft).unwrap();
+    records::append(&log, &key, draft).unwrap();
     let a = bin(&lab).args(["status", "noroot"]).assert().code(1);
     assert!(err(&a).contains("is not registered"), "{}", err(&a));
 }
@@ -685,6 +685,23 @@ fn verify_counts_sessions_without_an_end() {
 }
 
 #[test]
+fn verify_counts_session_records_that_do_not_parse() {
+    let lab = lab();
+    let id = "garbled";
+    plain(&lab, id);
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let log = lab.home.study_dir(id).join("records.jsonl");
+    let draft = records::RecordDraft::new(id, SESSION_START, serde_json::json!({ "pid": 1 }));
+    records::append(&log, &key, draft).unwrap();
+    let a = bin(&lab).args(["verify", "--study", id]).assert().code(0);
+    let out = text(&a);
+    assert!(
+        out.contains("\nsessions: 0, 0 without an end record, 1 unreadable\n"),
+        "{out}"
+    );
+}
+
+#[test]
 fn sessions_change_no_figure() {
     use ignorarium::runner::progress;
     let lab = lab();
@@ -692,7 +709,7 @@ fn sessions_change_no_figure() {
     bin_at(&lab, "fig").args(["run", "fig"]).assert().code(0);
     let all = common::records_of(&lab, "fig");
     let bare: Vec<_> = (all.iter())
-        .filter(|r| !r.kind.starts_with("session."))
+        .filter(|r| !common::is_session(&r.kind))
         .cloned()
         .collect();
     assert_eq!(all.len() - bare.len(), 2);
@@ -1675,7 +1692,7 @@ fn a_resumed_run_writes_one_resize_record() {
         assert_eq!(Resize::of(resized[0]).unwrap(), made, "{n}");
         assert_eq!(reserve_ran(&plan, &again), ran, "{n}");
         let study = common::study_records_of(&lab, "again");
-        let want = all.iter().filter(|r| !common::is_session(r)).count();
+        let want = all.iter().filter(|r| !common::is_session(&r.kind)).count();
         assert_eq!(study.len(), want, "{n}");
     }
     // A resume reads the record it finds and never makes it again: one that admits a single

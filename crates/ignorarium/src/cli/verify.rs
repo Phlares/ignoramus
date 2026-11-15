@@ -1,6 +1,6 @@
 //! `verify`: check the plan logs and, for one study, its record chain.
 use super::{CliError, Ctx, Done, Run, out};
-use crate::derived::{Register, SessionEnd, SessionStart};
+use crate::derived::{Register, SESSION_END, SESSION_START, SessionEnd, SessionStart};
 use crate::planlog::store::PlanLog;
 use crate::records::Record;
 use crate::telemetry::Reading;
@@ -68,8 +68,14 @@ pub fn run(ctx: &Ctx, study: Option<&str>) -> Run {
                         "registered box: {}\n",
                         box_text(registered.as_ref())
                     ))?;
-                    let (n, open) = sessions(&all);
-                    out(&format!("sessions: {n}, {open} without an end record\n"))?;
+                    let (n, open, unreadable) = sessions(&all);
+                    let unreadable = match unreadable {
+                        0 => String::new(),
+                        m => format!(", {m} unreadable"),
+                    };
+                    out(&format!(
+                        "sessions: {n}, {open} without an end record{unreadable}\n"
+                    ))?;
                 }
                 Err(e) => failed.push(format!("study {id}: {e}")),
             }
@@ -85,8 +91,9 @@ pub fn run(ctx: &Ctx, study: Option<&str>) -> Run {
     }
 }
 
-/// The session starts in `all`, and how many of them have no end record of the same session.
-fn sessions(all: &[Record]) -> (usize, usize) {
+/// The session starts in `all`, how many of them have no end record of the same session, and
+/// how many session records have a body that does not parse.
+fn sessions(all: &[Record]) -> (usize, usize, usize) {
     let ended: BTreeSet<String> = (all.iter().filter_map(SessionEnd::of))
         .map(|e| e.session)
         .collect();
@@ -94,7 +101,14 @@ fn sessions(all: &[Record]) -> (usize, usize) {
     let open = (starts.iter())
         .filter(|s| !ended.contains(&s.session))
         .count();
-    (starts.len(), open)
+    let unreadable = (all.iter())
+        .filter(|r| match &r.kind[..] {
+            SESSION_START => SessionStart::of(r).is_none(),
+            SESSION_END => SessionEnd::of(r).is_none(),
+            _ => false,
+        })
+        .count();
+    (starts.len(), open, unreadable)
 }
 
 /// The box identity a register record holds, as text; `not recorded` for a record written
@@ -151,9 +165,17 @@ mod tests {
             let body = serde_json::json!({ "session": id, "status": "done" });
             record(crate::derived::SESSION_END, body)
         };
-        assert_eq!(sessions(&[]), (0, 0));
-        assert_eq!(sessions(&[start("a"), end("a")]), (1, 0));
-        assert_eq!(sessions(&[start("a"), start("b"), end("b")]), (2, 1));
-        assert_eq!(sessions(&[start("a"), end("b")]), (1, 1));
+        assert_eq!(sessions(&[]), (0, 0, 0));
+        assert_eq!(sessions(&[start("a"), end("a")]), (1, 0, 0));
+        assert_eq!(sessions(&[start("a"), start("b"), end("b")]), (2, 1, 0));
+        assert_eq!(sessions(&[start("a"), end("b")]), (1, 1, 0));
+        // A session record whose body does not parse counts as unreadable, not as a session.
+        let bad = |kind: &str| record(kind, serde_json::json!({ "session": 1 }));
+        let all = [
+            start("a"),
+            bad(crate::derived::SESSION_START),
+            bad(crate::derived::SESSION_END),
+        ];
+        assert_eq!(sessions(&all), (1, 1, 2));
     }
 }

@@ -347,7 +347,10 @@ where
         _ if name == "dev.selftest" => None,
         Ok(home) => Some(home.root.join("events.jsonl")),
         Err(e) => {
-            warn_on_err(Err(e.clone()));
+            let _ = writeln!(
+                std::io::stderr(),
+                "warning: cannot write the event log: {e}"
+            );
             None
         }
     };
