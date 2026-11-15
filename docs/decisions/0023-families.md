@@ -1,5 +1,7 @@
 # 0023 Families of studies
 
+Date: 2026-11-07.
+
 Confirmatory studies declared together, before any of them runs, form a family. Members may reuse each other's confirmation and reserve data. Each member keeps its own stream slot, its own level and its own verdicts. A confirmatory study may also take selection data from data an earlier plan used.
 
 Decision:

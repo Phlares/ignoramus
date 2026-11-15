@@ -38,6 +38,11 @@ Case against:
 
 What failure this prevents: a change of alpha or of the slot count that no reader can date, and a full stream that leaves the author no stated next step.
 
+Constants:
+
+- alpha = 0.05. Basis: the false discovery rate over every claim the box confirms; e-LOND keeps it under any dependence between the studies. Rule for change: a new decision record with a date and a basis; a signed stream keeps the alpha it was signed with.
+- slots = 10. Basis: even weights of 1/10 give the first study a level of 0.005, the default level for a new claim that brings no justified level of its own. Rule for change: only with the run budget, never with outcomes; a change spreads only the budget not yet spent.
+
 Open:
 
 - The rule for a full stream. The source on bounded testing allows new weights over the unspent budget when the bound changes before it is reached. Nothing is decided for a stream that is already full.

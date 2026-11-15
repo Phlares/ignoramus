@@ -33,6 +33,8 @@ Case against:
 
 What failure this prevents: a hand-written summary that reports a "not shown" as a failed claim, or as a near pass.
 
+Constants: none. The record fixes three words and one sentence, not a value.
+
 Sources:
 
 - A registered-report guideline: classify a result by whether its interval lies below, spans or lies above the smallest effect of interest; do not report "spans" as a null. https://www.ebi.ac.uk/europepmc/webservices/rest/PMC8647608/fullTextXML

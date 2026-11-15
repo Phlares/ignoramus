@@ -1,5 +1,7 @@
 # 0027 The litmus
 
+Date: 2026-11-09.
+
 The `litmus` crate writes a small synthetic study whose verdicts are known in advance. The box runs it like any study. One arm must pass and two must not, all in the same run. A box that gives other verdicts is not fit to judge a real study.
 
 Decision:

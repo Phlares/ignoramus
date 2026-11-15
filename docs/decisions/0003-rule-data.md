@@ -1,5 +1,7 @@
 # 0003 Rules as data
 
+Date: 2026-10-29.
+
 The checker holds its rules as typed data in `rules/v0.toml`, not as scattered code.
 
 Decision:

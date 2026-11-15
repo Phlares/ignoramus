@@ -1,5 +1,7 @@
 # 0018 Determinism rechecks
 
+Date: 2026-11-01.
+
 A plan can declare that its payload is deterministic: the same job always gives the same output. The box tests the claim on a sample of its own rows, and a study that borrows estimates can carry a passed test from a study that ran the same code.
 
 Decision:

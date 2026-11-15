@@ -1,5 +1,7 @@
 # 0006 Runner and budget
 
+Date: 2026-10-29.
+
 `run` executes a registered plan row by row and meters cost against the declared budget. Pausing is the safe default.
 
 Decision:

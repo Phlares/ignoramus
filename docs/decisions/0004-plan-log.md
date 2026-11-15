@@ -1,5 +1,7 @@
 # 0004 Plan log
 
+Date: 2026-10-29.
+
 `register` records each approved plan in an append-only log. Anyone can later check that the log only grew.
 
 Decision:
@@ -21,4 +23,4 @@ Why:
 - A signed, append-only log shows that a plan existed before its data did.
 - The salt keeps a private plan private while its commitment sits in the log.
 
-Source: https://www.rfc-editor.org/rfc/rfc9162
+Sources: https://www.rfc-editor.org/rfc/rfc9162

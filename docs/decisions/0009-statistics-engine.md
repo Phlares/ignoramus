@@ -1,5 +1,7 @@
 # 0009 Statistics engine
 
+Date: 2026-10-29.
+
 The `evidence` crate computes the statistics that decide whether an experiment found something. It does no I/O and has no dependencies.
 
 Terms used below:

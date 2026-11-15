@@ -1,5 +1,7 @@
 # 0010 Level 2: one virtual machine per row
 
+Date: 2026-10-29.
+
 Level 2 runs each row in a fresh virtual machine. The crate `ignorarium-guest` holds both sides: the host code that starts the machine, and the guest agent that runs the payload inside it. The crate knows nothing of the box; the box's level 2 backend wraps `host::run_row` (0015).
 
 Decision:

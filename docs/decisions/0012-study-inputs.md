@@ -1,5 +1,7 @@
 # 0012 Study inputs: root, store, clusters, payload
 
+Date: 2026-10-31.
+
 A plan names its files by path. This record fixes where a path starts, where the bytes come from, how a file becomes clusters and units, and which code counts as part of the plan.
 
 Decision:

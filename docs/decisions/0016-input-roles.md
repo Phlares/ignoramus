@@ -1,5 +1,7 @@
 # 0016 Input roles
 
+Date: 2026-11-01.
+
 Every input declares a role from a closed set: `selection`, `confirmation`, `calibration` or `model`. The schedule and the data rules read it. This record fixes how a row learns each input's role, and which roles a confirmation input may not share data with.
 
 Decision:

@@ -1,5 +1,7 @@
 # 0015 Level 2 through the runner
 
+Date: 2026-10-31.
+
 Level 2 rows run through the box's runner. The backend `backend::level2::Level2` wraps `ignorarium_guest::host::run_row` (0010), so each row runs in one fresh Cloud Hypervisor machine. The guest crate still knows nothing of the box.
 
 Decision:

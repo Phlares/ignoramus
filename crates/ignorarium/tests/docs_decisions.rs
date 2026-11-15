@@ -1,4 +1,5 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 const PARTS: [&str; 7] = [
     "Date",
@@ -123,6 +124,81 @@ fn problems(number: &str, text: &str, debt: &[&str]) -> Vec<String> {
     faults
 }
 
+// The parts each record written before the template still lacks. An entry leaves the list in
+// the change that writes the part. The list never grows, and no record from 0030 on may enter it.
+const DEBT: &[(&str, &[&str])] = &[
+    (
+        "0001",
+        &[
+            "Decision",
+            "Why",
+            "Case against",
+            "What failure this prevents",
+            "Constants",
+            "Sources",
+        ],
+    ),
+    ("0002", &["Case against", "What failure this prevents", "Constants"]),
+    ("0003", &["Case against", "What failure this prevents", "Constants", "Sources"]),
+    ("0004", &["Case against", "What failure this prevents", "Constants"]),
+    ("0005", &["Case against", "What failure this prevents", "Constants", "Sources"]),
+    ("0006", &["Case against", "What failure this prevents", "Constants"]),
+    ("0007", &["Case against", "What failure this prevents", "Constants"]),
+    ("0008", &["Case against", "What failure this prevents", "Constants"]),
+    ("0009", &["Case against", "What failure this prevents", "Constants"]),
+    ("0010", &["Case against", "What failure this prevents", "Constants"]),
+    ("0011", &["Case against", "What failure this prevents", "Constants", "Sources"]),
+    ("0012", &["Case against", "What failure this prevents", "Constants", "Sources"]),
+    ("0013", &["Case against", "What failure this prevents", "Constants"]),
+    ("0014", &["Case against", "What failure this prevents", "Constants", "Sources"]),
+    ("0015", &["Case against", "What failure this prevents", "Constants"]),
+    ("0016", &["Case against", "What failure this prevents", "Constants"]),
+    ("0017", &["Case against", "What failure this prevents", "Constants"]),
+    ("0018", &["Case against", "What failure this prevents", "Constants"]),
+    ("0019", &["Why", "What failure this prevents", "Constants"]),
+    ("0020", &["What failure this prevents", "Constants"]),
+    ("0021", &["What failure this prevents", "Constants"]),
+    ("0022", &["Why", "What failure this prevents", "Constants"]),
+    ("0023", &["Case against", "What failure this prevents", "Constants"]),
+    ("0024", &["Case against", "What failure this prevents", "Constants"]),
+    ("0025", &["What failure this prevents", "Constants"]),
+    ("0026", &["Why", "What failure this prevents", "Constants"]),
+    ("0027", &["What failure this prevents", "Constants"]),
+    ("0028", &["Why", "Case against", "What failure this prevents", "Constants"]),
+    ("0029", &["Why", "Case against", "What failure this prevents", "Constants"]),
+];
+
+fn debt(number: &str) -> &'static [&'static str] {
+    DEBT.iter()
+        .find(|(record, _)| *record == number)
+        .map_or(&[], |(_, parts)| parts)
+}
+
+fn records_in(dir: &Path) -> BTreeMap<String, String> {
+    let mut records = BTreeMap::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let numbered = name
+            .get(..5)
+            .is_some_and(|head| head.ends_with('-') && head[..4].bytes().all(|b| b.is_ascii_digit()));
+        assert!(
+            numbered && name.ends_with(".md") && path.is_file(),
+            "{name} is not a record named NNNN-<slug>.md"
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            records.insert(name[..4].to_owned(), text).is_none(),
+            "{name} repeats a record number"
+        );
+    }
+    records
+}
+
+fn records() -> BTreeMap<String, String> {
+    records_in(Path::new("../../docs/decisions"))
+}
+
 #[test]
 fn a_part_needs_a_label_at_line_start_and_a_body() {
     let has = |text: &str, part: &str| held(text).contains(part);
@@ -214,4 +290,46 @@ fn problems_name_the_record_and_the_fault() {
         cut("- x = 1. Basis: y. Rule for change: z.", "x is 1."),
         ["0099: Constants holds no bullet"]
     );
+}
+
+#[test]
+fn every_record_holds_its_parts() {
+    let faults: Vec<String> = records()
+        .iter()
+        .flat_map(|(number, text)| problems(number, text, debt(number)))
+        .collect();
+    assert!(faults.is_empty(), "\n{}", faults.join("\n"));
+}
+
+#[test]
+fn debt_names_only_records_and_parts_that_exist() {
+    let records = records();
+    let mut seen = BTreeSet::new();
+    for (number, parts) in DEBT {
+        assert!(
+            records.contains_key(*number),
+            "DEBT names {number}, which is no record"
+        );
+        assert!(seen.insert(number), "DEBT lists {number} twice");
+        assert!(
+            *number < "0030",
+            "DEBT names {number}; records from 0030 on hold every part"
+        );
+        for part in *parts {
+            assert!(PARTS.contains(part), "DEBT {number}: {part} is no part");
+        }
+    }
+    assert_eq!(
+        DEBT.iter().map(|(_, parts)| parts.len()).sum::<usize>(),
+        93
+    );
+}
+
+#[test]
+#[should_panic(expected = "README.md")]
+fn a_stray_file_among_the_records_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("0001-a.md"), "# 0001 A\n").unwrap();
+    std::fs::write(dir.path().join("README.md"), "x\n").unwrap();
+    records_in(dir.path());
 }

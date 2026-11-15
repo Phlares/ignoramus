@@ -1,5 +1,7 @@
 # 0008 Level 1 through bubblewrap
 
+Date: 2026-10-30.
+
 Level 1 runs each row in a bubblewrap sandbox. bubblewrap is the first level 1 launcher. We evaluate it later against a launcher of our own (issue #2). It sits behind the `Backend` trait, so a replacement touches one module.
 
 Decision:

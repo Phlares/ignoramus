@@ -1,5 +1,7 @@
 # 0024 The spawn engine
 
+Date: 2026-11-07.
+
 A trigger watches the selection data during a run. When it fires, the box runs the children the trigger declared, on the confirmation data. This build is for exploratory studies only, on either log. It makes no confirmatory claim.
 
 Decision:

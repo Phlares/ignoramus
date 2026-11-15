@@ -1,5 +1,7 @@
 # 0028 Box identity
 
+Date: 2026-11-15.
+
 A box has two identities: the rules it embeds and the binary that runs. Each has a SHA-256 hash. Nothing in a study's verdict reads either hash. Only `pins.rule_base` and the binary gate (see Gate) can refuse a plan or a run.
 
 Decision:
@@ -31,6 +33,6 @@ Evidence: in the acceptance run, the box binary's hash was written into the deci
 - **`verify`.** `verify --study` prints one line per binary change between consecutive session starts, or between the register record and the first start, where `k` counts session starts from 1: `binary changed at session <k>: declared (<reason>)`, or `binary changed at session <k>: undeclared`. A change is declared only when the start's `changed_from` is the binary before it. An undeclared change cannot occur through the box. `verify` also lists it as a failure, `undeclared binary change at session <k>`, and exits 1.
 - **Case against.** An operator can always pass the flag. The gate slows a change; it does not lock it. The gain is a dated, signed declaration in place of a reconstruction.
 
-## Sources
+Sources:
 
 - Reproducible Builds, "Definition": https://reproducible-builds.org/docs/definition/

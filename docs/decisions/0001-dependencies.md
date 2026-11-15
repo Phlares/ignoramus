@@ -1,5 +1,7 @@
 # 0001 Dependencies
 
+Date: 2026-10-28.
+
 Each dependency has one job. Add a line here with its reason when you add a crate.
 
 Runtime:

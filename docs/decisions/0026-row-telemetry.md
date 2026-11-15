@@ -1,5 +1,7 @@
 # 0026 Row telemetry
 
+Date: 2026-11-10.
+
 Each row record holds a `telemetry` object of raw readings for later study: the host CPU, the host's CPU tick counts around the row, and the row cgroup's peak memory, memory events and CPU time. Nothing reads it: no output hash, recheck comparison, charge, budget, schedule, pause or verdict.
 
 Decision:

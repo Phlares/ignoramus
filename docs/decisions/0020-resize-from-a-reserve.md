@@ -1,5 +1,7 @@
 # 0020 Re-size from a reserve
 
+Date: 2026-11-02.
+
 A confirmatory study may declare a first batch, a pinned reserve of fresh clusters, and one blinded re-size. The box runs the first batch, counts the clusters each claimed stratum needs from that batch's own data, then appends that many reserve clusters in a fixed order or stops. At the end it releases the reserve clusters it never measured.
 
 Decision:
