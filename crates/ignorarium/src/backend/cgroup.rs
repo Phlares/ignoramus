@@ -180,7 +180,7 @@ impl RowCgroup {
 
     /// Make the process `cmd` starts enter this leaf before it execs.
     pub fn enter(&self, cmd: &mut Command) {
-        self.hook()(cmd);
+        sys::enter_cgroup(cmd, self.procs.clone());
     }
 
     /// `enter` as a hook that outlives the leaf's borrow.

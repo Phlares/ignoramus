@@ -411,7 +411,7 @@ fn runs_section(c: &Card) -> String {
             let which = if each.is_empty() {
                 String::new()
             } else {
-                format!(" ({})", each.join(", "))
+                format!(" ({})", names(&each))
             };
             format!(
                 "{} passed, {} failed{which}, {} at level 0 (no sandbox), {} not recorded",
