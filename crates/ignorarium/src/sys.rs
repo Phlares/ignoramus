@@ -184,7 +184,12 @@ pub fn peak_rss_kib() -> Option<u64> {
         return None;
     }
     // Linux reports `ru_maxrss` in KiB.
-    u64::try_from(usage.ru_maxrss).ok().filter(|k| *k > 0)
+    positive(usage.ru_maxrss)
+}
+
+/// A kernel count that is above zero; zero and negative values mean "none".
+fn positive(k: i64) -> Option<u64> {
+    u64::try_from(k).ok().filter(|k| *k > 0)
 }
 
 /// Name of the parent process, from `/proc`.
@@ -199,6 +204,14 @@ mod tests {
     use super::*;
     use std::os::unix::thread::JoinHandleExt;
     use std::time::Duration;
+
+    #[test]
+    fn positive_keeps_only_counts_above_zero() {
+        assert_eq!(positive(-1), None);
+        assert_eq!(positive(0), None);
+        assert_eq!(positive(1), Some(1));
+        assert_eq!(positive(4096), Some(4096));
+    }
 
     fn handler(sig: libc::c_int) -> libc::sighandler_t {
         action_of(sig).unwrap().sa_sigaction
