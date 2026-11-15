@@ -40,7 +40,7 @@ pub struct BoxIdentity {
 pub fn current() -> BoxIdentity {
     BoxIdentity {
         rules_sha256: rules_sha256().into(),
-        binary_sha256: serde_json::to_value(binary_sha256()).unwrap_or(Value::Null),
+        binary_sha256: serde_json::to_value(binary_sha256()).expect("a Reading<String> serializes"),
     }
 }
 
