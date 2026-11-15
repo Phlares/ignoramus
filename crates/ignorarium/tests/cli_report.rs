@@ -532,7 +532,7 @@ fn report_json_has_card_version() {
         .assert()
         .success();
     let r: Value = serde_json::from_str(&text(&a)).unwrap();
-    assert_eq!(r["card_version"], 1);
+    assert_eq!(r["card_version"], 2);
     assert_eq!(r["study"], "s1");
     assert_eq!(r["finished_at"], ts_of(&lab));
     assert_eq!(r["records"], bodies.len());
@@ -652,7 +652,7 @@ fn card_marks_interval_post_hoc() {
     let found = tightest(&mean, evidence::Tail::Lower, &samples, 1.0 / level, grid).unwrap();
     assert!(found.margin.unwrap() < 0.0);
     let want = json!([{
-        "stratum": "", "side": "below", "estimate": -25.0, "bound": found.margin,
+        "stratum": "", "side": "below", "margin": 0.0, "estimate": -25.0, "bound": found.margin,
         "method": "inverted registered e-process",
         "grid": { "from": -25.0, "to": 30.0, "step": 1e-4 },
         "contiguous": true, "registered": false,

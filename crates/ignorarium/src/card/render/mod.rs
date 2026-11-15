@@ -57,23 +57,34 @@ fn pct(x: f64, signed: bool) -> String {
     }
 }
 
-/// The decimals in a grid step's shortest form: 1e-4 gives 4, 0.25 gives 2, 0.5 gives 1.
-fn decimals(step: f64) -> usize {
-    (step.to_string().split_once('.')).map_or(0, |(_, d)| d.len())
+/// The decimals in a number's shortest form: 1e-4 gives 4, 0.25 gives 2, 0.5 gives 1.
+fn decimals(x: f64) -> usize {
+    (x.to_string().split_once('.')).map_or(0, |(_, d)| d.len())
 }
 
-/// A bound rounds outward to the step's decimals: up for `below`, down for `above`. The shown
-/// number never lies on the passing side of the true bound.
+/// The largest scaled bound whose slack, 4 float steps, stays under half a unit.
+const SCALED_MAX: f64 = 5e14;
+
+/// A bound rounds outward to the decimals of its grid, the margin plus whole steps: up for
+/// `below`, down for `above`. The shown number never lies on the passing side of the true bound.
+/// A scaled grid point sits within a few float steps of an integer, and the slack absorbs
+/// them. The decimals stop where the scaled bound passes `SCALED_MAX`: past it the slack
+/// reaches half a unit, so the next digit is float noise.
 fn bound_text(i: &Interval) -> Option<String> {
-    let d = decimals(i.grid.step);
-    let k = 10f64.powi(d as i32);
+    let want = decimals(i.grid.step).max(i.margin.map_or(0, decimals));
     i.bound.map(|b| {
+        let fit = (SCALED_MAX / b.abs()).log10().floor().max(0.0) as usize;
+        let d = want.min(fit).min(f64::DIGITS as usize + 2);
+        let k = 10f64.powi(d as i32);
+        let x = b * k;
+        let slack = (x.abs() * 4.0 * f64::EPSILON).max(1e-9);
         let n = if i.side == "above" {
-            (b * k + 1e-9).floor()
+            (x + slack).floor()
         } else {
-            (b * k - 1e-9).ceil()
+            (x - slack).ceil()
         };
-        format!("{:.*}", d, n / k)
+        // `+ 0.0` turns -0 into 0.
+        format!("{:.*}", d, n / k + 0.0)
     })
 }
 
@@ -192,10 +203,10 @@ fn results_table(c: &Card) -> Table {
                 r.e_value.map_or_else(String::new, e_text),
                 r.clusters.to_string(),
                 r.units.to_string(),
-                if r.registered {
-                    "registered"
-                } else {
-                    "post hoc"
+                match (r.registered, r.descriptive) {
+                    (false, _) => "post hoc",
+                    (true, true) => "descriptive",
+                    (true, false) => "registered",
                 }
                 .into(),
             ]

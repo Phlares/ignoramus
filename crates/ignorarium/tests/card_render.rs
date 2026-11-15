@@ -1,6 +1,7 @@
 //! The Markdown and LaTeX renderers and the figure: pure functions of one card.
 use ignorarium::card::Card;
 use ignorarium::card::render::{self, figure, latex, markdown, tex_escape};
+use ignorarium::card::sections::Field;
 use std::path::PathBuf;
 
 fn fixture(name: &str) -> PathBuf {
@@ -14,11 +15,12 @@ fn card() -> Card {
     serde_json::from_str(&text).unwrap()
 }
 
-/// The card with its first interval of `H1`'s code row given `bound`.
+/// The card with its first interval of `H1`'s code row given `bound`, and no margin, so the
+/// bound prints at the step's decimals.
 fn with_bound(bound: Option<f64>, contiguous: bool) -> Card {
     let mut c = card();
     let i = &mut c.results[0].intervals[0];
-    (i.bound, i.contiguous) = (bound, contiguous);
+    (i.bound, i.contiguous, i.margin) = (bound, contiguous, None);
     c
 }
 
@@ -111,11 +113,12 @@ fn markdown_sections_follow_design_order() {
     assert!(at.windows(2).all(|w| w[0] < w[1]), "{at:?}");
 }
 
-/// The card with the code row's `below` bound `b` at grid step `step`, on side `side`.
+/// The card with the code row's `below` bound `b` at grid step `step`, on side `side`, and no
+/// margin.
 fn rounded(side: &str, b: f64, step: f64) -> String {
     let mut c = card();
     let i = &mut c.results[0].intervals[0];
-    (i.side, i.bound, i.grid.step) = (side.into(), Some(b), step);
+    (i.side, i.bound, i.grid.step, i.margin) = (side.into(), Some(b), step, None);
     markdown(&c)
 }
 
@@ -169,6 +172,84 @@ fn bounds_round_outward_on_the_step_grid() {
     assert!(
         rounded("below", 0.31, 0.5).contains("below 0.4 "),
         "step 0.5 has 1 decimal"
+    );
+}
+
+/// Issue #72: every grid point is the margin plus whole steps, so a bound prints exactly at
+/// the margin's decimals when they exceed the step's.
+#[test]
+fn a_bound_prints_at_the_margin_decimals() {
+    let at = |margin: Option<f64>, b: f64| {
+        let mut c = card();
+        let i = &mut c.results[0].intervals[0];
+        (i.margin, i.bound) = (margin, Some(b));
+        markdown(&c)
+    };
+    let md = at(Some(0.039_221), 0.039_221);
+    assert!(md.contains("below 0.039221 "), "{md}");
+    assert!(md.contains("bound 0.039221"), "alt text: {md}");
+    assert!(at(Some(0.039_221), 0.039_221 + 3e-4).contains("below 0.039521 "));
+    assert!(
+        at(Some(0.04), 0.0403).contains("below 0.0403 "),
+        "a margin with fewer decimals keeps the step's"
+    );
+    assert!(
+        at(None, 0.039_221).contains("below 0.0393 "),
+        "a card with no margin keeps the step's decimals"
+    );
+    // The full ln(1.04): 16 decimals, where one float step of the scaled bound is 0.0625.
+    let m = 0.039_220_713_153_281_3;
+    for k in 0..40 {
+        let b = m + k as f64 * 1e-4;
+        let want = format!("below {b:.16} ");
+        assert!(at(Some(m), b).contains(&want), "step {k}: {want}");
+    }
+    assert!(
+        at(Some(1e-320), 1e-320).contains("below 0.00000000000000000 "),
+        "a margin past 17 decimals prints a finite number, not NaN or -0"
+    );
+    assert!(
+        at(Some(0.123_456_789_012_345_6), 0.123_456_789_012_345_6)
+            .contains("below 0.123456789012346 "),
+        "the decimals stop where float noise starts"
+    );
+    let mut c = card();
+    c.results[0].intervals[0].margin = Some(0.039_221);
+    c.results[0].intervals[0].bound = Some(0.039_221);
+    let tex = files(&c);
+    assert!(
+        tex.iter().any(|(_, t)| t == "0.039221"),
+        "the LaTeX value prints the same"
+    );
+}
+
+/// The manifest check of the fixtures' study `s1`.
+const CHECK: &str = "(cd <box home>/studies/s1 && sha256sum -c) < <card folder>/manifest.sha256";
+
+/// A card built before #72 and #80 lacks their fields and still loads, with the defaults.
+#[test]
+fn a_card_built_before_the_audit_fields_still_loads() {
+    let mut v: serde_json::Value = serde_json::to_value(card()).unwrap();
+    v.as_object_mut().unwrap().remove("builder");
+    v["header"].as_object_mut().unwrap().remove("population");
+    for r in v["results"].as_array_mut().unwrap() {
+        r.as_object_mut().unwrap().remove("descriptive");
+        for i in r["intervals"].as_array_mut().unwrap() {
+            i.as_object_mut().unwrap().remove("margin");
+        }
+    }
+    let c: Card = serde_json::from_value(v).unwrap();
+    assert!(c.results.iter().all(|r| !r.descriptive));
+    assert!((c.results.iter().flat_map(|r| &r.intervals)).all(|i| i.margin.is_none()));
+    assert_eq!(c.header.population, Field::Missing { link: None });
+    let md = markdown(&c);
+    assert!(md.contains("- Population: not in the records\n"), "{md}");
+    assert!(md.contains(CHECK), "{md}");
+    assert!(
+        md.contains(
+            "Card builder: version not in the records, binary SHA-256 not in the records\n"
+        ),
+        "{md}"
     );
 }
 

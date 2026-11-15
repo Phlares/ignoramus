@@ -14,6 +14,7 @@
 
 ## Claim
 
+- Population: every text file of the four strata
 - H1 (ppl-ratio): claim below 0.039221; mean clipped to \[-0.693147, 0.693147\]; level 0.005; pass rule: e-value at least 200.0 in code, article
 
 ## Verdicts
@@ -32,7 +33,7 @@
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | H1 | code | ppl-ratio | 0.02870 | +2.91% | below: no grid margin passes (inverted registered e-process; grid: steps of 0.0001 from the registered margin, searched from 0.028621 to 0.693147; post hoc) | 3.100 | 4 | 20 | registered |
 | H1 | article | ppl-ratio | 0.02870 | +2.91% | below: no grid margin passes (inverted registered e-process; grid: steps of 0.0001 from the registered margin, searched from 0.028621 to 0.693147; post hoc) | 3.100 | 4 | 20 | registered |
-| H1 | all | ppl-ratio | 0.02870 | +2.91% | no interval |  | 8 | 40 | registered |
+| H1 | all | ppl-ratio | 0.02870 | +2.91% | no interval |  | 8 | 40 | descriptive |
 
 ## Sensitivity
 
@@ -117,10 +118,17 @@ ignorarium run s1 --max-level 2
 - Isolation levels held: \[2\]
 - Box version: 0.1.0
 - Box binary SHA-256: not in the records
+- Card builder: version 0.0.2, binary SHA-256 cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd (not the box version that ran the study)
 - Bundle DOI: not in the records
 - Manifest roots: spec.toml, spec.json, spec.hash, salt, schedule.json, in/, payload/
 - Roots the folder lacks: spec.json, spec.hash, salt, schedule.json, in/, payload/
 - Manifest: 1 files, list SHA-256 53c7939fa1b6a82466144408e7ed4dcdc51ace61a01a933da54727d670c884db
+
+manifest.sha256 names the files of the study's folder in the box home. Check them there:
+
+```
+(cd <box home>/studies/s1 && sha256sum -c) < <card folder>/manifest.sha256
+```
 
 ## Citation
 

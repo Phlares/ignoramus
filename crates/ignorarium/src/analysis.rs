@@ -841,6 +841,8 @@ pub struct IntervalResult {
     pub stratum: String,
     /// `below` or `above`, as the bound's `BoundResult`.
     pub side: String,
+    /// The registered margin of the bound: every grid margin is it plus whole steps.
+    pub margin: f64,
     /// The mean of the cluster observations.
     pub estimate: f64,
     pub inversion: Inversion,
@@ -903,6 +905,7 @@ pub fn intervals(
                     hypothesis: h.id.clone(),
                     stratum: scope.stratum.to_string(),
                     side: side(&b).into(),
+                    margin: b.margin,
                     estimate,
                     inversion: claim::tightest(&stat, b.tail, &samples, 1.0 / level, grid)?,
                 })

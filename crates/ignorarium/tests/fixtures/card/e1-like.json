@@ -1,5 +1,5 @@
 {
-  "card_version": 1,
+  "card_version": 2,
   "study": "s1",
   "finished_at": "2026-11-14T20:21:09.383Z",
   "records": 87,
@@ -54,6 +54,10 @@
     "timestamp": {
       "state": "missing",
       "link": null
+    },
+    "population": {
+      "state": "recorded",
+      "value": "every text file of the four strata"
     }
   },
   "claims": [
@@ -108,11 +112,13 @@
             "step": 0.0001
           },
           "contiguous": true,
-          "registered": false
+          "registered": false,
+          "margin": 0.039221
         }
       ],
       "note": null,
-      "registered": true
+      "registered": true,
+      "descriptive": false
     },
     {
       "hypothesis": "H1",
@@ -136,11 +142,13 @@
             "step": 0.0001
           },
           "contiguous": true,
-          "registered": false
+          "registered": false,
+          "margin": 0.039221
         }
       ],
       "note": null,
-      "registered": true
+      "registered": true,
+      "descriptive": false
     },
     {
       "hypothesis": "H1",
@@ -153,7 +161,8 @@
       "e_value": null,
       "intervals": [],
       "note": null,
-      "registered": true
+      "registered": true,
+      "descriptive": true
     }
   ],
   "sensitivity": [
@@ -449,6 +458,16 @@
     "cff": {
       "state": "missing",
       "link": null
+    }
+  },
+  "builder": {
+    "version": {
+      "state": "recorded",
+      "value": "0.0.2"
+    },
+    "binary_sha256": {
+      "state": "recorded",
+      "value": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
     }
   }
 }
