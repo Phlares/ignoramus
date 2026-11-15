@@ -263,6 +263,9 @@ pub struct Card {
     pub citation: Citation,
     #[serde(default = "Builder::unknown")]
     pub builder: Builder,
+    /// The box that registered the plan, beside the one that built the card.
+    #[serde(default = "sections::missing")]
+    pub registered_box: Field<crate::identity::BoxIdentity>,
 }
 
 impl Card {
@@ -491,6 +494,7 @@ pub fn build(
         recipe,
         citation,
         builder: Builder::this(),
+        registered_box: Field::of(own.box_identity.clone(), None),
         cost: sections::cost(log, spec),
         runs: sections::runs(log, events.as_ref()),
         outside,

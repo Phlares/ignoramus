@@ -251,6 +251,139 @@ fn the_card_names_its_builder() {
     assert!(md.contains(&line), "{md}");
 }
 
+/// A planted `session.start` of session `id`.
+fn session_start(id: &str) -> (&'static str, Value) {
+    let body = json!({
+        "session": id, "verb": "run", "pid": 1, "box_version": "0",
+        "rules_sha256": "sha256:ab", "binary_sha256": "sha256:cd",
+        "started": "2026-11-15T00:00:00Z",
+    });
+    ("session.start", body)
+}
+
+fn session_end(id: &str) -> (&'static str, Value) {
+    ("session.end", json!({ "session": id, "status": "done" }))
+}
+
+/// The card of `ID` with `sessions` planted after its rows.
+fn card_with_sessions(sessions: Vec<(&'static str, Value)>) -> Card {
+    let lab = lab();
+    let mut all = bodies(&lab, MEAN, rows_on_level_2());
+    let at = all.iter().position(|(k, _)| *k == "row").unwrap();
+    all.splice(at..at, sessions);
+    plant(&lab.home, ID, &all);
+    card_of(&lab)
+}
+
+#[test]
+fn run_sessions_come_from_the_signed_records() {
+    let card = card_with_sessions(vec![session_start("a"), session_end("a")]);
+    assert_eq!(card.runs.sessions, recorded(1));
+    assert_eq!(card.runs.sessions_without_end, Some(0));
+    let md = card::render::markdown(&card);
+    assert!(
+        md.contains(
+            "- Run sessions: 1
+"
+        ),
+        "{md}"
+    );
+}
+
+#[test]
+fn a_killed_session_prints_as_without_an_end_record() {
+    let card = card_with_sessions(vec![
+        session_start("a"),
+        session_start("b"),
+        session_end("b"),
+    ]);
+    assert_eq!(card.runs.sessions, recorded(2));
+    assert_eq!(card.runs.sessions_without_end, Some(1));
+    let md = card::render::markdown(&card);
+    assert!(
+        md.contains(
+            "- Run sessions: 2, 1 without an end record
+"
+        ),
+        "{md}"
+    );
+}
+
+#[test]
+fn no_session_records_print_as_before() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let card = card_of(&lab);
+    assert_eq!(card.runs.sessions, Field::Missing { link: None });
+    assert_eq!(card.runs.sessions_without_end, None);
+    assert_eq!(card.registered_box, Field::Missing { link: None });
+    let md = card::render::markdown(&card);
+    assert!(
+        md.contains(
+            "- Run sessions: not in the records
+"
+        ),
+        "{md}"
+    );
+    assert!(
+        md.contains(
+            "- Registered box: not in the records
+"
+        ),
+        "{md}"
+    );
+    let json: Value = serde_json::from_str(&card.json()).unwrap();
+    assert!(json["runs"].get("sessions_without_end").is_none());
+}
+
+#[test]
+fn the_card_names_the_registered_box() {
+    let lab = lab();
+    let mut all = bodies(&lab, MEAN, rows_on_level_2());
+    for (kind, body) in all.iter_mut() {
+        if *kind == "register" {
+            body["box"] = json!({ "rules_sha256": "sha256:ab", "binary_sha256": "sha256:cd" });
+        }
+    }
+    plant(&lab.home, ID, &all);
+    let card = card_of(&lab);
+    let md = card::render::markdown(&card);
+    assert!(
+        md.contains(
+            "- Registered box: rules sha256:ab, binary sha256:cd
+"
+        ),
+        "{md}"
+    );
+    let json: Value = serde_json::from_str(&card.json()).unwrap();
+    assert_eq!(json["registered_box"]["state"], "recorded");
+    assert_eq!(json["registered_box"]["value"]["rules_sha256"], "sha256:ab");
+}
+
+#[test]
+fn a_declared_box_change_is_a_deviation_row() {
+    use ignorarium::control::{DeviationRow, Timing, deviation};
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let row = DeviationRow {
+        kind: "box-changed".into(),
+        reason: "rebuilt".into(),
+        timing: Timing::DuringCollection,
+        original: "binary sha256:cd, rules sha256:ab".into(),
+        justification: "rebuilt".into(),
+        impact: "rows from here run under binary sha256:ef, rules sha256:ab".into(),
+    };
+    deviation(&lab.home, ID, &row).unwrap();
+    let card = card_of(&lab);
+    let kinds: Vec<&str> = (card.deviations.iter())
+        .filter_map(|d| match d {
+            card::DeviationRow::Recorded { kind, .. } => Some(&kind[..]),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(kinds, ["box-changed"]);
+}
+
 /// Issue #80: the claim's frame prints beside it.
 #[test]
 fn the_population_prints_with_the_claim() {

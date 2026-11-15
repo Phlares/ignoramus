@@ -370,8 +370,12 @@ fn runs_section(c: &Card) -> String {
             a.exit.clone().unwrap_or_default()
         )
     }));
+    let open = match r.sessions_without_end {
+        Some(k) if k > 0 => format!(", {k} without an end record"),
+        _ => String::new(),
+    };
     l.push(format!(
-        "Run sessions: {}",
+        "Run sessions: {}{open}",
         field(&r.sessions, u64::to_string)
     ));
     l.extend(r.stopped.as_ref().map(|s| format!("Stopped: {s}")));
@@ -405,6 +409,10 @@ fn recipe_section(c: &Card) -> String {
         "Card builder: version {}, binary SHA-256 {}{differs}",
         field(&b.version, |v| v.clone()),
         field(&b.binary_sha256, |v| v.clone())
+    ));
+    l.push(format!(
+        "Registered box: {}",
+        field(&c.registered_box, |b| b.text())
     ));
     l.push(format!(
         "Bundle DOI: {}",

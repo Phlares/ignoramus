@@ -2115,6 +2115,11 @@ fn a_run_study_reports_its_recorded_verdict() {
         assert_eq!(got["above"], want.above);
         assert_eq!(got["units"], want.units);
     }
+    let md = bin(&lab)
+        .args(["report", "told", "--format", "md"])
+        .assert()
+        .success();
+    assert!(text(&md).contains("- Run sessions: 1\n"), "{}", text(&md));
     let close_ts = close_record_of(&lab, "told").ts;
     let verdict_ts = kind_of(&lab, "told", "verdict")[0].ts.clone();
     assert_eq!(r["finished_at"], close_ts.as_str());

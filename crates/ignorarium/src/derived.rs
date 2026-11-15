@@ -414,6 +414,34 @@ impl SessionEnd {
     }
 }
 
+/// What the session records of a log hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sessions {
+    /// The session starts that parse.
+    pub started: u64,
+    /// Of those, the starts with no end record of the same session: the process died.
+    pub without_end: u64,
+    /// The session records whose body does not parse.
+    pub unreadable: u64,
+}
+
+/// The sessions of `records`, each start paired with the end of its own session id.
+pub fn sessions(records: &[Record]) -> Sessions {
+    let starts: Vec<SessionStart> = records.iter().filter_map(SessionStart::of).collect();
+    let ends: Vec<SessionEnd> = records.iter().filter_map(SessionEnd::of).collect();
+    let ended: BTreeSet<&str> = ends.iter().map(|e| &e.session[..]).collect();
+    let kinds = (records.iter())
+        .filter(|r| r.kind == SESSION_START || r.kind == SESSION_END)
+        .count();
+    Sessions {
+        started: starts.len() as u64,
+        without_end: (starts.iter())
+            .filter(|s| !ended.contains(&s.session[..]))
+            .count() as u64,
+        unreadable: kinds.saturating_sub(starts.len() + ends.len()) as u64,
+    }
+}
+
 /// A value taken from another study: where the plan names it, the study, the hashes of the
 /// records it comes from, and the value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -681,4 +709,43 @@ pub fn contrast_key(
     let bytes = to_canonical(&key).expect("a key built from finite numbers serializes");
     let hash = sha256_hex(&bytes);
     (key, hash)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_session_pairs_with_the_end_of_its_own_id() {
+        let record = |kind: &str, body: Value| Record {
+            seq: 0,
+            prev: String::new(),
+            study: "s".into(),
+            row: None,
+            kind: kind.into(),
+            body,
+            ts: String::new(),
+        };
+        let start = |id: &str| {
+            let body = json!({
+                "session": id, "verb": "run", "pid": 1, "box_version": "0",
+                "rules_sha256": "sha256:ab", "binary_sha256": "sha256:cd",
+                "started": "2026-11-15T00:00:00Z",
+            });
+            record(SESSION_START, body)
+        };
+        let end = |id: &str| record(SESSION_END, json!({ "session": id, "status": "done" }));
+        let of = |all: &[Record]| {
+            let s = sessions(all);
+            (s.started, s.without_end, s.unreadable)
+        };
+        assert_eq!(of(&[]), (0, 0, 0));
+        assert_eq!(of(&[start("a"), end("a")]), (1, 0, 0));
+        assert_eq!(of(&[start("a"), start("b"), end("b")]), (2, 1, 0));
+        assert_eq!(of(&[start("a"), end("b")]), (1, 1, 0));
+        // A session record whose body does not parse counts as unreadable, not as a session.
+        let bad = |kind: &str| record(kind, json!({ "session": 1 }));
+        let all = [start("a"), bad(SESSION_START), bad(SESSION_END)];
+        assert_eq!(of(&all), (1, 1, 2));
+    }
 }

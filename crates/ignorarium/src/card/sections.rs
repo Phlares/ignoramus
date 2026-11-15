@@ -719,8 +719,13 @@ pub struct Runs {
     pub ok: Vec<RunGroup>,
     /// In log order.
     pub attempts: Vec<Attempt>,
-    /// The run sessions are events, which no key signs.
+    /// The signed `session.start` records; `Missing` when the log holds none (a study run
+    /// before they existed), as the unsigned events then hold the sessions.
     pub sessions: Field<u64>,
+    /// Of those, the starts with no end record: a process that died. `Some` only when
+    /// session records exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sessions_without_end: Option<u64>,
     /// The reason in the study's `stop` record.
     pub stopped: Option<String>,
 }
@@ -742,12 +747,15 @@ pub fn runs(log: &Log, events: Option<&Outside>) -> Runs {
             });
         }
     }
+    let held = crate::derived::sessions(&log.records);
+    let some = |n| (held.started > 0).then_some(n);
     Runs {
         ok: (ok.into_iter())
             .map(|(stage, rows)| RunGroup { stage, rows })
             .collect(),
         attempts,
-        sessions: Field::of(None, events),
+        sessions: Field::of(some(held.started), events),
+        sessions_without_end: some(held.without_end),
         stopped: crate::cli::stopped_why(&log.records),
     }
 }
