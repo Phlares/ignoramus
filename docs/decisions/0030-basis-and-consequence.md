@@ -19,7 +19,7 @@ Decision:
 - **One meaning of `design.power`.** It is the joint target: the chance that every bound in every stratum passes (0013). The re-size asks each of k strata for `design.power`^(1/k) (0020).
 - **No offset rule.** The box gives no default for `power_at` and no rule that derives it from the margin. Each `power_at` states its own basis.
 - **No preset supplies a value.** A template or a profile may require a basis or a print. It supplies a number only where a named standard states that number.
-- **Same shape, own issues.** Three more declared things follow the same two mechanisms: a group above the cluster (#111), the stated population as named attributes with a count per value, and input screens as named rules that `check` applies again.
+- **Same shape, own issues.** Three more declared things follow the same two mechanisms: a group above the cluster (#111), the stated population as named attributes with a count per value (#114), and input screens as named rules that `check` applies again (#115).
 
 Evidence. The first confirmatory study and the three planned after it. Each number was computed again from the records before it went into this record.
 
@@ -53,7 +53,6 @@ Open:
 
 - The list of kinds for each value.
 - A second selection rule (best worst stratum) waits for a simulation at borrowed estimates (#75).
-- Issues for the population attributes and for the screens.
 - This record sets no value.
 
 Sources:
