@@ -34,16 +34,18 @@ const AGENT_LEVEL: u8 = 2;
 pub const LABEL_NOT_COMPUTED: &str = "label not computed";
 /// The results note of a quantile claim (ruling R8).
 pub const NO_QUANTILE_INTERVAL: &str = "the interval is not built for quantile claims";
-/// The files of the study folder the card lists by name, in order. Every file under `PREREG`
-/// follows them.
+/// The files of the study folder the card lists by name, in order. Every file under each of
+/// `TREES` follows them.
 pub const LISTED: [&str; 4] = [
     "gaps.md",
     "decisions.md",
     crate::deviations::FILE,
     super::recipe::CITATION_FILE,
 ];
-/// The study folder's tree of preregistered documents, among them the statement.
-pub const PREREG: &str = "prereg";
+/// The trees of the study folder the card lists file by file, in order: the preregistered
+/// documents, among them the statement, and the descriptive outputs, files no registered test
+/// reads.
+pub const TREES: [&str; 2] = ["prereg", "descriptive"];
 /// Why an outside file is missing when no `--study-folder` is given.
 pub const NO_STUDY_FOLDER: &str = "no study folder given";
 /// Why a link in the study folder is missing from the list.
@@ -82,6 +84,11 @@ pub enum Field<T> {
         link: Option<Outside>,
     },
     NotApplicable,
+}
+
+/// The default of a field a card built before it existed does not hold.
+pub(crate) fn missing<T>() -> Field<T> {
+    Field::Missing { link: None }
 }
 
 impl<T> Field<T> {
@@ -135,16 +142,16 @@ impl OutsideFiles {
     }
 }
 
-/// The paths under `PREREG` in `dir` that are files or links, sorted. A link is not entered.
-/// Refuses what the manifest walk refuses.
-fn prereg(dir: &Path) -> Result<Vec<String>, String> {
+/// The paths under tree `root` of `dir` that are files or links, sorted; none when the tree is
+/// absent. A link is not entered. Refuses what the manifest walk refuses.
+fn tree(dir: &Path, root: &str) -> Result<Vec<String>, String> {
     let mut found = vec![];
-    let mut pending = vec![(dir.join(PREREG), PREREG.to_string())];
+    let mut pending = vec![(dir.join(root), root.to_string())];
     while let Some((full, rel)) = pending.pop() {
         plain(&rel, "the path")?;
         let kind = match std::fs::symlink_metadata(&full) {
             Ok(meta) => meta.file_type(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound && rel == PREREG => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && rel == root => continue,
             Err(e) => return Err(format!("{rel}: {e}")),
         };
         if kind.is_dir() {
@@ -227,7 +234,8 @@ pub fn outside(dir: Option<&Path>) -> Result<(OutsideFiles, Option<Source>), Str
     if inside != "true" {
         return Err(not_inside(""));
     }
-    let names = LISTED.map(String::from).into_iter().chain(prereg(dir)?);
+    let trees = (TREES.iter().map(|t| tree(dir, t))).collect::<Result<Vec<_>, _>>()?;
+    let names = LISTED.map(String::from).into_iter().chain(trees.concat());
     let files = names
         .map(|name| listed(dir, &name))
         .collect::<Result<Vec<_>, _>>()?;
@@ -281,6 +289,10 @@ pub struct Header {
     pub registered_at: String,
     /// An outside time stamp of the registration; a confirmatory plan waits for one.
     pub timestamp: Field<String>,
+    /// The plan's `question.population`: the frame every claim covers. Missing when the plan
+    /// leaves it empty.
+    #[serde(default = "missing")]
+    pub population: Field<String>,
 }
 
 /// The header of a study whose register record `own` was written at `registered_at`.
@@ -291,6 +303,10 @@ pub fn header(own: &Register, registered_at: &str, spec: &Spec) -> Header {
         spec_hash: own.spec_hash.clone(),
         registered_at: registered_at.into(),
         timestamp: Field::of(own.timestamp.clone().filter(|t| t != PENDING), None),
+        population: Field::of(
+            Some(spec.question.population.clone()).filter(|p| !p.is_empty()),
+            None,
+        ),
     }
 }
 
@@ -375,6 +391,9 @@ pub struct ResultRow {
     pub note: Option<String>,
     /// The outcome is registered.
     pub registered: bool,
+    /// No registered claim is held in this group: the row carries no claim.
+    #[serde(default)]
+    pub descriptive: bool,
 }
 
 pub fn results(after: &[Record], spec: &Spec, intervals: &[IntervalResult]) -> Vec<ResultRow> {
@@ -384,6 +403,9 @@ pub fn results(after: &[Record], spec: &Spec, intervals: &[IntervalResult]) -> V
             let h = (spec.question.hypotheses.iter()).find(|h| h.id == e.hypothesis);
             let outcome = spec.outcomes.iter().find(|o| o.id == e.outcome);
             let log_ratio = outcome.is_some_and(|o| o.paired == Paired::LogRatio);
+            let claimed = h.is_some_and(|h| {
+                h.claim.is_some() && claim_strata(h).contains(&e.stratum.as_str())
+            });
             let quantile = h.is_some_and(|h| {
                 h.claim.is_some() && matches!(h.statistic, Some(StatisticSpec::Quantile(_)))
             });
@@ -402,6 +424,7 @@ pub fn results(after: &[Record], spec: &Spec, intervals: &[IntervalResult]) -> V
                 intervals,
                 note: quantile.then(|| NO_QUANTILE_INTERVAL.into()),
                 registered: outcome.is_some_and(|o| o.registered),
+                descriptive: !claimed,
                 hypothesis: e.hypothesis,
                 stratum: e.stratum,
                 outcome: e.outcome,
@@ -489,29 +512,49 @@ pub struct Stack {
     pub vcpus: Field<u32>,
     /// The plan's `row_memory_mib`.
     pub memory_cap_mib: Field<u32>,
+    /// Per key above, the row records whose value does not parse; keys with none are left out.
+    #[serde(default)]
+    pub unreadable: BTreeMap<String, u64>,
 }
 
-/// The distinct values of `key` over the row records of `log`; `None` when no row holds one.
-fn from_rows<T: Ord + DeserializeOwned>(log: &Log, key: &str) -> Option<Vec<T>> {
-    let values: BTreeSet<T> = (rows(log).filter_map(|r| r.body.get(key)))
-        .filter_map(|v| serde_json::from_value(v.clone()).ok())
-        .collect();
+/// The distinct values of `key` over the row records of `log`, `None` when no row holds one,
+/// and the count of rows whose value does not parse, added to `unreadable`.
+fn from_rows<T: Ord + DeserializeOwned>(
+    log: &Log,
+    key: &str,
+    unreadable: &mut BTreeMap<String, u64>,
+) -> Option<Vec<T>> {
+    let mut values = BTreeSet::new();
+    let mut bad = 0;
+    for v in rows(log).filter_map(|r| r.body.get(key)) {
+        match serde_json::from_value(v.clone()) {
+            Ok(v) => {
+                values.insert(v);
+            }
+            Err(_) => bad += 1,
+        }
+    }
+    if bad > 0 {
+        unreadable.insert(key.into(), bad);
+    }
     (!values.is_empty()).then(|| values.into_iter().collect())
 }
 
 pub fn stack(log: &Log, spec: &Spec, events: Option<&Outside>) -> Stack {
-    let levels: Option<Vec<u8>> = from_rows(log, "isolation");
+    let mut unreadable = BTreeMap::new();
+    let levels: Option<Vec<u8>> = from_rows(log, "isolation", &mut unreadable);
     let agentless = (levels.as_ref()).is_some_and(|l| l.iter().all(|l| *l < AGENT_LEVEL));
-    let agent_sha256 = match from_rows(log, "agent_sha256") {
+    let agent_sha256 = match from_rows(log, "agent_sha256", &mut unreadable) {
         None if agentless => Field::NotApplicable,
         found => Field::of(found, events),
     };
     Stack {
         isolation: Field::of(levels, events),
-        launcher: Field::of(from_rows(log, "launcher"), events),
+        launcher: Field::of(from_rows(log, "launcher", &mut unreadable), events),
         agent_sha256,
         vcpus: Field::of(None, None),
         memory_cap_mib: Field::of(spec.design.row_memory_mib, None),
+        unreadable,
     }
 }
 

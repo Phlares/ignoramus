@@ -996,6 +996,7 @@ fn intervals_match_verdict_order() {
             hypothesis: "H1".into(),
             stratum: "code".into(),
             side: "below".into(),
+            margin: 0.0,
             estimate: drawn.iter().sum::<f64>() / drawn.len() as f64,
             inversion: want,
         }]

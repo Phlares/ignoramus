@@ -173,6 +173,113 @@ fn stack_from_row_records() {
     assert_eq!(stack.memory_cap_mib, recorded(2304));
 }
 
+/// Issue #73: a row value the reader cannot parse is counted, not dropped without a trace.
+#[test]
+fn an_unreadable_row_value_is_counted() {
+    let lab = lab();
+    let mut bodies = bodies(&lab, MEAN, rows_on_level_2());
+    let first = bodies.iter_mut().find(|(k, _)| *k == "row").unwrap();
+    first.1["isolation"] = json!("2");
+    plant(&lab.home, ID, &bodies);
+    let card = card_of(&lab);
+    let stack = &card.setup.stack;
+    assert_eq!(stack.isolation, recorded(vec![2]));
+    assert_eq!(
+        stack.unreadable,
+        std::collections::BTreeMap::from([("isolation".to_string(), 1)])
+    );
+    let md = card::render::markdown(&card);
+    assert!(
+        md.contains("Unreadable row values, rows per key: isolation 1"),
+        "{md}"
+    );
+    let lab = self::lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let card = card_of(&lab);
+    assert!(card.setup.stack.unreadable.is_empty());
+    assert!(!card::render::markdown(&card).contains("Unreadable row values"));
+}
+
+/// Issue #80: the claim is held per stratum, so the pooled row carries no claim.
+#[test]
+fn a_row_outside_the_claim_is_descriptive() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let card = card_of(&lab);
+    let marks: Vec<(&str, bool)> = (card.results.iter())
+        .map(|r| (r.stratum.as_str(), r.descriptive))
+        .collect();
+    assert_eq!(marks, [("code", false), ("article", false), ("", true)]);
+    let md = card::render::markdown(&card);
+    let pooled = md.lines().find(|l| l.starts_with("| H1 | all |")).unwrap();
+    assert!(pooled.ends_with("| descriptive |"), "{pooled}");
+    let code = md.lines().find(|l| l.starts_with("| H1 | code |")).unwrap();
+    assert!(code.ends_with("| registered |"), "{code}");
+}
+
+/// Issue #80: `manifest.sha256` lists paths of the study's folder in the box home.
+#[test]
+fn the_manifest_names_the_folder_it_checks() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let card = card_of(&lab);
+    let md = card::render::markdown(&card);
+    let check = format!(
+        "```\n(cd <box home>/studies/{ID} && sha256sum -c) < <card folder>/manifest.sha256\n```"
+    );
+    assert!(md.contains(&check), "{md}");
+}
+
+/// Issue #80: the card names the box that built it, whatever box ran the rows.
+#[test]
+fn the_card_names_its_builder() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let card = card_of(&lab);
+    let exe = std::env::current_exe().unwrap();
+    let want = ignorarium::canon::sha256_file(&exe).unwrap();
+    assert_eq!(
+        card.builder.version,
+        recorded(env!("CARGO_PKG_VERSION").to_string())
+    );
+    assert_eq!(card.builder.binary_sha256, recorded(want.clone()));
+    let md = card::render::markdown(&card);
+    let line = format!(
+        "Card builder: version {}, binary SHA-256 {want}",
+        env!("CARGO_PKG_VERSION")
+    );
+    assert!(md.contains(&line), "{md}");
+}
+
+/// Issue #80: the claim's frame prints beside it.
+#[test]
+fn the_population_prints_with_the_claim() {
+    let lab = lab();
+    let mut bodies = bodies(&lab, MEAN, rows_on_level_2());
+    let dir = lab.home.study_dir(ID);
+    let text = std::fs::read_to_string(dir.join("spec.toml")).unwrap();
+    let text = text.replace("population = \"\"", "population = \"every input file\"");
+    let hash = spec::parse(text.as_bytes()).unwrap().hash;
+    for (kind, body) in bodies.iter_mut() {
+        if *kind == "register" {
+            body["spec_hash"] = json!(hash);
+        }
+    }
+    std::fs::write(dir.join("spec.toml"), text).unwrap();
+    plant(&lab.home, ID, &bodies);
+    let card = card_of(&lab);
+    assert_eq!(
+        card.header.population,
+        recorded("every input file".to_string())
+    );
+    let md = card::render::markdown(&card);
+    let claim = md.split("## Claim\n").nth(1).unwrap();
+    assert!(
+        claim.starts_with("\n- Population: every input file\n"),
+        "{claim}"
+    );
+}
+
 #[test]
 fn display_word_not_shown_for_fail() {
     let lab = lab();
@@ -371,6 +478,33 @@ fn outside_files_from_git_folder() {
         })
         .collect();
     assert_eq!(rows, ["s"], "deviations.toml comes from the study folder");
+}
+
+/// Issue #80: the study's descriptive outputs are listed by path and hash, like `prereg/`.
+#[test]
+fn descriptive_outputs_are_listed() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let (_repo, folder) = study_repo(
+        "",
+        &[
+            ("prereg/s.md", "s\n"),
+            ("descriptive/b/rivals.json", "{}\n"),
+            ("descriptive/a.json", "[]\n"),
+        ],
+    );
+    let files = card_in(&lab, &folder).outside.files;
+    let tail: Vec<Listed> = files[FIXED.len()..].to_vec();
+    assert_eq!(
+        tail,
+        [
+            present("prereg/s.md", "s\n"),
+            present("descriptive/a.json", "[]\n"),
+            present("descriptive/b/rivals.json", "{}\n"),
+        ]
+    );
+    std::fs::write(folder.join("descriptive/a.json"), "changed\n").unwrap();
+    assert!(refusal(&lab, &folder).contains("descriptive/a.json"));
 }
 
 #[test]
