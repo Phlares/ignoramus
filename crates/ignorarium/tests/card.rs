@@ -940,7 +940,10 @@ fn cost_totals_row_telemetry() {
     assert_eq!(t.cpu_ticks.value["steal"], 1.75 * 80.0);
     assert_eq!(t.cpu_ticks.value["user"], 0.0);
     assert_eq!(t.cpu_ticks.value.len(), 10);
-    assert_eq!((t.process.summed.read, t.process.summed.unavailable), (0, 80));
+    assert_eq!(
+        (t.process.summed.read, t.process.summed.unavailable),
+        (0, 80)
+    );
     assert!(t.process.summed.value.is_empty(), "unavailable is not zero");
     assert_eq!(t.process.memory_peak_max, None);
     let read = json!({
@@ -950,7 +953,10 @@ fn cost_totals_row_telemetry() {
     let lab = self::lab();
     fixture(&lab, MEAN, json!({ "telemetry": telemetry(read) }));
     let t = card_of(&lab).cost.telemetry;
-    assert_eq!((t.process.summed.read, t.process.summed.unavailable), (80, 0));
+    assert_eq!(
+        (t.process.summed.read, t.process.summed.unavailable),
+        (80, 0)
+    );
     assert_eq!(t.process.summed.value["cpu_stat.usage_usec"], 500.0 * 80.0);
     assert_eq!(t.process.summed.value["memory_events.max"], 2.0 * 80.0);
     assert_eq!(t.process.memory_peak_max, Some(4096));

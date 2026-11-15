@@ -23,7 +23,7 @@ Decision:
   - The box enables `memory` only, and sets no limit with it. It never enables `cpu`, `io` or `pids`. With `cpu`, the kernel shares CPU between the box and the rows by cgroup weight, which is a scheduling change.
   - `cpu.stat` times need no controller. Throttling counts need `cpu`, and nothing throttles without `cpu.max`, so none are kept.
   - No `io.stat`: a systemd user manager need not delegate `io`, so it would often read unavailable.
-- **Level 2.** `cgroup` reads `level 2 rows run in a machine`. A cgroup around the VMM would count guest memory the machine touched, not payload memory.
+- **Level 2.** Level 2 makes a leaf per row as level 1 does, once the machine is about to start, and the VMM enters it before exec through a hook on the VMM's command. The leaf holds the VMM and every thread it starts. Its reading is the machine's total, not the payload's memory: guest RAM the machine touched, the VMM process, and page cache the VMM charged. The card names it `VM total (guest RAM touched + VMM), bytes`, and its CPU line `Cgroup counters, level 2 (VMM and guest)`. `cpu.stat` holds the VMM with guest vCPU time; `cpu_seconds` stays the guest's report and `box_cpu_seconds` the `wait4` count of the VMM. A row that ends before its machine starts makes no leaf and reads `the box made no cgroup for the row`.
 
 What `memory.peak` measures: the most memory charged to the leaf since the box made it. That is anonymous memory, the page cache of files the row reads and writes, shared memory, and kernel memory such as page tables. It sizes host memory and the rows a host can run at once. It does not size `design.row_memory_mib`, which caps `VmData` (0019). The cap stays `RLIMIT_DATA`.
 
@@ -40,7 +40,10 @@ Limits:
 - An EBUSY refusal happens after the box moved itself into `ignorarium-box`. The box stays there for the rest of the run.
 - A removed leaf can stay in the kernel as a dying memory cgroup until its page cache is reclaimed. Across thousands of rows this can add up to hundreds of MB of reclaimable memory. The operator watches `nr_dying_descendants` in the scope's `cgroup.stat`.
 - Level 0 has no cgroup namespace, so a payload sees its per-row path in `/proc/self/cgroup`. A payload that prints it changes its output hash.
-- Level 2 rows run in a machine and record the cgroup as unavailable. Per-row cgroup readings cover levels 0 and 1 only.
+- Level 2's page cache part is bounded. The box builds the input and payload disks with a `mkfs.ext4` child before the VMM starts, so those pages are charged to the box's cgroup. The rootfs disk is kept between rows, so only the first level 2 row after a host boot pays for the pages it reads. The leaf takes the VMM's writes to the output disk, at most its size (256 MiB by default). Under host memory pressure, input and payload pages can be evicted and re-read by the VMM, which charges them to the leaf.
+- An out-of-memory kill inside the guest does not show in `memory.events`. The box sets no `memory.max`, so `oom_kill` counts only host kills of the VMM. A row past its cap fails inside the guest as a payload failure (0019).
+- Cloud Hypervisor's disks use the host page cache by default (`direct=off`). This is not checked against its documentation; the bounds test checks its effect.
+- The VMM's own overhead beyond guest RAM and the output disk is measured on the test host: OVERHEAD_PENDING.
 - The ownership check does not prove `Delegate=yes`. The operator starts the run with `systemd-run --user --scope -p Delegate=yes`.
 
 Case against: a scope ties the run's life to the systemd user manager, which a run from a plain shell does not depend on.
@@ -62,6 +65,7 @@ It prints these figures:
 - The total row count.
 - The cgroup states, with a row count for each. A row with no cgroup reading counts as `not recorded`.
 - Each host CPU model and flags hash, with a row count.
+- Rows below level 2 and level 2 rows print their cgroup states apart (`cgroup` and `cgroup, level 2`), because a level 2 leaf holds a machine, not the payload's processes. A study with no level 2 rows prints as before. The card sums cgroup counters and takes the peak per class the same way.
 - Steal seconds per row and iowait seconds per row: largest and mean, each with its row count.
 - The rows with no host CPU and the rows with no usable CPU ticks: each as a count of rows whose reading is a reason or unusable, and a count of rows that never recorded it.
 - Wall seconds per row and CPU seconds per row for the whole study: largest and mean.
@@ -74,7 +78,7 @@ The share of steal or iowait is its tick delta over the deltas of user, nice, sy
 
 The two numbers of a block are the first and last row of the block in schedule order. Rows run by stage, cluster, then condition. The two numbers need not be consecutive, and the first can exceed the last. The block edges come from the full schedule, reserve and child rows included. A row that never runs has no record in its block. The edges do not move when a re-size or trigger record lands.
 
-The command reads verified records. For each row record it copies the row index, the `telemetry` key and the wall and CPU seconds. It never copies `values`, `output_hash`, `outputs` or `data_hashes`. It works while a run holds the run lock. In `--json`, each spread is `{rows, max, mean}`: `steal_s`, `iowait_s`, `wall_s` and `cpu_s` for the study, and `steal_share`, `iowait_share` and, when not blind, `wall_s` and `cpu_s` for each block.
+The command reads verified records. For each row record it copies the row index, the `telemetry` key and the wall and CPU seconds. It never copies `values`, `output_hash`, `outputs` or `data_hashes`. It works while a run holds the run lock. In `--json`, `cgroup` holds the states of rows below level 2 and `cgroup_machine`, present only when level 2 rows exist, those of level 2 rows. Each spread is `{rows, max, mean}`: `steal_s`, `iowait_s`, `wall_s` and `cpu_s` for the study, and `steal_share`, `iowait_share` and, when not blind, `wall_s` and `cpu_s` for each block.
 
 A blind study prints no per-block wall or CPU figure. A row index joins to a condition through the schedule, and row time can track an outcome. A block of row times would let a blind reader infer the condition. This follows the rule that comparative interim results stay limited to people independent of the study's conduct (FDA 2019, section VII). Steal and iowait shares come from host counters, not from a row's result. They stay.
 
