@@ -46,8 +46,59 @@ comment. Every comment emails everyone on the issue.
 - A new dependency needs a line in `docs/decisions/0001-dependencies.md` with
   its reason. Open an issue before you add one.
 - A new check, threshold or algorithm needs a decision record in
-  `docs/decisions/`, with the numbers that justify it.
+  `docs/decisions/`, with the numbers that justify it. See
+  [Decision records](#decision-records).
 - New dependencies must have a license compatible with Apache-2.0.
+
+## Decision records
+
+A record under `docs/decisions/` is named `NNNN-<slug>.md` and holds the
+parts below. Each label starts a line and ends with a colon. The test
+`crates/ignorarium/tests/docs_decisions.rs` checks them.
+
+```text
+# NNNN Title
+
+Date: YYYY-MM-DD. The day the record goes on file.
+
+Decision:
+
+- What is decided.
+
+Why:
+
+- The reasons.
+
+Case against:
+
+- The arguments against the decision, and the alternatives rejected.
+
+What failure this prevents: the failure, and whether it was observed or is only expected.
+
+Constants:
+
+- `name` = value. Basis: where the value comes from. Rule for change: when and how it may change.
+
+Sources:
+
+- A citation with its URL.
+```
+
+- **Date.** The date is the day the record goes on file. When the decision
+  was made earlier, say so on the same line.
+- **Case against.** A limit or a cost alone is not a case against.
+- **What failure this prevents.** Name the source of an observed failure.
+- **Nothing to say.** Write `none` and the reason, as in
+  `Constants: none. This record sets no value.` A bare `none` fails the test.
+- **Later changes.** A change to the Decision or Constants part adds a line
+  under the Date line: `Amended: YYYY-MM-DD. What changed (#PR).` Oldest
+  first. A spelling fix needs none.
+- **Parts added later.** A part written on a later day than the record's
+  date ends with `(written YYYY-MM-DD)`.
+- **Other parts** are free: Evidence, Limits, Cost, Open. The order is free.
+- **Records 0001 to 0029** are older than this template. Their Date and
+  Amended lines were added on 2026-11-15 from the git history. The test
+  lists the parts each still lacks, and that list only shrinks.
 
 ## License of contributions
 

@@ -199,6 +199,18 @@ fn records() -> BTreeMap<String, String> {
     records_in(Path::new("../../docs/decisions"))
 }
 
+fn template() -> String {
+    let guide = std::fs::read_to_string("../../CONTRIBUTING.md").unwrap();
+    let (_, section) = guide
+        .split_once("\n## Decision records\n")
+        .expect("CONTRIBUTING.md has a section \"Decision records\"");
+    let fenced = section
+        .split("\n```")
+        .nth(1)
+        .expect("the section holds a fenced template");
+    fenced.split_once('\n').map_or("", |(_, block)| block).to_owned()
+}
+
 #[test]
 fn a_part_needs_a_label_at_line_start_and_a_body() {
     let has = |text: &str, part: &str| held(text).contains(part);
@@ -332,4 +344,16 @@ fn a_stray_file_among_the_records_fails() {
     std::fs::write(dir.path().join("0001-a.md"), "# 0001 A\n").unwrap();
     std::fs::write(dir.path().join("README.md"), "x\n").unwrap();
     records_in(dir.path());
+}
+
+#[test]
+fn the_template_holds_every_part() {
+    let template = template();
+    assert_eq!(held(&template).len(), PARTS.len(), "{template}");
+    for bullet in constants(&template).expect("the template shows a constant") {
+        assert!(
+            bullet.contains("Basis:") && bullet.contains("Rule for change:"),
+            "{bullet}"
+        );
+    }
 }
