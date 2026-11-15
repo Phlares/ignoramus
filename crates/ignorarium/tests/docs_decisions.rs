@@ -16,7 +16,8 @@ fn after_label<'a>(line: &'a str, label: &str) -> Option<&'a str> {
 }
 
 fn opens_a_part(line: &str) -> bool {
-    line.starts_with('#') || (line.starts_with(char::is_uppercase) && line.trim_end().ends_with(':'))
+    line.starts_with('#')
+        || (line.starts_with(char::is_uppercase) && line.trim_end().ends_with(':'))
 }
 
 fn body<'a>(text: &'a str, label: &str) -> Option<Vec<&'a str>> {
@@ -40,7 +41,12 @@ fn held(text: &str) -> BTreeSet<&'static str> {
 
 fn constants(text: &str) -> Option<Vec<String>> {
     let body = body(text, "Constants")?;
-    if body.join(" ").trim().to_ascii_lowercase().starts_with("none") {
+    if body
+        .join(" ")
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("none")
+    {
         return None;
     }
     let mut bullets: Vec<String> = Vec::new();
@@ -73,12 +79,13 @@ fn dated<'a>(line: &'a str, label: &str) -> Option<&'a str> {
 }
 
 fn amended_in_order(date: &str, below: &mut std::str::Lines) -> bool {
-    let mut last = date;
-    let mut head = below.by_ref().take_while(|line| line.starts_with("Amended:"));
-    let ordered = head.all(|line| {
-        dated(line, "Amended").is_some_and(|next| std::mem::replace(&mut last, next) <= next)
-    });
-    ordered && !below.any(|line| line.starts_with("Amended:"))
+    let head: Option<Vec<&str>> = below
+        .by_ref()
+        .take_while(|line| line.starts_with("Amended:"))
+        .map(|line| dated(line, "Amended"))
+        .collect();
+    head.is_some_and(|dates| std::iter::once(date).chain(dates).is_sorted())
+        && !below.any(|line| line.starts_with("Amended:"))
 }
 
 fn problems(number: &str, text: &str, debt: &[&str]) -> Vec<String> {
@@ -86,17 +93,13 @@ fn problems(number: &str, text: &str, debt: &[&str]) -> Vec<String> {
     let held = held(text);
     for part in PARTS {
         match (debt.contains(&part), held.contains(part)) {
-            (true, _) if part == "Date" => faults.push(format!("{number}: Date cannot be debt")),
             (true, true) => faults.push(format!("{number}: holds {part}; remove it from DEBT")),
             (false, false) => faults.push(format!("{number}: lacks {part}")),
             _ => {}
         }
     }
     let mut below = text.lines();
-    let first = below
-        .by_ref()
-        .skip(1)
-        .find(|line| !line.trim().is_empty());
+    let first = below.by_ref().skip(1).find(|line| !line.trim().is_empty());
     match first.and_then(|line| dated(line, "Date")) {
         None => faults.push(format!(
             "{number}: the first line under the title must read \"Date: YYYY-MM-DD.\""
@@ -124,54 +127,34 @@ fn problems(number: &str, text: &str, debt: &[&str]) -> Vec<String> {
     faults
 }
 
-// The parts each record written before the template still lacks. An entry leaves the list in
-// the change that writes the part. The list never grows, and no record from 0030 on may enter it.
+// The parts that records written before the template still lack, by part. A record leaves a
+// list in the change that writes the part. No list grows, and no record from 0030 on may enter.
+#[rustfmt::skip]
 const DEBT: &[(&str, &[&str])] = &[
-    (
-        "0001",
-        &[
-            "Decision",
-            "Why",
-            "Case against",
-            "What failure this prevents",
-            "Constants",
-            "Sources",
-        ],
-    ),
-    ("0002", &["Case against", "What failure this prevents", "Constants"]),
-    ("0003", &["Case against", "What failure this prevents", "Constants", "Sources"]),
-    ("0004", &["Case against", "What failure this prevents", "Constants"]),
-    ("0005", &["Case against", "What failure this prevents", "Constants", "Sources"]),
-    ("0006", &["Case against", "What failure this prevents", "Constants"]),
-    ("0007", &["Case against", "What failure this prevents", "Constants"]),
-    ("0008", &["Case against", "What failure this prevents", "Constants"]),
-    ("0009", &["Case against", "What failure this prevents", "Constants"]),
-    ("0010", &["Case against", "What failure this prevents", "Constants"]),
-    ("0011", &["Case against", "What failure this prevents", "Constants", "Sources"]),
-    ("0012", &["Case against", "What failure this prevents", "Constants", "Sources"]),
-    ("0013", &["Case against", "What failure this prevents", "Constants"]),
-    ("0014", &["Case against", "What failure this prevents", "Constants", "Sources"]),
-    ("0015", &["Case against", "What failure this prevents", "Constants"]),
-    ("0016", &["Case against", "What failure this prevents", "Constants"]),
-    ("0017", &["Case against", "What failure this prevents", "Constants"]),
-    ("0018", &["Case against", "What failure this prevents", "Constants"]),
-    ("0019", &["Why", "What failure this prevents", "Constants"]),
-    ("0020", &["What failure this prevents", "Constants"]),
-    ("0021", &["What failure this prevents", "Constants"]),
-    ("0022", &["Why", "What failure this prevents", "Constants"]),
-    ("0023", &["Case against", "What failure this prevents", "Constants"]),
-    ("0024", &["Case against", "What failure this prevents", "Constants"]),
-    ("0025", &["What failure this prevents", "Constants"]),
-    ("0026", &["Why", "What failure this prevents", "Constants"]),
-    ("0027", &["What failure this prevents", "Constants"]),
-    ("0028", &["Why", "Case against", "What failure this prevents", "Constants"]),
-    ("0029", &["Why", "Case against", "What failure this prevents", "Constants"]),
+    ("Decision", &["0001"]),
+    ("Why", &["0001", "0019", "0022", "0026", "0028", "0029"]),
+    ("Case against", &[
+        "0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0010", "0011",
+        "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0023", "0024", "0028", "0029",
+    ]),
+    ("What failure this prevents", &[
+        "0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0010", "0011",
+        "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022",
+        "0023", "0024", "0025", "0026", "0027", "0028", "0029",
+    ]),
+    ("Constants", &[
+        "0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0010", "0011",
+        "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022",
+        "0023", "0024", "0025", "0026", "0027", "0028", "0029",
+    ]),
+    ("Sources", &["0001", "0003", "0005", "0011", "0012", "0014"]),
 ];
 
-fn debt(number: &str) -> &'static [&'static str] {
+fn debt(number: &str) -> Vec<&'static str> {
     DEBT.iter()
-        .find(|(record, _)| *record == number)
-        .map_or(&[], |(_, parts)| parts)
+        .filter(|(_, records)| records.contains(&number))
+        .map(|(part, _)| *part)
+        .collect()
 }
 
 fn records_in(dir: &Path) -> BTreeMap<String, String> {
@@ -179,9 +162,9 @@ fn records_in(dir: &Path) -> BTreeMap<String, String> {
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        let numbered = name
-            .get(..5)
-            .is_some_and(|head| head.ends_with('-') && head[..4].bytes().all(|b| b.is_ascii_digit()));
+        let numbered = name.get(..5).is_some_and(|head| {
+            head.ends_with('-') && head[..4].bytes().all(|b| b.is_ascii_digit())
+        });
         assert!(
             numbered && name.ends_with(".md") && path.is_file(),
             "{name} is not a record named NNNN-<slug>.md"
@@ -208,7 +191,10 @@ fn template() -> String {
         .split("\n```")
         .nth(1)
         .expect("the section holds a fenced template");
-    fenced.split_once('\n').map_or("", |(_, block)| block).to_owned()
+    fenced
+        .split_once('\n')
+        .map_or("", |(_, block)| block)
+        .to_owned()
 }
 
 #[test]
@@ -265,15 +251,18 @@ fn problems_name_the_record_and_the_fault() {
         none
     );
     assert_eq!(
-        problems("0099", FULL, &["Date"])[0],
-        "0099: Date cannot be debt"
+        problems("0099", FULL, &["Date"]),
+        ["0099: holds Date; remove it from DEBT"]
     );
     let date = "0099: the first line under the title must read \"Date: YYYY-MM-DD.\"";
     assert_eq!(
         cut("Date: 2026-11-15. On file.", "Date: 2026-13-15. On file."),
         [date]
     );
-    assert_eq!(cut("Date: 2026-11-15. On file.", "Date: 2026-11-15"), [date]);
+    assert_eq!(
+        cut("Date: 2026-11-15. On file.", "Date: 2026-11-15"),
+        [date]
+    );
     assert_eq!(cut("# 0099 T\n\n", "# 0099 T\n\nIntro first.\n\n"), [date]);
     let amended = "0099: Amended lines follow the Date line, read \"Amended: YYYY-MM-DD.\", and run oldest first";
     assert_eq!(
@@ -308,7 +297,7 @@ fn problems_name_the_record_and_the_fault() {
 fn every_record_holds_its_parts() {
     let faults: Vec<String> = records()
         .iter()
-        .flat_map(|(number, text)| problems(number, text, debt(number)))
+        .flat_map(|(number, text)| problems(number, text, &debt(number)))
         .collect();
     assert!(faults.is_empty(), "\n{}", faults.join("\n"));
 }
@@ -316,25 +305,25 @@ fn every_record_holds_its_parts() {
 #[test]
 fn debt_names_only_records_and_parts_that_exist() {
     let records = records();
-    let mut seen = BTreeSet::new();
-    for (number, parts) in DEBT {
-        assert!(
-            records.contains_key(*number),
-            "DEBT names {number}, which is no record"
-        );
-        assert!(seen.insert(number), "DEBT lists {number} twice");
-        assert!(
-            *number < "0030",
-            "DEBT names {number}; records from 0030 on hold every part"
-        );
-        for part in *parts {
-            assert!(PARTS.contains(part), "DEBT {number}: {part} is no part");
+    for (part, numbers) in DEBT {
+        assert!(PARTS.contains(part), "DEBT: {part} is no part");
+        for (at, number) in numbers.iter().enumerate() {
+            assert!(
+                records.contains_key(*number),
+                "DEBT {part}: {number} is no record"
+            );
+            assert!(
+                !numbers[..at].contains(number),
+                "DEBT {part} lists {number} twice"
+            );
+            assert!(
+                *number < "0030",
+                "DEBT {part}: {number}; records from 0030 on hold every part"
+            );
         }
     }
-    assert_eq!(
-        DEBT.iter().map(|(_, parts)| parts.len()).sum::<usize>(),
-        93
-    );
+    let entries: usize = DEBT.iter().map(|(_, numbers)| numbers.len()).sum();
+    assert_eq!(entries, 93);
 }
 
 #[test]
