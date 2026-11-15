@@ -212,13 +212,16 @@ pub struct Builder {
 }
 
 impl Builder {
-    /// The running binary, read through `/proc/self/exe` so a binary replaced on disk since
-    /// the start is not the one hashed. A binary it cannot read leaves the hash missing.
+    /// The running binary, as the identity module hashed it. A binary it cannot read leaves
+    /// the hash missing.
     fn this() -> Builder {
-        let hash = crate::canon::sha256_file(Path::new("/proc/self/exe"));
+        let hash = match crate::identity::binary_sha256() {
+            crate::telemetry::Reading::Read(h) => h.strip_prefix("sha256:"),
+            crate::telemetry::Reading::Unavailable(_) => None,
+        };
         Builder {
             version: Field::of(Some(env!("CARGO_PKG_VERSION").into()), None),
-            binary_sha256: Field::of(hash.ok(), None),
+            binary_sha256: Field::of(hash.map(String::from), None),
         }
     }
 
