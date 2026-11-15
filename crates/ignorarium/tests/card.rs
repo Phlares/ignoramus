@@ -310,6 +310,24 @@ fn a_killed_session_prints_as_without_an_end_record() {
 }
 
 #[test]
+fn an_unreadable_session_record_is_counted() {
+    let card = card_with_sessions(vec![
+        session_start("a"),
+        session_end("a"),
+        ("session.end", json!({ "session": 1 })),
+    ]);
+    assert_eq!(card.runs.sessions_unreadable, Some(1));
+    let md = card::render::markdown(&card);
+    assert!(
+        md.contains(
+            "- Run sessions: 1, 1 unreadable
+"
+        ),
+        "{md}"
+    );
+}
+
+#[test]
 fn no_session_records_print_as_before() {
     let lab = lab();
     fixture(&lab, MEAN, rows_on_level_2());
@@ -369,9 +387,9 @@ fn a_declared_box_change_is_a_deviation_row() {
         kind: "box-changed".into(),
         reason: "rebuilt".into(),
         timing: Timing::DuringCollection,
-        original: "binary sha256:cd, rules sha256:ab".into(),
+        original: "rules sha256:ab, binary sha256:cd".into(),
         justification: "rebuilt".into(),
-        impact: "rows from here run under binary sha256:ef, rules sha256:ab".into(),
+        impact: "rows from here run under rules sha256:ab, binary sha256:ef".into(),
     };
     deviation(&lab.home, ID, &row).unwrap();
     let card = card_of(&lab);
@@ -382,6 +400,8 @@ fn a_declared_box_change_is_a_deviation_row() {
         })
         .collect();
     assert_eq!(kinds, ["box-changed"]);
+    let md = card::render::markdown(&card);
+    assert!(md.contains("box-changed"), "{md}");
 }
 
 /// Issue #80: the claim's frame prints beside it.

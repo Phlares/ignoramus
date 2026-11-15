@@ -669,12 +669,9 @@ fn a_declared_change_writes_a_deviation_row_and_names_the_old_hash() {
         kind: "box-changed".into(),
         reason: reason.into(),
         timing: Timing::DuringCollection,
-        original: format!("binary {old}, rules {}", was.rules_sha256),
+        original: was.text(),
         justification: reason.into(),
-        impact: format!(
-            "rows from here run under binary {new}, rules {}",
-            now.rules_sha256
-        ),
+        impact: format!("rows from here run under {}", now.text()),
     };
     assert_eq!(deviations_of(&dir), [want]);
     let (starts, _) = sessions_of(&lab, "bd");

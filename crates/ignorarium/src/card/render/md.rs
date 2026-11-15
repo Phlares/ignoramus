@@ -374,6 +374,10 @@ fn runs_section(c: &Card) -> String {
         Some(k) if k > 0 => format!(", {k} without an end record"),
         _ => String::new(),
     };
+    let open = match r.sessions_unreadable {
+        Some(m) if m > 0 => format!("{open}, {m} unreadable"),
+        _ => open,
+    };
     l.push(format!(
         "Run sessions: {}{open}",
         field(&r.sessions, u64::to_string)

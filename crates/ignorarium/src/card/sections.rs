@@ -726,6 +726,9 @@ pub struct Runs {
     /// session records exist.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sessions_without_end: Option<u64>,
+    /// Session records whose body does not parse; `Some` only when session records exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sessions_unreadable: Option<u64>,
     /// The reason in the study's `stop` record.
     pub stopped: Option<String>,
 }
@@ -756,6 +759,7 @@ pub fn runs(log: &Log, events: Option<&Outside>) -> Runs {
         attempts,
         sessions: Field::of(some(held.started), events),
         sessions_without_end: some(held.without_end),
+        sessions_unreadable: some(held.unreadable),
         stopped: crate::cli::stopped_why(&log.records),
     }
 }

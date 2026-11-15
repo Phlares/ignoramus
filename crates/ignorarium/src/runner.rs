@@ -1118,12 +1118,9 @@ fn binary_gate(
                 kind: "box-changed".into(),
                 reason: reason.clone(),
                 timing,
-                original: format!("binary {old}, rules {}", was.rules_sha256),
+                original: was.text(),
                 justification: reason.clone(),
-                impact: format!(
-                    "rows from here run under binary {new}, rules {}",
-                    now.rules_sha256
-                ),
+                impact: format!("rows from here run under {}", now.text()),
             };
             control::deviation(&plan.home, &plan.study_id, &row).map_err(io)?;
             Ok(Some(was.binary_sha256))
