@@ -106,7 +106,7 @@ creators = []
 [pins]
 environment = ""
 payload = ""                    # "", or the hash of payload/ under the study root that register prints
-rule_base = ""
+rule_base = ""                  # "" for no pin, or the rules hash that check prints
 # deterministic = true          # the payload gives the same output for the same job; the box reruns one row per condition and compares
 # [[pins.deviations]]           # confirmatory: one per study in estimates whose payload, environment, or model and calibration inputs this plan does not pin
 # from = "my-pilot"             # the study id

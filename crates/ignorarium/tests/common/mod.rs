@@ -593,6 +593,7 @@ pub fn finished_with(
         alpha: None,
         timestamp: None,
         gate: vec![],
+        box_identity: None,
     };
     let analysis = derived::Analysis {
         commit: "ef".repeat(32),

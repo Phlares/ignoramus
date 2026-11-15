@@ -73,12 +73,13 @@ pub fn load(path: &Path) -> Result<Vec<Pattern>, ScanError> {
     parse(&std::fs::read_to_string(path).map_err(ScanError::Io)?)
 }
 
+/// The text of `rules/scan.toml`, as embedded.
+pub const SCAN_TOML: &str = include_str!("../../../rules/scan.toml");
+
 /// The patterns in `rules/scan.toml`, compiled once.
 pub fn builtin() -> &'static [Pattern] {
     static BUILTIN: OnceLock<Vec<Pattern>> = OnceLock::new();
-    BUILTIN.get_or_init(|| {
-        parse(include_str!("../../../rules/scan.toml")).expect("embedded scan.toml is valid")
-    })
+    BUILTIN.get_or_init(|| parse(SCAN_TOML).expect("embedded scan.toml is valid"))
 }
 
 /// True when `p` matches `s` outside its allow list. The search resumes at the end

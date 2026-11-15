@@ -133,6 +133,11 @@ pub struct Register {
     /// existed. An older box reads a record that holds it as no register.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gate: Vec<GatePrediction>,
+    /// The rules and binary hashes of the box that registered the plan; left out in a record
+    /// written before the field existed. An older box reads a record that holds it as no
+    /// register (`deny_unknown_fields`), as for `gate`.
+    #[serde(rename = "box", default, skip_serializing_if = "Option::is_none")]
+    pub box_identity: Option<crate::identity::BoxIdentity>,
 }
 
 /// The power gate's finding for one hypothesis, and what it simulated with.

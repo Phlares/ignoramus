@@ -421,6 +421,10 @@ fn faults() -> Vec<Fault> {
     };
     vec![
         f(
+            vec![("/pins/rule_base", j(json!("sha256:abc")))],
+            vec![("E-HSH-002", "pins.rule_base")],
+        ),
+        f(
             vec![
                 ("/study/mode", j(json!("exploratory"))),
                 UNDECLARED,
@@ -2834,6 +2838,7 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
         "E-ISO-001",
         "E-PTH-001",
         "E-HSH-001",
+        "E-HSH-002",
         "E-SEC-001",
         "E-UNT-001",
         "E-UNT-002",
@@ -6409,4 +6414,41 @@ fn a_legacy_trigger_is_refused_with_the_new_shape_named() {
     assert!(d[0].problem.ends_with(
         "This trigger names a metric. Declare outcome, contrast, claim, statistic and spawns instead."
     ));
+}
+
+#[test]
+fn rule_base_empty_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = spec_at("../../templates/numeric-ablation.toml");
+    set(&mut s, "/pins/rule_base", Some(json!("")));
+    let d = named(&s, dir.path());
+    assert!(d.iter().all(|x| x.code != "E-HSH-002"), "{d:?}");
+}
+
+#[test]
+fn rule_base_equal_to_the_rules_hash_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = spec_at("../../templates/numeric-ablation.toml");
+    set(
+        &mut s,
+        "/pins/rule_base",
+        Some(json!(ignorarium::identity::rules_sha256())),
+    );
+    let d = named(&s, dir.path());
+    assert!(d.iter().all(|x| x.code != "E-HSH-002"), "{d:?}");
+}
+
+#[test]
+fn rule_base_other_value_raises_e_hsh_002() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = spec_at("../../templates/numeric-ablation.toml");
+    for other in ["sha256:abc", "anything", &"0".repeat(64)] {
+        set(&mut s, "/pins/rule_base", Some(json!(other)));
+        let d = named(&s, dir.path());
+        let got: Vec<_> = codes_paths(&d)
+            .into_iter()
+            .filter(|(c, _)| *c == "E-HSH-002")
+            .collect();
+        assert_eq!(got, [("E-HSH-002", "pins.rule_base")], "{other}");
+    }
 }

@@ -125,6 +125,8 @@ fn check_passes_the_template_and_prints_the_estimate() {
     // The hash is over the author's file, not the defaulted value.
     let hash = ignorarium::spec::load(&spec).unwrap().hash;
     assert!(out.contains(&format!("spec: {hash}")), "{out}");
+    let rules = ignorarium::identity::rules_sha256();
+    assert!(out.contains(&format!("rules: {rules}")), "{out}");
 }
 
 #[test]
@@ -154,6 +156,7 @@ fn check_json_is_machine_readable() {
     assert!(!d["instruction"].as_str().unwrap().is_empty());
     assert!(v["estimate"].is_null());
     assert_eq!(v["hash"], ignorarium::spec::load(&spec).unwrap().hash);
+    assert_eq!(v["rules_sha256"], ignorarium::identity::rules_sha256());
 }
 
 #[test]

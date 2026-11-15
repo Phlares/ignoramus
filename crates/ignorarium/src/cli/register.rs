@@ -95,6 +95,7 @@ fn record_body(
     filled: &[(String, Value)],
     frozen: &Frozen,
     alpha: Option<Alpha>,
+    identity: crate::identity::BoxIdentity,
 ) -> Result<Value, CliError> {
     serde_json::to_value(Register {
         spec_hash: hash.into(),
@@ -111,6 +112,7 @@ fn record_body(
         timestamp: alpha.is_some().then(|| "pending".into()),
         alpha,
         gate: frozen.gate.clone(),
+        box_identity: Some(identity),
     })
     .map_err(|e| io("register record", e))
 }
@@ -627,7 +629,15 @@ fn store(
         };
         plan_log.append(leaf, key).map_err(|e| io(log, e))?;
     }
-    let body = record_body(&a.hash, leaf, log, &a.filled, frozen, alpha.clone())?;
+    let body = record_body(
+        &a.hash,
+        leaf,
+        log,
+        &a.filled,
+        frozen,
+        alpha.clone(),
+        crate::identity::current(),
+    )?;
     records::append(
         &dir.join("records.jsonl"),
         key,
@@ -744,7 +754,20 @@ mod tests {
             family: None,
             gate: vec![],
         };
-        let exp = record_body("sha256:ab", 3, "planlog", &filled, &frozen, None).unwrap();
+        let id = crate::identity::BoxIdentity {
+            rules_sha256: "sha256:aa".into(),
+            binary_sha256: crate::telemetry::Reading::Unavailable("no exe".into()),
+        };
+        let exp = record_body(
+            "sha256:ab",
+            3,
+            "planlog",
+            &filled,
+            &frozen,
+            None,
+            id.clone(),
+        )
+        .unwrap();
         assert_eq!(
             exp,
             json!({"spec_hash": "sha256:ab", "leaf": 3, "log": "planlog",
@@ -757,14 +780,16 @@ mod tests {
                    "deviations": [{ "from": "pilot", "reason": "r", "timing": "after-results",
                                     "differs": ["environment"] }],
                    "carries": { "study": "pilot", "record": "ab".repeat(32) },
-                   "alpha": null})
+                   "alpha": null,
+                   "box": {"rules_sha256": "sha256:aa", "binary_sha256": {"unavailable": "no exe"}}})
         );
         let slot = Alpha {
             log: "testlog".into(),
             slot: 2,
             level: 0.01,
         };
-        let conf = record_body("sha256:ab", 3, "testlog", &filled, &frozen, Some(slot)).unwrap();
+        let conf =
+            record_body("sha256:ab", 3, "testlog", &filled, &frozen, Some(slot), id).unwrap();
         assert_eq!(conf["timestamp"], "pending");
         assert_eq!(conf["log"], "testlog");
         assert_eq!(
