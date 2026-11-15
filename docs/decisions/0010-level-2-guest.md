@@ -1,6 +1,8 @@
 # 0010 Level 2: one virtual machine per row
 
 Date: 2026-10-29.
+Amended: 2026-10-31. A payload disk, io_uring off, and `/out` at half the output disk (#33).
+Amended: 2026-11-01. A memory check before the row and a data limit on the payload (#34).
 
 Level 2 runs each row in a fresh virtual machine. The crate `ignorarium-guest` holds both sides: the host code that starts the machine, and the guest agent that runs the payload inside it. The crate knows nothing of the box; the box's level 2 backend wraps `host::run_row` (0015).
 

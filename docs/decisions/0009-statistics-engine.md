@@ -1,6 +1,8 @@
 # 0009 Statistics engine
 
 Date: 2026-10-29.
+Amended: 2026-10-31. Integer draws, the selection stage, and the tree's e-value as the largest share-weighted e-value (#31).
+Amended: 2026-11-06. Results run again with the bet cap at 3/4 (#42).
 
 The `evidence` crate computes the statistics that decide whether an experiment found something. It does no I/O and has no dependencies.
 

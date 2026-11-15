@@ -1,6 +1,7 @@
 # 0025 Report after the study finishes
 
 Date: 2026-11-06.
+Amended: 2026-11-07. The report names the family and each member's state (#49).
 
 `ignorarium report <id> [--json]` prints the verdicts of a finished study. It refuses every other study. It verifies the record log, appends one signed `opened` record, and only then prints.
 

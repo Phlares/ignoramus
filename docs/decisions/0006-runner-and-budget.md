@@ -1,6 +1,9 @@
 # 0006 Runner and budget
 
 Date: 2026-10-29.
+Amended: 2026-10-30. Level 1 joins as a backend and ends a row's detached processes; a pause writes its state before its event (#25).
+Amended: 2026-10-31. Rows run the registered payload copy and read inputs through the input view; a CPU bound for rows the box ended; the payload hash covers the whole folder (#31).
+Amended: 2026-11-01. The estimate charges each row a wall time equal to its CPU time (#34).
 
 `run` executes a registered plan row by row and meters cost against the declared budget. Pausing is the safe default.
 

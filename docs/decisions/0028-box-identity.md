@@ -1,6 +1,7 @@
 # 0028 Box identity
 
 Date: 2026-11-15.
+Amended: 2026-11-15. The binary gate and `--box-changed` (#104).
 
 A box has two identities: the rules it embeds and the binary that runs. Each has a SHA-256 hash. Nothing in a study's verdict reads either hash. Only `pins.rule_base` and the binary gate (see Gate) can refuse a plan or a run.
 
