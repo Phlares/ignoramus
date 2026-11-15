@@ -20,12 +20,14 @@
 //! A scenario runs in batches of 4,000 replicates, the count the registration gate uses: one
 //! call of 100,000 would size its re-size table with 100,000 replicates per search, past
 //! `WORK`.
+mod support;
+
 use evidence::Tail;
 use evidence::claim::{Bound, Statistic};
 use evidence::power::{Shares, Staged, StagedStratum, staged_detail, staged_detail_by};
 use std::f64::consts::LN_2;
-use std::thread;
 use std::time::Instant;
+use support::{par_map, seed};
 
 /// ln 1.04.
 const MARGIN: f64 = 0.039221;
@@ -39,22 +41,6 @@ const TARGET_EACH: f64 = 0.894427;
 const BATCH: u32 = 4_000;
 const BATCHES: u32 = 25;
 const REPS: u32 = BATCH * BATCHES;
-
-fn seed(text: &str) -> [u8; 32] {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in text.bytes() {
-        h = (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    let mut out = [0u8; 32];
-    for chunk in out.chunks_mut(8) {
-        h = h.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut z = h;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        chunk.copy_from_slice(&(z ^ (z >> 31)).to_le_bytes());
-    }
-    out
-}
 
 #[derive(Clone, Copy)]
 enum Shape {
@@ -150,12 +136,7 @@ fn counts(test: &str, s: &Scenario) -> ([u32; 3], f64) {
 /// Runs every scenario on its own thread and prints a line per scenario: the pass, stop and
 /// cross shares, each with its Monte Carlo standard error.
 fn run(test: &str, scenarios: &[Scenario]) -> Vec<[u32; 3]> {
-    let results: Vec<_> = thread::scope(|scope| {
-        let handles: Vec<_> = (scenarios.iter())
-            .map(|s| scope.spawn(move || counts(test, s)))
-            .collect();
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    });
+    let results = par_map(scenarios, |s| counts(test, s));
     let n = f64::from(REPS);
     let cell = |k: u32| {
         let p = f64::from(k) / n;

@@ -2,7 +2,8 @@
 //! arXiv:2010.09686; Vovk and Wang, arXiv:1912.06116 for the two-sided mean).
 use crate::{Error, Tail};
 
-/// Largest bet fraction. Every factor stays at or above 1/4, so wealth never reaches 0.
+/// The largest bet fraction of [`EProcess::new`]. Every factor stays at or above 1/4, so wealth
+/// never reaches 0.
 pub const MAX_BET: f64 = 0.75;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -18,14 +19,21 @@ pub enum Score {
     Bounded { lo: f64, hi: f64, mean: f64 },
 }
 
+/// One wealth: the side it bets on (+1 or -1) and its largest bet fraction.
+#[derive(Debug, Clone)]
+struct Arm {
+    sigma: f64,
+    cap: f64,
+    log_wealth: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct EProcess {
     score: Score,
-    sides: &'static [f64],
     stop: f64,
+    arms: Vec<Arm>,
     s_sum: f64,
     q_sum: f64,
-    log_wealth: [f64; 2],
     peak_log: f64,
     stopped: bool,
     observed: usize,
@@ -33,6 +41,17 @@ pub struct EProcess {
 
 impl EProcess {
     pub fn new(score: Score, tail: Tail, stop: f64) -> Result<EProcess, Error> {
+        EProcess::with_caps(score, tail, stop, &[MAX_BET])
+    }
+
+    /// [`EProcess::new`] with the largest bet fractions `caps`: at least one, each strictly
+    /// between 0 and 1. Any such cap fixed before the data keeps the test valid and changes
+    /// its power. The value is the mean of the e-values the caps give, which is an e-value
+    /// too.
+    pub fn with_caps(score: Score, tail: Tail, stop: f64, caps: &[f64]) -> Result<EProcess, Error> {
+        if caps.is_empty() || !caps.iter().all(|&cap| cap > 0.0 && cap < 1.0) {
+            return Err(Error::Parameter("cap"));
+        }
         if stop.is_nan() || stop <= 1.0 {
             return Err(Error::Parameter("stop"));
         }
@@ -54,13 +73,19 @@ impl EProcess {
             Tail::Lower => &[-1.0],
             Tail::Both => &[1.0, -1.0],
         };
+        let arm = |&sigma: &f64| {
+            caps.iter().map(move |&cap| Arm {
+                sigma,
+                cap,
+                log_wealth: 0.0,
+            })
+        };
         Ok(EProcess {
             score,
-            sides,
             stop,
+            arms: sides.iter().flat_map(arm).collect(),
             s_sum: 0.0,
             q_sum: 0.0,
-            log_wealth: [0.0; 2],
             peak_log: 0.0,
             stopped: false,
             observed: 0,
@@ -92,23 +117,24 @@ impl EProcess {
         if self.stopped {
             return Ok(());
         }
-        for (w, &sigma) in self.log_wealth.iter_mut().zip(self.sides) {
-            let bet = (sigma * self.s_sum / (1.0 + self.q_sum)).clamp(0.0, MAX_BET);
-            *w += (bet * (sigma * s)).ln_1p();
+        for a in &mut self.arms {
+            let bet = (a.sigma * self.s_sum / (1.0 + self.q_sum)).clamp(0.0, a.cap);
+            a.log_wealth += (bet * (a.sigma * s)).ln_1p();
         }
         self.s_sum += s;
         self.q_sum += s * s;
         self.observed += 1;
-        self.peak_log = self.peak_log.max(self.log_value());
-        self.stopped = self.stop.is_finite() && self.value() >= self.stop;
+        let now = self.log_value();
+        self.peak_log = self.peak_log.max(now);
+        self.stopped = self.stop.is_finite() && now.exp() >= self.stop;
         Ok(())
     }
 
     fn log_value(&self) -> f64 {
-        let ws = &self.log_wealth[..self.sides.len()];
-        let m = ws.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let sum: f64 = ws.iter().map(|w| (w - m).exp()).sum();
-        m + (sum / ws.len() as f64).ln()
+        let ws = || self.arms.iter().map(|a| a.log_wealth);
+        let m = ws().fold(f64::NEG_INFINITY, f64::max);
+        let sum: f64 = ws().map(|w| (w - m).exp()).sum();
+        m + (sum / self.arms.len() as f64).ln()
     }
 
     pub fn value(&self) -> f64 {
