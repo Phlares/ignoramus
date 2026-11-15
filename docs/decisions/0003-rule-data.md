@@ -1,6 +1,7 @@
 # 0003 Rules as data
 
 Date: 2026-10-29.
+
 Amended: 2026-10-31. The power check asks only for `design.power`; an unreadable stream is a problem, not a default level (#31).
 
 The checker holds its rules as typed data in `rules/v0.toml`, not as scattered code.

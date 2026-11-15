@@ -91,14 +91,19 @@ Sources:
 - **Nothing to say.** Write `none` and the reason, as in
   `Constants: none. This record sets no value.` A bare `none` fails the test.
 - **Later changes.** A change to the Decision or Constants part adds a line
-  under the Date line: `Amended: YYYY-MM-DD. What changed (#PR).` Oldest
-  first. A spelling fix needs none.
+  under the Date line, after a blank line:
+  `Amended: YYYY-MM-DD. What changed (#PR).` Oldest first. A spelling fix
+  needs none.
 - **Parts added later.** A part written on a later day than the record's
   date ends with `(written YYYY-MM-DD)`.
 - **Other parts** are free: Evidence, Limits, Cost, Open. The order is free.
+  A line that starts with a capital letter and has a colon before any full
+  stop reads as a label. It ends the part above it.
 - **Records 0001 to 0029** are older than this template. Their Date and
-  Amended lines were added on 2026-11-15 from the git history. The test
-  lists the parts each still lacks, and that list only shrinks.
+  Amended lines were added on 2026-11-15 from the git history. 0001 has no
+  Amended line: each dependency is a list entry, and git holds its date. The
+  test lists the parts each old record still lacks, and that list only
+  shrinks.
 
 ## License of contributions
 

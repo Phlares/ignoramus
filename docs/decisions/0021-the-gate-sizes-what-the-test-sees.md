@@ -1,6 +1,7 @@
 # 0021 The power gate sizes from what the test sees
 
 Date: 2026-11-05.
+
 Amended: 2026-11-10. `check --json` and `review` show a power curve for each hypothesis the gate simulates (#63).
 
 The registration power gate (0013) borrows an sd and an icc from the study a hypothesis names in `estimates` (0014). It now borrows the spread the test will see: one arm's own pair, and for a mean claim, the source study's unit values clipped to the claim's declared range.

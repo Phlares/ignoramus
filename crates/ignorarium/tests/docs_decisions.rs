@@ -15,9 +15,15 @@ fn after_label<'a>(line: &'a str, label: &str) -> Option<&'a str> {
     line.strip_prefix(label)?.strip_prefix(':')
 }
 
+// A heading, or a line that starts with a capital letter and has a colon before any full stop.
+// The colon must end the line or precede a space, so a URL or a time of day is no label.
 fn opens_a_part(line: &str) -> bool {
+    let labelled = |(label, said): (&str, &str)| {
+        !label.contains('.') && (said.is_empty() || said.starts_with(' '))
+    };
     line.starts_with('#')
-        || (line.starts_with(char::is_uppercase) && line.trim_end().ends_with(':'))
+        || (line.starts_with(char::is_uppercase)
+            && line.trim_end().split_once(':').is_some_and(labelled))
 }
 
 fn body<'a>(text: &'a str, label: &str) -> Option<Vec<&'a str>> {
@@ -27,11 +33,22 @@ fn body<'a>(text: &'a str, label: &str) -> Option<Vec<&'a str>> {
     Some(std::iter::once(first.trim()).chain(below).collect())
 }
 
+// The reason a body gives after "none." (empty for a bare "none"), when the body reads that way.
+fn after_none(said: &str) -> Option<&str> {
+    let rest = said
+        .get(..4)
+        .filter(|word| word.eq_ignore_ascii_case("none"))
+        .map(|_| &said[4..])?;
+    match rest.strip_prefix('.') {
+        Some(reason) => Some(reason.trim()),
+        None => rest.is_empty().then_some(""),
+    }
+}
+
 fn held(text: &str) -> BTreeSet<&'static str> {
     let says_something = |body: Vec<&str>| {
         let said = body.join(" ");
-        let said = said.trim().trim_end_matches('.');
-        !said.is_empty() && !said.eq_ignore_ascii_case("none")
+        !said.trim().is_empty() && after_none(said.trim()) != Some("")
     };
     PARTS
         .into_iter()
@@ -41,12 +58,7 @@ fn held(text: &str) -> BTreeSet<&'static str> {
 
 fn constants(text: &str) -> Option<Vec<String>> {
     let body = body(text, "Constants")?;
-    if body
-        .join(" ")
-        .trim()
-        .to_ascii_lowercase()
-        .starts_with("none")
-    {
+    if after_none(body.join(" ").trim()).is_some() {
         return None;
     }
     let mut bullets: Vec<String> = Vec::new();
@@ -79,13 +91,21 @@ fn dated<'a>(line: &'a str, label: &str) -> Option<&'a str> {
 }
 
 fn amended_in_order(date: &str, below: &mut std::str::Lines) -> bool {
-    let head: Option<Vec<&str>> = below
-        .by_ref()
-        .take_while(|line| line.starts_with("Amended:"))
-        .map(|line| dated(line, "Amended"))
-        .collect();
-    head.is_some_and(|dates| std::iter::once(date).chain(dates).is_sorted())
-        && !below.any(|line| line.starts_with("Amended:"))
+    let mut dates = vec![date];
+    let mut spaced = false;
+    for line in below.by_ref() {
+        if line.trim().is_empty() {
+            spaced = true;
+        } else if !line.starts_with("Amended") {
+            break;
+        } else if let (true, Some(next)) = (spaced, dated(line, "Amended")) {
+            dates.push(next);
+            spaced = false;
+        } else {
+            return false;
+        }
+    }
+    dates.is_sorted() && !below.any(|line| line.starts_with("Amended"))
 }
 
 fn problems(number: &str, text: &str, debt: &[&str]) -> Vec<String> {
@@ -99,13 +119,20 @@ fn problems(number: &str, text: &str, debt: &[&str]) -> Vec<String> {
         }
     }
     let mut below = text.lines();
-    let first = below.by_ref().skip(1).find(|line| !line.trim().is_empty());
+    if below
+        .next()
+        .and_then(|title| title.strip_prefix("# ")?.strip_prefix(number))
+        .is_none_or(|title| !title.starts_with(' '))
+    {
+        faults.push(format!("{number}: line 1 must read \"# {number} <title>\""));
+    }
+    let first = below.by_ref().find(|line| !line.trim().is_empty());
     match first.and_then(|line| dated(line, "Date")) {
         None => faults.push(format!(
             "{number}: the first line under the title must read \"Date: YYYY-MM-DD.\""
         )),
         Some(date) if !amended_in_order(date, &mut below) => faults.push(format!(
-            "{number}: Amended lines follow the Date line, read \"Amended: YYYY-MM-DD.\", and run oldest first"
+            "{number}: Amended lines follow the Date line, each after a blank line, read \"Amended: YYYY-MM-DD.\", and run oldest first"
         )),
         Some(_) => {}
     }
@@ -221,6 +248,17 @@ fn a_part_needs_a_label_at_line_start_and_a_body() {
     assert!(!has("Why 3/4 and not higher:\n\n- a", "Why"));
     assert!(!has("- **Case against.** a", "Case against"));
     assert!(!has("  Why: a", "Why"));
+    assert!(!has("Why:\n\nSources: none. No outside work.", "Why"));
+    assert!(!has("Why:\n\nCost: one cost.", "Why"));
+    assert!(!has(
+        "Constants: none.\n\nSources: https://example.org",
+        "Constants"
+    ));
+    assert!(has("Why:\n\nEvidence. One study: five of five.", "Why"));
+    assert!(has(
+        "Why:\n\nSee https://example.org for the reason.",
+        "Why"
+    ));
 }
 
 #[test]
@@ -232,9 +270,13 @@ fn constants_bullets_end_at_the_next_part() {
         None
     );
     assert_eq!(constants("Why: a"), None);
+    assert_eq!(
+        constants("Constants:\n\nNone of the values is fixed yet.\n\n- a = 1."),
+        Some(Vec::new())
+    );
 }
 
-const FULL: &str = "# 0099 T\n\nDate: 2026-11-15. On file.\nAmended: 2026-11-16. A change (#1).\n\nIntro.\n\nDecision: a\n\nWhy: b\n\nCase against: c\n\nWhat failure this prevents: d, expected.\n\nConstants:\n\n- x = 1. Basis: y. Rule for change: z.\n\nSources: none. No outside work.\n";
+const FULL: &str = "# 0099 T\n\nDate: 2026-11-15. On file.\n\nAmended: 2026-11-16. A change (#1).\n\nIntro.\n\nDecision: a\n\nWhy: b\n\nCase against: c\n\nWhat failure this prevents: d, expected.\n\nConstants:\n\n- x = 1. Basis: y. Rule for change: z.\n\nSources: none. No outside work.\n";
 
 #[test]
 fn problems_name_the_record_and_the_fault() {
@@ -264,7 +306,11 @@ fn problems_name_the_record_and_the_fault() {
         [date]
     );
     assert_eq!(cut("# 0099 T\n\n", "# 0099 T\n\nIntro first.\n\n"), [date]);
-    let amended = "0099: Amended lines follow the Date line, read \"Amended: YYYY-MM-DD.\", and run oldest first";
+    assert_eq!(
+        cut("# 0099 T", "# 0098 T"),
+        ["0099: line 1 must read \"# 0099 <title>\""]
+    );
+    let amended = "0099: Amended lines follow the Date line, each after a blank line, read \"Amended: YYYY-MM-DD.\", and run oldest first";
     assert_eq!(
         cut("Amended: 2026-11-16.", "Amended: 2026-11-14."),
         [amended]
@@ -272,8 +318,20 @@ fn problems_name_the_record_and_the_fault() {
     assert_eq!(
         cut(
             "Amended: 2026-11-16. A change (#1).\n",
-            "Amended: 2026-11-17. B (#2).\nAmended: 2026-11-16. A (#1).\n"
+            "Amended: 2026-11-17. B (#2).\n\nAmended: 2026-11-16. A (#1).\n"
         ),
+        [amended]
+    );
+    assert_eq!(
+        cut(
+            "Amended: 2026-11-16. A change (#1).\n",
+            "Amended: 2026-11-16. A change (#1).\n\nAmended: 2026-11-16. B (#2).\n"
+        ),
+        none
+    );
+    assert_eq!(cut("On file.\n\nAmended", "On file.\nAmended"), [amended]);
+    assert_eq!(
+        cut("Amended: 2026-11-16.", "Amended 2026-11-16."),
         [amended]
     );
     assert_eq!(

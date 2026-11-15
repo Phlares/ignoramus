@@ -1,7 +1,9 @@
 # 0005 Sandbox and runtime
 
 Date: 2026-10-29.
+
 Amended: 2026-10-30. Level 1 ships as a bubblewrap sandbox (#25).
+
 Amended: 2026-10-31. Rows see a view of the declared inputs only (#31).
 
 `run` executes each plan row on a backend. Level 0 is a bare process on the host, with no network or filesystem isolation. Level 1 runs the process in a bubblewrap sandbox (0008). This record names the stack that ships and the reason for each part. A crate gets a line in `0001-dependencies.md` when it lands.

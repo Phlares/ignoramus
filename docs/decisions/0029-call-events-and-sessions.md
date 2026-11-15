@@ -1,6 +1,7 @@
 # 0029 Call events and sessions
 
 Date: 2026-11-15.
+
 Amended: 2026-11-15. The card prints run sessions and the registered box (#105).
 
 Each call of the box writes two events to the box's event log. Each `run` or `resume` call that holds the run lock also writes two signed records to the study's record log. They say who started a call, how long it ran, how much memory it used, and how it ended. Nothing in a study's verdict reads them.
