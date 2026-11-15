@@ -2148,3 +2148,29 @@ for i in range(0, len(b), 4096): b[i] = 1' &&          head -c 1048576 /dev/zero
         assert!(c.memory_peak <= top, "row {n}: {} > {top}", c.memory_peak);
     }
 }
+
+/// Says go on for the first `n` ticks, then stop.
+struct StopAfter {
+    n: Cell<u32>,
+}
+
+impl Watch for StopAfter {
+    fn tick(&self) -> bool {
+        let left = self.n.get();
+        self.n.set(left.saturating_sub(1));
+        left > 0
+    }
+}
+
+#[test]
+fn a_stop_while_the_disks_build_makes_no_leaf() {
+    let Some(r) = ready() else { return };
+    let (_d, job) = row(&r, "true", LONG);
+    // run_timed ticks twice before the host builds the disks; the host's first tick stops.
+    let watch = StopAfter { n: Cell::new(2) };
+    let (o, _) = r
+        .level2
+        .run_timed(&job, &watch, || panic!("no leaf before the spawn"));
+    assert_eq!(o.exit, Exit::Stopped, "{o:?}");
+    assert_eq!(o.cgroup, RowOutcome::failed(Exit::Ok, 0.0).cgroup);
+}
