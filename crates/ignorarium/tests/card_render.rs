@@ -251,6 +251,11 @@ fn a_card_built_before_the_audit_fields_still_loads() {
         ),
         "{md}"
     );
+    assert!(
+        md.contains("- Registered box: not in the records\n"),
+        "{md}"
+    );
+    assert!(md.contains("- Run sessions: not in the records"), "{md}");
 }
 
 #[test]

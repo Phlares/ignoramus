@@ -116,6 +116,7 @@ ignorarium run s1 --max-level 2
 - Box version: 0.1.0
 - Box binary SHA-256: not in the records
 - Card builder: version 0.0.2, binary SHA-256 cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd (not the box version that ran the study)
+- Registered box: not in the records
 - Bundle DOI: not in the records
 - Manifest roots: spec.toml, spec.json, spec.hash, salt, schedule.json, in/, payload/
 - Roots the folder lacks: spec.json, spec.hash, salt, schedule.json, in/, payload/

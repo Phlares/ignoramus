@@ -37,6 +37,17 @@ pub struct BoxIdentity {
     pub binary_sha256: Reading<String>,
 }
 
+impl BoxIdentity {
+    /// `rules <hash>, binary <hash or why not>`.
+    pub fn text(&self) -> String {
+        format!(
+            "rules {}, binary {}",
+            self.rules_sha256,
+            binary_text(&self.binary_sha256)
+        )
+    }
+}
+
 pub fn current() -> BoxIdentity {
     BoxIdentity {
         rules_sha256: rules_sha256().into(),

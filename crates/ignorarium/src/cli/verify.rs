@@ -1,12 +1,10 @@
 //! `verify`: check the plan logs and, for one study, its record chain.
 use super::{CliError, Ctx, Done, Run, out};
-use crate::derived::{Register, SESSION_END, SESSION_START, SessionEnd, SessionStart};
-use crate::identity::{binary_text, same_binary};
+use crate::derived::{Register, SessionStart, sessions};
+use crate::identity::same_binary;
 use crate::planlog::store::PlanLog;
-use crate::records::Record;
 use crate::telemetry::Reading;
 use crate::{keys, records};
-use std::collections::BTreeSet;
 
 /// True when the log holds no leaves.
 fn empty(home: &crate::home::Home, name: &str) -> bool {
@@ -71,14 +69,14 @@ pub fn run(ctx: &Ctx, study: Option<&str>) -> Run {
                     ))?;
                     let starts: Vec<SessionStart> =
                         all.iter().filter_map(SessionStart::of).collect();
-                    let (open, unreadable) = sessions(&all, &starts);
-                    let unreadable = match unreadable {
+                    let counts = sessions(&all);
+                    let unreadable = match counts.unreadable {
                         0 => String::new(),
                         m => format!(", {m} unreadable"),
                     };
                     out(&format!(
-                        "sessions: {}, {open} without an end record{unreadable}\n",
-                        starts.len()
+                        "sessions: {}, {} without an end record{unreadable}\n",
+                        counts.started, counts.without_end
                     ))?;
                     let was = registered.as_ref().map(|b| &b.binary_sha256);
                     for (k, declared) in binary_changes(was, &starts) {
@@ -108,20 +106,6 @@ pub fn run(ctx: &Ctx, study: Option<&str>) -> Run {
     }
 }
 
-/// Of `starts`, every session start that parses in `all`: how many have no end record of the
-/// same session, and how many session records in `all` have a body that does not parse.
-fn sessions(all: &[Record], starts: &[SessionStart]) -> (usize, usize) {
-    let ends: Vec<SessionEnd> = all.iter().filter_map(SessionEnd::of).collect();
-    let ended: BTreeSet<&str> = ends.iter().map(|e| &e.session[..]).collect();
-    let open = (starts.iter())
-        .filter(|s| !ended.contains(&s.session[..]))
-        .count();
-    let kinds = (all.iter())
-        .filter(|r| r.kind == SESSION_START || r.kind == SESSION_END)
-        .count();
-    (open, kinds.saturating_sub(starts.len() + ends.len()))
-}
-
 /// Each binary change between consecutive session starts, or between the `registered` binary
 /// and the first start: the start's 1-based number, and its reason when its `changed_from` is
 /// the binary before it (`None`: undeclared). With no registered binary, the first start has
@@ -147,11 +131,7 @@ fn binary_changes(
 /// The box identity a register record holds, as text; `not recorded` for a record written
 /// before the field existed.
 fn box_text(b: Option<&crate::identity::BoxIdentity>) -> String {
-    let Some(b) = b else {
-        return "not recorded".into();
-    };
-    let binary = binary_text(&b.binary_sha256);
-    format!("rules {}, binary {binary}", b.rules_sha256)
+    b.map_or_else(|| "not recorded".into(), |b| b.text())
 }
 
 #[cfg(test)]
@@ -170,49 +150,6 @@ mod tests {
             "rules sha256:ab, binary unavailable: no exe"
         );
         assert_eq!(box_text(None), "not recorded");
-    }
-
-    #[test]
-    fn a_session_pairs_with_the_end_of_its_own_id() {
-        let record = |kind: &str, body: serde_json::Value| Record {
-            seq: 0,
-            prev: String::new(),
-            study: "s".into(),
-            row: None,
-            kind: kind.into(),
-            body,
-            ts: String::new(),
-        };
-        let start = |id: &str| {
-            let body = serde_json::json!({
-                "session": id, "verb": "run", "pid": 1, "box_version": "0",
-                "rules_sha256": "sha256:ab", "binary_sha256": "sha256:cd",
-                "started": "2026-11-15T00:00:00Z",
-            });
-            record(crate::derived::SESSION_START, body)
-        };
-        let end = |id: &str| {
-            let body = serde_json::json!({ "session": id, "status": "done" });
-            record(crate::derived::SESSION_END, body)
-        };
-        // The starts as `run` parses them, then what `sessions` counts.
-        let sessions = |all: &[Record]| {
-            let starts: Vec<SessionStart> = all.iter().filter_map(SessionStart::of).collect();
-            let (open, unreadable) = sessions(all, &starts);
-            (starts.len(), open, unreadable)
-        };
-        assert_eq!(sessions(&[]), (0, 0, 0));
-        assert_eq!(sessions(&[start("a"), end("a")]), (1, 0, 0));
-        assert_eq!(sessions(&[start("a"), start("b"), end("b")]), (2, 1, 0));
-        assert_eq!(sessions(&[start("a"), end("b")]), (1, 1, 0));
-        // A session record whose body does not parse counts as unreadable, not as a session.
-        let bad = |kind: &str| record(kind, serde_json::json!({ "session": 1 }));
-        let all = [
-            start("a"),
-            bad(crate::derived::SESSION_START),
-            bad(crate::derived::SESSION_END),
-        ];
-        assert_eq!(sessions(&all), (1, 1, 2));
     }
 
     #[test]
