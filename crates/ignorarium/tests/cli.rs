@@ -473,6 +473,47 @@ fn a_start_event_names_the_study_a_verb_takes() {
 }
 
 #[test]
+fn verify_names_its_study_only_when_given_one() {
+    let dir = TempDir::new().unwrap();
+    let _ = bin(dir.path()).args(["verify", "--study", "s-1"]).assert();
+    let _ = bin(dir.path()).arg("verify").assert();
+    let lines = all_events(dir.path());
+    let starts: Vec<_> = lines.iter().filter(|e| e["name"] == "call.start").collect();
+    assert_eq!(starts.len(), 2);
+    assert_eq!(starts[0]["attrs"]["verb"], "verify");
+    assert_eq!(starts[0]["attrs"]["study"], "s-1");
+    assert_eq!(starts[1]["attrs"]["verb"], "verify");
+    assert!(starts[1]["attrs"].get("study").is_none());
+}
+
+#[test]
+fn the_start_event_names_the_parent_and_the_end_event_the_memory() {
+    let (_d, home, spec) = setup(|t| t);
+    bin(&home).arg("check").arg(&spec).assert().code(0);
+    let lines = all_events(&home);
+    // The test binary spawned the box; the kernel keeps 15 bytes of a name.
+    let comm = std::fs::read_to_string("/proc/self/comm").unwrap();
+    assert_eq!(lines[0]["attrs"]["parent"], comm.trim_end_matches('\n'));
+    // A Rust binary holds well over 1 MiB resident.
+    assert!(lines[1]["attrs"]["peak_rss_kib"].as_u64().unwrap() > 1024);
+}
+
+#[test]
+fn a_failed_event_write_warns_and_keeps_the_exit_code() {
+    let (dir, _, spec) = setup(|t| t);
+    let home = dir.path().join("evhome");
+    std::fs::create_dir_all(home.join("events.jsonl")).unwrap();
+    let ok = bin(&dir.path().join("okhome"))
+        .arg("check")
+        .arg(&spec)
+        .assert();
+    let want = ok.get_output().status.code().unwrap();
+    let a = bin(&home).arg("check").arg(&spec).assert().code(want);
+    let err = stderr(&a);
+    assert!(err.contains("warning: cannot write the event log"), "{err}");
+}
+
+#[test]
 fn a_parse_error_and_selftest_leave_no_event() {
     let dir = TempDir::new().unwrap();
     bin(dir.path()).arg("no-such-verb").assert().code(2);
