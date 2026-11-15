@@ -2,7 +2,7 @@
 //! `ignorarium_guest::host::run_row`. The environment, the inputs and the payload's folder
 //! reach the guest as read-only disks; the outputs come back as a pack. Cloud Hypervisor:
 //! <https://github.com/cloud-hypervisor/cloud-hypervisor>.
-use super::cgroup::IN_MACHINE;
+use super::cgroup::RowCgroup;
 use super::rootfs;
 use super::selftest::{Call, SelfTest};
 use super::{Backend, Exit, Machine, Probe, RowJob, RowOutcome, TIMEOUT_CODE, Watch};
@@ -186,7 +186,14 @@ impl Level2 {
     /// Runs one row and returns its outcome, with the host's timings when the machine ran to
     /// a report. The rootfs disk and the boot count toward the row's wall time, not the
     /// payload's.
-    pub fn run_timed(&self, job: &RowJob, watch: &dyn Watch) -> (RowOutcome, Option<Timings>) {
+    /// The row, run in the leaf `leaf` makes once the machine is about to start, and the
+    /// host's timings.
+    pub fn run_timed(
+        &self,
+        job: &RowJob,
+        watch: &dyn Watch,
+        leaf: impl FnOnce() -> Result<RowCgroup, String>,
+    ) -> (RowOutcome, Option<Timings>) {
         let start = Instant::now();
         let wall = || start.elapsed().as_secs_f64();
         let ended = |res: Result<VmOutcome, VmError>| {
@@ -228,6 +235,7 @@ impl Level2 {
             Err(e) => return infra(format!("cannot make the row's scratch folder: {e}")),
         };
         let machine = self.machine_of(job);
+        let leaf = leaf();
         let vm = Vm {
             vmm: self.vmm.clone(),
             kernel: self.kernel.clone(),
@@ -240,7 +248,7 @@ impl Level2 {
             exit_timeout: self.exit_timeout,
             report_slack: self.report_slack,
             serial_log: None,
-            pre_spawn: None,
+            pre_spawn: leaf.as_ref().ok().map(|l| Box::new(l.hook()) as _),
         };
         let counted = Counted {
             watch,
@@ -250,6 +258,7 @@ impl Level2 {
         let (mut o, timings) = ended(res);
         o.box_cpu_seconds = counted.cpu.get();
         o.machine = Some(machine);
+        o.cgroup = leaf.map_or_else(Reading::Unavailable, RowCgroup::finish);
         (o, timings)
     }
 }
@@ -378,15 +387,8 @@ impl Backend for Level2 {
         })
     }
 
-    fn row_cgroup(&self) -> Result<(), String> {
-        Err(IN_MACHINE.into())
-    }
-
     fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> io::Result<RowOutcome> {
-        Ok(RowOutcome {
-            cgroup: Reading::Unavailable(IN_MACHINE.into()),
-            ..self.run_timed(job, watch).0
-        })
+        Ok(self.run_timed(job, watch, RowCgroup::make).0)
     }
 }
 

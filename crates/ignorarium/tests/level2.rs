@@ -3,6 +3,7 @@
 //! cannot run level 2.
 mod common;
 use common::{in_child, is_child, write_exec};
+use ignorarium::backend::cgroup::{MISSED, RowCgroup};
 use ignorarium::backend::level0::Level0;
 use ignorarium::backend::level1::Level1;
 use ignorarium::backend::level2::{
@@ -321,17 +322,6 @@ fn launcher_reads_the_hypervisor_version() {
     assert_eq!(launcher().launcher(), "cloud-hypervisor unknown");
     let missing = Level2::with(d.path().join("none"), PathBuf::new(), PathBuf::new());
     assert_eq!(missing.launcher(), "cloud-hypervisor unknown");
-}
-
-#[test]
-fn a_level2_row_records_its_cgroup_as_unavailable() {
-    let b = Level2::with(PathBuf::new(), PathBuf::new(), PathBuf::new());
-    let why = "level 2 rows run in a machine";
-    assert_eq!(b.row_cgroup(), Err(why.into()));
-    // A row that fails before its machine starts records the same reason.
-    let o = b.run_row(&RowJob::default(), &|| true).unwrap();
-    assert!(matches!(o.exit, Exit::Infra(_)), "{:?}", o.exit);
-    assert_eq!(o.cgroup, Reading::Unavailable(why.into()));
 }
 
 #[test]
@@ -904,7 +894,7 @@ fn a_row_without_an_environment_is_infra_before_any_vm() {
     };
     assert_eq!(b.level(), 2);
     let watch = Leaders::default();
-    let (o, timings) = b.run_timed(&job, &watch);
+    let (o, timings) = b.run_timed(&job, &watch, || panic!("no leaf before the machine"));
     assert_eq!(
         o.exit,
         Exit::Infra("level 2 runs rows in an environment image; this study has none".into())
@@ -1873,7 +1863,7 @@ impl Backend for Timed {
         self.inner.cpus()
     }
     fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> io::Result<RowOutcome> {
-        let (o, timings) = self.inner.run_timed(job, watch);
+        let (o, timings) = self.inner.run_timed(job, watch, RowCgroup::make);
         if let Some(t) = timings {
             self.boots.borrow_mut().push(t.boot.as_secs_f64());
         }
@@ -1983,4 +1973,106 @@ fn overhead_through_the_runner() {
     report("l2_row", l2_rows, &l2);
     report("l2_boot", l2_rows, &boot);
     report("l2_minus_l1", l2_rows, &diff);
+}
+
+#[test]
+fn level2_reports_the_row_cgroup_like_level1() {
+    assert_eq!(Level2::new().row_cgroup(), Level0.row_cgroup());
+}
+
+#[test]
+fn a_row_that_fails_before_the_vm_makes_no_leaf() {
+    let b = Level2::with(PathBuf::new(), PathBuf::new(), PathBuf::new());
+    let (o, _) = b.run_timed(&RowJob::default(), &|| true, || panic!("no leaf"));
+    assert_eq!(o.cgroup, RowOutcome::failed(Exit::Ok, 0.0).cgroup);
+}
+
+/// A leaf in a temp folder that reads as never entered: its `cgroup.procs` cannot be
+/// written, and its counters read zero.
+fn unwritable_leaf(d: &Path) -> RowCgroup {
+    fs::write(
+        d.join("memory.peak"),
+        "0
+",
+    )
+    .unwrap();
+    fs::write(
+        d.join("memory.events"),
+        "oom_kill 0
+",
+    )
+    .unwrap();
+    fs::write(
+        d.join("cpu.stat"),
+        "usage_usec 0
+",
+    )
+    .unwrap();
+    fs::write(d.join("cgroup.procs"), "").unwrap();
+    fs::set_permissions(d.join("cgroup.procs"), Permissions::from_mode(0o444)).unwrap();
+    RowCgroup::at(d.into())
+}
+
+#[test]
+fn a_level2_row_reads_its_cgroup() {
+    let Some(r) = ready() else { return };
+    if common::skip_cgroup() {
+        return;
+    }
+    let (_d, job) = row(&r, "true", LONG);
+    let o = r.level2.run_row(&job, &|| true).unwrap();
+    assert_eq!(o.exit, Exit::Ok, "{o:?}");
+    let Reading::Read(c) = &o.cgroup else {
+        panic!("{:?}", o.cgroup)
+    };
+    assert!(c.memory_peak > 0 && c.cpu_stat["usage_usec"] > 0, "{c:?}");
+}
+
+#[test]
+fn a_leaf_that_cannot_be_made_keeps_the_row() {
+    let Some(r) = ready() else { return };
+    let (_d, job) = row(&r, "true", LONG);
+    let (o, _) = r
+        .level2
+        .run_timed(&job, &|| true, || Err("no leaf here".into()));
+    assert_eq!(o.exit, Exit::Ok, "{o:?}");
+    assert_eq!(o.cgroup, Reading::Unavailable("no leaf here".into()));
+}
+
+#[test]
+fn a_hook_that_cannot_move_the_vmm_reads_missed() {
+    let Some(r) = ready() else { return };
+    let (_d, job) = row(&r, "true", LONG);
+    let leaf = TempDir::new().unwrap();
+    let (o, _) = r
+        .level2
+        .run_timed(&job, &|| true, || Ok(unwritable_leaf(leaf.path())));
+    assert_eq!(o.exit, Exit::Ok, "{o:?}");
+    assert_eq!(o.cgroup, Reading::Unavailable(MISSED.into()));
+}
+
+/// Says stop once the VMM has started.
+#[derive(Default)]
+struct StopOnStart(Cell<bool>);
+
+impl Watch for StopOnStart {
+    fn tick(&self) -> bool {
+        !self.0.get()
+    }
+    fn started(&self, _: u32) {
+        self.0.set(true);
+    }
+}
+
+#[test]
+fn a_stopped_row_still_reads_its_leaf() {
+    let Some(r) = ready() else { return };
+    let (_d, job) = row(&r, "sleep 30", LONG);
+    let leaf = TempDir::new().unwrap();
+    let watch = StopOnStart::default();
+    let (o, _) = r
+        .level2
+        .run_timed(&job, &watch, || Ok(unwritable_leaf(leaf.path())));
+    assert_eq!(o.exit, Exit::Stopped, "{o:?}");
+    assert_eq!(o.cgroup, Reading::Unavailable(MISSED.into()));
 }

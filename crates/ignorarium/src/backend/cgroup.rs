@@ -23,7 +23,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// The reason a row records when its first process never entered its leaf.
 pub const MISSED: &str = "the row did not enter its cgroup";
 /// The reason every level 2 row records.
-pub const IN_MACHINE: &str = "level 2 rows run in a machine";
 /// The `cpu.stat` lines kept. Throttling lines need the `cpu` controller, which the box never
 /// enables.
 const CPU_KEPT: [&str; 3] = ["usage_usec", "user_usec", "system_usec"];
@@ -181,7 +180,13 @@ impl RowCgroup {
 
     /// Make the process `cmd` starts enter this leaf before it execs.
     pub fn enter(&self, cmd: &mut Command) {
-        sys::enter_cgroup(cmd, self.procs.clone());
+        self.hook()(cmd);
+    }
+
+    /// `enter` as a hook that outlives the leaf's borrow.
+    pub fn hook(&self) -> impl Fn(&mut Command) + Send + Sync + 'static {
+        let procs = self.procs.clone();
+        move |cmd| sys::enter_cgroup(cmd, procs.clone())
     }
 
     /// The leaf's counters, once every process in it is reaped; then the leaf is removed. A
