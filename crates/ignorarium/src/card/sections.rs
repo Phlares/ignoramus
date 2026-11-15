@@ -6,13 +6,13 @@ use super::sidecar::DataList;
 use crate::analysis::{IntervalResult, claim_strata};
 use crate::canon::sha256_file;
 use crate::derived::{
-    Analysis, Estimate, GroupClip, Instrument, Register, Resolved, Trigger, Verdict,
+    Analysis, Estimate, GroupClip, Instrument, Register, Resolved, Selection, Trigger, Verdict,
 };
 use crate::files::optional;
 use crate::records::{Log, Record};
 use crate::rules::{Curve, CurvePoint};
 use crate::runner::Tally;
-use crate::spec::model::{Budget, Claim, Mode, Paired, Spec, StatisticSpec};
+use crate::spec::model::{Budget, Claim, Mode, Paired, SelectionRule, Spec, StatisticSpec};
 use crate::telemetry::Totals;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -344,6 +344,28 @@ pub fn claims(after: &[Record], spec: &Spec) -> Vec<ClaimLine> {
             }
         })
         .collect()
+}
+
+/// The candidate a selection stage picked, from its signed `selection` record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Pick {
+    pub selected: String,
+    pub rule: SelectionRule,
+    pub metric: String,
+    /// In the order the stage lists them.
+    pub candidates: Vec<String>,
+    pub complete_units: u64,
+}
+
+/// `None` when the log holds no `selection` record: the study had no selection stage.
+pub fn pick(log: &Log) -> Option<Pick> {
+    (log.records.iter().find_map(Selection::of)).map(|s| Pick {
+        selected: s.selected,
+        rule: s.rule,
+        metric: s.metric,
+        candidates: s.candidates.into_iter().map(|c| c.id).collect(),
+        complete_units: s.complete_units,
+    })
 }
 
 /// A verdict as the card words it: `pass` is shown, `fail` is not shown, `none` makes no claim.

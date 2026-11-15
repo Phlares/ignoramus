@@ -6,8 +6,8 @@ use super::{
 };
 use crate::card::Card;
 use crate::card::readings::NOT_READ;
-use crate::card::sections::{Field, UNRECORDED};
-use crate::spec::model::StatisticSpec;
+use crate::card::sections::{Field, Pick, UNRECORDED};
+use crate::spec::model::{SelectionRule, StatisticSpec};
 
 fn md_table(t: &Table) -> String {
     let line = |cells: Vec<String>| format!("| {} |\n", cells.join(" | "));
@@ -117,7 +117,21 @@ fn claim_section(c: &Card) -> String {
                     l.hypothesis, l.outcome
                 )
             }))
+            .chain(c.pick.iter().map(pick_text))
             .collect(),
+    )
+}
+
+fn pick_text(p: &Pick) -> String {
+    let rule = match p.rule {
+        SelectionRule::BestMean => "the best mean",
+    };
+    format!(
+        "Picked: {}, {rule} of {} over {} complete selection units, among {}",
+        p.selected,
+        p.metric,
+        p.complete_units,
+        names(&p.candidates)
     )
 }
 
