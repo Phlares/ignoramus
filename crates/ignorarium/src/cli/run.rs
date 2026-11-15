@@ -4,24 +4,28 @@ use crate::control::{ControlFile, Signal, run_is_live};
 use crate::runner::{self, RunError, RunStatus};
 use crate::{machine, sys};
 
-pub fn run(ctx: &Ctx, id: &str, max_level: Option<u8>) -> Run {
-    go(ctx, id, max_level, false)
+pub fn run(ctx: &Ctx, id: &str, max_level: Option<u8>, box_changed: Option<String>) -> Run {
+    go(ctx, id, max_level, false, box_changed)
 }
 
 /// `run`, or `resume` when `resume` is set: the same refusals, except that `resume`
-/// clears the pending pause that `run` refuses on.
-pub fn go(ctx: &Ctx, id: &str, max_level: Option<u8>, resume: bool) -> Run {
+/// clears the pending pause that `run` refuses on. `box_changed` is the reason for a declared
+/// change of box binary; a `resume` that a live run takes ignores it.
+pub fn go(
+    ctx: &Ctx,
+    id: &str,
+    max_level: Option<u8>,
+    resume: bool,
+    box_changed: Option<String>,
+) -> Run {
     let (home, _, all) = registered(ctx, id)?;
     refuse_if_stopped(id, &all)?;
     let control = ControlFile::of(home, id);
-    let request_resume = || {
-        control
-            .request_resume()
-            .map_err(|e| CliError::usage(format!("cannot write the resume request: {e}")))
-    };
     // A live run reads the request at its next row boundary; this call starts nothing.
     if resume && run_is_live(home, id).map_err(|e| CliError::usage(e.to_string()))? {
-        request_resume()?;
+        control
+            .request_resume()
+            .map_err(|e| CliError::usage(format!("cannot write the resume request: {e}")))?;
         out("the live run continues
 ")?;
         return Ok(Done::exit(0));
@@ -38,7 +42,7 @@ pub fn go(ctx: &Ctx, id: &str, max_level: Option<u8>, resume: bool) -> Run {
     let reach = machine.max_level.min(max_level.unwrap_or(u8::MAX));
     let root = crate::inputs::current_root()
         .map_err(|e| CliError::usage(format!("cannot read the current folder: {e}")))?;
-    let plan = runner::prepare(home, id, &root, reach).map_err(|e| match e {
+    let mut plan = runner::prepare(home, id, &root, reach).map_err(|e| match e {
         // Level 0 always runs, so `have` is never empty.
         RunError::NoBackend { need, have } => CliError::refuse(format!(
             "study {id} needs isolation level {need}; this machine reaches level {}. \
@@ -47,9 +51,10 @@ pub fn go(ctx: &Ctx, id: &str, max_level: Option<u8>, resume: bool) -> Run {
         )),
         e => run_error(e),
     })?;
-    if resume {
-        request_resume()?;
-    }
+    // The runner sends the resume request once the binary gate passes, so a refused resume
+    // leaves the pause pending.
+    plan.resumed_by = resume;
+    plan.box_changed = box_changed;
     // Rows start below: a terminal signal must end the row, not leave it running.
     sys::catch_interrupts()
         .map_err(|e| CliError::usage(format!("cannot install the signal handlers: {e}")))?;

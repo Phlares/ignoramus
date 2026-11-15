@@ -1,21 +1,23 @@
 mod common;
 
+use common::deviations_of;
 use common::{
-    Lab, PAYLOAD, events_of, indices, kind_of, lab, named, plain, register_study, rows_of,
+    Lab, PAYLOAD, events_of, indices, kind_of, lab, named, plain, register_study, rows_of, run,
 };
 use ignorarium::backend::cgroup::rows_parent;
 use ignorarium::backend::level0::Level0;
 use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome, Watch};
 use ignorarium::budget::{Cost, FakeMeter, MeterError};
 use ignorarium::canon::sha256_hex;
-use ignorarium::control::State;
+use ignorarium::control::{DeviationRow, State, Timing};
 use ignorarium::derived::{
-    Analysis, BoundResult, Carried, Estimate, Instrument, Recheck, Register, StudyState, Verdict,
-    contrast_key,
+    Analysis, BoundResult, Carried, Estimate, Instrument, Recheck, Register, SESSION_END,
+    SESSION_START, SessionEnd, SessionStart, StudyState, Verdict, contrast_key,
 };
+use ignorarium::identity::{BoxIdentity, binary_text};
 use ignorarium::planlog::store::PlanLog;
 use ignorarium::prior::{PriorUse, file_hashes};
-use ignorarium::runner::{RunError, RunPlan, RunStatus, prepare, prepare_with, run, up_to};
+use ignorarium::runner::{RunError, RunPlan, RunStatus, prepare, prepare_with, run_as, up_to};
 use ignorarium::spec::model::Role;
 use ignorarium::stream::{Log, LogName};
 use ignorarium::telemetry::{Reading, host_cpu_of};
@@ -413,13 +415,14 @@ fn run_writes_one_record_per_row_in_order() {
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
     let key = keys::load(&lab.home).unwrap().unwrap();
     let log = dir.join("records.jsonl");
-    // Register, inputs, 6 rows, then the analysis, estimate and verdict records.
-    assert_eq!(records::verify(&log, &key.verifying_key()).unwrap(), 11);
+    // Register, inputs, the session start, 6 rows, the analysis, estimate and verdict records,
+    // then the session end.
+    assert_eq!(records::verify(&log, &key.verifying_key()).unwrap(), 13);
     let rows = rows_of(&lab, "s1");
     assert_eq!(rows.len(), 6);
     for (i, r) in rows.iter().enumerate() {
         assert_eq!(r.row, Some(i as u64));
-        assert_eq!(r.seq, i as u64 + 2);
+        assert_eq!(r.seq, i as u64 + 3);
         let row = &plan.schedule.rows[i];
         assert_eq!(r.body["condition"], row.condition.as_str());
         assert_eq!(r.body["unit"], row.unit.as_str());
@@ -463,10 +466,7 @@ fn resume_skips_only_recorded_rows() {
     let dir = plain(&lab, "s2");
     run(&plan_of(&lab, "s2")).unwrap();
     // Keep the register and inputs records and rows 0..3.
-    let log = dir.join("records.jsonl");
-    let text = std::fs::read_to_string(&log).unwrap();
-    let kept: String = text.split_inclusive('\n').take(5).collect();
-    std::fs::write(&log, kept).unwrap();
+    keep_records(&dir, 5);
     std::fs::rename(dir.join("run"), dir.join("run-old")).unwrap();
     let mut plan = plan_of(&lab, "s2");
     let (b, seen) = fake(vec![]);
@@ -495,6 +495,280 @@ fn crash_before_record_reruns_the_row() {
     // The crashed attempt's output is kept under another name.
     assert!(dir.join("run/rows/2/out.crashed-0/result").is_file());
     assert!(dir.join("run/rows/2/out/result").is_file());
+}
+
+/// Each value with its position in the log.
+type Placed<T> = Vec<(T, usize)>;
+
+/// The session starts and ends of study `id`, each with its position in the log.
+fn sessions_of(lab: &Lab, id: &str) -> (Placed<SessionStart>, Placed<SessionEnd>) {
+    let all = common::records_of(lab, id);
+    let starts = (all.iter().enumerate())
+        .filter_map(|(i, r)| SessionStart::of(r).map(|s| (s, i)))
+        .collect();
+    let ends = (all.iter().enumerate())
+        .filter_map(|(i, r)| SessionEnd::of(r).map(|e| (e, i)))
+        .collect();
+    (starts, ends)
+}
+
+#[test]
+fn a_run_writes_one_session_pair() {
+    let lab = lab();
+    plain(&lab, "sess");
+    let plan = plan_of(&lab, "sess");
+    assert!(!plan.resumed_by);
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let all = common::records_of(&lab, "sess");
+    let (starts, ends) = sessions_of(&lab, "sess");
+    assert_eq!(starts.len(), 1);
+    let (start, at) = &starts[0];
+    let first_row = all.iter().position(|r| r.kind == "row").unwrap();
+    assert!(*at < first_row);
+    assert_eq!(all[*at].kind, SESSION_START);
+    assert_eq!(start.verb, "run");
+    assert_eq!(start.pid, std::process::id());
+    assert_eq!(start.box_version, env!("CARGO_PKG_VERSION"));
+    let id = common::box_identity();
+    assert_eq!(start.rules_sha256, id.rules_sha256);
+    assert_eq!(start.binary_sha256, id.binary_sha256);
+    assert_eq!(start.session.len(), 32);
+    assert!(start.started <= all[*at].ts, "{}", start.started);
+    assert_eq!((&start.changed_from, &start.reason), (&None, &None));
+    let body = &all[*at].body;
+    assert!(body.get("changed_from").is_none() && body.get("reason").is_none());
+    // The last record ends the session; a run that did not fail names no error.
+    assert_eq!(ends.len(), 1);
+    assert_eq!(ends[0].1, all.len() - 1);
+    assert_eq!(all[ends[0].1].kind, SESSION_END);
+    let want = SessionEnd {
+        session: start.session.clone(),
+        status: "done".into(),
+        error: None,
+    };
+    assert_eq!(ends[0].0, want);
+    assert!(all[ends[0].1].body.get("error").is_none());
+}
+
+#[test]
+fn a_pause_ends_the_session_paused_and_resume_starts_a_new_one() {
+    let lab = lab();
+    plain(&lab, "sp");
+    let control = ignorarium::control::ControlFile::of(&lab.home, "sp");
+    control.request_pause().unwrap();
+    assert!(matches!(
+        run(&plan_of(&lab, "sp")).unwrap(),
+        RunStatus::Paused(_)
+    ));
+    control.request_resume().unwrap();
+    let mut plan = plan_of(&lab, "sp");
+    plan.resumed_by = true;
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let (starts, ends) = sessions_of(&lab, "sp");
+    let verbs: Vec<&str> = starts.iter().map(|(s, _)| &s.verb[..]).collect();
+    assert_eq!(verbs, ["run", "resume"]);
+    let statuses: Vec<&str> = ends.iter().map(|(e, _)| &e.status[..]).collect();
+    assert_eq!(statuses, ["paused", "done"]);
+    // Two pairs, each end after its own start and before the next start.
+    let order = [starts[0].1, ends[0].1, starts[1].1, ends[1].1];
+    assert!(order.is_sorted(), "{order:?}");
+    for ((s, _), (e, _)) in starts.iter().zip(&ends) {
+        assert_eq!(s.session, e.session);
+    }
+    assert_ne!(starts[0].0.session, starts[1].0.session);
+}
+
+#[test]
+fn a_failed_run_ends_the_session_failed_with_a_redacted_error() {
+    let lab = lab();
+    plain(&lab, "sf");
+    let plan = plan_of(&lab, "sf");
+    // The run reads the machine file again, after the session starts.
+    let machine = lab.home.root.join("machine.toml");
+    std::fs::write(&machine, "max_level = 1\ncpus = 0\n").unwrap();
+    let e = run(&plan).unwrap_err().to_string();
+    assert!(e.contains(&lab.home.root.display().to_string()), "{e}");
+    let (starts, ends) = sessions_of(&lab, "sf");
+    assert_eq!((starts.len(), ends.len()), (1, 1));
+    let end = &ends[0].0;
+    assert_eq!(end.session, starts[0].0.session);
+    assert_eq!(end.status, "failed");
+    let error = end.error.as_deref().unwrap();
+    assert_eq!(error, plan.redact.text(&e));
+    assert!(error.contains("<home>/machine.toml"), "{error}");
+}
+
+/// The suite's box with another binary hash, made of `c`.
+fn rebuilt(c: char) -> BoxIdentity {
+    BoxIdentity {
+        binary_sha256: common::fake_binary(c),
+        ..common::box_identity().clone()
+    }
+}
+
+#[test]
+fn a_changed_binary_refuses_without_a_declaration() {
+    let lab = lab();
+    let dir = plain(&lab, "bc");
+    let plan = plan_of(&lab, "bc");
+    let was = common::box_identity();
+    let now = rebuilt('0');
+    let (old, new) = (
+        binary_text(&was.binary_sha256),
+        binary_text(&now.binary_sha256),
+    );
+    let e = run_as(&plan, &now).unwrap_err();
+    assert!(
+        matches!(&e, RunError::BoxChanged { was: w, now: n } if *w == old && *n == new),
+        "{e:?}"
+    );
+    assert_eq!(
+        e.to_string(),
+        format!(
+            "the box binary changed since the last session ({old} to {new}); \
+             to continue, run with --box-changed \"<reason>\""
+        )
+    );
+    // A binary that cannot read itself is never the same one.
+    let blind = BoxIdentity {
+        binary_sha256: Reading::Unavailable("no exe".into()),
+        ..was.clone()
+    };
+    let e = run_as(&plan, &blind).unwrap_err();
+    assert!(
+        matches!(&e, RunError::BoxChanged { now, .. } if now == "unavailable: no exe"),
+        "{e:?}"
+    );
+    let (starts, ends) = sessions_of(&lab, "bc");
+    assert!(starts.is_empty() && ends.is_empty());
+    assert!(rows_of(&lab, "bc").is_empty());
+    assert!(deviations_of(&dir).is_empty());
+    // The registered binary still runs.
+    assert_eq!(run_as(&plan, was).unwrap(), RunStatus::Done);
+}
+
+#[test]
+fn a_declared_change_writes_a_deviation_row_and_names_the_old_hash() {
+    let lab = lab();
+    let dir = plain(&lab, "bd");
+    let was = common::box_identity();
+    assert_eq!(run_as(&plan_of(&lab, "bd"), was).unwrap(), RunStatus::Done);
+    // Keep the register and inputs records and rows 0..3, with the first session's start.
+    keep_records(&dir, 5);
+    std::fs::rename(dir.join("run"), dir.join("run-old")).unwrap();
+    let mut plan = plan_of(&lab, "bd");
+    let now = rebuilt('0');
+    let (old, new) = (
+        binary_text(&was.binary_sha256),
+        binary_text(&now.binary_sha256),
+    );
+    let reason = "rebuilt with a fix to the reader";
+    plan.box_changed = Some(reason.into());
+    assert_eq!(run_as(&plan, &now).unwrap(), RunStatus::Done);
+    let want = DeviationRow {
+        kind: "box-changed".into(),
+        reason: reason.into(),
+        timing: Timing::DuringCollection,
+        original: format!("binary {old}, rules {}", was.rules_sha256),
+        justification: reason.into(),
+        impact: format!(
+            "rows from here run under binary {new}, rules {}",
+            now.rules_sha256
+        ),
+    };
+    assert_eq!(deviations_of(&dir), [want]);
+    let (starts, _) = sessions_of(&lab, "bd");
+    assert_eq!(starts.len(), 2);
+    let start = &starts[1].0;
+    assert_eq!(start.binary_sha256, now.binary_sha256);
+    assert_eq!(start.changed_from, Some(was.binary_sha256.clone()));
+    assert_eq!(start.reason.as_deref(), Some(reason));
+    // The declared binary is the baseline now: it runs on, and the old one refuses.
+    plan.box_changed = None;
+    assert_eq!(run_as(&plan, &now).unwrap(), RunStatus::Done);
+    let e = run_as(&plan, was).unwrap_err();
+    assert!(
+        matches!(&e, RunError::BoxChanged { was: w, now: n } if *w == new && *n == old),
+        "{e:?}"
+    );
+    assert_eq!(deviations_of(&dir).len(), 1);
+}
+
+#[test]
+fn a_declared_change_before_any_row_is_before_collection() {
+    let lab = lab();
+    let dir = plain(&lab, "bb");
+    let mut plan = plan_of(&lab, "bb");
+    plan.box_changed = Some("rebuilt".into());
+    assert_eq!(run_as(&plan, &rebuilt('1')).unwrap(), RunStatus::Done);
+    let rows = deviations_of(&dir);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].timing, Timing::BeforeCollection);
+}
+
+#[test]
+fn a_declaration_with_no_change_refuses() {
+    let lab = lab();
+    let dir = plain(&lab, "bn");
+    let mut plan = plan_of(&lab, "bn");
+    plan.box_changed = Some("rebuilt".into());
+    let e = run_as(&plan, common::box_identity()).unwrap_err();
+    assert!(matches!(e, RunError::NothingChanged), "{e:?}");
+    assert_eq!(
+        e.to_string(),
+        "--box-changed was given, but the box binary is the one the last session ran"
+    );
+    let (starts, _) = sessions_of(&lab, "bn");
+    assert!(starts.is_empty());
+    assert!(rows_of(&lab, "bn").is_empty());
+    assert!(deviations_of(&dir).is_empty());
+}
+
+#[test]
+fn an_old_register_without_box_runs_and_records_a_session() {
+    let lab = lab();
+    let dir = plain(&lab, "old");
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let log = dir.join("records.jsonl");
+    let all = records::read_all(&log, &key.verifying_key()).unwrap();
+    assert_eq!(all.len(), 1);
+    let mut body = all[0].body.clone();
+    body.as_object_mut().unwrap().remove("box").unwrap();
+    std::fs::rename(&log, dir.join("records.old")).unwrap();
+    let draft = records::RecordDraft::new("old", "register", body);
+    records::append(&log, &key, draft).unwrap();
+    let now = rebuilt('2');
+    // With nothing to compare, the run passes and ignores a declared change.
+    let mut plan = plan_of(&lab, "old");
+    plan.box_changed = Some("rebuilt".into());
+    assert_eq!(run_as(&plan, &now).unwrap(), RunStatus::Done);
+    let (starts, ends) = sessions_of(&lab, "old");
+    assert_eq!((starts.len(), ends.len()), (1, 1));
+    assert_eq!(starts[0].0.binary_sha256, now.binary_sha256);
+    assert_eq!(starts[0].0.changed_from, None);
+    assert_eq!(starts[0].0.reason, None);
+    assert!(deviations_of(&dir).is_empty());
+    // That session is the baseline from here.
+    let e = run_as(&plan_of(&lab, "old"), common::box_identity()).unwrap_err();
+    assert!(matches!(e, RunError::BoxChanged { .. }), "{e:?}");
+}
+
+#[test]
+fn a_killed_session_does_not_block_the_next_run() {
+    let lab = lab();
+    plain(&lab, "dead");
+    let was = common::box_identity();
+    common::sign_session_start(&lab, "dead", &was.binary_sha256, None);
+    assert_eq!(
+        run_as(&plan_of(&lab, "dead"), was).unwrap(),
+        RunStatus::Done
+    );
+    let (starts, ends) = sessions_of(&lab, "dead");
+    assert_eq!((starts.len(), ends.len()), (2, 1));
+    // A killed session of another binary is the baseline too.
+    common::sign_session_start(&lab, "dead", &rebuilt('3').binary_sha256, None);
+    let e = run_as(&plan_of(&lab, "dead"), was).unwrap_err();
+    assert!(matches!(e, RunError::BoxChanged { .. }), "{e:?}");
 }
 
 #[test]
@@ -2011,9 +2285,10 @@ fn an_overrun_on_child_rows_stops_the_children_and_finishes() {
     assert_eq!(kind_of(&lab, "overrun", "verdict").len(), 1);
     let p = ignorarium::runner::progress(&lab.home, "overrun", &all).unwrap();
     assert_eq!((p.done, p.total), (19, 19));
-    // A resume runs no child row and adds nothing.
+    // A resume runs no child row and adds nothing but its session pair.
+    let study = common::study_records_of(&lab, "overrun");
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
-    assert_eq!(common::records_of(&lab, "overrun").len(), all.len());
+    assert_eq!(common::study_records_of(&lab, "overrun"), study);
 }
 
 #[test]
@@ -2055,6 +2330,7 @@ fn a_resumed_run_writes_each_trigger_record_once() {
     let log = dir.join("records.jsonl");
     let whole = std::fs::read_to_string(&log).unwrap();
     let all = common::records_of(&lab, "t-again");
+    let study = common::study_records_of(&lab, "t-again").len();
     let at = all.iter().position(|r| r.kind == "trigger").unwrap();
     let made = all[at].body.clone();
     // A box killed before the record, or after it and one row, then resumed: one record, the
@@ -2068,7 +2344,11 @@ fn a_resumed_run_writes_each_trigger_record_once() {
         let t: Vec<_> = again.iter().filter(|r| r.kind == "trigger").collect();
         assert_eq!(t.len(), 1, "{n}");
         assert_eq!(t[0].body, made, "{n}");
-        assert_eq!(again.len(), all.len(), "{n}");
+        assert_eq!(
+            common::study_records_of(&lab, "t-again").len(),
+            study,
+            "{n}"
+        );
     }
     // A resume reads the record it finds and never evaluates the trigger again: one that
     // admits no child runs none.
@@ -2205,6 +2485,7 @@ fn a_child_two_triggers_declare_runs_once_named_by_the_first() {
     let log = dir.join("records.jsonl");
     let whole = std::fs::read_to_string(&log).unwrap();
     let all = common::records_of(&lab, "twice");
+    let study = common::study_records_of(&lab, "twice").len();
     let at = all.iter().position(|r| r.kind == "trigger").unwrap();
     let text: String = whole.split_inclusive('\n').take(at + 1).collect();
     std::fs::write(&log, text).unwrap();
@@ -2216,7 +2497,7 @@ fn a_child_two_triggers_declare_runs_once_named_by_the_first() {
         t.iter().map(|(r, _)| r.body.clone()).collect()
     };
     assert_eq!(bodies(&again), bodies(&t));
-    assert_eq!(common::records_of(&lab, "twice").len(), all.len());
+    assert_eq!(common::study_records_of(&lab, "twice").len(), study);
 }
 
 #[test]
@@ -3129,10 +3410,7 @@ fn alerts_crossed_by_earlier_sessions_stay_silent_on_resume() {
     plan.meter = Box::new(FakeMeter::new(vec![cost(0.0, 0.0)]));
     run(&plan).unwrap();
     // Keep the register and inputs records and rows 0 and 1: 2000 s of 3600 s, past 0.50.
-    let log = dir.join("records.jsonl");
-    let text = std::fs::read_to_string(&log).unwrap();
-    let kept: String = text.split_inclusive('\n').take(4).collect();
-    std::fs::write(&log, kept).unwrap();
+    keep_records(&dir, 4);
     let mut plan = plan_of(&lab, "b4b");
     plan.backend = slow();
     plan.meter = Box::new(FakeMeter::new(vec![cost(0.0, 2000.0), cost(0.0, 3000.0)]));
@@ -3214,10 +3492,7 @@ fn spend_survives_a_resume_through_the_signed_records() {
     plan.backend = Box::new(b);
     run(&plan).unwrap();
     // Keep the register and inputs records and rows 0..3, as a crash would.
-    let log = dir.join("records.jsonl");
-    let text = std::fs::read_to_string(&log).unwrap();
-    let kept: String = text.split_inclusive('\n').take(5).collect();
-    std::fs::write(&log, kept).unwrap();
+    keep_records(&dir, 5);
     let mut resumed = plan_of(&lab, "b5");
     let (mut b, _) = fake(vec![]);
     b.wall = Some(100.0);
@@ -3507,6 +3782,23 @@ fn a_resumed_run_writes_run_resume_and_no_second_run_start() {
     assert_eq!(resumes[0]["attrs"]["launcher"], "process");
 }
 
+#[test]
+fn a_run_paused_before_its_first_row_starts_again_with_run_start() {
+    let lab = lab();
+    let dir = plain(&lab, "nofirst");
+    let control = ignorarium::control::ControlFile::of(&lab.home, "nofirst");
+    control.request_pause().unwrap();
+    let plan = plan_of(&lab, "nofirst");
+    assert!(matches!(run(&plan).unwrap(), RunStatus::Paused(_)));
+    assert!(rows_of(&lab, "nofirst").is_empty());
+    // The first run left a session pair and no row: the second is still a start.
+    control.request_resume().unwrap();
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let ev = events_of(&dir);
+    assert_eq!(named(&ev, "run.start").len(), 2);
+    assert!(named(&ev, "run.resume").is_empty());
+}
+
 fn outcome(cpu: f64, wall: f64, ended: bool, unknown: bool) -> RowOutcome {
     RowOutcome {
         exit: Exit::Ok,
@@ -3654,7 +3946,7 @@ strata = []
 
 /// Kinds of the records after the last row record.
 fn after_the_rows(lab: &Lab, id: &str) -> Vec<String> {
-    let all = common::records_of(lab, id);
+    let all = common::study_records_of(lab, id);
     let last = all.iter().rposition(|r| r.kind == "row").unwrap();
     all[last + 1..].iter().map(|r| r.kind.clone()).collect()
 }
@@ -3665,9 +3957,23 @@ fn keep_lines(path: &std::path::Path, n: usize) {
     std::fs::write(path, text.split_inclusive('\n').take(n).collect::<String>()).unwrap();
 }
 
-/// Keep the first `n` records of the study's log.
+/// Keep the first `n` study records of the study's log, with the session records among them:
+/// the log a crash after study record `n` leaves.
 fn keep_records(dir: &std::path::Path, n: usize) {
-    keep_lines(&dir.join("records.jsonl"), n);
+    let path = dir.join("records.jsonl");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut left = n;
+    let kept: String = (text.split_inclusive('\n'))
+        .take_while(|line| {
+            let keep = left > 0;
+            let stored: serde_json::Value = serde_json::from_str(line).unwrap();
+            if !common::is_session(stored["record"]["kind"].as_str().unwrap()) {
+                left = left.saturating_sub(1);
+            }
+            keep
+        })
+        .collect();
+    std::fs::write(&path, kept).unwrap();
 }
 
 /// True when the study is finished as a later study reads it, its stream slot included.
@@ -3698,7 +4004,7 @@ fn a_finished_run_writes_each_record_once_and_heals_a_crash() {
     let kinds = ["analysis", "estimate", "estimate", "verdict", "verdict"];
     assert_eq!(after_the_rows(&lab, "fin"), kinds);
     assert!(finished(&lab, "fin"));
-    let all = common::records_of(&lab, "fin");
+    let all = common::study_records_of(&lab, "fin");
     let a = Analysis::of(&all[8]).unwrap();
     let version = env!("CARGO_PKG_VERSION");
     assert_eq!(
@@ -3735,7 +4041,7 @@ fn a_finished_run_writes_each_record_once_and_heals_a_crash() {
     }
     // A second run adds nothing.
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
-    assert_eq!(common::records_of(&lab, "fin").len(), 13);
+    assert_eq!(common::study_records_of(&lab, "fin").len(), 13);
     // A crash after any record of the tail: the next run adds what is missing, once.
     for kept in [13, 12, 11, 10, 9] {
         keep_records(&dir, kept);
@@ -3743,7 +4049,7 @@ fn a_finished_run_writes_each_record_once_and_heals_a_crash() {
         assert_eq!(run(&plan).unwrap(), RunStatus::Done);
         assert_eq!(after_the_rows(&lab, "fin"), kinds, "kept {kept}");
         assert!(finished(&lab, "fin"));
-        let all = common::records_of(&lab, "fin");
+        let all = common::study_records_of(&lab, "fin");
         assert_eq!(
             all[9..11]
                 .iter()
@@ -3816,7 +4122,7 @@ fn finished_study(lab: &Lab, id: &str) -> (std::path::PathBuf, RunPlan, Vec<reco
     );
     let plan = plan_of(lab, id);
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
-    (dir, plan, common::records_of(lab, id))
+    (dir, plan, common::study_records_of(lab, id))
 }
 
 #[test]
@@ -3835,7 +4141,7 @@ fn an_analysis_record_that_does_not_parse_is_an_error() {
         other => panic!("{other:?}"),
     }
     // Nothing was written after it.
-    assert_eq!(common::records_of(&lab, "badan").len(), 9);
+    assert_eq!(common::study_records_of(&lab, "badan").len(), 9);
 }
 
 #[test]
@@ -3850,7 +4156,7 @@ fn finish_refuses_when_the_spec_changed_since_registration() {
         analysis::finish(&plan),
         Err(RunError::SpecChanged)
     ));
-    assert_eq!(common::records_of(&lab, "moved").len(), 8);
+    assert_eq!(common::study_records_of(&lab, "moved").len(), 8);
 }
 
 #[test]
@@ -3875,16 +4181,16 @@ fn a_heal_by_another_box_version_is_refused_only_when_it_adds_something() {
         }
         other => panic!("{other:?}"),
     }
-    assert_eq!(common::records_of(&lab, "vers").len(), 10);
+    assert_eq!(common::study_records_of(&lab, "vers").len(), 10);
     // With every estimate there and a verdict missing, it is still refused.
     append_record(&lab, "vers", "estimate", all[10].body.clone());
     append_record(&lab, "vers", "verdict", all[11].body.clone());
     assert!(matches!(run(&plan), Err(RunError::Records(_))));
-    assert_eq!(common::records_of(&lab, "vers").len(), 12);
+    assert_eq!(common::study_records_of(&lab, "vers").len(), 12);
     // With every record there, nothing is added and nothing is refused.
     append_record(&lab, "vers", "verdict", all[12].body.clone());
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
-    assert_eq!(common::records_of(&lab, "vers").len(), 13);
+    assert_eq!(common::study_records_of(&lab, "vers").len(), 13);
 }
 
 /// `staged`, with arm-b's `bits` taken from study `chooser`.
@@ -4149,7 +4455,7 @@ fn verdicts_and_the_close_are_written_once() {
     let stream = Log::of(&lab.home, LogName::Plan).path().to_path_buf();
     let kinds = ["analysis", "estimate", "verdict"];
     assert_eq!(after_the_rows(&lab, "once"), kinds);
-    let all = common::records_of(&lab, "once");
+    let all = common::study_records_of(&lab, "once");
     let n = all.len();
     let a = all.iter().find_map(Analysis::of).unwrap();
     assert_eq!((a.estimates, a.verdicts, a.slot), (1, 1, Some(1)));
@@ -4166,7 +4472,7 @@ fn verdicts_and_the_close_are_written_once() {
     };
     // A second run adds nothing, to the study's log or to the stream.
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
-    assert_eq!(common::records_of(&lab, "once").len(), n);
+    assert_eq!(common::study_records_of(&lab, "once").len(), n);
     assert_eq!(stream_of(&lab, LogName::Plan), closed);
     // A crash before the close: after the verdict, after the estimate, after the analysis
     // record, or before it. The next run adds what is missing, once, and closes the slot
@@ -4177,7 +4483,7 @@ fn verdicts_and_the_close_are_written_once() {
         assert!(!finished(&lab, "once"), "kept {kept}");
         assert_eq!(run(&plan).unwrap(), RunStatus::Done);
         assert_eq!(after_the_rows(&lab, "once"), kinds, "kept {kept}");
-        let now = common::records_of(&lab, "once");
+        let now = common::study_records_of(&lab, "once");
         assert_eq!(bodies(&now[n - 3..]), bodies(&all[n - 3..]), "kept {kept}");
         assert_eq!(stream_of(&lab, LogName::Plan), closed, "kept {kept}");
         assert!(finished(&lab, "once"), "kept {kept}");
@@ -4195,7 +4501,7 @@ fn verdicts_and_the_close_are_written_once() {
     append_record(&lab, "once", "verdict", verdict);
     keep_lines(&stream, 2);
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
-    assert_eq!(common::records_of(&lab, "once").len(), n);
+    assert_eq!(common::study_records_of(&lab, "once").len(), n);
     let stream = stream_of(&lab, LogName::Plan);
     assert_eq!(stream.last(), Some(&close_of("once", 250.0, true)));
     assert!(finished(&lab, "once"));
@@ -5021,7 +5327,7 @@ fn each_admitted_child_gets_one_estimate_per_outcome_before_the_analysis_record(
             child_estimate("arm-a~window_tokens=512", "arm-a", 512),
         ]
     );
-    let all = common::records_of(&lab, "kids");
+    let all = common::study_records_of(&lab, "kids");
     let at = |kind: &str| all.iter().position(|r| r.kind == kind).unwrap();
     assert!(at("child-estimate") < at("analysis"));
     // A second finish adds nothing.

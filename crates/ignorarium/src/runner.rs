@@ -9,8 +9,8 @@ use crate::budget::{
 use crate::cli::check::HomeRecords;
 use crate::control::{self, ControlError, ControlFile, RunLock, Signal, State};
 use crate::derived::{
-    CONTINUE, INPUTS, Inputs, REGISTER, RESIZE, Register, SELECTION, SPAWN_STOP, Selection,
-    SpawnStop, TRIGGER,
+    CONTINUE, INPUTS, Inputs, REGISTER, RESIZE, Register, SELECTION, SESSION_END, SESSION_START,
+    SPAWN_STOP, Selection, SessionEnd, SessionStart, SpawnStop, TRIGGER,
 };
 use crate::diag::printable;
 use crate::environ::{Builder, Built, Recipe};
@@ -18,6 +18,7 @@ use crate::estimate::{apply_defaults, estimate};
 use crate::events::{self, Event};
 use crate::family;
 use crate::home::Home;
+use crate::identity::{BoxIdentity, binary_text, same_binary};
 use crate::inputs::{self, Found, InputHashes};
 use crate::machine::{self, Machine};
 use crate::payload::{self, PayloadError};
@@ -33,6 +34,7 @@ use crate::schedule::{
 use crate::spec::model::{Mode, Param, Role, SELECTED, Spec, param_path};
 use crate::store::Store;
 use crate::stream::{LogName, StreamError};
+use crate::telemetry::Reading;
 use crate::view::{self, ViewError};
 use crate::{analysis, canon, keys, resize, spawn, spec, sys, telemetry, units, values};
 use ed25519_dalek::SigningKey;
@@ -101,6 +103,12 @@ pub struct RunPlan {
     /// The study root, the box home and the user's home as `<root>`, `<home>` and `~`: a
     /// backend's message reaches the records through it.
     pub redact: Redact,
+    /// Set by `resume`: the session record's verb is `resume`, else `run`, and once the binary
+    /// gate passes, the run sends the resume request that clears a pending pause.
+    pub resumed_by: bool,
+    /// The reason given with `--box-changed`: the run passes the binary gate on a changed
+    /// binary, and refuses on an unchanged one.
+    pub box_changed: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +153,14 @@ pub enum RunError {
     NoKey,
     /// Another run of this study holds the run lock.
     Busy,
+    /// The box binary differs from the last session's, or the register record's when no
+    /// session exists, and no change was declared. Each side as `identity::binary_text`.
+    BoxChanged {
+        was: String,
+        now: String,
+    },
+    /// A change was declared, but the box binary is the one the last session ran.
+    NothingChanged,
     /// A path inside the study folder is a symbolic link.
     Unsafe(String),
     NoBackend {
@@ -221,6 +237,15 @@ impl fmt::Display for RunError {
             RunError::Disk(e) => write!(f, "level 2 cannot make a disk of {e}; rename it"),
             RunError::NoKey => write!(f, "the box key does not exist"),
             RunError::Busy => write!(f, "another run of this study is in progress"),
+            RunError::BoxChanged { was, now } => write!(
+                f,
+                "the box binary changed since the last session ({was} to {now}); \
+                 to continue, run with --box-changed \"<reason>\""
+            ),
+            RunError::NothingChanged => write!(
+                f,
+                "--box-changed was given, but the box binary is the one the last session ran"
+            ),
             RunError::Unsafe(p) => write!(f, "{p} is a symbolic link"),
             RunError::NoBackend { need, have } => {
                 write!(
@@ -487,6 +512,8 @@ pub fn prepare_with(
         meter: Box::new(HostMeter::new(machine.rate_usd_per_hour)),
         heartbeat: HEARTBEAT,
         redact,
+        resumed_by: false,
+        box_changed: None,
     })
 }
 
@@ -1004,29 +1031,163 @@ fn no_links(base: &Path, parts: &[&str]) -> Result<(), RunError> {
 /// an input changed. While a row runs, the backend ticks the watch, which emits heartbeats and
 /// ends the row on a stop. Once the caller has called `sys::catch_interrupts`, SIGINT, SIGTERM
 /// or SIGHUP ends the row as a stop does, and the run pauses. The library leaves signal
-/// handling to its caller.
+/// handling to its caller. Once it holds the lock, the run passes `binary_gate`, signs a
+/// `session.start` record, and at its end, after the late stop, a `session.end` record of how
+/// it ended.
 pub fn run(plan: &RunPlan) -> Result<RunStatus, RunError> {
+    run_as(plan, &crate::identity::current())
+}
+
+/// `run` as the box `now`: the binary gate and the session record read `now`, not the
+/// running binary. Test seam: production calls pass `identity::current()`.
+#[doc(hidden)]
+pub fn run_as(plan: &RunPlan, now: &BoxIdentity) -> Result<RunStatus, RunError> {
     no_links(&plan.home.study_dir(&plan.study_id), &["run"])?;
     let lock = RunLock::try_take(&plan.home, &plan.study_id)
         .map_err(io)?
         .ok_or(RunError::Busy)?;
-    let result = run_locked(plan, &lock);
+    let log = plan.home.study_dir(&plan.study_id).join("records.jsonl");
+    let mut session = None;
+    let result = records::read_all(&log, &plan.key.verifying_key())
+        .map_err(RunError::from)
+        .and_then(|all| {
+            let changed_from = binary_gate(plan, now, &all)?;
+            // Only a resume the gate lets through clears a pending pause.
+            if plan.resumed_by {
+                ControlFile::of(&plan.home, &plan.study_id)
+                    .request_resume()
+                    .map_err(io)?;
+            }
+            session = Some(start_session(plan, &log, now, changed_from)?);
+            run_locked(plan, &lock, all)
+        });
     drop(lock);
     // A stop sent while this run held the lock, after its last look or before an error,
     // found the lock taken: finish it here, on every path. A failure of this check leaves
     // the run's own result, which already ended the run safely.
     let late = control::stop_if_idle(&plan.home, &plan.study_id, &plan.key);
-    match (result, late) {
+    let result = match (result, late) {
         (Ok(_), Ok(Some(r))) => Ok(RunStatus::Stopped(why_of(&r))),
         (result, _) => result,
+    };
+    // A failed append leaves the run's own result; `verify` counts the session as unended.
+    if let Some(session) = session {
+        let _ = end_session(plan, &log, session, &result);
+    }
+    result
+}
+
+/// The binary gate (0028). The baseline is the box of the last `session.start` in `all`, else
+/// the register record's; with neither, the run passes. A binary that differs from it, an
+/// unreadable one included, refuses unless `plan.box_changed` declares the change. A declared
+/// change appends its row to `deviations.jsonl` and returns the old binary hash; a declaration
+/// on the same binary refuses.
+fn binary_gate(
+    plan: &RunPlan,
+    now: &BoxIdentity,
+    all: &[records::Record],
+) -> Result<Option<Reading<String>>, RunError> {
+    let last = (all.iter().rev().find_map(SessionStart::of)).map(|s| BoxIdentity {
+        rules_sha256: s.rules_sha256,
+        binary_sha256: s.binary_sha256,
+    });
+    let registered = || {
+        all.iter()
+            .find_map(Register::of)
+            .and_then(|r| r.box_identity)
+    };
+    let Some(was) = last.or_else(registered) else {
+        return Ok(None);
+    };
+    let (old, new) = (
+        binary_text(&was.binary_sha256),
+        binary_text(&now.binary_sha256),
+    );
+    match (
+        &plan.box_changed,
+        same_binary(&was.binary_sha256, &now.binary_sha256),
+    ) {
+        (None, true) => Ok(None),
+        (Some(_), true) => Err(RunError::NothingChanged),
+        (None, false) => Err(RunError::BoxChanged { was: old, now: new }),
+        (Some(reason), false) => {
+            // The rows that run: a re-size or trigger study's schedule holds rows that never do.
+            let p = progress(&plan.home, &plan.study_id, all)?;
+            let timing = control::Timing::of_stop(p.done, false, || Ok(p.total)).map_err(io)?;
+            let row = control::DeviationRow {
+                kind: "box-changed".into(),
+                reason: reason.clone(),
+                timing,
+                original: format!("binary {old}, rules {}", was.rules_sha256),
+                justification: reason.clone(),
+                impact: format!(
+                    "rows from here run under binary {new}, rules {}",
+                    now.rules_sha256
+                ),
+            };
+            control::deviation(&plan.home, &plan.study_id, &row).map_err(io)?;
+            Ok(Some(was.binary_sha256))
+        }
     }
 }
 
-fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
+/// Append the `session.start` record of this call, as the box `now`, and return its session
+/// id. `changed_from` is the old binary of a declared change.
+fn start_session(
+    plan: &RunPlan,
+    log: &Path,
+    now: &BoxIdentity,
+    changed_from: Option<Reading<String>>,
+) -> Result<String, RunError> {
+    let start = SessionStart {
+        session: events::new_trace_id(),
+        verb: (if plan.resumed_by { "resume" } else { "run" }).into(),
+        pid: std::process::id(),
+        box_version: env!("CARGO_PKG_VERSION").into(),
+        rules_sha256: now.rules_sha256.clone(),
+        binary_sha256: now.binary_sha256.clone(),
+        started: crate::time::now_rfc3339(),
+        reason: changed_from.as_ref().and(plan.box_changed.clone()),
+        changed_from,
+    };
+    let body = serde_json::to_value(&start).map_err(io)?;
+    let draft = RecordDraft::new(&plan.study_id, SESSION_START, body);
+    records::append(log, &plan.key, draft)?;
+    Ok(start.session)
+}
+
+/// Append the `session.end` record of `session`, which ended with `result`.
+fn end_session(
+    plan: &RunPlan,
+    log: &Path,
+    session: String,
+    result: &Result<RunStatus, RunError>,
+) -> Result<(), RunError> {
+    let (status, error) = match result {
+        Ok(RunStatus::Done) => ("done", None),
+        Ok(RunStatus::Paused(_)) => ("paused", None),
+        Ok(RunStatus::Stopped(_)) => ("stopped", None),
+        Err(e) => ("failed", Some(plan.redact.text(&e.to_string()))),
+    };
+    let end = SessionEnd {
+        session,
+        status: status.into(),
+        error,
+    };
+    let body = serde_json::to_value(&end).map_err(io)?;
+    let draft = RecordDraft::new(&plan.study_id, SESSION_END, body);
+    records::append(log, &plan.key, draft)?;
+    Ok(())
+}
+
+fn run_locked(
+    plan: &RunPlan,
+    lock: &RunLock,
+    all: Vec<records::Record>,
+) -> Result<RunStatus, RunError> {
     let dir = plan.home.study_dir(&plan.study_id);
     let log = dir.join("records.jsonl");
     let machine = machine::load(&plan.home.root).map_err(io)?;
-    let all = records::read_all(&log, &plan.key.verifying_key())?;
     let stopped = (all.iter().find(|r| r.kind == "stop").map(why_of))
         .or_else(|| recheck_stop(&plan.spec, &all));
     if let Some(why) = stopped {

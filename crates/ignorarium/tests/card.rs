@@ -771,8 +771,9 @@ const MINUS_25: &str = "#!/bin/sh\ncase \"$2\" in exact) v=8;; *) v=6;; esac\npr
 
 #[test]
 fn seeds_derive_from_the_plan_hash() {
+    use common::run;
     use ignorarium::backend::level0::Level0;
-    use ignorarium::runner::{RunStatus, prepare_with, run};
+    use ignorarium::runner::{RunStatus, prepare_with};
     let lab = lab();
     common::pilot(&lab.home, vec![common::arm_a()]);
     let edit = |t: String| {

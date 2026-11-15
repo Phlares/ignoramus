@@ -462,7 +462,7 @@ fn members_the_context_did_not_read_fail_closed() {
 
 // ---- registering a root ----
 
-/// Register the spec at `spec` with `register::run`, approving its hash: the exit code, and
+/// Register the spec at `spec` as the suite's box, approving its hash: the exit code, and
 /// the output followed by the refusal, if any.
 fn try_register(lab: &Lab, spec: &Path) -> (i32, String) {
     let hash = ignorarium::spec::load(spec).unwrap().hash;
@@ -470,7 +470,8 @@ fn try_register(lab: &Lab, spec: &Path) -> (i32, String) {
     let mut out = Vec::new();
     let mut answer = std::io::Cursor::new(typed.into_bytes());
     let printed = |out: &[u8]| String::from_utf8_lossy(out).into_owned();
-    match register::run(spec, &lab.home, &mut answer, &mut out, true) {
+    let as_box = common::box_identity();
+    match register::run_as(spec, &lab.home, &mut answer, &mut out, true, as_box) {
         Ok(done) => (done.code, printed(&out)),
         Err(e) => (e.code, format!("{}\n{}", printed(&out), e.msg)),
     }
@@ -810,8 +811,9 @@ fn a_study_locked_by_a_test_log_family_cannot_join_a_plan_log_family() {
 
 /// Run study `id` from `root` at level 0 to its end.
 fn run_to_end(lab: &Lab, id: &str, root: &Path) {
+    use common::run;
     use ignorarium::backend::level0::Level0;
-    use ignorarium::runner::{RunStatus, prepare_with, run};
+    use ignorarium::runner::{RunStatus, prepare_with};
     let plan = prepare_with(&lab.home, id, root, vec![Box::new(Level0)]).unwrap();
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
 }

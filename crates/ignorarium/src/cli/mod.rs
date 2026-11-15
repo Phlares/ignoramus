@@ -1,11 +1,14 @@
 //! The command line: argument parsing, the shared context, and one event per call.
 use crate::events::{self, Event};
 use crate::home::Home;
+use crate::sys;
+use clap::builder::NonEmptyStringValueParser;
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 use std::ffi::OsString;
-use std::io::Write;
-use std::path::PathBuf;
+use std::io::{IsTerminal, Write};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 pub mod check;
 mod docs;
@@ -174,6 +177,10 @@ enum Verb {
         /// Use no backend above this isolation level.
         #[arg(long, value_parser = clap::value_parser!(u8).range(..=3))]
         max_level: Option<u8>,
+        /// Run on a box binary that differs from the last session's, for this reason. The
+        /// reason goes into the deviation log and the session record.
+        #[arg(long, value_name = "REASON", value_parser = NonEmptyStringValueParser::new())]
+        box_changed: Option<String>,
     },
     /// Show how far a study has run and what it has spent.
     Status {
@@ -216,6 +223,11 @@ enum Verb {
     Resume {
         /// Study id.
         study: String,
+        /// Resume on a box binary that differs from the last session's, for this reason. The
+        /// reason goes into the deviation log and the session record. Ignored when a live run
+        /// takes the resume request.
+        #[arg(long, value_name = "REASON", value_parser = NonEmptyStringValueParser::new())]
+        box_changed: Option<String>,
     },
     /// End a study for good and record why. Works on a paused or idle study.
     Stop {
@@ -242,6 +254,20 @@ enum Dev {
 }
 
 impl Verb {
+    /// The study id of a verb that takes one.
+    fn study(&self) -> Option<&str> {
+        match self {
+            Verb::Run { study, .. }
+            | Verb::Status { study, .. }
+            | Verb::Report { study, .. }
+            | Verb::Pause { study }
+            | Verb::Resume { study, .. }
+            | Verb::Stop { study, .. } => Some(study),
+            Verb::Verify { study } => study.as_deref(),
+            _ => None,
+        }
+    }
+
     fn name(&self) -> &'static str {
         match self {
             Verb::Guide { .. } => "guide",
@@ -275,7 +301,11 @@ impl Verb {
             Verb::Import { source, files } => import::run(ctx, &source, &files),
             Verb::Verify { study } => verify::run(ctx, study.as_deref()),
             Verb::Probe => probe::run(ctx),
-            Verb::Run { study, max_level } => run::run(ctx, &study, max_level),
+            Verb::Run {
+                study,
+                max_level,
+                box_changed,
+            } => run::run(ctx, &study, max_level, box_changed),
             Verb::Status {
                 study,
                 json,
@@ -297,7 +327,7 @@ impl Verb {
                 study_folder.as_deref(),
             ),
             Verb::Pause { study } => pause::run(ctx, &study),
-            Verb::Resume { study } => resume::run(ctx, &study),
+            Verb::Resume { study, box_changed } => resume::run(ctx, &study, box_changed),
             Verb::Stop { study, reason } => stop::run(ctx, &study, &reason),
             Verb::Dev(Dev::GenRuleDocs { out }) => docs::run(&out),
             Verb::Dev(Dev::Selftest) => selftest::run(),
@@ -319,30 +349,64 @@ where
         }
     };
     let name = cli.verb.name();
+    let started = Instant::now();
+    let trace_id = events::new_trace_id();
+    let span_id = events::new_span_id();
     let ctx = Ctx {
         home: Home::open().map_err(|e| e.to_string()),
     };
+    // The selftest runs in a sandbox where the event log is out of reach. A box home that
+    // cannot be opened warns once, for the call, not for each event.
+    let log = match &ctx.home {
+        _ if name == "dev.selftest" => None,
+        Ok(home) => Some(home.root.join("events.jsonl")),
+        Err(e) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "warning: cannot write the event log: {e}"
+            );
+            None
+        }
+    };
+    if let Some(log) = &log {
+        let mut attrs = json!({
+            "verb": name,
+            "pid": std::process::id(),
+            "parent": sys::parent_name(),
+            "stdin_tty": std::io::stdin().is_terminal(),
+        });
+        if let (Some(map), Some(study)) = (attrs.as_object_mut(), cli.verb.study()) {
+            map.insert("study".into(), study.into());
+        }
+        warn_on_err(write_event(log, &trace_id, &span_id, "call.start", attrs));
+    }
     // A hung-up terminal fails these writes; the exit code and the event still stand.
     let done = cli.verb.run(&ctx).unwrap_or_else(|e| {
         let _ = writeln!(std::io::stderr(), "error: {}", e.msg);
         Done::exit(e.code)
     });
-    // The self-test runs in a sandbox where the event log is out of reach.
-    if name == "dev.selftest" {
-        return done.code;
+    if let Some(log) = &log {
+        let attrs = end_attrs(&done, started);
+        warn_on_err(write_event(log, &trace_id, &span_id, name, attrs));
     }
-    if let Err(e) = emit(&ctx, name, &done) {
+    done.code
+}
+
+fn warn_on_err(r: Result<(), String>) {
+    if let Err(e) = r {
         let _ = writeln!(
             std::io::stderr(),
             "warning: cannot write the event log: {e}"
         );
     }
-    done.code
 }
 
-fn emit(ctx: &Ctx, name: &str, done: &Done) -> Result<(), String> {
-    let home = ctx.home.as_ref().map_err(String::clone)?;
-    let mut attrs = json!({ "exit": done.code });
+fn end_attrs(done: &Done, started: Instant) -> Value {
+    let mut attrs = json!({
+        "exit": done.code,
+        "duration_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "peak_rss_kib": sys::peak_rss_kib(),
+    });
     if let Some(map) = attrs.as_object_mut() {
         if let Some(h) = &done.spec_hash {
             map.insert("spec_hash".into(), Value::String(h.clone()));
@@ -354,12 +418,22 @@ fn emit(ctx: &Ctx, name: &str, done: &Done) -> Result<(), String> {
             map.extend(extra.clone());
         }
     }
+    attrs
+}
+
+fn write_event(
+    log: &Path,
+    trace_id: &str,
+    span_id: &str,
+    name: &str,
+    attrs: Value,
+) -> Result<(), String> {
     events::emit(
-        &home.root.join("events.jsonl"),
+        log,
         Event {
             ts: crate::time::now_rfc3339(),
-            trace_id: events::new_trace_id(),
-            span_id: None,
+            trace_id: trace_id.into(),
+            span_id: Some(span_id.into()),
             name: name.into(),
             level: "info".into(),
             attrs,

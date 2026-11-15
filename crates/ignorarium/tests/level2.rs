@@ -996,7 +996,7 @@ fn the_vmm_s_cpu_is_box_spend_in_the_meter_and_the_records_not_in_the_row() {
     write_exec(&b.vmm, burn);
     (plan.backend, plan.rootfs) = (Box::new(b), job.rootfs);
     // The boot fails; before the retry, the probe finds the fake VMM off its pin.
-    let status = runner::run(&plan).unwrap();
+    let status = common::run(&plan).unwrap();
     let paused = matches!(&status, RunStatus::Paused(w) if w.starts_with("backend unavailable: "));
     assert!(paused, "{status:?}");
     let spend = common::kind_of(&lab, id, "spend");
@@ -1746,7 +1746,7 @@ fn a_level2_study_reads_the_sealed_view_and_records_values() {
     register_pinned(&lab, id, (2, 1, &digest), VIEW_PAYLOAD, params);
     let work = common::work_of(&lab.home, id);
     let plan = runner::prepare_with(&lab.home, id, &work, vec![Box::new(Level2::new())]).unwrap();
-    assert_eq!(runner::run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(common::run(&plan).unwrap(), RunStatus::Done);
     let dir = lab.home.study_dir(id);
     let view = tree::tree_rows(&dir.join("in")).unwrap();
     let names: Vec<&str> = view.iter().map(|r| r.path.as_str()).collect();
@@ -1920,7 +1920,7 @@ fn overhead_through_the_runner() {
             };
             let work = common::work_of(&lab.home, &id);
             let plan = runner::prepare_with(&lab.home, &id, &work, vec![backend]).unwrap();
-            assert_eq!(runner::run(&plan).unwrap(), RunStatus::Done, "{id}");
+            assert_eq!(common::run(&plan).unwrap(), RunStatus::Done, "{id}");
             walls[level as usize - 1] = kept_walls(&lab, &id);
         }
         if trial == 0 {

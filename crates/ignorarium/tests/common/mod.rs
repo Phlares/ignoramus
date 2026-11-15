@@ -1,13 +1,18 @@
 //! A registered study in a temp home, shared by the run tests.
 #![allow(dead_code)]
+use ignorarium::canon::sha256_file;
 use ignorarium::cli::register;
 use ignorarium::derived;
 use ignorarium::home::Home;
+use ignorarium::identity::{self, BoxIdentity};
 use ignorarium::rules::BoxRecords;
+use ignorarium::runner::{self, RunError, RunPlan, RunStatus};
 use ignorarium::spec::model::{Direction, Outcome, Paired, SelectionRule};
+use ignorarium::telemetry::Reading;
 use ignorarium::{keys, records, spec, stream};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use tempfile::TempDir;
 
 /// The box binary, with its home in `lab`.
@@ -15,6 +20,68 @@ pub fn bin(lab: &Lab) -> assert_cmd::Command {
     let mut c = assert_cmd::Command::cargo_bin("ignorarium").unwrap();
     c.env("IGNORARIUM_HOME", &lab.home.root);
     c
+}
+
+/// The box every test study registers and runs under: the embedded rules and the `ignorarium`
+/// binary. A test process is another binary, so `run` passes this one to the gate, and a
+/// study registered here runs through the binary and in the test process alike.
+pub fn box_identity() -> &'static BoxIdentity {
+    static BOX: OnceLock<BoxIdentity> = OnceLock::new();
+    BOX.get_or_init(|| BoxIdentity {
+        rules_sha256: identity::rules_sha256().into(),
+        binary_sha256: Reading::Read(format!(
+            "sha256:{}",
+            sha256_file(env!("CARGO_BIN_EXE_ignorarium").as_ref()).unwrap()
+        )),
+    })
+}
+
+/// A binary hash made of `c`, which no real binary has.
+pub fn fake_binary(c: char) -> Reading<String> {
+    Reading::Read(format!("sha256:{}", c.to_string().repeat(64)))
+}
+
+/// Sign a `session.start` of `binary` with no end into study `id`'s log: a killed session.
+/// With `declared`, it names the binary it changed from and the reason.
+pub fn sign_session_start(
+    lab: &Lab,
+    id: &str,
+    binary: &Reading<String>,
+    declared: Option<(&Reading<String>, &str)>,
+) {
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let start = derived::SessionStart {
+        session: ignorarium::events::new_trace_id(),
+        verb: "run".into(),
+        pid: 1,
+        box_version: "0.0.0".into(),
+        rules_sha256: box_identity().rules_sha256.clone(),
+        binary_sha256: binary.clone(),
+        started: "2026-11-15T00:00:00Z".into(),
+        changed_from: declared.map(|(from, _)| from.clone()),
+        reason: declared.map(|(_, why)| why.into()),
+    };
+    let body = serde_json::to_value(start).unwrap();
+    let log = lab.home.study_dir(id).join("records.jsonl");
+    let draft = records::RecordDraft::new(id, derived::SESSION_START, body);
+    records::append(&log, &key, draft).unwrap();
+}
+
+/// The rows of the study folder's `deviations.jsonl`; none when it does not exist.
+pub fn deviations_of(dir: &Path) -> Vec<ignorarium::control::DeviationRow> {
+    match std::fs::read_to_string(dir.join("deviations.jsonl")) {
+        Ok(text) => text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+/// `runner::run` as the suite's box.
+pub fn run(plan: &RunPlan) -> Result<RunStatus, RunError> {
+    runner::run_as(plan, box_identity())
 }
 
 /// What the command of `a` printed.
@@ -122,8 +189,15 @@ pub fn register_study(
     let typed = format!("{}\n", &hash["sha256:".len()..][..8]);
     let mut out = Vec::new();
     let mut input = Cursor::new(typed.into_bytes());
-    let done = register::run(&spec_path, &lab.home, &mut input, &mut out, true)
-        .unwrap_or_else(|e| panic!("{}: {}", e.msg, String::from_utf8_lossy(&out)));
+    let done = register::run_as(
+        &spec_path,
+        &lab.home,
+        &mut input,
+        &mut out,
+        true,
+        box_identity(),
+    )
+    .unwrap_or_else(|e| panic!("{}: {}", e.msg, String::from_utf8_lossy(&out)));
     assert_eq!(done.code, 0, "{}", String::from_utf8_lossy(&out));
     lab.home.study_dir(id)
 }
@@ -155,6 +229,19 @@ pub fn records_of(lab: &Lab, id: &str) -> Vec<records::Record> {
     let key = keys::load(&lab.home).unwrap().unwrap();
     let path = lab.home.study_dir(id).join("records.jsonl");
     (records::read_log(&path, &key.verifying_key()).unwrap()).restored()
+}
+
+/// True for the kind of a `session.start` or `session.end` record: the pair each run adds
+/// around its work.
+pub fn is_session(kind: &str) -> bool {
+    kind == derived::SESSION_START || kind == derived::SESSION_END
+}
+
+/// `records_of` without the session records.
+pub fn study_records_of(lab: &Lab, id: &str) -> Vec<records::Record> {
+    let mut all = records_of(lab, id);
+    all.retain(|r| !is_session(&r.kind));
+    all
 }
 
 pub fn kind_of(lab: &Lab, id: &str, kind: &str) -> Vec<records::Record> {

@@ -5,7 +5,7 @@ use common::{lab, named, plain, skip_level1, write_exec};
 use ignorarium::backend::level1::Level1;
 use ignorarium::backend::selftest::{self, SelfTest};
 use ignorarium::backend::{Backend, Exit, RowJob};
-use ignorarium::runner::{self, RunStatus, prepare_with};
+use ignorarium::runner::{RunStatus, prepare_with};
 use ignorarium_guest::sys;
 use std::path::Path;
 use std::time::Duration;
@@ -92,7 +92,7 @@ fn a_run_logs_the_self_test_of_every_row() {
         vec![Box::new(b)],
     )
     .unwrap();
-    assert_eq!(runner::run(&plan).unwrap(), RunStatus::Done);
+    assert_eq!(common::run(&plan).unwrap(), RunStatus::Done);
     let events = common::events_of(&dir);
     let tests = named(&events, "sandbox.selftest");
     assert_eq!(tests.len(), 6);

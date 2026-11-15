@@ -425,20 +425,101 @@ fn new_rejects_unknown_template_and_bad_id() {
 }
 
 #[test]
-fn each_verb_emits_one_event() {
+fn each_verb_emits_a_start_and_an_end_event() {
     let (_d, home, spec) = setup(|t| t);
     bin(&home).arg("check").arg(&spec).assert().code(0);
-    let log = std::fs::read_to_string(home.join("events.jsonl")).unwrap();
-    let lines: Vec<Value> = log
-        .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
-    assert_eq!(lines.len(), 1);
-    assert_eq!(lines[0]["name"], "check");
-    assert_eq!(lines[0]["attrs"]["exit"], 0);
+    let lines = all_events(&home);
+    assert_eq!(lines.len(), 2);
+    let (start, end) = (&lines[0], &lines[1]);
+    assert_eq!(start["name"], "call.start");
+    assert_eq!(start["attrs"]["verb"], "check");
+    assert!(start["attrs"]["pid"].as_u64().unwrap() > 0);
+    assert_eq!(start["attrs"]["stdin_tty"], false);
+    assert!(start["attrs"].get("parent").is_some());
+    assert!(start["attrs"].get("study").is_none());
+    assert_eq!(end["name"], "check");
+    assert_eq!(end["attrs"]["exit"], 0);
     let hash = ignorarium::spec::load(&spec).unwrap().hash;
-    assert_eq!(lines[0]["attrs"]["spec_hash"], hash.as_str());
-    assert_eq!(lines[0]["trace_id"].as_str().unwrap().len(), 32);
+    assert_eq!(end["attrs"]["spec_hash"], hash.as_str());
+    assert_eq!(end["trace_id"].as_str().unwrap().len(), 32);
+    assert_eq!(start["trace_id"], end["trace_id"]);
+    assert_eq!(start["span_id"].as_str().unwrap().len(), 16);
+    assert_eq!(start["span_id"], end["span_id"]);
+    assert!(end["attrs"]["duration_ms"].is_u64());
+    assert!(end["attrs"]["peak_rss_kib"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn a_box_home_that_cannot_open_warns_once_per_call() {
+    let (dir, _, spec) = setup(|t| t);
+    let file = dir.path().join("not-a-folder");
+    std::fs::write(&file, "").unwrap();
+    let a = bin(&file).arg("check").arg(&spec).assert();
+    let err = stderr(&a);
+    assert_eq!(
+        err.matches("warning: cannot write the event log").count(),
+        1,
+        "{err}"
+    );
+}
+
+#[test]
+fn a_start_event_names_the_study_a_verb_takes() {
+    let dir = TempDir::new().unwrap();
+    bin(dir.path()).args(["status", "nope"]).assert().code(1);
+    let lines = all_events(dir.path());
+    assert_eq!(lines[0]["attrs"]["verb"], "status");
+    assert_eq!(lines[0]["attrs"]["study"], "nope");
+}
+
+#[test]
+fn verify_names_its_study_only_when_given_one() {
+    let dir = TempDir::new().unwrap();
+    let _ = bin(dir.path()).args(["verify", "--study", "s-1"]).assert();
+    let _ = bin(dir.path()).arg("verify").assert();
+    let lines = all_events(dir.path());
+    let starts: Vec<_> = lines.iter().filter(|e| e["name"] == "call.start").collect();
+    assert_eq!(starts.len(), 2);
+    assert_eq!(starts[0]["attrs"]["verb"], "verify");
+    assert_eq!(starts[0]["attrs"]["study"], "s-1");
+    assert_eq!(starts[1]["attrs"]["verb"], "verify");
+    assert!(starts[1]["attrs"].get("study").is_none());
+}
+
+#[test]
+fn the_start_event_names_the_parent_and_the_end_event_the_memory() {
+    let (_d, home, spec) = setup(|t| t);
+    bin(&home).arg("check").arg(&spec).assert().code(0);
+    let lines = all_events(&home);
+    // The test binary spawned the box; the kernel keeps 15 bytes of a name.
+    let comm = std::fs::read_to_string("/proc/self/comm").unwrap();
+    assert_eq!(lines[0]["attrs"]["parent"], comm.trim_end_matches('\n'));
+    // A Rust binary holds well over 1 MiB resident.
+    assert!(lines[1]["attrs"]["peak_rss_kib"].as_u64().unwrap() > 1024);
+}
+
+#[test]
+fn a_failed_event_write_warns_and_keeps_the_exit_code() {
+    let (dir, _, spec) = setup(|t| t);
+    let home = dir.path().join("evhome");
+    std::fs::create_dir_all(home.join("events.jsonl")).unwrap();
+    let ok = bin(&dir.path().join("okhome"))
+        .arg("check")
+        .arg(&spec)
+        .assert();
+    let want = ok.get_output().status.code().unwrap();
+    let a = bin(&home).arg("check").arg(&spec).assert().code(want);
+    let err = stderr(&a);
+    assert!(err.contains("warning: cannot write the event log"), "{err}");
+}
+
+#[test]
+fn a_parse_error_and_selftest_leave_no_event() {
+    let dir = TempDir::new().unwrap();
+    bin(dir.path()).arg("no-such-verb").assert().code(2);
+    assert!(!dir.path().join("events.jsonl").exists());
+    let _ = bin(dir.path()).args(["dev", "selftest"]).assert();
+    assert!(!dir.path().join("events.jsonl").exists());
 }
 
 #[test]
@@ -900,12 +981,19 @@ fn an_error_that_cannot_reach_stderr_keeps_its_exit_code_and_its_event() {
     assert_eq!(ev[0]["attrs"]["exit"], 1);
 }
 
-fn events(home: &Path) -> Vec<Value> {
+fn all_events(home: &Path) -> Vec<Value> {
     std::fs::read_to_string(home.join("events.jsonl"))
         .unwrap()
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect()
+}
+
+/// The end events: one per call, after its `call.start`.
+fn events(home: &Path) -> Vec<Value> {
+    let mut ev = all_events(home);
+    ev.retain(|e| e["name"] != "call.start");
+    ev
 }
 
 #[test]

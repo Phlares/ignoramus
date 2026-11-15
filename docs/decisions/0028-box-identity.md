@@ -1,6 +1,6 @@
 # 0028 Box identity
 
-A box has two identities: the rules it embeds and the binary that runs. Each has a SHA-256 hash. Nothing in a study's verdict reads either hash. Only `pins.rule_base` and the binary gate (added with #81) can refuse a plan or a run.
+A box has two identities: the rules it embeds and the binary that runs. Each has a SHA-256 hash. Nothing in a study's verdict reads either hash. Only `pins.rule_base` and the binary gate (see Gate) can refuse a plan or a run.
 
 Decision:
 
@@ -17,7 +17,19 @@ Evidence: in the acceptance run, the box binary's hash was written into the deci
 
 ## Gate
 
-Added with #81.
+- **On the binary, not the rules.** The run path reads no rule data. `check_all` runs only from `check` and `family::check`. The runner calls `rules::selection_data`, `family::exempt` and `family::shared`, which are code. The rules act at `check` and `register`, where their hash is recorded and pinned. The binary holds the rules, so one gate on the binary hash covers both.
+- **Baseline.** Once `run` or `resume` holds the run lock, it compares the box binary with the binary of the last `session.start` record in the log. With no session, it compares with the register record's `box`. A binary that cannot read itself never counts as the same.
+- **Refusal.** A different binary refuses with exit 1: `the box binary changed since the last session (<old> to <new>); to continue, run with --box-changed "<reason>"`. The box writes no session record and runs no row. A refused `resume` leaves a pending pause in place: the box sends the resume request only after the gate passes.
+- **Declared path.** `run --box-changed <reason>` and `resume --box-changed <reason>` pass the gate. The box then writes, in this order:
+  1. a row in `deviations.jsonl`, kind `box-changed`, with the reason and the timing; `original` names the old binary and rules hashes, `justification` is the reason, and `impact` names the new binary and rules hashes;
+  2. the signed `session.start` record, which also holds `changed_from`, the old binary hash, and `reason`.
+  The card's deviation table then shows the change with its timing stage, with no hand entry. The date is in the signed session record. An empty reason is a usage error (exit 2).
+- **A declaration of nothing refuses.** `--box-changed` on the binary the last session ran refuses with exit 1: `--box-changed was given, but the box binary is the one the last session ran`.
+- **A live run.** A `resume` that only sends its request to a live run ignores the flag. The live run keeps its binary.
+- **Not gated.** `report`, `verify`, `status` and every other verb. A card rebuild with `report --card` stays free.
+- **Old studies.** A register record without `box`, and no session, gives the gate nothing to compare. The first run under this box passes, ignores `--box-changed`, and writes `session.start` with its binary. That session is the baseline from then on. `verify` prints `not recorded` for the register hashes.
+- **`verify`.** `verify --study` prints one line per binary change between consecutive session starts, or between the register record and the first start, where `k` counts session starts from 1: `binary changed at session <k>: declared (<reason>)`, or `binary changed at session <k>: undeclared`. A change is declared only when the start's `changed_from` is the binary before it. An undeclared change cannot occur through the box. `verify` also lists it as a failure, `undeclared binary change at session <k>`, and exits 1.
+- **Case against.** An operator can always pass the flag. The gate slows a change; it does not lock it. The gain is a dated, signed declaration in place of a reconstruction.
 
 ## Sources
 
