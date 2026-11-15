@@ -2480,3 +2480,31 @@ fn the_check_run_and_status_steps_explain_triggers_and_children() {
     let status = does("status");
     assert!(status.contains("trigger") && status.contains("child"));
 }
+
+#[test]
+fn stop_refuses_a_blank_reason() {
+    let lab = common::lab();
+    common::plain(&lab, "b1");
+    for reason in ["", "   "] {
+        common::bin(&lab)
+            .args(["stop", "b1", "--reason", reason])
+            .assert()
+            .code(2);
+        assert!(!lab.home.study_dir("b1").join("run/control").exists());
+        assert!(common::kind_of(&lab, "b1", "stop").is_empty());
+    }
+}
+
+#[test]
+fn box_changed_refuses_a_blank_reason() {
+    use ignorarium::derived::SESSION_START;
+    let lab = common::lab();
+    common::plain(&lab, "b2");
+    for verb in ["run", "resume"] {
+        common::bin(&lab)
+            .args([verb, "b2", "--box-changed", "  "])
+            .assert()
+            .code(2);
+    }
+    assert!(common::kind_of(&lab, "b2", SESSION_START).is_empty());
+}

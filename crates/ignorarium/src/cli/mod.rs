@@ -2,7 +2,6 @@
 use crate::events::{self, Event};
 use crate::home::Home;
 use crate::sys;
-use clap::builder::NonEmptyStringValueParser;
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 use std::ffi::OsString;
@@ -85,6 +84,14 @@ impl Ctx {
     fn home(&self) -> Result<&Home, CliError> {
         self.home.as_ref().map_err(|e| CliError::usage(e.clone()))
     }
+}
+
+/// A reason goes into a signed record, so it must say something. The value stays as typed.
+fn non_blank(s: &str) -> Result<String, String> {
+    if s.trim().is_empty() {
+        return Err("the reason must not be blank".into());
+    }
+    Ok(s.to_owned())
 }
 
 /// Write to stdout. A closed pipe is not an error; any other failure is.
@@ -179,7 +186,7 @@ enum Verb {
         max_level: Option<u8>,
         /// Run on a box binary that differs from the last session's, for this reason. The
         /// reason goes into the deviation log and the session record.
-        #[arg(long, value_name = "REASON", value_parser = NonEmptyStringValueParser::new())]
+        #[arg(long, value_name = "REASON", value_parser = non_blank)]
         box_changed: Option<String>,
     },
     /// Show how far a study has run and what it has spent.
@@ -226,7 +233,7 @@ enum Verb {
         /// Resume on a box binary that differs from the last session's, for this reason. The
         /// reason goes into the deviation log and the session record. Ignored when a live run
         /// takes the resume request.
-        #[arg(long, value_name = "REASON", value_parser = NonEmptyStringValueParser::new())]
+        #[arg(long, value_name = "REASON", value_parser = non_blank)]
         box_changed: Option<String>,
     },
     /// End a study for good and record why. Works on a paused or idle study.
@@ -234,7 +241,7 @@ enum Verb {
         /// Study id.
         study: String,
         /// Why the study stops.
-        #[arg(long)]
+        #[arg(long, value_name = "REASON", value_parser = non_blank)]
         reason: String,
     },
     #[command(hide = true, subcommand)]
