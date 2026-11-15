@@ -2,6 +2,7 @@
 use crate::canon::{sha256_hex, to_canonical};
 use crate::records::Record;
 use crate::spec::model::{Direction, Outcome, SelectionRule};
+use crate::telemetry::Reading;
 use crate::units::Cluster;
 use ed25519_dalek::SigningKey;
 use serde::de::DeserializeOwned;
@@ -19,6 +20,8 @@ pub const OPENED: &str = "opened";
 pub const REGISTER: &str = "register";
 pub const RESIZE: &str = "resize";
 pub const SELECTION: &str = "selection";
+pub const SESSION_END: &str = "session.end";
+pub const SESSION_START: &str = "session.start";
 pub const SPAWN_STOP: &str = "spawn-stop";
 pub const TRIGGER: &str = "trigger";
 pub const VERDICT: &str = "verdict";
@@ -362,6 +365,52 @@ impl SpawnStop {
     /// `None` for another kind of record, or a body that does not parse.
     pub fn of(r: &Record) -> Option<SpawnStop> {
         body_of(r, SPAWN_STOP)
+    }
+}
+
+/// The start of one `run` or `resume` call's work on a study, written once the call holds
+/// the run lock. A start with no `SessionEnd` of the same `session` means the process died.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionStart {
+    /// 32 hex characters, new for each session.
+    pub session: String,
+    /// `run` or `resume`.
+    pub verb: String,
+    pub pid: u32,
+    pub box_version: String,
+    pub rules_sha256: String,
+    pub binary_sha256: Reading<String>,
+    /// RFC 3339.
+    pub started: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_from: Option<Reading<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl SessionStart {
+    /// `None` for another kind of record, or a body that does not parse.
+    pub fn of(r: &Record) -> Option<SessionStart> {
+        body_of(r, SESSION_START)
+    }
+}
+
+/// How a session ended: `done`, `paused`, `stopped` or `failed`. Only a failed session has an
+/// `error`, with this machine's paths redacted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionEnd {
+    pub session: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl SessionEnd {
+    /// `None` for another kind of record, or a body that does not parse.
+    pub fn of(r: &Record) -> Option<SessionEnd> {
+        body_of(r, SESSION_END)
     }
 }
 

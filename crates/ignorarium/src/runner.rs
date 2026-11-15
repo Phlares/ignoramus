@@ -9,8 +9,8 @@ use crate::budget::{
 use crate::cli::check::HomeRecords;
 use crate::control::{self, ControlError, ControlFile, RunLock, Signal, State};
 use crate::derived::{
-    CONTINUE, INPUTS, Inputs, REGISTER, RESIZE, Register, SELECTION, SPAWN_STOP, Selection,
-    SpawnStop, TRIGGER,
+    CONTINUE, INPUTS, Inputs, REGISTER, RESIZE, Register, SELECTION, SESSION_END, SESSION_START,
+    SPAWN_STOP, Selection, SessionEnd, SessionStart, SpawnStop, TRIGGER,
 };
 use crate::diag::printable;
 use crate::environ::{Builder, Built, Recipe};
@@ -101,6 +101,8 @@ pub struct RunPlan {
     /// The study root, the box home and the user's home as `<root>`, `<home>` and `~`: a
     /// backend's message reaches the records through it.
     pub redact: Redact,
+    /// Set by `resume`: the session record's verb is `resume`, else `run`.
+    pub resumed_by: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -487,6 +489,7 @@ pub fn prepare_with(
         meter: Box::new(HostMeter::new(machine.rate_usd_per_hour)),
         heartbeat: HEARTBEAT,
         redact,
+        resumed_by: false,
     })
 }
 
@@ -1004,29 +1007,89 @@ fn no_links(base: &Path, parts: &[&str]) -> Result<(), RunError> {
 /// an input changed. While a row runs, the backend ticks the watch, which emits heartbeats and
 /// ends the row on a stop. Once the caller has called `sys::catch_interrupts`, SIGINT, SIGTERM
 /// or SIGHUP ends the row as a stop does, and the run pauses. The library leaves signal
-/// handling to its caller.
+/// handling to its caller. Once it holds the lock, the run signs a `session.start` record,
+/// and at its end, after the late stop, a `session.end` record of how it ended.
 pub fn run(plan: &RunPlan) -> Result<RunStatus, RunError> {
     no_links(&plan.home.study_dir(&plan.study_id), &["run"])?;
     let lock = RunLock::try_take(&plan.home, &plan.study_id)
         .map_err(io)?
         .ok_or(RunError::Busy)?;
-    let result = run_locked(plan, &lock);
+    let log = plan.home.study_dir(&plan.study_id).join("records.jsonl");
+    let mut session = None;
+    let result = records::read_all(&log, &plan.key.verifying_key())
+        .map_err(RunError::from)
+        .and_then(|all| {
+            session = Some(start_session(plan, &log)?);
+            run_locked(plan, &lock, all)
+        });
     drop(lock);
     // A stop sent while this run held the lock, after its last look or before an error,
     // found the lock taken: finish it here, on every path. A failure of this check leaves
     // the run's own result, which already ended the run safely.
     let late = control::stop_if_idle(&plan.home, &plan.study_id, &plan.key);
-    match (result, late) {
+    let result = match (result, late) {
         (Ok(_), Ok(Some(r))) => Ok(RunStatus::Stopped(why_of(&r))),
         (result, _) => result,
+    };
+    // A failed append leaves the run's own result; `verify` counts the session as unended.
+    if let Some(session) = session {
+        let _ = end_session(plan, &log, session, &result);
     }
+    result
 }
 
-fn run_locked(plan: &RunPlan, lock: &RunLock) -> Result<RunStatus, RunError> {
+/// Append the `session.start` record of this call and return its session id.
+fn start_session(plan: &RunPlan, log: &Path) -> Result<String, RunError> {
+    let identity = crate::identity::current();
+    let start = SessionStart {
+        session: events::new_trace_id(),
+        verb: (if plan.resumed_by { "resume" } else { "run" }).into(),
+        pid: std::process::id(),
+        box_version: env!("CARGO_PKG_VERSION").into(),
+        rules_sha256: identity.rules_sha256,
+        binary_sha256: identity.binary_sha256,
+        started: crate::time::now_rfc3339(),
+        changed_from: None,
+        reason: None,
+    };
+    let body = serde_json::to_value(&start).map_err(io)?;
+    let draft = RecordDraft::new(&plan.study_id, SESSION_START, body);
+    records::append(log, &plan.key, draft)?;
+    Ok(start.session)
+}
+
+/// Append the `session.end` record of `session`, which ended with `result`.
+fn end_session(
+    plan: &RunPlan,
+    log: &Path,
+    session: String,
+    result: &Result<RunStatus, RunError>,
+) -> Result<(), RunError> {
+    let (status, error) = match result {
+        Ok(RunStatus::Done) => ("done", None),
+        Ok(RunStatus::Paused(_)) => ("paused", None),
+        Ok(RunStatus::Stopped(_)) => ("stopped", None),
+        Err(e) => ("failed", Some(plan.redact.text(&e.to_string()))),
+    };
+    let end = SessionEnd {
+        session,
+        status: status.into(),
+        error,
+    };
+    let body = serde_json::to_value(&end).map_err(io)?;
+    let draft = RecordDraft::new(&plan.study_id, SESSION_END, body);
+    records::append(log, &plan.key, draft)?;
+    Ok(())
+}
+
+fn run_locked(
+    plan: &RunPlan,
+    lock: &RunLock,
+    all: Vec<records::Record>,
+) -> Result<RunStatus, RunError> {
     let dir = plan.home.study_dir(&plan.study_id);
     let log = dir.join("records.jsonl");
     let machine = machine::load(&plan.home.root).map_err(io)?;
-    let all = records::read_all(&log, &plan.key.verifying_key())?;
     let stopped = (all.iter().find(|r| r.kind == "stop").map(why_of))
         .or_else(|| recheck_stop(&plan.spec, &all));
     if let Some(why) = stopped {

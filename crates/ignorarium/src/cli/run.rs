@@ -38,7 +38,7 @@ pub fn go(ctx: &Ctx, id: &str, max_level: Option<u8>, resume: bool) -> Run {
     let reach = machine.max_level.min(max_level.unwrap_or(u8::MAX));
     let root = crate::inputs::current_root()
         .map_err(|e| CliError::usage(format!("cannot read the current folder: {e}")))?;
-    let plan = runner::prepare(home, id, &root, reach).map_err(|e| match e {
+    let mut plan = runner::prepare(home, id, &root, reach).map_err(|e| match e {
         // Level 0 always runs, so `have` is never empty.
         RunError::NoBackend { need, have } => CliError::refuse(format!(
             "study {id} needs isolation level {need}; this machine reaches level {}. \
@@ -50,6 +50,7 @@ pub fn go(ctx: &Ctx, id: &str, max_level: Option<u8>, resume: bool) -> Run {
     if resume {
         request_resume()?;
     }
+    plan.resumed_by = resume;
     // Rows start below: a terminal signal must end the row, not leave it running.
     sys::catch_interrupts()
         .map_err(|e| CliError::usage(format!("cannot install the signal handlers: {e}")))?;

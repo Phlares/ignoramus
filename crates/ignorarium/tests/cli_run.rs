@@ -10,7 +10,7 @@ use ignorarium::backend::{Backend, Probe};
 use ignorarium::canon::sha256_hex;
 use ignorarium::cli::status::blind_order;
 use ignorarium::control::{ControlFile, RunLock, Signal, State};
-use ignorarium::derived::Register;
+use ignorarium::derived::{Register, SESSION_END, SESSION_START, SessionEnd, SessionStart};
 use ignorarium::estimate::apply_defaults;
 use ignorarium::spec::model::Spec;
 use ignorarium::{keys, view};
@@ -365,8 +365,11 @@ fn pause_then_status_shows_paused_and_run_refuses_until_resume() {
         err(&a)
     );
     assert!(kind_of(&lab, "p1", "row").is_empty());
-    // resume clears the pause and runs to the end.
+    // resume clears the pause and runs to the end, in a session of its own.
     bin_at(&lab, "p1").args(["resume", "p1"]).assert().code(0);
+    let starts = kind_of(&lab, "p1", SESSION_START);
+    assert_eq!(starts.len(), 1);
+    assert_eq!(SessionStart::of(&starts[0]).unwrap().verb, "resume");
     let s = status(&lab, "p1");
     assert_eq!(s["state"], "done");
     assert!(s["request"].is_null());
@@ -487,6 +490,8 @@ fn resume_and_stop_during_a_live_run() {
     );
     assert_eq!(child.wait().unwrap().code().unwrap(), 1);
     assert_eq!(status(&lab, "live")["state"], "stopped");
+    let end = kind_of(&lab, "live", SESSION_END);
+    assert_eq!(SessionEnd::of(&end[0]).unwrap().status, "stopped");
 }
 
 /// Row 0 leaves a child that writes `late` after 1.5 s, marks itself started, and sleeps.
@@ -668,6 +673,72 @@ fn a_killed_run_leaves_a_start_without_an_end() {
 }
 
 #[test]
+fn verify_counts_sessions_without_an_end() {
+    let lab = lab();
+    let id = "unended";
+    killed_in_row_0(&lab, id);
+    let a = bin(&lab).args(["verify", "--study", id]).assert().code(0);
+    let out = text(&a);
+    let after = out.split("registered box: ").nth(1).unwrap_or_default();
+    let line = after.lines().nth(1);
+    assert_eq!(line, Some("sessions: 1, 1 without an end record"), "{out}");
+}
+
+#[test]
+fn sessions_change_no_figure() {
+    use ignorarium::runner::progress;
+    let lab = lab();
+    plain(&lab, "fig");
+    bin_at(&lab, "fig").args(["run", "fig"]).assert().code(0);
+    let all = common::records_of(&lab, "fig");
+    let bare: Vec<_> = (all.iter())
+        .filter(|r| !r.kind.starts_with("session."))
+        .cloned()
+        .collect();
+    assert_eq!(all.len() - bare.len(), 2);
+    let (full, want) = (
+        progress(&lab.home, "fig", &all).unwrap(),
+        progress(&lab.home, "fig", &bare).unwrap(),
+    );
+    assert_eq!(full.spec_hash, want.spec_hash);
+    assert_eq!(full.total, want.total);
+    assert_eq!(full.indices, want.indices);
+    assert_eq!(full.done, want.done);
+    assert_eq!(full.conditions, want.conditions);
+    assert_eq!(full.voided, want.voided);
+    assert_eq!(full.unknown_cpu, want.unknown_cpu);
+    assert_eq!(full.retried, want.retried);
+    assert_eq!(full.cost, want.cost);
+    // `status --json` reads the full records and gives the figures of the bare ones.
+    let s = status(&lab, "fig");
+    assert_eq!(s["done"], want.done);
+    assert_eq!(s["total"], want.total);
+    let lines = s["conditions"].as_array().unwrap();
+    assert_eq!(lines.len(), want.conditions.len());
+    for c in lines {
+        let (done, total) = want.conditions[c["label"].as_str().unwrap()];
+        assert_eq!(
+            (c["done"].as_u64(), c["total"].as_u64()),
+            (Some(done), Some(total))
+        );
+    }
+    let cost = &s["cost"];
+    assert_eq!(cost["cpu_hours"], want.cost.cpu_seconds / 3600.0);
+    assert_eq!(cost["wall_hours"], want.cost.wall_seconds / 3600.0);
+    assert_eq!(cost["money_usd"], want.cost.usd);
+    // A run that ended counts as a session with an end.
+    let a = bin(&lab)
+        .args(["verify", "--study", "fig"])
+        .assert()
+        .code(0);
+    assert!(
+        text(&a).contains("\nsessions: 1, 0 without an end record\n"),
+        "{}",
+        text(&a)
+    );
+}
+
+#[test]
 fn stop_sends_its_request_before_it_reads_a_torn_log() {
     let lab = lab();
     let id = "torn";
@@ -684,7 +755,7 @@ fn stop_sends_its_request_before_it_reads_a_torn_log() {
         .code(2);
     assert_eq!(
         err(&a),
-        "error: the stop request is sent, but records of torn: line 2 is not a whole record\n"
+        "error: the stop request is sent, but records of torn: line 3 is not a whole record\n"
     );
     assert_eq!(
         ControlFile::of(&lab.home, id).peek().unwrap(),
@@ -1603,7 +1674,9 @@ fn a_resumed_run_writes_one_resize_record() {
         assert_eq!(resized.len(), 1, "{n}");
         assert_eq!(Resize::of(resized[0]).unwrap(), made, "{n}");
         assert_eq!(reserve_ran(&plan, &again), ran, "{n}");
-        assert_eq!(again.len(), all.len(), "{n}");
+        let study = common::study_records_of(&lab, "again");
+        let want = all.iter().filter(|r| !common::is_session(r)).count();
+        assert_eq!(study.len(), want, "{n}");
     }
     // A resume reads the record it finds and never makes it again: one that admits a single
     // reserve cluster runs that one alone.
@@ -1879,10 +1952,15 @@ fn a_run_study_reports_its_recorded_verdict() {
     let log = lab.home.study_dir("told").join("records.jsonl");
     let before = std::fs::read(&log).unwrap();
     let estimates = kind_of(&lab, "told", "estimate");
+    let count = common::records_of(&lab, "told").len();
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
-    assert_eq!(std::fs::read(&log).unwrap(), before);
+    // The run adds its session pair and nothing else.
+    assert!(std::fs::read(&log).unwrap().starts_with(&before));
+    let now = common::records_of(&lab, "told");
+    let added: Vec<&str> = now[count..].iter().map(|r| &r.kind[..]).collect();
+    assert_eq!(added, ["session.start", "session.end"]);
     assert_eq!(
-        common::records_of(&lab, "told").last().unwrap().kind,
+        common::study_records_of(&lab, "told").last().unwrap().kind,
         "opened"
     );
     assert_eq!(kind_of(&lab, "told", "estimate"), estimates);

@@ -157,6 +157,18 @@ pub fn records_of(lab: &Lab, id: &str) -> Vec<records::Record> {
     (records::read_log(&path, &key.verifying_key()).unwrap()).restored()
 }
 
+/// True for a `session.start` or `session.end` record: the pair each run adds around its work.
+pub fn is_session(r: &records::Record) -> bool {
+    r.kind.starts_with("session.")
+}
+
+/// `records_of` without the session records.
+pub fn study_records_of(lab: &Lab, id: &str) -> Vec<records::Record> {
+    let mut all = records_of(lab, id);
+    all.retain(|r| !is_session(r));
+    all
+}
+
 pub fn kind_of(lab: &Lab, id: &str, kind: &str) -> Vec<records::Record> {
     records_of(lab, id)
         .into_iter()

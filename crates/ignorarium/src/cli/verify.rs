@@ -1,8 +1,11 @@
 //! `verify`: check the plan logs and, for one study, its record chain.
 use super::{CliError, Ctx, Done, Run, out};
+use crate::derived::{Register, SessionEnd, SessionStart};
 use crate::planlog::store::PlanLog;
+use crate::records::Record;
 use crate::telemetry::Reading;
 use crate::{keys, records};
+use std::collections::BTreeSet;
 
 /// True when the log holds no leaves.
 fn empty(home: &crate::home::Home, name: &str) -> bool {
@@ -52,12 +55,21 @@ pub fn run(ctx: &Ctx, study: Option<&str>) -> Run {
         if !known || !dir.is_dir() {
             failed.push(format!("no study named {id:?} in the box"));
         } else if let Some(k) = &key {
-            match records::verify(&dir.join("records.jsonl"), &k.verifying_key()) {
-                Ok(0) => failed.push(format!("study {id}: no register record")),
-                Ok(n) => {
-                    out(&format!("study {id}: {n} records\n"))?;
-                    let shown = registered_box(&dir, &k.verifying_key());
-                    out(&format!("registered box: {shown}\n"))?;
+            match records::read_all(&dir.join("records.jsonl"), &k.verifying_key()) {
+                Ok(all) if all.is_empty() => {
+                    failed.push(format!("study {id}: no register record"));
+                }
+                Ok(all) => {
+                    out(&format!("study {id}: {} records\n", all.len()))?;
+                    // The register is the first record of the log.
+                    let registered =
+                        (all.first().and_then(Register::of)).and_then(|r| r.box_identity);
+                    out(&format!(
+                        "registered box: {}\n",
+                        box_text(registered.as_ref())
+                    ))?;
+                    let (n, open) = sessions(&all);
+                    out(&format!("sessions: {n}, {open} without an end record\n"))?;
                 }
                 Err(e) => failed.push(format!("study {id}: {e}")),
             }
@@ -73,18 +85,20 @@ pub fn run(ctx: &Ctx, study: Option<&str>) -> Run {
     }
 }
 
-/// The box identity the study's register record holds, as text; `not recorded` for a record
-/// written before the field existed. The register is the first record of the log.
-fn registered_box(dir: &std::path::Path, key: &ed25519_dalek::VerifyingKey) -> String {
-    // A read error prints `not recorded`: the log verified one line earlier.
-    let register = records::first(&dir.join("records.jsonl"), key)
-        .ok()
-        .flatten()
-        .and_then(|r| crate::derived::Register::of(&r))
-        .and_then(|r| r.box_identity);
-    box_text(register.as_ref())
+/// The session starts in `all`, and how many of them have no end record of the same session.
+fn sessions(all: &[Record]) -> (usize, usize) {
+    let ended: BTreeSet<String> = (all.iter().filter_map(SessionEnd::of))
+        .map(|e| e.session)
+        .collect();
+    let starts: Vec<SessionStart> = all.iter().filter_map(SessionStart::of).collect();
+    let open = (starts.iter())
+        .filter(|s| !ended.contains(&s.session))
+        .count();
+    (starts.len(), open)
 }
 
+/// The box identity a register record holds, as text; `not recorded` for a record written
+/// before the field existed.
 fn box_text(b: Option<&crate::identity::BoxIdentity>) -> String {
     let Some(b) = b else {
         return "not recorded".into();
@@ -112,5 +126,34 @@ mod tests {
             "rules sha256:ab, binary unavailable: no exe"
         );
         assert_eq!(box_text(None), "not recorded");
+    }
+
+    #[test]
+    fn a_session_pairs_with_the_end_of_its_own_id() {
+        let record = |kind: &str, body: serde_json::Value| Record {
+            seq: 0,
+            prev: String::new(),
+            study: "s".into(),
+            row: None,
+            kind: kind.into(),
+            body,
+            ts: String::new(),
+        };
+        let start = |id: &str| {
+            let body = serde_json::json!({
+                "session": id, "verb": "run", "pid": 1, "box_version": "0",
+                "rules_sha256": "sha256:ab", "binary_sha256": "sha256:cd",
+                "started": "2026-11-15T00:00:00Z",
+            });
+            record(crate::derived::SESSION_START, body)
+        };
+        let end = |id: &str| {
+            let body = serde_json::json!({ "session": id, "status": "done" });
+            record(crate::derived::SESSION_END, body)
+        };
+        assert_eq!(sessions(&[]), (0, 0));
+        assert_eq!(sessions(&[start("a"), end("a")]), (1, 0));
+        assert_eq!(sessions(&[start("a"), start("b"), end("b")]), (2, 1));
+        assert_eq!(sessions(&[start("a"), end("b")]), (1, 1));
     }
 }
