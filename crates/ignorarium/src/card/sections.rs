@@ -489,29 +489,47 @@ pub struct Stack {
     pub vcpus: Field<u32>,
     /// The plan's `row_memory_mib`.
     pub memory_cap_mib: Field<u32>,
+    /// Per key above, the row records whose value does not parse; keys with none are left out.
+    #[serde(default)]
+    pub unreadable: BTreeMap<String, u64>,
 }
 
-/// The distinct values of `key` over the row records of `log`; `None` when no row holds one.
-fn from_rows<T: Ord + DeserializeOwned>(log: &Log, key: &str) -> Option<Vec<T>> {
-    let values: BTreeSet<T> = (rows(log).filter_map(|r| r.body.get(key)))
-        .filter_map(|v| serde_json::from_value(v.clone()).ok())
-        .collect();
+/// The distinct values of `key` over the row records of `log`, `None` when no row holds one,
+/// and the count of rows whose value does not parse, added to `unreadable`.
+fn from_rows<T: Ord + DeserializeOwned>(
+    log: &Log,
+    key: &str,
+    unreadable: &mut BTreeMap<String, u64>,
+) -> Option<Vec<T>> {
+    let mut values = BTreeSet::new();
+    let mut bad = 0;
+    for v in rows(log).filter_map(|r| r.body.get(key)) {
+        match serde_json::from_value(v.clone()) {
+            Ok(v) => drop(values.insert(v)),
+            Err(_) => bad += 1,
+        }
+    }
+    if bad > 0 {
+        unreadable.insert(key.into(), bad);
+    }
     (!values.is_empty()).then(|| values.into_iter().collect())
 }
 
 pub fn stack(log: &Log, spec: &Spec, events: Option<&Outside>) -> Stack {
-    let levels: Option<Vec<u8>> = from_rows(log, "isolation");
+    let mut unreadable = BTreeMap::new();
+    let levels: Option<Vec<u8>> = from_rows(log, "isolation", &mut unreadable);
     let agentless = (levels.as_ref()).is_some_and(|l| l.iter().all(|l| *l < AGENT_LEVEL));
-    let agent_sha256 = match from_rows(log, "agent_sha256") {
+    let agent_sha256 = match from_rows(log, "agent_sha256", &mut unreadable) {
         None if agentless => Field::NotApplicable,
         found => Field::of(found, events),
     };
     Stack {
         isolation: Field::of(levels, events),
-        launcher: Field::of(from_rows(log, "launcher"), events),
+        launcher: Field::of(from_rows(log, "launcher", &mut unreadable), events),
         agent_sha256,
         vcpus: Field::of(None, None),
         memory_cap_mib: Field::of(spec.design.row_memory_mib, None),
+        unreadable,
     }
 }
 

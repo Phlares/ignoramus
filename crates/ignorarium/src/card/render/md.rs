@@ -221,6 +221,12 @@ fn setup_section(c: &Card) -> String {
         "Agent SHA-256: {}",
         field(&k.agent_sha256, |v| names(v))
     ));
+    if !k.unreadable.is_empty() {
+        let counts: Vec<String> = (k.unreadable.iter())
+            .map(|(key, n)| format!("{key} {n}"))
+            .collect();
+        l.push(format!("Unreadable row values, rows per key: {}", names(&counts)));
+    }
     l.push(format!("Virtual CPUs: {}", field(&k.vcpus, u32::to_string)));
     l.push(format!(
         "Row memory cap (MiB): {}",

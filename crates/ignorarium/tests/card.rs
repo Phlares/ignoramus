@@ -173,6 +173,30 @@ fn stack_from_row_records() {
     assert_eq!(stack.memory_cap_mib, recorded(2304));
 }
 
+/// Issue #73: a row value the reader cannot parse is counted, not dropped without a trace.
+#[test]
+fn an_unreadable_row_value_is_counted() {
+    let lab = lab();
+    let mut bodies = bodies(&lab, MEAN, rows_on_level_2());
+    let first = bodies.iter_mut().find(|(k, _)| *k == "row").unwrap();
+    first.1["isolation"] = json!("2");
+    plant(&lab.home, ID, &bodies);
+    let card = card_of(&lab);
+    let stack = &card.setup.stack;
+    assert_eq!(stack.isolation, recorded(vec![2]));
+    assert_eq!(
+        stack.unreadable,
+        std::collections::BTreeMap::from([("isolation".to_string(), 1)])
+    );
+    let md = card::render::markdown(&card);
+    assert!(md.contains("Unreadable row values, rows per key: isolation 1"), "{md}");
+    let lab = self::lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let card = card_of(&lab);
+    assert!(card.setup.stack.unreadable.is_empty());
+    assert!(!card::render::markdown(&card).contains("Unreadable row values"));
+}
+
 #[test]
 fn display_word_not_shown_for_fail() {
     let lab = lab();
