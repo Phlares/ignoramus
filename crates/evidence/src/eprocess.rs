@@ -2,7 +2,8 @@
 //! arXiv:2010.09686; Vovk and Wang, arXiv:1912.06116 for the two-sided mean).
 use crate::{Error, Tail};
 
-/// Largest bet fraction. Every factor stays at or above 1/4, so wealth never reaches 0.
+/// The largest bet fraction of [`EProcess::new`]. Every factor stays at or above 1/4, so wealth
+/// never reaches 0.
 pub const MAX_BET: f64 = 0.75;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -23,6 +24,7 @@ pub struct EProcess {
     score: Score,
     sides: &'static [f64],
     stop: f64,
+    cap: f64,
     s_sum: f64,
     q_sum: f64,
     log_wealth: [f64; 2],
@@ -33,6 +35,15 @@ pub struct EProcess {
 
 impl EProcess {
     pub fn new(score: Score, tail: Tail, stop: f64) -> Result<EProcess, Error> {
+        EProcess::with_cap(score, tail, stop, MAX_BET)
+    }
+
+    /// [`EProcess::new`] with the largest bet fraction `cap`, which must lie strictly between 0
+    /// and 1: any such cap fixed before the data keeps the test valid and changes its power.
+    pub fn with_cap(score: Score, tail: Tail, stop: f64, cap: f64) -> Result<EProcess, Error> {
+        if !(cap > 0.0 && cap < 1.0) {
+            return Err(Error::Parameter("cap"));
+        }
         if stop.is_nan() || stop <= 1.0 {
             return Err(Error::Parameter("stop"));
         }
@@ -58,6 +69,7 @@ impl EProcess {
             score,
             sides,
             stop,
+            cap,
             s_sum: 0.0,
             q_sum: 0.0,
             log_wealth: [0.0; 2],
@@ -93,7 +105,7 @@ impl EProcess {
             return Ok(());
         }
         for (w, &sigma) in self.log_wealth.iter_mut().zip(self.sides) {
-            let bet = (sigma * self.s_sum / (1.0 + self.q_sum)).clamp(0.0, MAX_BET);
+            let bet = (sigma * self.s_sum / (1.0 + self.q_sum)).clamp(0.0, self.cap);
             *w += (bet * (sigma * s)).ln_1p();
         }
         self.s_sum += s;

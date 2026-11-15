@@ -296,3 +296,37 @@ fn a_stopped_process_never_reads_below_its_stop() {
     }
     assert!(p.value() >= 20.0);
 }
+
+const UNIT: Score = Score::Bounded {
+    lo: -1.0,
+    hi: 1.0,
+    mean: 0.0,
+};
+
+#[test]
+fn with_cap_at_max_bet_is_new() {
+    let xs = [-0.5, -0.9, 0.3, -0.2, 1.0, -1.0, -0.7];
+    let mut a = EProcess::new(UNIT, Tail::Lower, f64::INFINITY).unwrap();
+    let mut b = EProcess::with_cap(UNIT, Tail::Lower, f64::INFINITY, MAX_BET).unwrap();
+    assert_eq!(run(&mut a, &xs), run(&mut b, &xs));
+}
+
+#[test]
+fn the_cap_bounds_every_bet() {
+    // Scores of -1/2 push the Lower bet past 1 from the fourth on, so it bets the cap: a
+    // further -1/2 multiplies wealth by 1 + cap / 2, and a score at the far end by 1 - cap.
+    for cap in [0.5, 0.9] {
+        let mut p = EProcess::with_cap(UNIT, Tail::Lower, f64::INFINITY, cap).unwrap();
+        let v = run(&mut p, &[vec![-0.5; 10], vec![1.0]].concat());
+        close(v[9] / v[8], 1.0 + cap / 2.0);
+        close(v[10] / v[9], 1.0 - cap);
+    }
+}
+
+#[test]
+fn a_cap_outside_0_to_1_is_refused() {
+    for cap in [0.0, 1.0, -0.1, 1.5, f64::NAN, f64::INFINITY] {
+        let p = EProcess::with_cap(UNIT, Tail::Lower, f64::INFINITY, cap);
+        assert_eq!(p.unwrap_err(), Error::Parameter("cap"), "{cap}");
+    }
+}
