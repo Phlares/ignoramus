@@ -103,7 +103,8 @@ pub struct RunPlan {
     /// The study root, the box home and the user's home as `<root>`, `<home>` and `~`: a
     /// backend's message reaches the records through it.
     pub redact: Redact,
-    /// Set by `resume`: the session record's verb is `resume`, else `run`.
+    /// Set by `resume`: the session record's verb is `resume`, else `run`, and once the binary
+    /// gate passes, the run sends the resume request that clears a pending pause.
     pub resumed_by: bool,
     /// The reason given with `--box-changed`: the run passes the binary gate on a changed
     /// binary, and refuses on an unchanged one.
@@ -1038,7 +1039,8 @@ pub fn run(plan: &RunPlan) -> Result<RunStatus, RunError> {
 }
 
 /// `run` as the box `now`: the binary gate and the session record read `now`, not the
-/// running binary.
+/// running binary. Test seam: production calls pass `identity::current()`.
+#[doc(hidden)]
 pub fn run_as(plan: &RunPlan, now: &BoxIdentity) -> Result<RunStatus, RunError> {
     no_links(&plan.home.study_dir(&plan.study_id), &["run"])?;
     let lock = RunLock::try_take(&plan.home, &plan.study_id)
@@ -1050,6 +1052,12 @@ pub fn run_as(plan: &RunPlan, now: &BoxIdentity) -> Result<RunStatus, RunError> 
         .map_err(RunError::from)
         .and_then(|all| {
             let changed_from = binary_gate(plan, now, &all)?;
+            // Only a resume the gate lets through clears a pending pause.
+            if plan.resumed_by {
+                ControlFile::of(&plan.home, &plan.study_id)
+                    .request_resume()
+                    .map_err(io)?;
+            }
             session = Some(start_session(plan, &log, now, changed_from)?);
             run_locked(plan, &lock, all)
         });
@@ -1103,9 +1111,9 @@ fn binary_gate(
         (Some(_), true) => Err(RunError::NothingChanged),
         (None, false) => Err(RunError::BoxChanged { was: old, now: new }),
         (Some(reason), false) => {
-            let done = records::row_indices(all).len();
-            let timing = control::Timing::of_stop(done, false, || Ok(plan.schedule.rows.len()))
-                .map_err(io)?;
+            // The rows that run: a re-size or trigger study's schedule holds rows that never do.
+            let p = progress(&plan.home, &plan.study_id, all)?;
+            let timing = control::Timing::of_stop(p.done, false, || Ok(p.total)).map_err(io)?;
             let row = control::DeviationRow {
                 kind: "box-changed".into(),
                 reason: reason.clone(),

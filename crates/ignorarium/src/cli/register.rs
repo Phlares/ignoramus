@@ -158,7 +158,9 @@ pub fn run(
     )
 }
 
-/// `run` as the box `identity`, which the register record holds under `box`.
+/// `run` as the box `identity`, which the register record holds under `box`. Test seam:
+/// production calls pass `identity::current()`.
+#[doc(hidden)]
 pub fn run_as(
     spec_path: &Path,
     home: &Home,

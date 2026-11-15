@@ -21,14 +21,11 @@ pub fn go(
     let (home, _, all) = registered(ctx, id)?;
     refuse_if_stopped(id, &all)?;
     let control = ControlFile::of(home, id);
-    let request_resume = || {
-        control
-            .request_resume()
-            .map_err(|e| CliError::usage(format!("cannot write the resume request: {e}")))
-    };
     // A live run reads the request at its next row boundary; this call starts nothing.
     if resume && run_is_live(home, id).map_err(|e| CliError::usage(e.to_string()))? {
-        request_resume()?;
+        control
+            .request_resume()
+            .map_err(|e| CliError::usage(format!("cannot write the resume request: {e}")))?;
         out("the live run continues
 ")?;
         return Ok(Done::exit(0));
@@ -54,9 +51,8 @@ pub fn go(
         )),
         e => run_error(e),
     })?;
-    if resume {
-        request_resume()?;
-    }
+    // The runner sends the resume request once the binary gate passes, so a refused resume
+    // leaves the pause pending.
     plan.resumed_by = resume;
     plan.box_changed = box_changed;
     // Rows start below: a terminal signal must end the row, not leave it running.

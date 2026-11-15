@@ -1402,16 +1402,8 @@ fn register_writes_the_box_identity() {
     go(&f, &spec, &answer(&spec), true).0.unwrap();
     let rp = f.home.study_dir("my-study").join("records.jsonl");
     let body = &records(&rp)[0]["record"]["body"];
-    assert_eq!(
-        body["box"]["rules_sha256"],
-        ignorarium::identity::rules_sha256()
-    );
-    let binary = &body["box"]["binary_sha256"];
-    assert!(
-        binary.as_str().is_some_and(|s| s.starts_with("sha256:"))
-            || binary["unavailable"].is_string(),
-        "{binary}"
-    );
+    let want = serde_json::to_value(ignorarium::identity::current()).unwrap();
+    assert_eq!(body["box"], want);
 }
 
 #[test]

@@ -2,6 +2,7 @@
 use crate::events::{self, Event};
 use crate::home::Home;
 use crate::sys;
+use clap::builder::NonEmptyStringValueParser;
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 use std::ffi::OsString;
@@ -178,7 +179,7 @@ enum Verb {
         max_level: Option<u8>,
         /// Run on a box binary that differs from the last session's, for this reason. The
         /// reason goes into the deviation log and the session record.
-        #[arg(long, value_name = "REASON")]
+        #[arg(long, value_name = "REASON", value_parser = NonEmptyStringValueParser::new())]
         box_changed: Option<String>,
     },
     /// Show how far a study has run and what it has spent.
@@ -225,7 +226,7 @@ enum Verb {
         /// Resume on a box binary that differs from the last session's, for this reason. The
         /// reason goes into the deviation log and the session record. Ignored when a live run
         /// takes the resume request.
-        #[arg(long, value_name = "REASON")]
+        #[arg(long, value_name = "REASON", value_parser = NonEmptyStringValueParser::new())]
         box_changed: Option<String>,
     },
     /// End a study for good and record why. Works on a paused or idle study.

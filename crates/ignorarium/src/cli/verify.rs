@@ -69,25 +69,28 @@ pub fn run(ctx: &Ctx, study: Option<&str>) -> Run {
                         "registered box: {}\n",
                         box_text(registered.as_ref())
                     ))?;
-                    let (n, open, unreadable) = sessions(&all);
+                    let starts: Vec<SessionStart> =
+                        all.iter().filter_map(SessionStart::of).collect();
+                    let (open, unreadable) = sessions(&all, &starts);
                     let unreadable = match unreadable {
                         0 => String::new(),
                         m => format!(", {m} unreadable"),
                     };
                     out(&format!(
-                        "sessions: {n}, {open} without an end record{unreadable}\n"
+                        "sessions: {}, {open} without an end record{unreadable}\n",
+                        starts.len()
                     ))?;
-                    let starts: Vec<SessionStart> =
-                        all.iter().filter_map(SessionStart::of).collect();
                     let was = registered.as_ref().map(|b| &b.binary_sha256);
                     for (k, declared) in binary_changes(was, &starts) {
-                        match declared {
-                            Some(why) => out(&format!(
-                                "binary changed at session {k}: declared ({why})\n"
-                            ))?,
-                            None => failed.push(format!(
+                        let how = match &declared {
+                            Some(why) => format!("declared ({why})"),
+                            None => "undeclared".into(),
+                        };
+                        out(&format!("binary changed at session {k}: {how}\n"))?;
+                        if declared.is_none() {
+                            failed.push(format!(
                                 "study {id}: undeclared binary change at session {k}"
-                            )),
+                            ));
                         }
                     }
                 }
@@ -105,43 +108,38 @@ pub fn run(ctx: &Ctx, study: Option<&str>) -> Run {
     }
 }
 
-/// The session starts in `all`, how many of them have no end record of the same session, and
-/// how many session records have a body that does not parse.
-fn sessions(all: &[Record]) -> (usize, usize, usize) {
-    let ended: BTreeSet<String> = (all.iter().filter_map(SessionEnd::of))
-        .map(|e| e.session)
-        .collect();
-    let starts: Vec<SessionStart> = all.iter().filter_map(SessionStart::of).collect();
+/// Of `starts`, every session start that parses in `all`: how many have no end record of the
+/// same session, and how many session records in `all` have a body that does not parse.
+fn sessions(all: &[Record], starts: &[SessionStart]) -> (usize, usize) {
+    let ends: Vec<SessionEnd> = all.iter().filter_map(SessionEnd::of).collect();
+    let ended: BTreeSet<&str> = ends.iter().map(|e| &e.session[..]).collect();
     let open = (starts.iter())
-        .filter(|s| !ended.contains(&s.session))
+        .filter(|s| !ended.contains(&s.session[..]))
         .count();
-    let unreadable = (all.iter())
-        .filter(|r| match &r.kind[..] {
-            SESSION_START => SessionStart::of(r).is_none(),
-            SESSION_END => SessionEnd::of(r).is_none(),
-            _ => false,
-        })
+    let kinds = (all.iter())
+        .filter(|r| r.kind == SESSION_START || r.kind == SESSION_END)
         .count();
-    (starts.len(), open, unreadable)
+    (open, kinds.saturating_sub(starts.len() + ends.len()))
 }
 
 /// Each binary change between consecutive session starts, or between the `registered` binary
-/// and the first start: the start's 1-based number, and its reason when it names the binary it
-/// changed from (`None`: undeclared). With no registered binary, the first start has nothing
-/// to compare. An unreadable binary always differs, as at the gate.
+/// and the first start: the start's 1-based number, and its reason when its `changed_from` is
+/// the binary before it (`None`: undeclared). With no registered binary, the first start has
+/// nothing to compare. An unreadable binary always differs, as at the gate; a change from one
+/// is declared when `changed_from` holds that same reading, as the gate writes it.
 fn binary_changes(
     registered: Option<&Reading<String>>,
     starts: &[SessionStart],
 ) -> Vec<(usize, Option<String>)> {
     let before = std::iter::once(registered).chain(starts.iter().map(|s| Some(&s.binary_sha256)));
     (before.zip(starts).enumerate())
-        .filter(|(_, (was, s))| was.is_some_and(|w| !same_binary(w, &s.binary_sha256)))
-        .map(|(i, (_, s))| {
-            let declared = s.changed_from.as_ref();
-            (
+        .filter_map(|(i, (was, s))| {
+            let was = was.filter(|w| !same_binary(w, &s.binary_sha256))?;
+            let declared = s.changed_from.as_ref() == Some(was);
+            Some((
                 i + 1,
-                declared.map(|_| s.reason.clone().unwrap_or_default()),
-            )
+                declared.then(|| s.reason.clone().unwrap_or_default()),
+            ))
         })
         .collect()
 }
@@ -197,6 +195,12 @@ mod tests {
             let body = serde_json::json!({ "session": id, "status": "done" });
             record(crate::derived::SESSION_END, body)
         };
+        // The starts as `run` parses them, then what `sessions` counts.
+        let sessions = |all: &[Record]| {
+            let starts: Vec<SessionStart> = all.iter().filter_map(SessionStart::of).collect();
+            let (open, unreadable) = sessions(all, &starts);
+            (starts.len(), open, unreadable)
+        };
         assert_eq!(sessions(&[]), (0, 0, 0));
         assert_eq!(sessions(&[start("a"), end("a")]), (1, 0, 0));
         assert_eq!(sessions(&[start("a"), start("b"), end("b")]), (2, 1, 0));
@@ -214,17 +218,18 @@ mod tests {
     #[test]
     fn each_binary_change_is_numbered_by_its_session() {
         let read = |c: &str| Reading::Read(format!("sha256:{c}"));
-        let start = |binary: Reading<String>, declared: Option<(&str, &str)>| SessionStart {
-            session: "a".into(),
-            verb: "run".into(),
-            pid: 1,
-            box_version: "0".into(),
-            rules_sha256: "sha256:ab".into(),
-            binary_sha256: binary,
-            started: "2026-11-15T00:00:00Z".into(),
-            changed_from: declared.map(|(from, _)| read(from)),
-            reason: declared.map(|(_, why)| why.into()),
-        };
+        let start =
+            |binary: Reading<String>, declared: Option<(Reading<String>, &str)>| SessionStart {
+                session: "a".into(),
+                verb: "run".into(),
+                pid: 1,
+                box_version: "0".into(),
+                rules_sha256: "sha256:ab".into(),
+                binary_sha256: binary,
+                started: "2026-11-15T00:00:00Z".into(),
+                reason: declared.as_ref().map(|(_, why)| why.to_string()),
+                changed_from: declared.map(|(from, _)| from),
+            };
         let (a, b) = (read("aa"), read("bb"));
         // A register without `box` gives the first session nothing to compare.
         assert_eq!(binary_changes(None, &[start(b.clone(), None)]), []);
@@ -235,16 +240,25 @@ mod tests {
         );
         let starts = [
             start(a.clone(), None),
-            start(b.clone(), Some(("aa", "fix"))),
+            start(b.clone(), Some((a.clone(), "fix"))),
             start(b.clone(), None),
         ];
         assert_eq!(
             binary_changes(Some(&a), &starts),
             [(2, Some("fix".to_string()))]
         );
-        // An unreadable binary is never the same as another reading.
+        // A change that names another binary than the one before it is undeclared.
+        let starts = [start(b.clone(), Some((read("cc"), "fix")))];
+        assert_eq!(binary_changes(Some(&a), &starts), [(1, None)]);
+        // An unreadable binary is never the same as another reading, and a change from one is
+        // declared when it names that reading, as the gate writes it.
         let blind = Reading::Unavailable("no exe".into());
         let starts = [start(blind.clone(), None), start(blind.clone(), None)];
         assert_eq!(binary_changes(Some(&a), &starts), [(1, None), (2, None)]);
+        let starts = [start(b.clone(), Some((blind.clone(), "fix")))];
+        assert_eq!(
+            binary_changes(Some(&blind), &starts),
+            [(1, Some("fix".to_string()))]
+        );
     }
 }

@@ -3,7 +3,8 @@
 mod common;
 use assert_cmd::Command;
 use common::{
-    Lab, bin, edited, kind_of, lab, no_level1, plain, register_study, status, text, with_payload,
+    Lab, bin, edited, fake_binary, kind_of, lab, no_level1, plain, register_study,
+    sign_session_start, status, text, with_payload,
 };
 use ignorarium::backend::level2::Level2;
 use ignorarium::backend::{Backend, Probe};
@@ -12,8 +13,8 @@ use ignorarium::cli::status::blind_order;
 use ignorarium::control::{ControlFile, RunLock, Signal, State};
 use ignorarium::derived::{Register, SESSION_END, SESSION_START, SessionEnd, SessionStart};
 use ignorarium::estimate::apply_defaults;
+use ignorarium::identity::binary_text;
 use ignorarium::spec::model::Spec;
-use ignorarium::telemetry::Reading;
 use ignorarium::{keys, records, view};
 use serde_json::Value;
 use std::path::Path;
@@ -702,48 +703,40 @@ fn verify_counts_session_records_that_do_not_parse() {
     );
 }
 
-/// A binary hash made of `c`.
-fn other_binary(c: char) -> Reading<String> {
-    Reading::Read(format!("sha256:{}", c.to_string().repeat(64)))
-}
-
-/// Sign a `session.start` of `binary` with no end into study `id`'s log, declared as a change
-/// from `declared`'s binary for its reason when given.
-fn signed_start(
-    lab: &Lab,
-    id: &str,
-    binary: &Reading<String>,
-    declared: Option<(&Reading<String>, &str)>,
-) {
-    let key = keys::load(&lab.home).unwrap().unwrap();
-    let start = SessionStart {
-        session: ignorarium::events::new_trace_id(),
-        verb: "run".into(),
-        pid: 1,
-        box_version: "0.0.0".into(),
-        rules_sha256: common::box_identity().rules_sha256.clone(),
-        binary_sha256: binary.clone(),
-        started: "2026-11-15T00:00:00Z".into(),
-        changed_from: declared.map(|(from, _)| from.clone()),
-        reason: declared.map(|(_, why)| why.into()),
-    };
-    let body = serde_json::to_value(start).unwrap();
-    let log = lab.home.study_dir(id).join("records.jsonl");
-    records::append(
-        &log,
-        &key,
-        records::RecordDraft::new(id, SESSION_START, body),
-    )
-    .unwrap();
-}
-
 #[test]
 fn verify_fails_on_an_undeclared_change() {
     let lab = lab();
     let id = "undeclared";
     plain(&lab, id);
-    signed_start(&lab, id, &other_binary('0'), None);
+    sign_session_start(&lab, id, &fake_binary('0'), None);
     let a = bin(&lab).args(["verify", "--study", id]).assert().code(1);
+    assert!(
+        text(&a).contains("\nbinary changed at session 1: undeclared\n"),
+        "{}",
+        text(&a)
+    );
+    assert!(
+        err(&a).contains(&format!(
+            "study {id}: undeclared binary change at session 1"
+        )),
+        "{}",
+        err(&a)
+    );
+}
+
+#[test]
+fn verify_fails_on_a_change_that_names_another_binary() {
+    let lab = lab();
+    let id = "misnamed";
+    plain(&lab, id);
+    let wrong = fake_binary('1');
+    sign_session_start(&lab, id, &fake_binary('0'), Some((&wrong, "rebuilt")));
+    let a = bin(&lab).args(["verify", "--study", id]).assert().code(1);
+    assert!(
+        text(&a).contains("\nbinary changed at session 1: undeclared\n"),
+        "{}",
+        text(&a)
+    );
     assert!(
         err(&a).contains(&format!(
             "study {id}: undeclared binary change at session 1"
@@ -759,11 +752,11 @@ fn verify_lists_a_declared_change() {
     let id = "declared";
     plain(&lab, id);
     let was = &common::box_identity().binary_sha256;
-    signed_start(&lab, id, was, None);
-    signed_start(
+    sign_session_start(&lab, id, was, None);
+    sign_session_start(
         &lab,
         id,
-        &other_binary('0'),
+        &fake_binary('0'),
         Some((was, "rebuilt with a fix")),
     );
     let a = bin(&lab).args(["verify", "--study", id]).assert().code(0);
@@ -780,13 +773,10 @@ fn resume_with_box_changed_passes_the_gate() {
     let lab = lab();
     let id = "rebuilt";
     plain(&lab, id);
-    let was = other_binary('0');
-    signed_start(&lab, id, &was, None);
+    let was = fake_binary('0');
+    sign_session_start(&lab, id, &was, None);
     let now = common::box_identity();
-    let (old, new) = match &now.binary_sha256 {
-        Reading::Read(new) => (format!("sha256:{}", "0".repeat(64)), new.clone()),
-        Reading::Unavailable(why) => panic!("{why}"),
-    };
+    let (old, new) = (binary_text(&was), binary_text(&now.binary_sha256));
     let a = bin_at(&lab, id).args(["run", id]).assert().code(1);
     assert!(
         err(&a).contains(&format!(
@@ -822,6 +812,40 @@ fn resume_with_box_changed_passes_the_gate() {
         "{}",
         err(&a)
     );
+}
+
+#[test]
+fn a_resume_the_gate_refuses_leaves_the_pause_pending() {
+    let lab = lab();
+    let id = "held";
+    plain(&lab, id);
+    sign_session_start(&lab, id, &fake_binary('0'), None);
+    bin(&lab).args(["pause", id]).assert().code(0);
+    let a = bin_at(&lab, id).args(["resume", id]).assert().code(1);
+    assert!(err(&a).contains("the box binary changed"), "{}", err(&a));
+    let a = bin_at(&lab, id).args(["run", id]).assert().code(1);
+    assert!(
+        err(&a).contains(&format!("a pause is pending; run `ignorarium resume {id}`")),
+        "{}",
+        err(&a)
+    );
+    assert_eq!(status(&lab, id)["request"], "pause");
+}
+
+#[test]
+fn an_empty_box_changed_reason_is_a_usage_error() {
+    let lab = lab();
+    let id = "blank";
+    plain(&lab, id);
+    sign_session_start(&lab, id, &fake_binary('0'), None);
+    for verb in ["run", "resume"] {
+        let a = (bin_at(&lab, id).args([verb, id, "--box-changed", ""]))
+            .assert()
+            .code(2);
+        assert!(err(&a).contains("--box-changed"), "{verb}: {}", err(&a));
+    }
+    assert_eq!(kind_of(&lab, id, SESSION_START).len(), 1);
+    assert!(common::deviations_of(&lab.home.study_dir(id)).is_empty());
 }
 
 #[test]
@@ -2326,6 +2350,29 @@ fn the_analysis_record_counts_the_units_the_range_clipped() {
     bin_at(&lab, "none").args(["run", "none"]).assert().code(0);
     let body = &kind_of(&lab, "none", "analysis")[0].body;
     assert!(body.get("clipped").is_none(), "{body}");
+}
+
+#[test]
+fn a_declared_change_after_the_last_row_that_runs_is_after_collection() {
+    use ignorarium::control::Timing;
+    use ignorarium::runner::{RunStatus, progress, run_as};
+    let lab = lab();
+    common::resize_pilot(&lab.home);
+    let mut plan = resize_study(&lab, "ended", &flat("99"));
+    assert_eq!(common::run(&plan).unwrap(), RunStatus::Done);
+    // The re-size admits only some reserve rows: the schedule holds rows that never run.
+    let p = progress(&lab.home, "ended", &common::records_of(&lab, "ended")).unwrap();
+    assert_eq!(p.done, p.total);
+    assert!(plan.schedule.rows.len() > p.total);
+    plan.box_changed = Some("rebuilt".into());
+    let now = ignorarium::identity::BoxIdentity {
+        binary_sha256: fake_binary('0'),
+        ..common::box_identity().clone()
+    };
+    assert_eq!(run_as(&plan, &now).unwrap(), RunStatus::Done);
+    let rows = common::deviations_of(&lab.home.study_dir("ended"));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].timing, Timing::AfterCollectionBeforeAccess);
 }
 
 #[test]
