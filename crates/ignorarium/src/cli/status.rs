@@ -9,6 +9,7 @@ use crate::records::Record;
 use crate::runner::RunError;
 use crate::runner::progress;
 use crate::spec::model::{SELECTED, Spec, Trigger};
+use crate::telemetry::{RowView, overview};
 use crate::{resize, seed, spawn};
 use serde_json::{Value, json};
 
@@ -377,13 +378,106 @@ fn num(v: &Value) -> String {
     format!("{:.3}", v.as_f64().unwrap_or(0.0))
 }
 
-pub fn run(ctx: &Ctx, id: &str, json: bool) -> Run {
-    let r = report(ctx, id)?;
+pub fn run(ctx: &Ctx, id: &str, json: bool, telemetry: bool) -> Run {
+    let r = if telemetry {
+        telemetry_report(ctx, id)?
+    } else {
+        report(ctx, id)?
+    };
     let text = if json {
         serde_json::to_string_pretty(&r).map_err(|e| CliError::usage(e.to_string()))? + "\n"
+    } else if telemetry {
+        render_telemetry(&r)
     } else {
         render(&r)
     };
     out(&text)?;
     Ok(Done::exit(0))
+}
+
+/// The host readings of the study's row records, from the typed row view alone: no value, hash
+/// or output of a row reaches this report.
+pub fn telemetry_report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
+    let (home, _, all) = registered(ctx, id)?;
+    let p = progress(home, id, &all)
+        .map_err(|e| CliError::usage(format!("cannot report {id}: {e}")))?;
+    let views: Vec<RowView> = all.iter().filter_map(RowView::of).collect();
+    let blind = p.spec.access.blind;
+    Ok(json!({
+        "study": id,
+        "blind": blind,
+        "telemetry": overview(&views, &p.indices, blind),
+    }))
+}
+
+/// `max 2.00 s, mean 1.00 s`, or `n/a` when no row gave a figure.
+fn spread_text(v: &Value) -> String {
+    let (max, mean) = (&v["max_s"], &v["mean_s"]);
+    match (max.as_f64(), mean.as_f64()) {
+        (Some(a), Some(b)) => format!("max {a:.2} s, mean {b:.2} s"),
+        _ => "n/a".into(),
+    }
+}
+
+/// `share max 0.010, mean 0.005`-style text of an optional pair.
+fn share_text(max: &Value, mean: &Value) -> String {
+    match (max.as_f64(), mean.as_f64()) {
+        (Some(a), Some(b)) => format!("max {a:.3}, mean {b:.3}"),
+        _ => "n/a".into(),
+    }
+}
+
+fn render_telemetry(r: &Value) -> String {
+    let t = &r["telemetry"];
+    let mut s = format!(
+        "study: {}\nblind: {}\nrows: {}\n",
+        printable(r["study"].as_str().unwrap_or("")),
+        if r["blind"] == true { "yes" } else { "no" },
+        t["rows"]
+    );
+    let cgroup = (t["cgroup"].as_object().into_iter().flatten())
+        .map(|(k, n)| format!("{} {n}", printable(k)));
+    s.push_str(&format!("cgroup: {}\n", joined(cgroup)));
+    for h in t["host_cpu"].as_array().into_iter().flatten() {
+        s.push_str(&format!(
+            "host cpu: {} (flags {}), {} rows\n",
+            printable(h["model"].as_str().unwrap_or("")),
+            printable(h["flags_sha256"].as_str().unwrap_or("")),
+            h["rows"]
+        ));
+    }
+    for name in ["steal", "iowait"] {
+        let line = spread_text(&t[name]);
+        s.push_str(&format!(
+            "{name} per row: {line} ({} rows)\n",
+            t[name]["rows"]
+        ));
+    }
+    s.push_str(&format!(
+        "rows with no usable ticks: {}\n",
+        t["ticks_unavailable"]
+    ));
+    for (name, label) in [("wall", "wall"), ("cpu", "cpu")] {
+        s.push_str(&format!("{label} per row: {}\n", spread_text(&t[name])));
+    }
+    for (i, b) in t["blocks"].as_array().into_iter().flatten().enumerate() {
+        s.push_str(&format!(
+            "block {} (rows {}-{}): {} rows, steal share {}, iowait share {}",
+            i + 1,
+            b["first_row"],
+            b["last_row"],
+            b["rows"],
+            share_text(&b["steal_share_max"], &b["steal_share_mean"]),
+            share_text(&b["iowait_share_max"], &b["iowait_share_mean"]),
+        ));
+        if b.get("wall_max_s").is_some() {
+            s.push_str(&format!(
+                ", wall {}, cpu {}",
+                spread_text(&json!({"max_s": b["wall_max_s"], "mean_s": b["wall_mean_s"]})),
+                spread_text(&json!({"max_s": b["cpu_max_s"], "mean_s": b["cpu_mean_s"]})),
+            ));
+        }
+        s.push('\n');
+    }
+    s
 }

@@ -51,3 +51,13 @@ Sources:
 - https://systemd.io/CGROUP_DELEGATION/ (`Delegate=yes`, scopes)
 - https://man7.org/linux/man-pages/man7/cgroup_namespaces.7.html (a new cgroup namespace is rooted at the creator's cgroup)
 - https://man7.org/linux/man-pages/man5/proc_stat.5.html (the `cpu` line of `/proc/stat`)
+
+## Reader
+
+`ignorarium status <id> --telemetry` prints what the row records hold about the host. It prints the cgroup state counts, the host CPU models, steal and iowait seconds per row, and ten blocks of the schedule with each block's steal and iowait share. `--json` prints the same figures.
+
+The command reads verified records. It copies only the `telemetry` key and the two time fields of each row record. It never copies `values`, `output_hash`, `outputs` or `data_hashes`. It works while a run holds the run lock.
+
+A blind study prints no per-block wall or CPU figure. A row index joins to a condition through the schedule. Row time can track an outcome. A block of row times would let a blind reader infer the condition. Steal and iowait shares come from host counters, not from the row's result. They stay. This follows the FDA rule that interim results of an adaptive study stay hidden from those who could change its conduct (FDA 2019, "Adaptive Designs for Clinical Trials of Drugs and Biologics", section VII, https://www.fda.gov/media/78495/download).
+
+No decision reads this output. Nothing in `output_hash`, `compare`, charge, schedule order or budgets uses it.

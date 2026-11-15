@@ -3,7 +3,7 @@
 mod common;
 use assert_cmd::Command;
 use common::{
-    Lab, bin, kind_of, lab, no_level1, plain, register_study, status, text, with_payload,
+    Lab, bin, edited, kind_of, lab, no_level1, plain, register_study, status, text, with_payload,
 };
 use ignorarium::backend::level2::Level2;
 use ignorarium::backend::{Backend, Probe};
@@ -1056,6 +1056,126 @@ fn status_blinds_condition_ids_when_blind_is_set() {
     assert_eq!(labels, ["condition A", "condition B"]);
     // The label order is fixed by the spec hash: the same on a second read.
     assert_eq!(status(&lab, "b1")["conditions"], s["conditions"]);
+}
+
+const SENTINEL: &str = "SENTINEL-7f3a";
+
+/// Row records that carry the sentinel in every field a reader must not copy, and a
+/// `telemetry` key.
+fn plant_sentinel_rows(lab: &Lab, id: &str, n: u64) {
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let log = lab.home.study_dir(id).join("records.jsonl");
+    for row in 0..n {
+        let draft = ignorarium::records::RecordDraft {
+            study: id.into(),
+            row: Some(row),
+            kind: "row".into(),
+            body: serde_json::json!({
+                "condition": "arm-a", "exit": "ok", "cpu_seconds": 1.5, "wall_seconds": 2.5,
+                "attempts": 1,
+                "values": { "ppl": SENTINEL },
+                "output_hash": format!("sha256:{SENTINEL}"),
+                "outputs": [SENTINEL],
+                "data_hashes": { "data/example.txt": SENTINEL },
+                "telemetry": {
+                    "host_cpu": { "model": "m", "flags_sha256": "f" },
+                    "cpu_ticks": {
+                        "user_hz": 100,
+                        "start": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        "end": [10, 0, 5, 80, 0, 0, 0, 5, 0, 0],
+                    },
+                    "cgroup": { "unavailable": "no cgroup" },
+                },
+            }),
+        };
+        ignorarium::records::append(&log, &key, draft).unwrap();
+    }
+}
+
+#[test]
+fn status_telemetry_never_prints_values() {
+    let lab = lab();
+    plain(&lab, "tv");
+    plant_sentinel_rows(&lab, "tv", 3);
+    let a = bin(&lab)
+        .args(["status", "tv", "--telemetry"])
+        .assert()
+        .success();
+    let t = text(&a);
+    assert!(!t.contains(SENTINEL), "{t}");
+    assert!(t.contains("steal per row"), "{t}");
+    let a = bin(&lab)
+        .args(["status", "tv", "--telemetry", "--json"])
+        .assert()
+        .success();
+    let raw = text(&a);
+    assert!(!raw.contains(SENTINEL), "{raw}");
+    let s: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(s["study"], "tv");
+    assert_eq!(s["blind"], false);
+    assert_eq!(s["telemetry"]["rows"], 3);
+}
+
+#[test]
+fn status_telemetry_in_a_blind_study_has_no_block_times() {
+    let lab = lab();
+    edited(
+        &lab,
+        "tb",
+        |t| t.replace("blind = false", "blind = true"),
+        common::PAYLOAD,
+    );
+    plant_sentinel_rows(&lab, "tb", 3);
+    let a = bin(&lab)
+        .args(["status", "tb", "--telemetry", "--json"])
+        .assert()
+        .success();
+    let raw = text(&a);
+    assert!(!raw.contains(SENTINEL), "{raw}");
+    let s: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(s["blind"], true);
+    let blocks = s["telemetry"]["blocks"].as_array().unwrap();
+    assert!(!blocks.is_empty());
+    for b in blocks {
+        assert!(
+            b.get("wall_max_s").is_none() && b.get("cpu_max_s").is_none(),
+            "{b}"
+        );
+    }
+    let a = bin(&lab)
+        .args(["status", "tb", "--telemetry"])
+        .assert()
+        .success();
+    let t = text(&a);
+    let lines: Vec<&str> = t.lines().filter(|l| l.starts_with("block")).collect();
+    assert!(!lines.is_empty(), "{t}");
+    assert!(lines.iter().all(|l| !l.contains("wall max")), "{t}");
+    // The same rows in a study that is not blind show block times.
+    plain(&lab, "tn");
+    plant_sentinel_rows(&lab, "tn", 3);
+    let a = bin(&lab)
+        .args(["status", "tn", "--telemetry"])
+        .assert()
+        .success();
+    let t = text(&a);
+    assert!(
+        t.lines()
+            .any(|l| l.starts_with("block") && l.contains("wall max 2.50 s")),
+        "{t}"
+    );
+}
+
+#[test]
+fn status_telemetry_works_while_a_run_holds_the_lock() {
+    let lab = lab();
+    let id = "tl";
+    let dir = with_payload(&lab, id, SLEEPY_ROW_0);
+    let mut child = start_run(&lab, id, &[]);
+    row_0_file(&dir);
+    let a = bin(&lab).args(["status", id, "--telemetry"]).assert();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    a.success();
 }
 
 #[test]

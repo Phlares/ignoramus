@@ -182,6 +182,9 @@ enum Verb {
         /// Print one JSON object instead of text.
         #[arg(long)]
         json: bool,
+        /// Show the host readings of the rows, with no measured value.
+        #[arg(long)]
+        telemetry: bool,
     },
     /// Print the verdicts of a finished study.
     Report {
@@ -273,7 +276,11 @@ impl Verb {
             Verb::Verify { study } => verify::run(ctx, study.as_deref()),
             Verb::Probe => probe::run(ctx),
             Verb::Run { study, max_level } => run::run(ctx, &study, max_level),
-            Verb::Status { study, json } => status::run(ctx, &study, json),
+            Verb::Status {
+                study,
+                json,
+                telemetry,
+            } => status::run(ctx, &study, json, telemetry),
             Verb::Report {
                 study,
                 format,
