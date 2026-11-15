@@ -433,6 +433,39 @@ fn the_population_prints_with_the_claim() {
     );
 }
 
+/// Issue #108: the claim section names the candidate the selection stage picked.
+#[test]
+fn the_claim_names_the_pick() {
+    let lab = lab();
+    let mut bodies = bodies(&lab, MEAN, rows_on_level_2());
+    let at = bodies.iter().position(|(k, _)| *k == "analysis").unwrap();
+    let selection = json!({
+        "metric": "ppl-ratio", "rule": "best-mean", "direction": "lower",
+        "candidates": [{ "id": "arm-b", "mean": 0.02 }, { "id": "arm-a", "mean": 0.01 }],
+        "selected": "arm-a", "units": ["u1", "u2"], "complete_units": 2, "incomplete_units": 0,
+    });
+    bodies.insert(at, ("selection", selection));
+    plant(&lab.home, ID, &bodies);
+    let md = card::render::markdown(&card_of(&lab));
+    let claim = md.split("## Claim\n").nth(1).unwrap();
+    let claim = claim.split("\n## ").next().unwrap();
+    assert!(
+        claim.ends_with(
+            "\n- Picked: arm-a, the best mean of ppl-ratio over 2 complete selection units, among arm-b, arm-a\n"
+        ),
+        "{claim}"
+    );
+}
+
+#[test]
+fn a_study_without_a_selection_prints_no_pick() {
+    let lab = lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let card = card_of(&lab);
+    assert_eq!(card.pick, None);
+    assert!(!card::render::markdown(&card).contains("Picked"));
+}
+
 #[test]
 fn display_word_not_shown_for_fail() {
     let lab = lab();

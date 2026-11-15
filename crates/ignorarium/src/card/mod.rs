@@ -247,6 +247,9 @@ pub struct Card {
     pub deviations: Vec<DeviationRow>,
     pub header: Header,
     pub claims: Vec<ClaimLine>,
+    /// The candidate the selection stage picked; `None` without a selection stage.
+    #[serde(default)]
+    pub pick: Option<sections::Pick>,
     pub verdicts: Vec<VerdictLine>,
     pub results: Vec<ResultRow>,
     pub sensitivity: Vec<Sensitivity>,
@@ -485,6 +488,7 @@ pub fn build(
     Ok(Card {
         header: sections::header(&own, &registered.ts, spec),
         claims: sections::claims(&after, spec),
+        pick: sections::pick(log),
         verdicts: sections::verdicts(&after),
         results: sections::results(&after, spec, &intervals),
         sensitivity: sections::sensitivity(&own, &after, spec),
