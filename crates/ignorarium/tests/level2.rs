@@ -2076,3 +2076,76 @@ fn a_stopped_row_still_reads_its_leaf() {
     assert_eq!(o.exit, Exit::Stopped, "{o:?}");
     assert_eq!(o.cgroup, Reading::Unavailable(MISSED.into()));
 }
+
+/// MiB the VMM takes beyond guest RAM and the output disk's cache, measured on the test host
+/// (decision 0026). Zero until the first run measures it.
+const OVERHEAD_MIB: u64 = 0;
+
+/// Keeps the VMM's `VmHWM`, read each tick until the row ends.
+#[derive(Default)]
+struct HighWater {
+    pid: Cell<Option<u32>>,
+    kib: Cell<u64>,
+}
+
+impl Watch for HighWater {
+    fn tick(&self) -> bool {
+        let status =
+            (self.pid.get()).and_then(|p| fs::read_to_string(format!("/proc/{p}/status")).ok());
+        let hwm = (status.iter().flat_map(|s| s.lines()))
+            .find_map(|l| l.strip_prefix("VmHWM:"))
+            .and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok());
+        self.kib.set(self.kib.get().max(hwm.unwrap_or(0)));
+        true
+    }
+    fn started(&self, pid: u32) {
+        self.pid.set(Some(pid));
+    }
+}
+
+/// The row's peak sits between the guest memory its payload touched and the machine's memory
+/// plus the output disk plus the VMM's overhead. The first row reads the rootfs disk into the
+/// page cache and is reported, not checked.
+#[test]
+fn level2_row_peak_lies_within_the_machine_bounds() {
+    let Some(r) = ready() else { return };
+    if common::skip_cgroup() {
+        return;
+    }
+    const TOUCHED_MIB: u64 = 512;
+    let touch = format!(
+        "python3 -c 'b = bytearray({TOUCHED_MIB} << 20)
+for i in range(0, len(b), 4096): b[i] = 1' &&          head -c 1048576 /dev/zero > \"$IGNORARIUM_OUT/o\""
+    );
+    let mib = 1u64 << 20;
+    for (n, script) in ["true", &touch, &touch, &touch].into_iter().enumerate() {
+        let (_d, mut job) = row(&r, script, LONG);
+        job.memory_mib = Some(1024);
+        let watch = HighWater::default();
+        let o = r.level2.run_row(&job, &watch).unwrap();
+        assert_eq!(o.exit, Exit::Ok, "{o:?}");
+        let Reading::Read(c) = &o.cgroup else {
+            panic!("{:?}", o.cgroup)
+        };
+        let vm = u64::from(r.level2.vm_mem_mib(&job));
+        let top = (vm + r.level2.out_mib + OVERHEAD_MIB) * mib;
+        println!(
+            "row {n}: memory_peak {} B, vm_mem_mib {vm}, out_mib {}, VMM VmHWM {} kB, peak - vm {} MiB",
+            c.memory_peak,
+            r.level2.out_mib,
+            watch.kib.get(),
+            (c.memory_peak as i64 - (vm * mib) as i64) >> 20,
+        );
+        if n == 0 || script == "true" {
+            continue;
+        }
+        assert!(
+            c.memory_peak >= TOUCHED_MIB * mib,
+            "row {n}: {}",
+            c.memory_peak
+        );
+        if OVERHEAD_MIB > 0 {
+            assert!(c.memory_peak <= top, "row {n}: {} > {top}", c.memory_peak);
+        }
+    }
+}
