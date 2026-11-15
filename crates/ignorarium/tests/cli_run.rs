@@ -1137,10 +1137,7 @@ fn status_telemetry_in_a_blind_study_has_no_block_times() {
     let blocks = s["telemetry"]["blocks"].as_array().unwrap();
     assert!(!blocks.is_empty());
     for b in blocks {
-        assert!(
-            b.get("wall_max_s").is_none() && b.get("cpu_max_s").is_none(),
-            "{b}"
-        );
+        assert!(b.get("wall_s").is_none() && b.get("cpu_s").is_none(), "{b}");
     }
     let a = bin(&lab)
         .args(["status", "tb", "--telemetry"])

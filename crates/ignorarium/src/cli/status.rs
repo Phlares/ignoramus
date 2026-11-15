@@ -5,9 +5,10 @@ use crate::canon::sha256_hex;
 use crate::control::{ControlFile, Signal, State, run_is_live};
 use crate::derived::{self, SpawnStop};
 use crate::diag::printable;
+use crate::home::Home;
 use crate::records::Record;
-use crate::runner::RunError;
 use crate::runner::progress;
+use crate::runner::{Progress, RunError};
 use crate::spec::model::{SELECTED, Spec, Trigger};
 use crate::telemetry::{RowView, overview};
 use crate::{resize, seed, spawn};
@@ -136,11 +137,21 @@ fn triggers(
     Ok(spec.mutations.triggers.iter().map(each).collect())
 }
 
+fn cannot_report(id: &str, e: &dyn std::fmt::Display) -> CliError {
+    CliError::usage(format!("cannot report {id}: {e}"))
+}
+
+/// A registered study's home, verified records and progress.
+fn opened<'a>(ctx: &'a Ctx, id: &str) -> Result<(&'a Home, Vec<Record>, Progress), CliError> {
+    let (home, _, all) = registered(ctx, id)?;
+    let p = progress(home, id, &all).map_err(|e| cannot_report(id, &e))?;
+    Ok((home, all, p))
+}
+
 /// Every field of the report, as one JSON object.
 pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
-    let (home, _, all) = registered(ctx, id)?;
-    let bad = |e: &dyn std::fmt::Display| CliError::usage(format!("cannot report {id}: {e}"));
-    let p = progress(home, id, &all).map_err(|e| bad(&e))?;
+    let (home, all, p) = opened(ctx, id)?;
+    let bad = |e: &dyn std::fmt::Display| cannot_report(id, e);
     let (spec, spec_hash, done, total) = (&p.spec, p.spec_hash, p.done, p.total);
     let wall_seconds = p.cost.wall_seconds;
     let hours = wall_seconds / 3600.0;
@@ -378,16 +389,18 @@ fn num(v: &Value) -> String {
     format!("{:.3}", v.as_f64().unwrap_or(0.0))
 }
 
+/// A report builder: `report` or `telemetry_report`.
+type Build = fn(&Ctx, &str) -> Result<Value, CliError>;
+
 pub fn run(ctx: &Ctx, id: &str, json: bool, telemetry: bool) -> Run {
-    let r = if telemetry {
-        telemetry_report(ctx, id)?
+    let (build, render): (Build, fn(&Value) -> String) = if telemetry {
+        (telemetry_report, render_telemetry)
     } else {
-        report(ctx, id)?
+        (report, render)
     };
+    let r = build(ctx, id)?;
     let text = if json {
         serde_json::to_string_pretty(&r).map_err(|e| CliError::usage(e.to_string()))? + "\n"
-    } else if telemetry {
-        render_telemetry(&r)
     } else {
         render(&r)
     };
@@ -398,9 +411,7 @@ pub fn run(ctx: &Ctx, id: &str, json: bool, telemetry: bool) -> Run {
 /// The host readings of the study's row records, from the typed row view alone: no value, hash
 /// or output of a row reaches this report.
 pub fn telemetry_report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
-    let (home, _, all) = registered(ctx, id)?;
-    let p = progress(home, id, &all)
-        .map_err(|e| CliError::usage(format!("cannot report {id}: {e}")))?;
+    let (_, all, p) = opened(ctx, id)?;
     let views: Vec<RowView> = all.iter().filter_map(RowView::of).collect();
     let blind = p.spec.access.blind;
     Ok(json!({
@@ -410,25 +421,18 @@ pub fn telemetry_report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
     }))
 }
 
-/// `max 2.00 s, mean 1.00 s`, or `n/a` when no row gave a figure.
-fn spread_text(v: &Value) -> String {
-    let (max, mean) = (&v["max_s"], &v["mean_s"]);
-    match (max.as_f64(), mean.as_f64()) {
-        (Some(a), Some(b)) => format!("max {a:.2} s, mean {b:.2} s"),
-        _ => "n/a".into(),
-    }
-}
-
-/// `share max 0.010, mean 0.005`-style text of an optional pair.
-fn share_text(max: &Value, mean: &Value) -> String {
-    match (max.as_f64(), mean.as_f64()) {
-        (Some(a), Some(b)) => format!("max {a:.3}, mean {b:.3}"),
+/// `max 2.00 s, mean 1.00 s`: the largest and mean of the `{max, mean}` object `v`, with
+/// `unit` after each and `precision` decimals; `n/a` when no row gave a figure.
+fn spread_text(v: &Value, unit: &str, precision: usize) -> String {
+    match (v["max"].as_f64(), v["mean"].as_f64()) {
+        (Some(a), Some(b)) => format!("max {a:.precision$}{unit}, mean {b:.precision$}{unit}"),
         _ => "n/a".into(),
     }
 }
 
 fn render_telemetry(r: &Value) -> String {
     let t = &r["telemetry"];
+    let seconds = |v: &Value| spread_text(v, " s", 2);
     let mut s = format!(
         "study: {}\nblind: {}\nrows: {}\n",
         printable(r["study"].as_str().unwrap_or("")),
@@ -446,19 +450,29 @@ fn render_telemetry(r: &Value) -> String {
             h["rows"]
         ));
     }
-    for name in ["steal", "iowait"] {
-        let line = spread_text(&t[name]);
+    let missing = |m: &Value| {
+        format!(
+            "{} unavailable, {} not recorded",
+            m["unavailable"], m["not_recorded"]
+        )
+    };
+    s.push_str(&format!(
+        "rows with no host cpu: {}\n",
+        missing(&t["host_cpu_missing"])
+    ));
+    for (name, key) in [("steal", "steal_s"), ("iowait", "iowait_s")] {
         s.push_str(&format!(
-            "{name} per row: {line} ({} rows)\n",
-            t[name]["rows"]
+            "{name} per row: {} ({} rows)\n",
+            seconds(&t[key]),
+            t[key]["rows"]
         ));
     }
     s.push_str(&format!(
         "rows with no usable ticks: {}\n",
-        t["ticks_unavailable"]
+        missing(&t["ticks_missing"])
     ));
-    for (name, label) in [("wall", "wall"), ("cpu", "cpu")] {
-        s.push_str(&format!("{label} per row: {}\n", spread_text(&t[name])));
+    for (name, key) in [("wall", "wall_s"), ("cpu", "cpu_s")] {
+        s.push_str(&format!("{name} per row: {}\n", seconds(&t[key])));
     }
     for (i, b) in t["blocks"].as_array().into_iter().flatten().enumerate() {
         s.push_str(&format!(
@@ -467,14 +481,14 @@ fn render_telemetry(r: &Value) -> String {
             b["first_row"],
             b["last_row"],
             b["rows"],
-            share_text(&b["steal_share_max"], &b["steal_share_mean"]),
-            share_text(&b["iowait_share_max"], &b["iowait_share_mean"]),
+            spread_text(&b["steal_share"], "", 3),
+            spread_text(&b["iowait_share"], "", 3),
         ));
-        if b.get("wall_max_s").is_some() {
+        if b.get("wall_s").is_some() {
             s.push_str(&format!(
                 ", wall {}, cpu {}",
-                spread_text(&json!({"max_s": b["wall_max_s"], "mean_s": b["wall_mean_s"]})),
-                spread_text(&json!({"max_s": b["cpu_max_s"], "mean_s": b["cpu_mean_s"]})),
+                seconds(&b["wall_s"]),
+                seconds(&b["cpu_s"])
             ));
         }
         s.push('\n');
