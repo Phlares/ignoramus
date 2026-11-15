@@ -73,21 +73,45 @@ pub fn run(ctx: &Ctx, study: Option<&str>) -> Run {
 }
 
 /// The box identity the study's register record holds, as text; `not recorded` for a record
-/// written before the field existed.
+/// written before the field existed. The register is the first record of the log.
 fn registered_box(dir: &std::path::Path, key: &ed25519_dalek::VerifyingKey) -> String {
-    let register = records::read_all(&dir.join("records.jsonl"), key)
+    // A read error prints `not recorded`: the log verified one line earlier.
+    let register = records::first(&dir.join("records.jsonl"), key)
         .ok()
-        .and_then(|all| all.iter().find_map(crate::derived::Register::of))
+        .flatten()
+        .and_then(|r| crate::derived::Register::of(&r))
         .and_then(|r| r.box_identity);
-    match register {
-        Some(b) => format!(
-            "rules {}, binary {}",
-            b.rules_sha256,
-            match &b.binary_sha256 {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            }
-        ),
-        None => "not recorded".into(),
+    box_text(register.as_ref())
+}
+
+fn box_text(b: Option<&crate::identity::BoxIdentity>) -> String {
+    let Some(b) = b else {
+        return "not recorded".into();
+    };
+    let binary = match &b.binary_sha256 {
+        serde_json::Value::String(s) => s.clone(),
+        other => match other.get("unavailable").and_then(|w| w.as_str()) {
+            Some(why) => format!("unavailable: {why}"),
+            None => other.to_string(),
+        },
+    };
+    format!("rules {}, binary {binary}", b.rules_sha256)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unavailable_binary_prints_its_reason() {
+        let b = crate::identity::BoxIdentity {
+            rules_sha256: "sha256:ab".into(),
+            binary_sha256: serde_json::json!({"unavailable": "no exe"}),
+        };
+        assert_eq!(
+            box_text(Some(&b)),
+            "rules sha256:ab, binary unavailable: no exe"
+        );
+        assert_eq!(box_text(None), "not recorded");
     }
 }
