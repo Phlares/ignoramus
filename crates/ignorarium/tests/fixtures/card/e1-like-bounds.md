@@ -120,8 +120,12 @@ ignorarium run s1 --max-level 2
 - Manifest roots: spec.toml, spec.json, spec.hash, salt, schedule.json, in/, payload/
 - Roots the folder lacks: spec.json, spec.hash, salt, schedule.json, in/, payload/
 - Manifest: 1 files, list SHA-256 53c7939fa1b6a82466144408e7ed4dcdc51ace61a01a933da54727d670c884db
-- Manifest folder: studies/s1 in the box home; manifest.sha256 names its files by path from there
-- Manifest check: cd \<box home\>/studies/s1 \&\& sha256sum -c \<card folder\>/manifest.sha256
+
+manifest.sha256 names the files of the study's folder in the box home. Check them there:
+
+```
+(cd <box home>/studies/s1 && sha256sum -c) < <card folder>/manifest.sha256
+```
 
 ## Citation
 

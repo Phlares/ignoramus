@@ -83,7 +83,7 @@ fn header_section(c: &Card) -> String {
 }
 
 fn claim_section(c: &Card) -> String {
-    let population = format!("Population: {}", c.header.population);
+    let population = format!("Population: {}", field(&c.header.population, |p| p.clone()));
     list(
         std::iter::once(population)
             .chain((c.claims.iter()).map(|l| {
@@ -421,15 +421,17 @@ fn recipe_section(c: &Card) -> String {
         "Manifest: {} files, list SHA-256 {}",
         m.files, m.list_sha256
     ));
-    l.push(format!(
-        "Manifest folder: {} in the box home; manifest.sha256 names its files by path from there",
-        m.folder
-    ));
-    l.push(format!(
-        "Manifest check: cd <box home>/{} && sha256sum -c <card folder>/manifest.sha256",
-        m.folder
-    ));
-    format!("Command:\n\n{}\n\n{}", fence(&r.command, ""), list(l))
+    let check = format!(
+        "(cd <box home>/{}/{} && sha256sum -c) < <card folder>/manifest.sha256",
+        crate::home::STUDIES,
+        c.study
+    );
+    format!(
+        "Command:\n\n{}\n\n{}\nmanifest.sha256 names the files of the study's folder in the box home. Check them there:\n\n{}\n",
+        fence(&r.command, ""),
+        list(l),
+        fence(&check, "")
+    )
 }
 
 fn fenced_field(f: &Field<String>, lang: &str) -> String {

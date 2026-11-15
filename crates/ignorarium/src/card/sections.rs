@@ -42,12 +42,10 @@ pub const LISTED: [&str; 4] = [
     crate::deviations::FILE,
     super::recipe::CITATION_FILE,
 ];
-/// The study folder's tree of preregistered documents, among them the statement.
-pub const PREREG: &str = "prereg";
-/// The study folder's tree of descriptive outputs: files no registered test reads.
-pub const DESCRIPTIVE: &str = "descriptive";
-/// The trees the card lists file by file, in order.
-pub const TREES: [&str; 2] = [PREREG, DESCRIPTIVE];
+/// The trees of the study folder the card lists file by file, in order: the preregistered
+/// documents, among them the statement, and the descriptive outputs, files no registered test
+/// reads.
+pub const TREES: [&str; 2] = ["prereg", "descriptive"];
 /// Why an outside file is missing when no `--study-folder` is given.
 pub const NO_STUDY_FOLDER: &str = "no study folder given";
 /// Why a link in the study folder is missing from the list.
@@ -86,6 +84,11 @@ pub enum Field<T> {
         link: Option<Outside>,
     },
     NotApplicable,
+}
+
+/// The default of a field a card built before it existed does not hold.
+pub(crate) fn missing<T>() -> Field<T> {
+    Field::Missing { link: None }
 }
 
 impl<T> Field<T> {
@@ -231,8 +234,7 @@ pub fn outside(dir: Option<&Path>) -> Result<(OutsideFiles, Option<Source>), Str
     if inside != "true" {
         return Err(not_inside(""));
     }
-    let trees = TREES.iter().map(|t| tree(dir, t));
-    let trees = trees.collect::<Result<Vec<_>, _>>()?;
+    let trees = (TREES.iter().map(|t| tree(dir, t))).collect::<Result<Vec<_>, _>>()?;
     let names = LISTED.map(String::from).into_iter().chain(trees.concat());
     let files = names
         .map(|name| listed(dir, &name))
@@ -287,9 +289,10 @@ pub struct Header {
     pub registered_at: String,
     /// An outside time stamp of the registration; a confirmatory plan waits for one.
     pub timestamp: Field<String>,
-    /// The plan's `question.population`: the frame every claim covers.
-    #[serde(default)]
-    pub population: String,
+    /// The plan's `question.population`: the frame every claim covers. Missing when the plan
+    /// leaves it empty.
+    #[serde(default = "missing")]
+    pub population: Field<String>,
 }
 
 /// The header of a study whose register record `own` was written at `registered_at`.
@@ -300,7 +303,10 @@ pub fn header(own: &Register, registered_at: &str, spec: &Spec) -> Header {
         spec_hash: own.spec_hash.clone(),
         registered_at: registered_at.into(),
         timestamp: Field::of(own.timestamp.clone().filter(|t| t != PENDING), None),
-        population: spec.question.population.clone(),
+        population: Field::of(
+            Some(spec.question.population.clone()).filter(|p| !p.is_empty()),
+            None,
+        ),
     }
 }
 
@@ -522,7 +528,9 @@ fn from_rows<T: Ord + DeserializeOwned>(
     let mut bad = 0;
     for v in rows(log).filter_map(|r| r.body.get(key)) {
         match serde_json::from_value(v.clone()) {
-            Ok(v) => drop(values.insert(v)),
+            Ok(v) => {
+                values.insert(v);
+            }
             Err(_) => bad += 1,
         }
     }

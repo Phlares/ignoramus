@@ -55,7 +55,10 @@
       "state": "missing",
       "link": null
     },
-    "population": "every text file of the four strata"
+    "population": {
+      "state": "recorded",
+      "value": "every text file of the four strata"
+    }
   },
   "claims": [
     {
@@ -420,7 +423,6 @@
       "link": null
     },
     "manifest": {
-      "folder": "studies/s1",
       "roots": [
         "spec.toml",
         "spec.json",

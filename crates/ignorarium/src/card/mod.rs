@@ -212,9 +212,10 @@ pub struct Builder {
 }
 
 impl Builder {
-    /// The running binary. A binary it cannot read leaves the hash missing.
+    /// The running binary, read through `/proc/self/exe` so a binary replaced on disk since
+    /// the start is not the one hashed. A binary it cannot read leaves the hash missing.
     fn this() -> Builder {
-        let hash = std::env::current_exe().and_then(|p| crate::canon::sha256_file(&p));
+        let hash = crate::canon::sha256_file(Path::new("/proc/self/exe"));
         Builder {
             version: Field::of(Some(env!("CARGO_PKG_VERSION").into()), None),
             binary_sha256: Field::of(hash.ok(), None),

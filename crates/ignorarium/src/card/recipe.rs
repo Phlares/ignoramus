@@ -35,9 +35,6 @@ pub const REQUIRES: [&str; 3] = [
 /// hash over the sorted lines with `files` beside it, not a Merkle root.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
-    /// The folder whose files the lines name, relative to the box home.
-    #[serde(default)]
-    pub folder: String,
     pub roots: Vec<String>,
     /// Roots the folder does not hold.
     pub missing: Vec<String>,
@@ -214,7 +211,6 @@ pub fn recipe(
         box_version: Field::of(Some(box_version.into()), None),
         bundle_doi: Field::of(None, None),
         manifest: Manifest {
-            folder: format!("{}/{id}", crate::home::STUDIES),
             roots: ROOTS.map(String::from).to_vec(),
             missing,
             files: lines.len() as u64,

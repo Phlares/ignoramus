@@ -223,18 +223,11 @@ fn the_manifest_names_the_folder_it_checks() {
     let lab = lab();
     fixture(&lab, MEAN, rows_on_level_2());
     let card = card_of(&lab);
-    assert_eq!(card.recipe.manifest.folder, format!("studies/{ID}"));
     let md = card::render::markdown(&card);
-    let check = format!("cd <box home>/studies/{ID} && sha256sum -c <card folder>/manifest.sha256");
-    assert!(
-        md.contains(
-            &check
-                .replace('<', "\\<")
-                .replace('>', "\\>")
-                .replace("&&", "\\&\\&")
-        ),
-        "{md}"
+    let check = format!(
+        "```\n(cd <box home>/studies/{ID} && sha256sum -c) < <card folder>/manifest.sha256\n```"
     );
+    assert!(md.contains(&check), "{md}");
 }
 
 /// Issue #80: the card names the box that built it, whatever box ran the rows.
@@ -275,7 +268,10 @@ fn the_population_prints_with_the_claim() {
     std::fs::write(dir.join("spec.toml"), text).unwrap();
     plant(&lab.home, ID, &bodies);
     let card = card_of(&lab);
-    assert_eq!(card.header.population, "every input file");
+    assert_eq!(
+        card.header.population,
+        recorded("every input file".to_string())
+    );
     let md = card::render::markdown(&card);
     let claim = md.split("## Claim\n").nth(1).unwrap();
     assert!(

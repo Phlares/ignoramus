@@ -1,6 +1,7 @@
 //! The Markdown and LaTeX renderers and the figure: pure functions of one card.
 use ignorarium::card::Card;
 use ignorarium::card::render::{self, figure, latex, markdown, tex_escape};
+use ignorarium::card::sections::Field;
 use std::path::PathBuf;
 
 fn fixture(name: &str) -> PathBuf {
@@ -196,6 +197,22 @@ fn a_bound_prints_at_the_margin_decimals() {
         at(None, 0.039_221).contains("below 0.0393 "),
         "a card with no margin keeps the step's decimals"
     );
+    // The full ln(1.04): 16 decimals, where one float step of the scaled bound is 0.0625.
+    let m = 0.039_220_713_153_281_3;
+    for k in 0..40 {
+        let b = m + k as f64 * 1e-4;
+        let want = format!("below {b:.16} ");
+        assert!(at(Some(m), b).contains(&want), "step {k}: {want}");
+    }
+    assert!(
+        at(Some(1e-320), 1e-320).contains("below 0.00000000000000000 "),
+        "a margin past 17 decimals prints a finite number, not NaN or -0"
+    );
+    assert!(
+        at(Some(0.123_456_789_012_345_6), 0.123_456_789_012_345_6)
+            .contains("below 0.123456789012346 "),
+        "the decimals stop where float noise starts"
+    );
     let mut c = card();
     c.results[0].intervals[0].margin = Some(0.039_221);
     c.results[0].intervals[0].bound = Some(0.039_221);
@@ -206,16 +223,15 @@ fn a_bound_prints_at_the_margin_decimals() {
     );
 }
 
+/// The manifest check of the fixtures' study `s1`.
+const CHECK: &str = "(cd <box home>/studies/s1 && sha256sum -c) < <card folder>/manifest.sha256";
+
 /// A card built before #72 and #80 lacks their fields and still loads, with the defaults.
 #[test]
 fn a_card_built_before_the_audit_fields_still_loads() {
     let mut v: serde_json::Value = serde_json::to_value(card()).unwrap();
     v.as_object_mut().unwrap().remove("builder");
     v["header"].as_object_mut().unwrap().remove("population");
-    v["recipe"]["manifest"]
-        .as_object_mut()
-        .unwrap()
-        .remove("folder");
     for r in v["results"].as_array_mut().unwrap() {
         r.as_object_mut().unwrap().remove("descriptive");
         for i in r["intervals"].as_array_mut().unwrap() {
@@ -225,14 +241,10 @@ fn a_card_built_before_the_audit_fields_still_loads() {
     let c: Card = serde_json::from_value(v).unwrap();
     assert!(c.results.iter().all(|r| !r.descriptive));
     assert!((c.results.iter().flat_map(|r| &r.intervals)).all(|i| i.margin.is_none()));
-    assert_eq!(
-        (
-            c.header.population.as_str(),
-            c.recipe.manifest.folder.as_str()
-        ),
-        ("", "")
-    );
+    assert_eq!(c.header.population, Field::Missing { link: None });
     let md = markdown(&c);
+    assert!(md.contains("- Population: not in the records\n"), "{md}");
+    assert!(md.contains(CHECK), "{md}");
     assert!(
         md.contains(
             "Card builder: version not in the records, binary SHA-256 not in the records\n"
