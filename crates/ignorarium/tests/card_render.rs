@@ -590,3 +590,63 @@ fn slot_grammar_is_closed() {
     // Digits in a reading heading stay allowed.
     assert_eq!(readings::check("## Reading: H1/code\n\nok\n"), vec![]);
 }
+
+#[test]
+fn cgroup_lines_name_the_level_class() {
+    use ignorarium::telemetry::{CgroupTotals, Summed};
+    let mut c = card();
+    let figures = |peak: u64| CgroupTotals {
+        summed: Summed {
+            read: 1,
+            ..Summed::default()
+        },
+        memory_peak_max: Some(peak),
+    };
+    // Every row ran at level 2: no figures of rows below it print.
+    c.cost.telemetry.machine = Some(figures(5000));
+    c.cost.telemetry.process = CgroupTotals::default();
+    let md = markdown(&c);
+    assert!(
+        md.contains(
+            "- VM total (guest RAM touched + VMM), bytes: 5000
+"
+        ),
+        "{md}"
+    );
+    assert!(
+        md.contains(
+            "- Cgroup counters, level 2 (VMM and guest): {}
+"
+        ),
+        "{md}"
+    );
+    assert!(!md.contains("Peak memory, bytes"), "{md}");
+    c.cost.telemetry.process = figures(100);
+    let md = markdown(&c);
+    assert!(
+        md.contains(
+            "- Peak memory, bytes: 100
+"
+        ),
+        "{md}"
+    );
+    assert!(
+        md.contains(
+            "- VM total (guest RAM touched + VMM), bytes: 5000
+"
+        ),
+        "{md}"
+    );
+    // No level 2 rows: the lines print as before, read or not.
+    c.cost.telemetry.machine = None;
+    c.cost.telemetry.process = CgroupTotals::default();
+    let md = markdown(&c);
+    assert!(
+        md.contains(
+            "- Cgroup counters: {}
+- Peak memory, bytes: none read
+"
+        ),
+        "{md}"
+    );
+}

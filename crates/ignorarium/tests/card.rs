@@ -940,9 +940,9 @@ fn cost_totals_row_telemetry() {
     assert_eq!(t.cpu_ticks.value["steal"], 1.75 * 80.0);
     assert_eq!(t.cpu_ticks.value["user"], 0.0);
     assert_eq!(t.cpu_ticks.value.len(), 10);
-    assert_eq!((t.cgroup.read, t.cgroup.unavailable), (0, 80));
-    assert!(t.cgroup.value.is_empty(), "unavailable is not zero");
-    assert_eq!(t.memory_peak_max, None);
+    assert_eq!((t.process.summed.read, t.process.summed.unavailable), (0, 80));
+    assert!(t.process.summed.value.is_empty(), "unavailable is not zero");
+    assert_eq!(t.process.memory_peak_max, None);
     let read = json!({
         "memory_peak": 4096, "memory_events": { "max": 2, "oom_kill": 0 },
         "cpu_stat": { "usage_usec": 500, "user_usec": 300, "system_usec": 200 },
@@ -950,10 +950,10 @@ fn cost_totals_row_telemetry() {
     let lab = self::lab();
     fixture(&lab, MEAN, json!({ "telemetry": telemetry(read) }));
     let t = card_of(&lab).cost.telemetry;
-    assert_eq!((t.cgroup.read, t.cgroup.unavailable), (80, 0));
-    assert_eq!(t.cgroup.value["cpu_stat.usage_usec"], 500.0 * 80.0);
-    assert_eq!(t.cgroup.value["memory_events.max"], 2.0 * 80.0);
-    assert_eq!(t.memory_peak_max, Some(4096));
+    assert_eq!((t.process.summed.read, t.process.summed.unavailable), (80, 0));
+    assert_eq!(t.process.summed.value["cpu_stat.usage_usec"], 500.0 * 80.0);
+    assert_eq!(t.process.summed.value["memory_events.max"], 2.0 * 80.0);
+    assert_eq!(t.process.memory_peak_max, Some(4096));
 }
 
 /// A payload whose `arm-a` value is 6 against the reference's 8.

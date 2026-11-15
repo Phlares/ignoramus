@@ -10,8 +10,8 @@ use ignorarium::backend::{Backend, Exit, RowJob, RowOutcome};
 use ignorarium::canon::sha256_hex;
 use ignorarium::records::Record;
 use ignorarium::telemetry::{
-    CpuTicks, HostCpu, Reading, RowView, Seen, Totals, cpu_ticks, cpu_ticks_of, host_cpu_of,
-    overview, record,
+    CpuTicks, HostCpu, LevelClass, Reading, RowView, Seen, Totals, cpu_ticks, cpu_ticks_of,
+    host_cpu_of, overview, record,
 };
 use serde_json::json;
 use std::cell::RefCell;
@@ -811,4 +811,61 @@ fn totals_count_unusable_ticks_as_unavailable_like_the_overview() {
     let t = Totals::of([&good]);
     assert_eq!(t.cpu_ticks.read, 1);
     assert_eq!(t.cpu_ticks.value["steal"], 1.0);
+}
+
+fn cgroup_body(isolation: u64, usage: u64, peak: u64) -> serde_json::Value {
+    json!({
+        "isolation": isolation,
+        "telemetry": {"cgroup": {
+            "memory_peak": peak,
+            "memory_events": {"oom_kill": 0},
+            "cpu_stat": {"usage_usec": usage},
+        }},
+    })
+}
+
+#[test]
+fn totals_split_cgroup_figures_by_level_class() {
+    let rows = [cgroup_body(1, 10, 100), cgroup_body(2, 1000, 5000)];
+    let t = Totals::of(rows.iter());
+    let process = &t.process;
+    assert_eq!(process.summed.value["cpu_stat.usage_usec"], 10.0);
+    assert_eq!(process.memory_peak_max, Some(100));
+    let machine = t.machine.as_ref().unwrap();
+    assert_eq!(machine.summed.value["cpu_stat.usage_usec"], 1000.0);
+    assert_eq!(machine.memory_peak_max, Some(5000));
+    assert_eq!((process.summed.read, machine.summed.read), (1, 1));
+    // A row without `isolation` is a record from before it: below level 2.
+    assert_eq!(LevelClass::of(None), LevelClass::Process);
+    assert_eq!(LevelClass::of(Some(0)), LevelClass::Process);
+    assert_eq!(LevelClass::of(Some(1)), LevelClass::Process);
+    assert_eq!(LevelClass::of(Some(2)), LevelClass::Machine);
+}
+
+#[test]
+fn overview_keeps_cgroup_for_process_rows() {
+    let cg = json!({"cgroup": {"cpu_stat": {}}});
+    let at = |row: u64, isolation: Option<u64>| {
+        let mut r = record_of(row, 1.0, 1.0, Some(cg.clone()));
+        if let Some(i) = isolation {
+            r.body["isolation"] = json!(i);
+        }
+        RowView::of(&r).unwrap()
+    };
+    let o = overview(&[at(0, None), at(1, Some(1))], &[0, 1], true);
+    assert_eq!(o["cgroup"], json!({"available": 2}));
+    assert!(o.get("cgroup_machine").is_none(), "{o}");
+    let o = overview(&[at(0, Some(1)), at(1, Some(2))], &[0, 1], true);
+    assert_eq!(o["cgroup"], json!({"available": 1}));
+    assert_eq!(o["cgroup_machine"], json!({"available": 1}));
+}
+
+#[test]
+fn totals_of_rows_below_level_2_keep_their_json() {
+    let t = Totals::of([cgroup_body(1, 10, 100)].iter());
+    assert!(t.machine.is_none());
+    let v = serde_json::to_value(&t).unwrap();
+    assert_eq!(v["cgroup"]["value"]["cpu_stat.usage_usec"], 10.0);
+    assert_eq!(v["memory_peak_max"], 100);
+    assert!(v.get("machine").is_none(), "{v}");
 }

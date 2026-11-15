@@ -439,9 +439,17 @@ fn render_telemetry(r: &Value) -> String {
         if r["blind"] == true { "yes" } else { "no" },
         t["rows"]
     );
-    let cgroup = (t["cgroup"].as_object().into_iter().flatten())
-        .map(|(k, n)| format!("{} {n}", printable(k)));
-    s.push_str(&format!("cgroup: {}\n", joined(cgroup)));
+    let states = |v: &Value| {
+        joined((v.as_object().into_iter().flatten()).map(|(k, n)| format!("{} {n}", printable(k))))
+    };
+    let machine = t.get("cgroup_machine");
+    let below = t["cgroup"].as_object().is_some_and(|m| !m.is_empty());
+    if machine.is_none() || below {
+        s.push_str(&format!("cgroup: {}\n", states(&t["cgroup"])));
+    }
+    if let Some(m) = machine {
+        s.push_str(&format!("cgroup, level 2: {}\n", states(m)));
+    }
     for h in t["host_cpu"].as_array().into_iter().flatten() {
         s.push_str(&format!(
             "host cpu: {} (flags {}), {} rows\n",

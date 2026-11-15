@@ -2593,3 +2593,45 @@ fn verify_says_not_recorded_for_an_old_register() {
         text(&a)
     );
 }
+
+#[test]
+fn status_telemetry_prints_level_2_cgroup_states_apart() {
+    let lab = lab();
+    plain(&lab, "tl");
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let log = lab.home.study_dir("tl").join("records.jsonl");
+    for (row, isolation) in [(0, 1), (1, 2)] {
+        let draft = ignorarium::records::RecordDraft {
+            study: "tl".into(),
+            row: Some(row),
+            kind: "row".into(),
+            body: serde_json::json!({
+                "condition": "arm-a", "exit": "ok", "cpu_seconds": 1.0, "wall_seconds": 1.0,
+                "attempts": 1, "isolation": isolation,
+                "telemetry": { "cgroup": { "unavailable": "no cgroup" } },
+            }),
+        };
+        ignorarium::records::append(&log, &key, draft).unwrap();
+    }
+    let a = bin(&lab)
+        .args(["status", "tl", "--telemetry"])
+        .assert()
+        .success();
+    let t = text(&a);
+    assert!(
+        t.contains(
+            "
+cgroup: no cgroup 1
+"
+        ),
+        "{t}"
+    );
+    assert!(
+        t.contains(
+            "
+cgroup, level 2: no cgroup 1
+"
+        ),
+        "{t}"
+    );
+}

@@ -8,6 +8,7 @@ use crate::card::Card;
 use crate::card::readings::NOT_READ;
 use crate::card::sections::{Field, Pick, UNRECORDED};
 use crate::spec::model::{SelectionRule, StatisticSpec};
+use crate::telemetry::CgroupTotals;
 
 fn md_table(t: &Table) -> String {
     let line = |cells: Vec<String>| format!("| {} |\n", cells.join(" | "));
@@ -325,10 +326,11 @@ fn surprises_section(c: &Card) -> String {
 
 fn cost_section(c: &Card) -> String {
     let (k, t) = (&c.cost, &c.cost.telemetry);
-    let peak = t
-        .memory_peak_max
-        .map_or_else(|| "none read".into(), |m| m.to_string());
-    list(vec![
+    let peak = |c: &CgroupTotals| {
+        c.memory_peak_max
+            .map_or_else(|| "none read".into(), |m| m.to_string())
+    };
+    let mut l = vec![
         format!(
             "CPU seconds: {}; budget {} CPU hours",
             k.cpu_seconds, k.budget.cpu_hours
@@ -361,9 +363,23 @@ fn cost_section(c: &Card) -> String {
             "Host CPU ticks summed over rows, seconds (rows that ran at the same time each count the same host ticks): {}",
             word(&t.cpu_ticks.value)
         ),
-        format!("Cgroup counters: {}", word(&t.cgroup.value)),
-        format!("Peak memory, bytes: {peak}"),
-    ])
+    ];
+    let below = &t.process.summed;
+    if t.machine.is_none() || below.read + below.unavailable > 0 {
+        l.push(format!("Cgroup counters: {}", word(&below.value)));
+        l.push(format!("Peak memory, bytes: {}", peak(&t.process)));
+    }
+    if let Some(m) = &t.machine {
+        l.push(format!(
+            "Cgroup counters, level 2 (VMM and guest): {}",
+            word(&m.summed.value)
+        ));
+        l.push(format!(
+            "VM total (guest RAM touched + VMM), bytes: {}",
+            peak(m)
+        ));
+    }
+    list(l)
 }
 
 fn runs_section(c: &Card) -> String {
