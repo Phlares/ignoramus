@@ -1,6 +1,7 @@
 //! `verify`: check the plan logs and, for one study, its record chain.
 use super::{CliError, Ctx, Done, Run, out};
 use crate::planlog::store::PlanLog;
+use crate::telemetry::Reading;
 use crate::{keys, records};
 
 /// True when the log holds no leaves.
@@ -89,11 +90,8 @@ fn box_text(b: Option<&crate::identity::BoxIdentity>) -> String {
         return "not recorded".into();
     };
     let binary = match &b.binary_sha256 {
-        serde_json::Value::String(s) => s.clone(),
-        other => match other.get("unavailable").and_then(|w| w.as_str()) {
-            Some(why) => format!("unavailable: {why}"),
-            None => other.to_string(),
-        },
+        Reading::Read(s) => s.clone(),
+        Reading::Unavailable(why) => format!("unavailable: {why}"),
     };
     format!("rules {}, binary {binary}", b.rules_sha256)
 }
@@ -101,12 +99,13 @@ fn box_text(b: Option<&crate::identity::BoxIdentity>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telemetry::Reading;
 
     #[test]
     fn an_unavailable_binary_prints_its_reason() {
         let b = crate::identity::BoxIdentity {
             rules_sha256: "sha256:ab".into(),
-            binary_sha256: serde_json::json!({"unavailable": "no exe"}),
+            binary_sha256: Reading::Unavailable("no exe".into()),
         };
         assert_eq!(
             box_text(Some(&b)),

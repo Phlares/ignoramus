@@ -1,6 +1,6 @@
 # 0028 Box identity
 
-A box has two identities: the rules it embeds and the binary that runs. Each has a SHA-256 hash. Nothing in a study's verdict reads either hash. Only `pins.rule_base` and the binary gate (added with #81) can refuse a run.
+A box has two identities: the rules it embeds and the binary that runs. Each has a SHA-256 hash. Nothing in a study's verdict reads either hash. Only `pins.rule_base` and the binary gate (added with #81) can refuse a plan or a run.
 
 Decision:
 

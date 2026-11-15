@@ -25,6 +25,19 @@ impl<T: Serialize> Serialize for Reading<T> {
     }
 }
 
+impl<'de, T: serde::de::DeserializeOwned> Deserialize<'de> for Reading<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let v = Value::deserialize(d)?;
+        if let Some(why) = v.get("unavailable").and_then(Value::as_str) {
+            return Ok(Self::Unavailable(why.into()));
+        }
+        serde_json::from_value(v)
+            .map(Self::Read)
+            .map_err(D::Error::custom)
+    }
+}
+
 impl<T> Reading<T> {
     fn unavailable(why: &str) -> Self {
         Self::Unavailable(why.into())

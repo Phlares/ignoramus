@@ -1,9 +1,8 @@
-//! What identifies this box: the rules it embeds and the binary that runs. Observation only:
-//! no decision, hash or comparison of a study reads it.
+//! What the box is: the rules it embeds and the binary that runs. Only `pins.rule_base` (at
+//! `check`) and the binary gate at `run`/`resume` read it.
 use crate::canon::{sha256_file, sha256_hex};
 use crate::telemetry::Reading;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::sync::OnceLock;
 
 /// The hash of both embedded rule files. Each part carries its byte length as a `u64`
@@ -20,7 +19,9 @@ pub fn rules_sha256() -> &'static str {
     })
 }
 
-/// The hash of the running executable, or why it cannot be read.
+/// The hash of the running executable, or why it cannot be read. Read through
+/// `/proc/self/exe`, not `current_exe()`, so a binary replaced on disk since the start is not
+/// the one hashed.
 pub fn binary_sha256() -> &'static Reading<String> {
     static HASH: OnceLock<Reading<String>> = OnceLock::new();
     HASH.get_or_init(|| match sha256_file("/proc/self/exe".as_ref()) {
@@ -29,22 +30,21 @@ pub fn binary_sha256() -> &'static Reading<String> {
     })
 }
 
-/// `binary_sha256` is a `Value`, so an unavailable reading keeps its `{"unavailable": why}` form.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct BoxIdentity {
     pub rules_sha256: String,
-    pub binary_sha256: Value,
+    pub binary_sha256: Reading<String>,
 }
 
 pub fn current() -> BoxIdentity {
     BoxIdentity {
         rules_sha256: rules_sha256().into(),
-        binary_sha256: serde_json::to_value(binary_sha256()).expect("a Reading<String> serializes"),
+        binary_sha256: binary_sha256().clone(),
     }
 }
 
 /// True only when both sides are hash strings and equal.
-pub fn same_binary(a: &Value, b: &Value) -> bool {
-    matches!((a, b), (Value::String(x), Value::String(y)) if x == y)
+pub fn same_binary(a: &Reading<String>, b: &Reading<String>) -> bool {
+    matches!((a, b), (Reading::Read(x), Reading::Read(y)) if x == y)
 }
