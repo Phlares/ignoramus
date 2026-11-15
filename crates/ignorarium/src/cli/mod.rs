@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 use std::ffi::OsString;
 use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 pub mod check;
@@ -341,8 +341,17 @@ where
     let ctx = Ctx {
         home: Home::open().map_err(|e| e.to_string()),
     };
-    // The selftest runs in a sandbox where the event log is out of reach.
-    if name != "dev.selftest" {
+    // The selftest runs in a sandbox where the event log is out of reach. A box home that
+    // cannot be opened warns once, for the call, not for each event.
+    let log = match &ctx.home {
+        _ if name == "dev.selftest" => None,
+        Ok(home) => Some(home.root.join("events.jsonl")),
+        Err(e) => {
+            warn_on_err(Err(e.clone()));
+            None
+        }
+    };
+    if let Some(log) = &log {
         let mut attrs = json!({
             "verb": name,
             "pid": std::process::id(),
@@ -352,18 +361,17 @@ where
         if let (Some(map), Some(study)) = (attrs.as_object_mut(), cli.verb.study()) {
             map.insert("study".into(), study.into());
         }
-        warn_on_err(write_event(&ctx, &trace_id, &span_id, "call.start", attrs));
+        warn_on_err(write_event(log, &trace_id, &span_id, "call.start", attrs));
     }
     // A hung-up terminal fails these writes; the exit code and the event still stand.
     let done = cli.verb.run(&ctx).unwrap_or_else(|e| {
         let _ = writeln!(std::io::stderr(), "error: {}", e.msg);
         Done::exit(e.code)
     });
-    if name == "dev.selftest" {
-        return done.code;
+    if let Some(log) = &log {
+        let attrs = end_attrs(&done, started);
+        warn_on_err(write_event(log, &trace_id, &span_id, name, attrs));
     }
-    let attrs = end_attrs(&done, started);
-    warn_on_err(write_event(&ctx, &trace_id, &span_id, name, attrs));
     done.code
 }
 
@@ -397,15 +405,14 @@ fn end_attrs(done: &Done, started: Instant) -> Value {
 }
 
 fn write_event(
-    ctx: &Ctx,
+    log: &Path,
     trace_id: &str,
     span_id: &str,
     name: &str,
     attrs: Value,
 ) -> Result<(), String> {
-    let home = ctx.home.as_ref().map_err(String::clone)?;
     events::emit(
-        &home.root.join("events.jsonl"),
+        log,
         Event {
             ts: crate::time::now_rfc3339(),
             trace_id: trace_id.into(),

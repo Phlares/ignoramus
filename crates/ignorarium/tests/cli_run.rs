@@ -626,12 +626,11 @@ fn sighup_kills_the_row_records_its_spend_and_pauses() {
     a_signal_pauses_the_run("HUP", 1);
 }
 
-#[test]
-fn a_killed_run_leaves_a_start_without_an_end() {
-    let lab = lab();
-    let id = "killed";
-    let dir = with_payload(&lab, id, SLEEPY_ROW_0);
-    let mut child = start_run(&lab, id, &[]);
+/// Register study `id` with `SLEEPY_ROW_0`, start its run, and kill the box and its row
+/// once row 0 runs.
+fn killed_in_row_0(lab: &Lab, id: &str) {
+    let dir = with_payload(lab, id, SLEEPY_ROW_0);
+    let mut child = start_run(lab, id, &[]);
     let row = row_0_file(&dir);
     child.kill().unwrap();
     child.wait().unwrap();
@@ -640,22 +639,32 @@ fn a_killed_run_leaves_a_start_without_an_end() {
     let _ = std::process::Command::new("kill")
         .args(["-KILL", "--", &group])
         .status();
+}
+
+#[test]
+fn a_killed_run_leaves_a_start_without_an_end() {
+    let lab = lab();
+    let id = "killed";
+    killed_in_row_0(&lab, id);
+    // A call that completes, for the same check to find its end.
+    bin(&lab).args(["status", id]).assert().success();
     let log = std::fs::read_to_string(lab.home.root.join("events.jsonl")).unwrap();
     let lines: Vec<Value> = log
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    let start = lines
-        .iter()
-        .find(|e| e["name"] == "call.start" && e["attrs"]["verb"] == "run")
-        .expect("a call.start for run");
-    assert_eq!(start["attrs"]["study"], id);
-    assert!(
-        !lines
-            .iter()
-            .any(|e| e["name"] != "call.start" && e["span_id"] == start["span_id"]),
-        "{log}"
-    );
+    let start_of = |verb: &str| {
+        (lines.iter())
+            .find(|e| e["name"] == "call.start" && e["attrs"]["verb"] == verb)
+            .unwrap_or_else(|| panic!("a call.start for {verb}: {log}"))
+    };
+    let ended = |start: &Value| {
+        (lines.iter()).any(|e| e["name"] != "call.start" && e["span_id"] == start["span_id"])
+    };
+    let run = start_of("run");
+    assert_eq!(run["attrs"]["study"], id);
+    assert!(!ended(run), "{log}");
+    assert!(ended(start_of("status")), "{log}");
 }
 
 #[test]

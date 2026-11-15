@@ -450,6 +450,20 @@ fn each_verb_emits_a_start_and_an_end_event() {
 }
 
 #[test]
+fn a_box_home_that_cannot_open_warns_once_per_call() {
+    let (dir, _, spec) = setup(|t| t);
+    let file = dir.path().join("not-a-folder");
+    std::fs::write(&file, "").unwrap();
+    let a = bin(&file).arg("check").arg(&spec).assert();
+    let err = stderr(&a);
+    assert_eq!(
+        err.matches("warning: cannot write the event log").count(),
+        1,
+        "{err}"
+    );
+}
+
+#[test]
 fn a_start_event_names_the_study_a_verb_takes() {
     let dir = TempDir::new().unwrap();
     bin(dir.path()).args(["status", "nope"]).assert().code(1);
