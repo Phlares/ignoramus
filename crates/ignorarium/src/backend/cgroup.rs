@@ -183,12 +183,6 @@ impl RowCgroup {
         sys::enter_cgroup(cmd, self.procs.clone());
     }
 
-    /// `enter` as a hook that outlives the leaf's borrow.
-    pub fn hook(&self) -> impl Fn(&mut Command) + Send + Sync + 'static {
-        let procs = self.procs.clone();
-        move |cmd| sys::enter_cgroup(cmd, procs.clone())
-    }
-
     /// The leaf's counters, once every process in it is reaped; then the leaf is removed. A
     /// leaf whose memory and CPU both read zero never held the row.
     pub fn finish(self) -> Reading<CgroupCounters> {

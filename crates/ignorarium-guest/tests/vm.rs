@@ -32,7 +32,7 @@ fn var(name: &str) -> PathBuf {
 
 struct Row {
     dir: tempfile::TempDir,
-    vm: Vm,
+    vm: Vm<'static>,
     job: HostJob,
 }
 

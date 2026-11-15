@@ -17,7 +17,7 @@ use ignorarium_guest::tree;
 use rustix::io::Errno;
 use rustix::process::{Pid, geteuid, test_kill_process};
 use sha2::{Digest, Sha256};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fs;
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
@@ -102,9 +102,6 @@ impl Level2 {
         }
     }
 
-    /// The guest memory of `job`'s machine, in MiB: `mem_mib` when the row declares no
-    /// memory; otherwise the cap, the `/out` and `/tmp` tmpfs and `GUEST_MIB`, which the host
-    /// checks every machine against.
     /// The machine `job`'s row runs in.
     pub fn machine_of(&self, job: &RowJob) -> Machine {
         Machine {
@@ -113,6 +110,9 @@ impl Level2 {
         }
     }
 
+    /// The guest memory of `job`'s machine, in MiB: `mem_mib` when the row declares no
+    /// memory; otherwise the cap, the `/out` and `/tmp` tmpfs and `GUEST_MIB`, which the host
+    /// checks every machine against.
     pub fn vm_mem_mib(&self, job: &RowJob) -> u32 {
         match job.data_limit() {
             None => self.mem_mib,
@@ -186,8 +186,8 @@ impl Level2 {
     /// Runs one row and returns its outcome, with the host's timings when the machine ran to
     /// a report. The rootfs disk and the boot count toward the row's wall time, not the
     /// payload's.
-    /// The row, run in the leaf `leaf` makes once the machine is about to start, and the
-    /// host's timings.
+    /// The row, run in the leaf `leaf` makes just before the VMM starts, and the host's
+    /// timings. A row that ends before then makes no leaf.
     pub fn run_timed(
         &self,
         job: &RowJob,
@@ -235,7 +235,17 @@ impl Level2 {
             Err(e) => return infra(format!("cannot make the row's scratch folder: {e}")),
         };
         let machine = self.machine_of(job);
-        let leaf = leaf();
+        // The host calls the hook once, after it built the disks, so a row that fails or stops
+        // before the VMM starts makes no leaf.
+        let leaf = RefCell::new(Some(leaf));
+        let made: RefCell<Option<Result<RowCgroup, String>>> = RefCell::new(None);
+        let hook = |cmd: &mut Command| {
+            let made_now = leaf.borrow_mut().take().map(|f| f());
+            if let Some(Ok(l)) = &made_now {
+                l.enter(cmd);
+            }
+            *made.borrow_mut() = made_now;
+        };
         let vm = Vm {
             vmm: self.vmm.clone(),
             kernel: self.kernel.clone(),
@@ -248,7 +258,7 @@ impl Level2 {
             exit_timeout: self.exit_timeout,
             report_slack: self.report_slack,
             serial_log: None,
-            pre_spawn: leaf.as_ref().ok().map(|l| Box::new(l.hook()) as _),
+            pre_spawn: Some(Box::new(hook)),
         };
         let counted = Counted {
             watch,
@@ -258,7 +268,9 @@ impl Level2 {
         let (mut o, timings) = ended(res);
         o.box_cpu_seconds = counted.cpu.get();
         o.machine = Some(machine);
-        o.cgroup = leaf.map_or_else(Reading::Unavailable, RowCgroup::finish);
+        if let Some(made) = made.take() {
+            o.cgroup = made.map_or_else(Reading::Unavailable, RowCgroup::finish);
+        }
         (o, timings)
     }
 }

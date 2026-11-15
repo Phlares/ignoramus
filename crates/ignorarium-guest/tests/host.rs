@@ -39,7 +39,7 @@ struct Rig {
     src: PathBuf,
     work: PathBuf,
     out: PathBuf,
-    vm: Vm,
+    vm: Vm<'static>,
     job: HostJob,
 }
 
