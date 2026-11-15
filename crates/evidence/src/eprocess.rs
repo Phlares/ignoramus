@@ -24,10 +24,11 @@ pub struct EProcess {
     score: Score,
     sides: &'static [f64],
     stop: f64,
-    cap: f64,
+    caps: Vec<f64>,
     s_sum: f64,
     q_sum: f64,
-    log_wealth: [f64; 2],
+    /// One per side and cap: the caps of the first side, then those of the second.
+    log_wealth: Vec<f64>,
     peak_log: f64,
     stopped: bool,
     observed: usize,
@@ -41,7 +42,13 @@ impl EProcess {
     /// [`EProcess::new`] with the largest bet fraction `cap`, which must lie strictly between 0
     /// and 1: any such cap fixed before the data keeps the test valid and changes its power.
     pub fn with_cap(score: Score, tail: Tail, stop: f64, cap: f64) -> Result<EProcess, Error> {
-        if !(cap > 0.0 && cap < 1.0) {
+        EProcess::with_caps(score, tail, stop, &[cap])
+    }
+
+    /// [`EProcess::with_cap`] over several caps: the value is the mean of the e-values the
+    /// caps give, which is an e-value too. `caps` must hold at least one.
+    pub fn with_caps(score: Score, tail: Tail, stop: f64, caps: &[f64]) -> Result<EProcess, Error> {
+        if caps.is_empty() || !caps.iter().all(|&cap| cap > 0.0 && cap < 1.0) {
             return Err(Error::Parameter("cap"));
         }
         if stop.is_nan() || stop <= 1.0 {
@@ -69,10 +76,10 @@ impl EProcess {
             score,
             sides,
             stop,
-            cap,
+            caps: caps.to_vec(),
             s_sum: 0.0,
             q_sum: 0.0,
-            log_wealth: [0.0; 2],
+            log_wealth: vec![0.0; sides.len() * caps.len()],
             peak_log: 0.0,
             stopped: false,
             observed: 0,
@@ -104,9 +111,11 @@ impl EProcess {
         if self.stopped {
             return Ok(());
         }
-        for (w, &sigma) in self.log_wealth.iter_mut().zip(self.sides) {
-            let bet = (sigma * self.s_sum / (1.0 + self.q_sum)).clamp(0.0, self.cap);
-            *w += (bet * (sigma * s)).ln_1p();
+        for (ws, &sigma) in self.log_wealth.chunks_mut(self.caps.len()).zip(self.sides) {
+            let bet = sigma * self.s_sum / (1.0 + self.q_sum);
+            for (w, &cap) in ws.iter_mut().zip(&self.caps) {
+                *w += (bet.clamp(0.0, cap) * (sigma * s)).ln_1p();
+            }
         }
         self.s_sum += s;
         self.q_sum += s * s;
@@ -117,7 +126,7 @@ impl EProcess {
     }
 
     fn log_value(&self) -> f64 {
-        let ws = &self.log_wealth[..self.sides.len()];
+        let ws = &self.log_wealth;
         let m = ws.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         let sum: f64 = ws.iter().map(|w| (w - m).exp()).sum();
         m + (sum / ws.len() as f64).ln()

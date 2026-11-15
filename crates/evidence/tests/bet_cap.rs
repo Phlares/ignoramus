@@ -7,8 +7,8 @@
 //! and otherwise normal with sd `spread` about -`gap`, clipped to the range. Its null twin
 //! moves the normal part so the mean of all observations is 0.
 //!
-//! Candidates: the caps 1/2, 3/4 and 0.9, and the mean of their three e-values, which is an
-//! e-value too. Every candidate reads the same draws.
+//! Candidates: the caps 1/2, 3/4 and 0.9, and the three together (`EProcess::with_caps`: the
+//! mean of their e-values, which is an e-value too). Every candidate reads the same draws.
 //!
 //! Power: per candidate and target, the smallest count of clusters at which the share of
 //! replicates with an e-value of at least 1 / level reaches the target. One path per replicate
@@ -73,25 +73,27 @@ impl Scenario {
     }
 }
 
-/// The four candidates over one path.
-struct Candidates([EProcess; 3]);
+/// The four candidates over one path: each cap alone, then the three together.
+struct Candidates([EProcess; 4]);
 
 impl Candidates {
     fn new() -> Candidates {
-        Candidates(
-            CAPS.map(|cap| EProcess::with_cap(SCORE, Tail::Lower, f64::INFINITY, cap).unwrap()),
-        )
+        let test =
+            |caps: &[f64]| EProcess::with_caps(SCORE, Tail::Lower, f64::INFINITY, caps).unwrap();
+        Candidates([
+            test(&CAPS[..1]),
+            test(&CAPS[1..2]),
+            test(&CAPS[2..]),
+            test(&CAPS),
+        ])
     }
 
     /// Each candidate's e-value after `x`.
     fn observe(&mut self, x: f64) -> [f64; 4] {
-        let mut v = [0.0; 4];
-        for (p, v) in self.0.iter_mut().zip(&mut v) {
+        self.0.each_mut().map(|p| {
             p.observe(x).unwrap();
-            *v = p.value();
-        }
-        v[3] = (v[0] + v[1] + v[2]) / 3.0;
-        v
+            p.value()
+        })
     }
 }
 
@@ -160,7 +162,8 @@ fn the_cap_in_force_gives_the_claim_test() {
     let last = obs.iter().map(|&x| c.observe(x)).last().unwrap();
     assert_eq!(last[1], e_value(&stat, &bound, &obs).unwrap());
     assert!(last[0] != last[1] && last[2] != last[1], "{last:?}");
-    assert_eq!(last[3], (last[0] + last[1] + last[2]) / 3.0);
+    let mean = (last[0] + last[1] + last[2]) / 3.0;
+    assert!((last[3] - mean).abs() <= 1e-12 * mean, "{last:?}");
 }
 
 #[test]
