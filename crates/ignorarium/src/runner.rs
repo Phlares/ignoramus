@@ -1997,6 +1997,9 @@ fn attempt_row(
         body["cpu_bound"] = json!(true);
     }
     box_cpu(&mut body, &outcome);
+    if let Some(t) = &outcome.selftest {
+        body["selftest"] = t.record();
+    }
     let (start, end) = &ticks;
     body["telemetry"] =
         telemetry::record(telemetry::host_cpu(), start, end, &outcome.cgroup, &|w| {

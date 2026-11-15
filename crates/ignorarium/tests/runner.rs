@@ -6,6 +6,7 @@ use common::{
 };
 use ignorarium::backend::cgroup::rows_parent;
 use ignorarium::backend::level0::Level0;
+use ignorarium::backend::selftest::SelfTest;
 use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome, Watch};
 use ignorarium::budget::{Cost, FakeMeter, MeterError};
 use ignorarium::canon::sha256_hex;
@@ -5644,5 +5645,100 @@ fn a_row_without_a_delegated_cgroup_records_why_and_runs_as_before() {
             // In a delegated scope the row has its own cgroup.
             Ok(_) => assert!(cgroup["memory_peak"].as_u64().unwrap() > 0, "{cgroup}"),
         }
+    }
+}
+
+/// Level 0 with a self-test: each attempt takes the next scripted exit and self-test, then
+/// `selftest`.
+struct Shaped {
+    attempts: RefCell<VecDeque<(Exit, SelfTest)>>,
+    selftest: SelfTest,
+}
+
+impl Backend for Shaped {
+    fn cpus(&self) -> u32 {
+        1
+    }
+    fn launcher(&self) -> String {
+        "process".into()
+    }
+    fn level(&self) -> u8 {
+        1
+    }
+    fn probe(&self) -> Probe {
+        Probe::Available
+    }
+    fn run_row(&self, job: &RowJob, watch: &dyn Watch) -> std::io::Result<RowOutcome> {
+        let o = Level0.run_row(job, watch)?;
+        Ok(match self.attempts.borrow_mut().pop_front() {
+            Some((exit, t)) => RowOutcome {
+                exit,
+                selftest: Some(t),
+                ..o
+            },
+            None => RowOutcome {
+                selftest: Some(self.selftest),
+                ..o
+            },
+        })
+    }
+}
+
+fn blocked() -> SelfTest {
+    SelfTest {
+        connect_blocked: true,
+        vsock_blocked: true,
+        io_uring_blocked: true,
+        vsock_absent: false,
+        io_uring_absent: false,
+        host_path: false,
+    }
+}
+
+fn shaped(attempts: Vec<(Exit, SelfTest)>) -> Shaped {
+    Shaped {
+        attempts: RefCell::new(attempts.into()),
+        selftest: blocked(),
+    }
+}
+
+#[test]
+fn row_records_hold_the_self_test() {
+    let lab = lab();
+    plain(&lab, "st");
+    let mut plan = plan_of(&lab, "st");
+    plan.backend = Box::new(shaped(vec![]));
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let rows = rows_of(&lab, "st");
+    assert!(!rows.is_empty());
+    for r in rows {
+        assert_eq!(r.body["selftest"], blocked().record(), "{}", r.body);
+    }
+}
+
+#[test]
+fn a_retried_row_records_its_last_self_test() {
+    let lab = lab();
+    plain(&lab, "st-retry");
+    let mut plan = plan_of(&lab, "st-retry");
+    let open = SelfTest {
+        connect_blocked: false,
+        ..blocked()
+    };
+    plan.backend = Box::new(shaped(vec![(Exit::Infra("self-test failed".into()), open)]));
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    let first = rows_of(&lab, "st-retry").into_iter().find(|r| r.row == Some(0)).unwrap();
+    assert_eq!(first.body["attempts"], 2, "{}", first.body);
+    assert_eq!(first.body["selftest"]["failed"], serde_json::json!([]));
+}
+
+#[test]
+fn level_0_rows_have_no_self_test_key() {
+    let lab = lab();
+    plain(&lab, "st0");
+    let plan = plan_of(&lab, "st0");
+    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    for r in rows_of(&lab, "st0") {
+        assert!(r.body.get("selftest").is_none(), "{}", r.body);
     }
 }
