@@ -756,6 +756,10 @@ pub struct Progress {
     pub spec: Spec,
     pub spec_hash: [u8; 32],
     pub total: usize,
+    /// Every scheduled row index, in schedule order: the rows of `total` and the rows that never
+    /// run (reserve rows a re-size leaves out, children no trigger admits). It does not change
+    /// when a re-size or trigger record lands.
+    pub indices: Vec<u64>,
     pub done: usize,
     /// Condition id to (rows done, rows scheduled).
     pub conditions: BTreeMap<String, (u64, u64)>,
@@ -784,7 +788,9 @@ pub fn progress(
     let ran = resize::ran(&spec, &clusters, resize::recorded(all)?.as_ref());
     let spawned: BTreeSet<String> = spawn::admitted(&spec, all)?.into_keys().collect();
     let rowed = records::row_indices(all);
-    let rows: Vec<Row> = (expand_rows(&spec, &spec_hash, register.as_ref())?.into_iter())
+    let scheduled = expand_rows(&spec, &spec_hash, register.as_ref())?;
+    let indices = scheduled.iter().map(|r| r.index).collect();
+    let rows: Vec<Row> = (scheduled.into_iter())
         .filter(|r| (resize::runs(r, &ran) && spawn::runs(r, &spawned)) || rowed.contains(&r.index))
         .collect();
     let tally = Tally::of(all);
@@ -804,6 +810,7 @@ pub fn progress(
         spec,
         spec_hash,
         total: rows.len(),
+        indices,
         done: seen.len(),
         conditions,
         voided: tally.voided,

@@ -67,7 +67,7 @@ command = "ignorarium run <id>"
 id = "status"
 title = "Check progress"
 does = "Shows rows done, time, cost against each budget cap, and voided or retried rows. Condition names stay hidden when the plan blinds them. For each trigger it shows whether it fired, its e-value, and the children admitted, skipped or stopped, with the reason."
-produces = "A progress summary. Add --json for the same fields as JSON."
+produces = "A progress summary. Add --json for the same fields as JSON. Add --telemetry for the host readings of the rows, with no measured value."
 command = "ignorarium status <id>"
 
 [[step]]

@@ -1671,6 +1671,9 @@ fn a_trigger_that_does_not_fire_runs_no_child_and_finishes() {
     let all = common::records_of(&lab, "spawn-wait");
     let p = ignorarium::runner::progress(&lab.home, "spawn-wait", &all).unwrap();
     assert_eq!((p.done, p.total), (12, 12));
+    // The schedule keeps the child rows that never ran, so block edges hold still.
+    assert!(ran.iter().all(|i| p.indices.contains(i)));
+    assert!(p.indices.len() > p.total, "{:?}", p.indices);
 }
 
 /// The spec text with a selection input of one unit at each of `paths`, before `[pins]`.

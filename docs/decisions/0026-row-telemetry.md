@@ -51,3 +51,33 @@ Sources:
 - https://systemd.io/CGROUP_DELEGATION/ (`Delegate=yes`, scopes)
 - https://man7.org/linux/man-pages/man7/cgroup_namespaces.7.html (a new cgroup namespace is rooted at the creator's cgroup)
 - https://man7.org/linux/man-pages/man5/proc_stat.5.html (the `cpu` line of `/proc/stat`)
+- FDA (2019), "Adaptive Designs for Clinical Trials of Drugs and Biologics", https://www.fda.gov/media/78495/download (section VII, limited access to comparative interim results)
+
+## Reader
+
+`ignorarium status <id> --telemetry` prints what the row records hold about the host. `--json` prints the same figures.
+
+It prints these figures:
+
+- The total row count.
+- The cgroup states, with a row count for each. A row with no cgroup reading counts as `not recorded`.
+- Each host CPU model and flags hash, with a row count.
+- Steal seconds per row and iowait seconds per row: largest and mean, each with its row count.
+- The rows with no host CPU and the rows with no usable CPU ticks: each as a count of rows whose reading is a reason or unusable, and a count of rows that never recorded it.
+- Wall seconds per row and CPU seconds per row for the whole study: largest and mean.
+- Ten blocks of the schedule. Each block prints the rows recorded, the first and last row of the block in schedule order, and the steal share and iowait share: largest and mean.
+- When the study is not blind, each block also prints wall seconds per row and CPU seconds per row: largest and mean.
+
+Every count of rows adds up to the total. A row from before this record has no `telemetry` key and counts as not recorded. A tick reading with a zero rate or too few fields counts as unusable.
+
+The share of steal or iowait is its tick delta over the deltas of user, nice, system, idle, iowait, irq, softirq and steal. The kernel counts guest time inside user and guest_nice inside nice, so those two stay out of the sum.
+
+The two numbers of a block are the first and last row of the block in schedule order. Rows run by stage, cluster, then condition. The two numbers need not be consecutive, and the first can exceed the last. The block edges come from the full schedule, reserve and child rows included. A row that never runs has no record in its block. The edges do not move when a re-size or trigger record lands.
+
+The command reads verified records. For each row record it copies the row index, the `telemetry` key and the wall and CPU seconds. It never copies `values`, `output_hash`, `outputs` or `data_hashes`. It works while a run holds the run lock. In `--json`, each spread is `{rows, max, mean}`: `steal_s`, `iowait_s`, `wall_s` and `cpu_s` for the study, and `steal_share`, `iowait_share` and, when not blind, `wall_s` and `cpu_s` for each block.
+
+A blind study prints no per-block wall or CPU figure. A row index joins to a condition through the schedule, and row time can track an outcome. A block of row times would let a blind reader infer the condition. This follows the rule that comparative interim results stay limited to people independent of the study's conduct (FDA 2019, section VII). Steal and iowait shares come from host counters, not from a row's result. They stay.
+
+The whole-study wall and CPU figures still print in a blind study. They join to no condition, so no condition's time can be read off them.
+
+No decision reads this output. Nothing in `output_hash`, `compare`, charge, schedule order or budgets uses it.
