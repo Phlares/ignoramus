@@ -430,6 +430,7 @@ pub fn selftest_of(t: &proto::SelfTest) -> SelfTest {
         io_uring_blocked: io_uring != Call::Open,
         vsock_absent: false,
         io_uring_absent: io_uring == Call::Absent,
+        host_path: true,
     }
 }
 

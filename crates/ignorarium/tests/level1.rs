@@ -1039,6 +1039,7 @@ impl Backend for BreakEvents {
             io_uring_blocked: true,
             vsock_absent: false,
             io_uring_absent: false,
+            host_path: false,
         };
         Ok(RowOutcome {
             exit: self.exit.clone(),

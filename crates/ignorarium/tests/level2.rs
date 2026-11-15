@@ -426,6 +426,7 @@ fn mapped(connect: bool, vsock: bool) -> SelfTest {
         io_uring_blocked: true,
         vsock_absent: false,
         io_uring_absent: false,
+        host_path: true,
     }
 }
 
@@ -442,6 +443,14 @@ fn selftest_of_maps_the_guest_checks() {
     assert_eq!(with(|g| g.route_blocked = false), ["connect"]);
     assert_eq!(with(|g| g.only_loopback = false), ["connect"]);
     assert_eq!(with(|g| g.host_path_blocked = false), ["vsock"]);
+    // At level 2 the vsock check is the guest's path to the host: blocked or open.
+    assert!(t.host_path);
+    assert_eq!(t.vsock_state(), "blocked");
+    let open = selftest_of(&proto::SelfTest {
+        host_path_blocked: false,
+        ..passing()
+    });
+    assert_eq!(open.vsock_state(), "open");
     // io_uring, as level 1 reads the same call.
     let io_uring = |errno: Option<i32>| {
         selftest_of(&proto::SelfTest {

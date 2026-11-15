@@ -23,6 +23,10 @@ pub struct SelfTest {
     pub vsock_absent: bool,
     #[serde(default)]
     pub io_uring_absent: bool,
+    /// The vsock check is the guest's path to the host (level 2), not a socket call, so it
+    /// reads blocked or open.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub host_path: bool,
 }
 
 /// What one call did: `EPERM` is the filter's answer. The guest's self-test reads its
@@ -46,13 +50,32 @@ impl SelfTest {
         .collect()
     }
 
-    /// `denied`, `absent` or `open`.
+    /// `blocked` or `open`: the probe cannot tell a denied connect from a missing network.
+    pub fn connect_state(&self) -> &'static str {
+        if self.connect_blocked { "blocked" } else { "open" }
+    }
+
+    /// `denied`, `absent` or `open`; `blocked` or `open` for the guest's path to the host.
     pub fn vsock_state(&self) -> &'static str {
-        state(self.vsock_blocked, self.vsock_absent)
+        match (self.host_path, self.vsock_blocked) {
+            (true, true) => "blocked",
+            (true, false) => "open",
+            (false, _) => state(self.vsock_blocked, self.vsock_absent),
+        }
     }
 
     pub fn io_uring_state(&self) -> &'static str {
         state(self.io_uring_blocked, self.io_uring_absent)
+    }
+
+    /// The row record's `selftest` value: each check's state and the checks that failed.
+    pub fn record(&self) -> serde_json::Value {
+        serde_json::json!({
+            "connect": self.connect_state(),
+            "vsock": self.vsock_state(),
+            "io_uring": self.io_uring_state(),
+            "failed": self.failed(),
+        })
     }
 }
 
@@ -77,6 +100,7 @@ pub fn run() -> SelfTest {
         io_uring_blocked: io_uring != Call::Open,
         vsock_absent: vsock == Call::Absent,
         io_uring_absent: io_uring == Call::Absent,
+        host_path: false,
     }
 }
 
@@ -146,6 +170,7 @@ mod tests {
             io_uring_blocked: true,
             vsock_absent: false,
             io_uring_absent: false,
+            host_path: false,
         }
     }
 

@@ -66,6 +66,7 @@ fn self_test_passes_inside_the_sandbox() {
         io_uring_blocked: true,
         vsock_absent: false,
         io_uring_absent: false,
+        host_path: false,
     };
     // The filter's EPERM, not a missing feature, is what blocks both calls.
     assert_eq!(o.selftest, Some(all));
@@ -258,4 +259,29 @@ i=0; while [ $i -lt 400000 ]; do i=$((i+1)); done
     let o = b.run_row(&job(work.path()), &|| true).unwrap();
     assert_eq!(o.exit, Exit::Ok);
     assert!(o.cpu_seconds > 0.1, "{}", o.cpu_seconds);
+}
+
+#[test]
+fn record_names_each_check_state() {
+    let all = SelfTest {
+        connect_blocked: true,
+        vsock_blocked: true,
+        io_uring_blocked: true,
+        vsock_absent: true,
+        io_uring_absent: false,
+        host_path: false,
+    };
+    assert_eq!(
+        all.record(),
+        serde_json::json!({"connect": "blocked", "vsock": "absent", "io_uring": "denied", "failed": []})
+    );
+    let open = SelfTest {
+        connect_blocked: false,
+        io_uring_blocked: false,
+        ..all
+    };
+    assert_eq!(
+        open.record(),
+        serde_json::json!({"connect": "open", "vsock": "absent", "io_uring": "open", "failed": ["connect", "io_uring"]})
+    );
 }
