@@ -70,6 +70,7 @@ impl Row {
             exit_timeout: secs(10),
             report_slack: REPORT_SLACK,
             serial_log: Some(p.join("serial.log")),
+            pre_spawn: None,
         };
         let job = HostJob {
             argv: ["/bin/sh", "-c", script].map(String::from).to_vec(),

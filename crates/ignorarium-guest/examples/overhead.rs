@@ -213,6 +213,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         exit_timeout: Duration::from_secs(10),
         report_slack: REPORT_SLACK,
         serial_log: Some(serial.clone()),
+        pre_spawn: None,
     };
     let mut env = vec![(
         "PATH".to_string(),

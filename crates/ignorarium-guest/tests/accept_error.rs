@@ -43,6 +43,7 @@ fn an_accept_error_surfaces_instead_of_waiting_for_the_boot_timeout() {
         exit_timeout: Duration::from_millis(50),
         report_slack: Duration::from_secs(5),
         serial_log: None,
+        pre_spawn: None,
     };
     let job = HostJob {
         argv: vec!["/bin/prog".into()],

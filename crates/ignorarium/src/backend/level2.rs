@@ -240,6 +240,7 @@ impl Level2 {
             exit_timeout: self.exit_timeout,
             report_slack: self.report_slack,
             serial_log: None,
+            pre_spawn: None,
         };
         let counted = Counted {
             watch,
