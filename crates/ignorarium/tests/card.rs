@@ -1721,6 +1721,110 @@ fn a_stamp_dated_before_its_record_is_flagged() {
 }
 
 #[test]
+fn the_card_escapes_the_authority() {
+    let forging = "CN=a\nstamp 9: forged\r\u{1b}[2J\u{202e}";
+    let lab = lab();
+    done_study(&lab, |hashes, _| {
+        let mut s = stamp_body(1, "2099-01-01T00:00:00.000Z", Some(0), hashes);
+        s["authority"] = json!(forging);
+        vec![s]
+    });
+    let card = card_of(&lab);
+    assert_eq!(card.header.stamps[0].authority.as_deref(), Some(forging));
+    let md = card::render::markdown(&card);
+    let stamps: Vec<&str> = (md.lines())
+        .filter(|l| l.starts_with("- Outside time stamp:"))
+        .collect();
+    assert_eq!(stamps.len(), 1, "{md}");
+    assert!(
+        stamps[0].contains(r"CN=a\\nstamp 9: forged\\r\\u{1b}\[2J\\u{202e}; covers"),
+        "{md}"
+    );
+    assert!(!md.lines().any(|l| l.starts_with("stamp 9")), "{md}");
+    assert!(!md.contains(['\r', '\u{1b}', '\u{202e}']), "{md}");
+}
+
+/// The card of `ID` as a replication of `orig`, whose test of `H1` passed, whose register
+/// record names `payload` and whose estimates are in `strata`, as `ID`'s are in `code`,
+/// `article` and the pooled group; `ID`'s own verdict is `verdict`. Returns the card and the
+/// hash of `orig`'s `done` record.
+fn replication_card(lab: &Lab, verdict: &str, payload: &str, strata: &[&str]) -> (Card, String) {
+    let arm = [("arm-a", 1.0, json!({}))];
+    let estimates: Vec<Value> = strata
+        .iter()
+        .map(|s| estimate(&arm, s, 4.0, Some(0.1)))
+        .collect();
+    let mut orig = common::judged("pass", "test", estimates);
+    orig[0].1["payload"] = json!(payload);
+    let verdict_at = 2 + strata.len();
+    let hashes = plant(&lab.home, "orig", &orig);
+    let done = common::plant_done(&lab.home, "orig");
+    let mut own = bodies(lab, MEAN, rows_on_level_2());
+    own[0].1["replicates"] = json!({
+        "study": "orig", "done": done, "hypothesis": "H1", "criterion": "verdict",
+        "verdict": hashes[verdict_at],
+    });
+    own.last_mut().unwrap().1["verdict"] = json!(verdict);
+    plant(&lab.home, ID, &own);
+    (card_of(lab), done)
+}
+
+/// The strata of `ID`'s estimates.
+const SAME: [&str; 3] = ["code", "article", ""];
+
+#[test]
+fn the_card_prints_the_pair() {
+    for (verdict, result) in [("pass", "met"), ("fail", "not met")] {
+        let lab = common::lab();
+        let (card, done) = replication_card(&lab, verdict, &"cd".repeat(32), &SAME);
+        let Field::Recorded { value: r } = &card.replication else {
+            panic!("{:?}", card.replication)
+        };
+        assert_eq!(
+            (r.study.as_str(), r.done.as_str(), r.hypothesis.as_str()),
+            ("orig", done.as_str(), "H1")
+        );
+        assert_eq!(r.original_verdict, "pass");
+        assert_eq!(r.result, result);
+        assert!(r.same_estimate_key && r.same_payload);
+        let md = card::render::markdown(&card);
+        let block = format!(
+            "## Replication\n\n- Original study: orig\n- Original done record: {done}\n\
+             - Hypothesis: H1\n- Original verdict: pass\n- Criterion: verdict\n\
+             - Result: {result}\n- Same estimate key: yes\n- Same payload: yes\n"
+        );
+        assert!(md.contains(&block), "{md}");
+    }
+    // Another payload is printed, not refused.
+    let lab = common::lab();
+    let (card, _) = replication_card(&lab, "pass", &"ef".repeat(32), &SAME);
+    let Field::Recorded { value: r } = &card.replication else {
+        panic!("{:?}", card.replication)
+    };
+    assert!(!r.same_payload);
+    assert!(r.same_estimate_key);
+    let json: Value = serde_json::from_str(&card.json()).unwrap();
+    assert_eq!(json["replication"]["value"]["same_payload"], false);
+    let md = card::render::markdown(&card);
+    assert!(md.contains("- Same payload: no\n"), "{md}");
+    // An original measured in the pooled group alone has other estimates.
+    let lab = common::lab();
+    let (card, _) = replication_card(&lab, "pass", &"cd".repeat(32), &[""]);
+    let Field::Recorded { value: r } = &card.replication else {
+        panic!("{:?}", card.replication)
+    };
+    assert!(!r.same_estimate_key);
+    let md = card::render::markdown(&card);
+    assert!(md.contains("- Same estimate key: no\n"), "{md}");
+    // A study that replicates nothing has no block.
+    let lab = common::lab();
+    fixture(&lab, MEAN, rows_on_level_2());
+    let card = card_of(&lab);
+    assert_eq!(card.replication, Field::NotApplicable);
+    assert!(!card::render::markdown(&card).contains("Replication"));
+}
+
+#[test]
 fn an_older_log_reads_as_not_recorded() {
     let lab = lab();
     plant(&lab.home, ID, &bodies(&lab, MEAN, rows_on_level_2()));

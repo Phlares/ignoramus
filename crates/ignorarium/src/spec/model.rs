@@ -48,6 +48,36 @@ pub struct Study {
     pub mode: Mode,
     pub label: Label,
     pub test_log: bool,
+    /// The study this one replicates; `None` when it replicates none.
+    #[serde(default)]
+    pub replicates: Option<Replicates>,
+}
+
+/// The study a replication repeats: its id, the hash of its `done` record (a pin the box
+/// checks), the hypothesis id both studies test, and the criterion that decides the result.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Replicates {
+    pub study: String,
+    pub done: String,
+    pub hypothesis: String,
+    pub criterion: Criterion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Criterion {
+    /// The replication's own registered test passes, given that the original's passed.
+    Verdict,
+}
+
+impl Criterion {
+    /// The name the plan writes.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Criterion::Verdict => "verdict",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

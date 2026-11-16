@@ -17,6 +17,10 @@ target = [
   { path = "study.mode", check = "required" },
   { path = "study.label", check = "required" },
   { path = "study.test_log", check = "required" },
+  { path = "study.replicates.study", check = "required" },
+  { path = "study.replicates.done", check = "required" },
+  { path = "study.replicates.hypothesis", check = "required" },
+  { path = "study.replicates.criterion", check = "required" },
   { path = "question", check = "required" },
   { path = "question.population", check = "required" },
   { path = "question.intervention", check = "required" },
@@ -115,6 +119,11 @@ target = [
   { path = "study.mode", check = "type", kind = "string" },
   { path = "study.label", check = "type", kind = "string" },
   { path = "study.test_log", check = "type", kind = "bool" },
+  { path = "study.replicates", check = "type", kind = "table" },
+  { path = "study.replicates.study", check = "type", kind = "string" },
+  { path = "study.replicates.done", check = "type", kind = "string" },
+  { path = "study.replicates.hypothesis", check = "type", kind = "string" },
+  { path = "study.replicates.criterion", check = "type", kind = "string" },
   { path = "question", check = "type", kind = "table" },
   { path = "question.population", check = "type", kind = "string" },
   { path = "question.intervention", check = "type", kind = "string" },
@@ -270,6 +279,7 @@ target = [
   { path = "study.template", check = "enum", values = ["numeric-ablation", "planted-spawn"] },
   { path = "study.mode", check = "enum", values = ["exploratory", "confirmatory"] },
   { path = "study.label", check = "enum", values = ["signal", "confirmed", "replicated", "generalized"] },
+  { path = "study.replicates.criterion", check = "enum", values = ["verdict"] },
   { path = "scope.stop_rule", check = "enum", values = ["budget-only", "e-process"] },
   { path = "scope.end_of_run.route", check = "enum", values = ["report", "follow-on", "share"] },
   { path = "design.pick", check = "enum", values = ["seeded", "first"] },
@@ -309,7 +319,7 @@ target = [
 code = "E-FMT-001"
 severity = "error"
 problem = "An id, a stratum or a study reference is not ASCII letters and digits joined by single hyphens."
-instruction = "Use ASCII lowercase letters and digits, joined by single hyphens, for example my-study. A hypothesis id may also use capital letters, for example E1 or P1a. A stratum may be empty where the design or an input names none, but not in the strata a hypothesis lists. estimates.from, a param's from and a deviation's from name a study id."
+instruction = "Use ASCII lowercase letters and digits, joined by single hyphens, for example my-study. A hypothesis id may also use capital letters, for example E1 or P1a. A stratum may be empty where the design or an input names none, but not in the strata a hypothesis lists. estimates.from, a param's from, a deviation's from and study.replicates.study name a study id."
 why = "Ids and strata become file names, seed inputs and record keys, and are printed in diagnostics. Accents and look-alike letters would make two ids that look the same differ."
 sources = ["https://toml.io/en/v1.0.0"]
 target = [
@@ -324,6 +334,8 @@ target = [
   { path = "question.hypotheses[*].estimates.from", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
   { path = "design.conditions[*].params.*.from", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
   { path = "pins.deviations[*].from", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
+  { path = "study.replicates.study", check = "format", pattern = "^[a-z0-9]+(-[a-z0-9]+)*$" },
+  { path = "study.replicates.hypothesis", check = "format", pattern = "^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$" },
 ]
 
 [[rule]]
@@ -453,12 +465,13 @@ target = [
 code = "W-REF-001"
 severity = "warning"
 problem = "A value waits on a study that has not finished."
-instruction = "Run the study it names to its end, then check again. Until then check exits 3 and register refuses the plan; nothing else needs to change."
+instruction = "Run the study it names to its end, then check again. A replication waits until its original's log holds its done record. Until then check exits 3 and register refuses the plan; nothing else needs to change."
 why = "A follow-on plan is written and checked before the study it builds on runs. Its values are read from that study's records once the study has written them all, so a value cannot change after the plan is registered. The box cannot read a study it has not run."
 sources = []
 target = [
   { path = "question.hypotheses[*].estimates", check = "named:reference-finished" },
   { path = "design.conditions[*].params.*", check = "named:reference-finished" },
+  { path = "study.replicates", check = "named:reference-finished" },
 ]
 
 [[rule]]
@@ -472,6 +485,39 @@ target = [
   { path = "question.hypotheses[*].estimates", check = "named:estimates-same-code" },
   { path = "pins.deviations[*].from", check = "named:deviation-borrowed" },
   { path = "pins.deviations[*].reason", check = "non-empty" },
+]
+
+[[rule]]
+code = "E-RPL-001"
+severity = "error"
+problem = "study.replicates.done is not the hash of the original's done record."
+instruction = "Copy the hash from the Study ended line of the original's card into study.replicates.done. If the original ended in another way than you planned for, read its card again before you plan the replication."
+why = "The pin names the end of the original that the replication repeats. The box finds the original by its id and checks the pin against its signed log, so a plan cannot name an end the original does not have."
+sources = []
+target = [
+  { path = "study.replicates", check = "named:replicates-done" },
+]
+
+[[rule]]
+code = "E-RPL-002"
+severity = "error"
+problem = "The original's verdict for the hypothesis is not a pass on its test."
+instruction = "Replicate a hypothesis whose registered test passed in the original: its verdict record says pass, on basis test. A claim that passed on its point estimate comes from an exploratory study; test it in an ordinary confirmatory study, with no study.replicates."
+why = "A replication tests a result that a registered test already showed. The criterion is the two-trials rule: the replication succeeds when its own registered test passes, given that the original's test passed. Two results that both fail to pass are not a replication, and a pass on a point estimate was never tested."
+sources = []
+target = [
+  { path = "study.replicates", check = "named:replicates-passed" },
+]
+
+[[rule]]
+code = "E-RPL-003"
+severity = "error"
+problem = "This study is not confirmatory, or has no hypothesis with a claim under the original's hypothesis id."
+instruction = "Make the study confirmatory, and give it a hypothesis with the id that study.replicates.hypothesis names, with a claim. The original and the replication test one hypothesis under one id."
+why = "The criterion reads the replication's own verdict for the hypothesis. Only a confirmatory hypothesis with a claim gets its verdict from a registered test."
+sources = []
+target = [
+  { path = "study.replicates", check = "named:replicates-confirmatory" },
 ]
 
 [[rule]]
@@ -1075,7 +1121,7 @@ check = "documented"
 [[rule]]
 code = "E-STP-001"
 severity = "error"
-problem = "The reply is not a granted RFC 3161 time-stamp reply over a SHA-256 digest."
+problem = "The reply is not a granted RFC 3161 time-stamp reply over a SHA-256 digest, or its digest is not 32 bytes long."
 instruction = "Pass the `.tsr` file the authority sent back, not the stamped file or an error page. When the authority refused, ask it again, or ask another, with `-sha256`."
 why = "Only a granted reply holds a time stamp. The box checks the digest against the file with SHA-256, so it records no reply over another digest."
 sources = ["https://www.rfc-editor.org/rfc/rfc3161"]

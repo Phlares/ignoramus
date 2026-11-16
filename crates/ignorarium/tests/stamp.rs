@@ -774,6 +774,40 @@ fn verify_prints_each_stamp() {
     assert!(out.contains("done: stop at "), "{out}");
 }
 
+/// An authority name that holds a line break, a terminal escape and a bidirectional control.
+const FORGING: &str = "CN=a\nstamp 9: forged\u{1b}[2J\u{202e}";
+
+#[test]
+fn verify_escapes_the_authority() {
+    let lab = common::lab();
+    common::plain(&lab, "v3");
+    let body = serde_json::json!({
+        "file_sha256": "01".repeat(32), "reply_sha256": "a1".repeat(32),
+        "authority": FORGING, "stamped_at": "2099-01-01T00:00:00.000Z", "serial": "1",
+        "policy": "1.2.3",
+        "lines": { "register": true, "register_signature": true, "key": true, "head": null,
+                   "head_signature": false },
+        "checked": ignorarium::derived::STAMP_CHECKED,
+    });
+    common::plant(&lab.home, "v3", &[("stamp", body)]);
+    let out = common::text(
+        &common::bin(&lab)
+            .args(["verify", "--study", "v3"])
+            .assert()
+            .code(0),
+    );
+    let stamps: Vec<&str> = out.lines().filter(|l| l.starts_with("stamp ")).collect();
+    assert_eq!(stamps.len(), 1, "{out}");
+    assert!(!stamps[0].starts_with("stamp 9: forged"), "{out}");
+    assert!(
+        stamps[0].contains(r"CN=a\nstamp 9: forged\u{1b}[2J\u{202e};"),
+        "{out}"
+    );
+    assert!(!out.contains(['\u{1b}', '\u{202e}']), "{out}");
+    // The record keeps the authority as the reply stated it.
+    assert_eq!(stamps_of(&lab, "v3")[0].authority.as_deref(), Some(FORGING));
+}
+
 #[test]
 fn verify_flags_a_stamp_dated_before_its_record_and_exits_0() {
     let lab = common::lab();

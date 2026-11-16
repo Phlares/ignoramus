@@ -1,8 +1,10 @@
 //! `verify`: check the plan logs and, for one study, its record chain; or check a copy of a
 //! study's log with a public key alone.
 use super::{CliError, Ctx, Done, Run, key, out};
-use crate::card::sections::stamp_flag;
-use crate::derived::{DONE, DoneRecord, OPENED, Register, STAMP, SessionStart, Stamp, sessions};
+use crate::derived::{
+    DONE, DoneRecord, OPENED, Register, STAMP, SessionStart, Stamp, sessions, stamp_flag,
+};
+use crate::diag::printable;
 use crate::identity::same_binary;
 use crate::planlog::store::PlanLog;
 use crate::telemetry::Reading;
@@ -169,7 +171,7 @@ fn stamp_lines(all: &[records::Record], c: &mut StudyCheck) {
             "stamp {}: {}, {}; lines: register {}, signature {}, key {}, head {head}, head signature {}; file {}, reply {}",
             r.seq,
             s.stamped_at,
-            s.authority.as_deref().unwrap_or("authority not stated"),
+            s.authority.as_deref().map_or("authority not stated".into(), printable),
             yes(l.register),
             yes(l.register_signature),
             yes(l.key),

@@ -4,7 +4,7 @@ Severity: error
 
 ## Problem
 
-The reply is not a granted RFC 3161 time-stamp reply over a SHA-256 digest.
+The reply is not a granted RFC 3161 time-stamp reply over a SHA-256 digest, or its digest is not 32 bytes long.
 
 ## Fix
 

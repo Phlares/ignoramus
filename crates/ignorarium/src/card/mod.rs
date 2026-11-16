@@ -269,6 +269,9 @@ pub struct Card {
     /// The box that registered the plan, beside the one that built the card.
     #[serde(default = "sections::missing")]
     pub registered_box: Field<crate::identity::BoxIdentity>,
+    /// The original a replication repeats; not applicable for any other study.
+    #[serde(default = "sections::missing")]
+    pub replication: Field<sections::Replication>,
 }
 
 impl Card {
@@ -478,6 +481,12 @@ pub fn build(
         })
         .collect();
     let family = family_block(&box_records, id, &own, &at).map_err(refuse)?;
+    let original = (own.replicates.as_ref())
+        .map(|r| box_records.study(&r.study))
+        .transpose()
+        .map_err(refuse)?
+        .flatten();
+    let replication = sections::replication(&own, all, original.as_deref()).map_err(refuse)?;
     let spec = &source.spec;
     let sidecars = Sidecars::from_source(&source, log).map_err(refuse)?;
     let setup = sections::setup(log, &own, spec, events.as_ref(), sidecars.data_list());
@@ -503,6 +512,7 @@ pub fn build(
         citation,
         builder: Builder::this(),
         registered_box: Field::of(own.box_identity.clone(), None),
+        replication,
         cost: sections::cost(log, spec),
         runs: sections::runs(log, events.as_ref()),
         outside,

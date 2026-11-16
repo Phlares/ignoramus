@@ -713,6 +713,7 @@ pub fn finished_with(
         timestamp: None,
         gate: vec![],
         box_identity: None,
+        replicates: None,
     };
     let analysis = derived::Analysis {
         commit: "ef".repeat(32),
@@ -896,6 +897,62 @@ pub fn plant(home: &Home, id: &str, bodies: &[(&str, serde_json::Value)]) -> Vec
             records::hash(&records::append(&path, &key, draft).unwrap())
         })
         .collect()
+}
+
+/// The records of a finished confirmatory study with `estimates`, as (kind, body): `finished`,
+/// with an analysis record that promises one verdict, and `H1`'s verdict `verdict` on `basis`
+/// after the estimates.
+pub fn judged(
+    verdict: &str,
+    basis: &str,
+    estimates: Vec<serde_json::Value>,
+) -> Vec<(&'static str, serde_json::Value)> {
+    let n = estimates.len();
+    let mut all = finished(estimates);
+    all[1].1["verdicts"] = serde_json::json!(1);
+    let body = serde_json::json!({
+        "hypothesis": "H1", "verdict": verdict, "basis": basis, "level": 0.005,
+        "e_value": 300.0, "bounds": [], "incomplete_units": 0, "reason": null,
+    });
+    all.insert(2 + n, ("verdict", body));
+    all
+}
+
+/// The body of the `done` record that ends the log `all`, as the box writes it.
+pub fn done_body(all: &[records::Record]) -> serde_json::Value {
+    serde_json::to_value(ignorarium::done::end_of(all, None).expect("the log has ended")).unwrap()
+}
+
+/// Plant `judged(verdict, basis, estimates)` as study `id` in the box at `home`, then its
+/// `done` record. Returns the hash of each record, the `done` record's last.
+pub fn original(
+    home: &Home,
+    id: &str,
+    verdict: &str,
+    basis: &str,
+    estimates: Vec<serde_json::Value>,
+) -> Vec<String> {
+    let mut hashes = plant(home, id, &judged(verdict, basis, estimates));
+    hashes.push(plant_done(home, id));
+    hashes
+}
+
+/// Plant the `done` record that ends the log of study `id` in the box at `home`. Returns its
+/// hash.
+pub fn plant_done(home: &Home, id: &str) -> String {
+    let key = keys::load(home).unwrap().unwrap();
+    let path = home.study_dir(id).join("records.jsonl");
+    let all = (records::read_log(&path, &key.verifying_key()).unwrap()).restored();
+    plant(home, id, &[("done", done_body(&all))]).remove(0)
+}
+
+/// The template text `t` with a `[study.replicates]` table: hypothesis `H1` of study `study`,
+/// whose `done` record has hash `done`, on the criterion `verdict`.
+pub fn replicating(t: String, study: &str, done: &str) -> String {
+    let table = format!(
+        "[study.replicates]\nstudy = \"{study}\"\ndone = \"{done}\"\nhypothesis = \"H1\"\ncriterion = \"verdict\"\n\n[question]\n"
+    );
+    t.replacen("\n[question]\n", &format!("\n{table}"), 1)
 }
 
 /// A finished study `my-pilot`, the one the template's commented `estimates` names, with

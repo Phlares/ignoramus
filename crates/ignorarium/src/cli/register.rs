@@ -4,7 +4,9 @@ use super::check::{self, Assessed, HomeRecords};
 use super::{CliError, Ctx, Done, refusal};
 use crate::backend::output::file_digest;
 use crate::canon::to_canonical;
-use crate::derived::{Alpha, Carried, GatePrediction, PinDeviated, REGISTER, Register, Resolved};
+use crate::derived::{
+    Alpha, Carried, GatePrediction, PinDeviated, REGISTER, Register, Replicated, Resolved,
+};
 use crate::diag::{printable, render_human};
 use crate::estimate::defaults_json;
 use crate::family::{self, Lock};
@@ -15,8 +17,8 @@ use crate::payload::{self, PayloadError};
 use crate::planlog::store::{Leaf, PlanLog};
 use crate::planlog::{commitment, shape};
 use crate::records::{self, RecordDraft};
-use crate::rules::{self, BoxRecords, Lookup, PENDING, Taken};
-use crate::spec::model::{Condition, Param, PinDeviation, Spec, param_path};
+use crate::rules::{self, BoxRecords, Lookup, PENDING, Picked, Taken};
+use crate::spec::model::{Condition, Param, PinDeviation, Replicates, Spec, param_path};
 use crate::spec::{self};
 use crate::store::Store;
 use crate::stream::{self, Log, LogName, StreamError};
@@ -56,8 +58,8 @@ fn put(dir: &Path, name: &str, bytes: &[u8], mode: u32) -> Result<(), CliError> 
 
 /// What `register` freezes besides the spec: the identity of the study root, the payload
 /// folder's hash, the digest of the stored copy of each input present, the values taken
-/// from other studies, the deviations from their code, the determinism check it carries, and
-/// a root's lock on its members.
+/// from other studies, the deviations from their code, the determinism check it carries, a
+/// root's lock on its members, and the original a replication repeats.
 struct Frozen {
     root_id: String,
     payload: String,
@@ -68,6 +70,7 @@ struct Frozen {
     family: Option<Lock>,
     gate: Vec<GatePrediction>,
     box_identity: crate::identity::BoxIdentity,
+    replicates: Option<Replicated>,
 }
 
 /// The body of the `register` record. A confirmatory plan holds the stream slot `alpha`, and
@@ -96,6 +99,7 @@ fn record_body(
         alpha,
         gate: frozen.gate.clone(),
         box_identity: Some(frozen.box_identity.clone()),
+        replicates: frozen.replicates.clone(),
     })
     .map_err(|e| io("register record", e))
 }
@@ -177,7 +181,9 @@ pub fn run_as(
         return Err(refusal("E-FAM-006", d.trim_end_matches('.')));
     }
     let spec = Spec::from_value(&a.value).map_err(|e| io("spec does not fit the schema", e))?;
-    let resolved = resolve(&a, &spec.design.conditions)?;
+    let replicates = spec.study.replicates.as_ref();
+    let resolved = resolve(&a, &spec.design.conditions, replicates)?;
+    let replicates = replicates.map(|r| frozen_link(&a, r)).transpose()?;
     let deviations = deviated(&a, &spec.pins.deviations)?;
     let checked = level_to_spend(&a)?;
     let id = spec.study.id.as_str();
@@ -198,6 +204,18 @@ pub fn run_as(
     }
     for d in &deviations {
         writeln!(output, "{}", deviates(d)).map_err(say)?;
+    }
+    if let Some(r) = &replicates {
+        writeln!(
+            output,
+            "replicates {} ({}) on criterion {}: done record {}, verdict record {}",
+            r.study,
+            r.hypothesis,
+            r.criterion.as_str(),
+            r.done,
+            r.verdict
+        )
+        .map_err(say)?;
     }
     if let Some(c) = &a.carried {
         writeln!(output, "carries the determinism check of {}", c.study).map_err(say)?;
@@ -237,6 +255,7 @@ pub fn run_as(
         carries: a.carried.clone(),
         family,
         box_identity: identity.clone(),
+        replicates,
     };
     let (leaf, alpha) = store(spec_path, home, &spec, &a, checked, &key, &frozen)?;
     if let (Some(approved), Some(spent)) = (checked, &alpha)
@@ -256,9 +275,13 @@ pub fn run_as(
 /// confirmatory plan, the sd and icc per group and the estimate records they come from; for
 /// each condition param that names a study, the condition that study selected and its
 /// `selection` record. A value still pending refuses, naming the study to wait for, and so
-/// does a root's member whose value waits on a study outside the family, and one the box no
-/// longer finds as the check found it.
-fn resolve(a: &Assessed, conditions: &[Condition]) -> Result<Vec<Resolved>, CliError> {
+/// do an original of `replicates` that is pending, a root's member whose value waits on a
+/// study outside the family, and a value the box no longer finds as the check found it.
+fn resolve(
+    a: &Assessed,
+    conditions: &[Condition],
+    replicates: Option<&Replicates>,
+) -> Result<Vec<Resolved>, CliError> {
     let hypotheses = a.value["question"]["hypotheses"]
         .as_array()
         .map_or(&[][..], Vec::as_slice);
@@ -283,7 +306,9 @@ fn resolve(a: &Assessed, conditions: &[Condition]) -> Result<Vec<Resolved>, CliE
     let pending = a.pending();
     let mut waits: Vec<String> = Vec::new();
     let named = claimed().map(|(_, path, study)| (path, study));
-    for (path, study) in named.chain(params.iter().map(|(p, s)| (p.clone(), *s))) {
+    let link = replicates.map(|r| (rules::REPLICATES.to_string(), r.study.as_str()));
+    let named = named.chain(params.iter().map(|(p, s)| (p.clone(), *s)));
+    for (path, study) in named.chain(link) {
         let wait = format!("register after {study} finishes");
         if pending.contains(&path.as_str()) && !waits.contains(&wait) {
             waits.push(wait);
@@ -336,7 +361,7 @@ fn resolve(a: &Assessed, conditions: &[Condition]) -> Result<Vec<Resolved>, CliE
     }
     for (path, study) in params {
         match rules::selected_by(&a.ctx, study) {
-            Taken::Found { selected, record } => out.push(Resolved {
+            Taken::Found(Picked { selected, record }) => out.push(Resolved {
                 path,
                 study: study.into(),
                 records: vec![record],
@@ -346,6 +371,21 @@ fn resolve(a: &Assessed, conditions: &[Condition]) -> Result<Vec<Resolved>, CliE
         }
     }
     Ok(out)
+}
+
+/// The original `r` names, as the box finds it now; the check found it done, with the `done`
+/// hash the plan pins and a passed test.
+fn frozen_link(a: &Assessed, r: &Replicates) -> Result<Replicated, CliError> {
+    match rules::replicated(&a.ctx, r) {
+        Taken::Found(o) => Ok(Replicated {
+            study: r.study.clone(),
+            done: o.done,
+            hypothesis: r.hypothesis.clone(),
+            criterion: r.criterion,
+            verdict: o.verdict,
+        }),
+        Taken::Pending(why) | Taken::Refused(why) => Err(drifted(rules::REPLICATES, &why)),
+    }
 }
 
 /// The refusal for a value at `path` that the box no longer finds as the check found it.
@@ -754,6 +794,7 @@ mod tests {
                 rules_sha256: "sha256:aa".into(),
                 binary_sha256: crate::telemetry::Reading::Unavailable("no exe".into()),
             },
+            replicates: None,
         };
         let exp = record_body("sha256:ab", 3, "planlog", &filled, &frozen, None).unwrap();
         assert_eq!(
@@ -854,7 +895,7 @@ mod tests {
     fn a_value_the_box_no_longer_holds_refuses() {
         // A plan the check passed, read again against a box without the study it names.
         let a = assessed(Path::new("/work/study"), borrowing());
-        let e = resolve(&a, &[]).unwrap_err();
+        let e = resolve(&a, &[], None).unwrap_err();
         assert_eq!(e.code, 1);
         assert_eq!(
             e.msg,

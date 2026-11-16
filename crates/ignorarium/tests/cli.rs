@@ -2575,6 +2575,65 @@ fn status_shows_the_end() {
     assert!(common::text(&a).contains(&line), "{}", common::text(&a));
 }
 
+/// The `verdict` body of `H1`: `verdict` on its test.
+fn verdict_of_h1(verdict: &str) -> Value {
+    json!({
+        "hypothesis": "H1", "verdict": verdict, "basis": "test", "level": 0.005,
+        "e_value": 1.0, "bounds": [], "incomplete_units": 0, "reason": null,
+    })
+}
+
+#[test]
+fn status_shows_the_criterion_state() {
+    let lab = common::lab();
+    common::pilot(&lab.home, vec![common::arm_a()]);
+    let hashes = common::original(&lab.home, "orig", "pass", "test", vec![common::arm_a()]);
+    let done = hashes.last().unwrap().clone();
+    let edit = |t: String| common::replicating(common::confirmatory(t), "orig", &done);
+    let state = |id: &str| {
+        let s = common::status(&lab, id);
+        let a = common::bin(&lab).args(["status", id]).assert().success();
+        (s["replicates"].clone(), common::text(&a))
+    };
+    let want = |result: &str| {
+        json!({ "study": "orig", "done": done, "hypothesis": "H1", "criterion": "verdict",
+                "result": result })
+    };
+    for (id, then, result) in [
+        ("rep-met", Some(verdict_of_h1("pass")), "met"),
+        ("rep-not", Some(verdict_of_h1("fail")), "not met"),
+        ("rep-stop", None, "no result"),
+    ] {
+        common::edited(&lab, id, edit, common::PAYLOAD);
+        let (json, text) = state(id);
+        assert_eq!(json, want("pending"), "{id}");
+        assert!(
+            text.contains("replicates orig (H1): criterion verdict: pending\n"),
+            "{text}"
+        );
+        match then {
+            Some(v) => {
+                common::plant(&lab.home, id, &[("verdict", v)]);
+            }
+            None => {
+                common::bin(&lab)
+                    .args(["stop", id, "--reason", "enough"])
+                    .assert()
+                    .code(0);
+            }
+        }
+        let (json, text) = state(id);
+        assert_eq!(json, want(result), "{id}");
+        let line = format!("replicates orig (H1): criterion verdict: {result}\n");
+        assert!(text.contains(&line), "{text}");
+    }
+    // A study that replicates nothing shows no line.
+    common::plain(&lab, "alone");
+    let (json, text) = state("alone");
+    assert_eq!(json, Value::Null);
+    assert!(!text.contains("replicates"), "{text}");
+}
+
 /// The lab's public key as the box prints it.
 fn public_hex(lab: &common::Lab) -> String {
     let key = keys::load(&lab.home).unwrap().unwrap();

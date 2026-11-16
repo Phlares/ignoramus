@@ -1,7 +1,7 @@
 //! Typed bodies of the records that carry derived values. One parser per record kind.
 use crate::canon::{sha256_hex, to_canonical};
 use crate::records::Record;
-use crate::spec::model::{Direction, Outcome, SelectionRule};
+use crate::spec::model::{Criterion, Direction, Outcome, SelectionRule};
 use crate::telemetry::Reading;
 use crate::units::Cluster;
 use ed25519_dalek::SigningKey;
@@ -145,6 +145,39 @@ pub struct Register {
     /// register (`deny_unknown_fields`), as for `gate`.
     #[serde(rename = "box", default, skip_serializing_if = "Option::is_none")]
     pub box_identity: Option<crate::identity::BoxIdentity>,
+    /// For a replication, the original it repeats; `None` for any other study, and left out
+    /// then. An older box reads a record that holds it as no register, as for `gate`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicates: Option<Replicated>,
+}
+
+/// The original a replication repeats, as `register` froze it: the plan's four values and the
+/// hash of the original's verdict record for the hypothesis.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Replicated {
+    pub study: String,
+    pub done: String,
+    pub hypothesis: String,
+    pub criterion: Criterion,
+    pub verdict: String,
+}
+
+/// The state of `r`'s criterion in the replication's own log `own`: `met` when its verdict for
+/// the hypothesis is `pass`, `not met` when `fail`, `no result` when the log holds `done` and
+/// no such verdict, else `pending`.
+pub fn criterion_state(own: &[Record], r: &Replicated) -> &'static str {
+    let verdict = match r.criterion {
+        Criterion::Verdict => (own.iter().filter_map(Verdict::of))
+            .find(|v| v.hypothesis == r.hypothesis)
+            .map(|v| v.verdict),
+    };
+    match verdict.as_deref() {
+        Some("pass") => "met",
+        Some("fail") => "not met",
+        _ if own.iter().any(|x| x.kind == DONE) => "no result",
+        _ => "pending",
+    }
 }
 
 /// The power gate's finding for one hypothesis, and what it simulated with.
@@ -699,6 +732,18 @@ impl Stamp {
     pub fn of(r: &Record) -> Option<Stamp> {
         body_of(r, STAMP)
     }
+}
+
+/// The flag for `s` when it is dated before the newest record it covers: the head record,
+/// else the register record. `ts` and `stamped_at` share one UTC format, so comparing the
+/// strings compares the times.
+pub fn stamp_flag(all: &[Record], s: &Stamp) -> Option<String> {
+    let head = s.lines.head.as_ref().map(|h| h.seq);
+    let covered = head
+        .and_then(|h| all.iter().find(|r| r.seq == h))
+        .or(all.first())?;
+    (s.stamped_at < covered.ts)
+        .then(|| format!("dated before record {}, which it covers", covered.seq))
 }
 
 /// What a study's records allow a later study to read.

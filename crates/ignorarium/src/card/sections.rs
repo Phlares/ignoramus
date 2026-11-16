@@ -7,13 +7,15 @@ use crate::analysis::{IntervalResult, claim_strata};
 use crate::canon::sha256_file;
 use crate::derived::{
     Analysis, DONE, DoneRecord, End, Estimate, GroupClip, Instrument, Register, Resolved,
-    Selection, Stamp, Trigger, Verdict,
+    Selection, Stamp, Trigger, Verdict, criterion_state, stamp_flag,
 };
 use crate::files::optional;
 use crate::records::{Log, Record};
 use crate::rules::{Curve, CurvePoint};
 use crate::runner::Tally;
-use crate::spec::model::{Budget, Claim, Mode, Paired, SelectionRule, Spec, StatisticSpec};
+use crate::spec::model::{
+    Budget, Claim, Criterion, Mode, Paired, SelectionRule, Spec, StatisticSpec,
+};
 use crate::telemetry::Totals;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -329,18 +331,6 @@ pub struct StampLine {
     pub flag: Option<String>,
 }
 
-/// The flag for `s` when it is dated before the newest record it covers: the head record,
-/// else the register record. `ts` and `stamped_at` share one UTC format, so comparing the
-/// strings compares the times.
-pub fn stamp_flag(all: &[Record], s: &Stamp) -> Option<String> {
-    let head = s.lines.head.as_ref().map(|h| h.seq);
-    let covered = head
-        .and_then(|h| all.iter().find(|r| r.seq == h))
-        .or(all.first())?;
-    (s.stamped_at < covered.ts)
-        .then(|| format!("dated before record {}, which it covers", covered.seq))
-}
-
 /// The `stamp` records of `all`, in order.
 pub fn stamps(all: &[Record]) -> Vec<StampLine> {
     let done = all.iter().find(|r| r.kind == DONE).map(|r| r.seq);
@@ -394,6 +384,63 @@ pub fn header(own: &Register, registered_at: &str, spec: &Spec, all: &[Record]) 
             None,
         ),
     }
+}
+
+/// The pair a replication's card prints: the original, its `done` hash, the hypothesis, the
+/// original's verdict, the criterion and its result, and whether the two studies hold the same
+/// estimates of the hypothesis (by `Estimate::identity`) and registered the same payload. A
+/// difference is printed, not refused.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Replication {
+    pub study: String,
+    pub done: String,
+    pub hypothesis: String,
+    pub original_verdict: String,
+    pub criterion: Criterion,
+    pub result: String,
+    pub same_estimate_key: bool,
+    pub same_payload: bool,
+}
+
+/// The pair of a study whose register record is `own` and whose log is `all`; `original` is the
+/// log of the study it replicates. Not applicable for a study that replicates none. Refuses an
+/// original that no longer holds its register record or the verdict record `register` froze.
+pub fn replication(
+    own: &Register,
+    all: &[Record],
+    original: Option<&[Record]>,
+) -> Result<Field<Replication>, String> {
+    let Some(r) = &own.replicates else {
+        return Ok(Field::NotApplicable);
+    };
+    let lost = |what: &str| format!("study {} holds no {what}", r.study);
+    let original = original.ok_or_else(|| lost("records"))?;
+    let theirs = original
+        .iter()
+        .find_map(Register::of)
+        .ok_or_else(|| lost("register record"))?;
+    let verdict = (original.iter())
+        .find(|x| crate::records::hash(x) == r.verdict)
+        .and_then(Verdict::of)
+        .ok_or_else(|| lost("verdict record with the hash this study froze"))?;
+    let keys = |log: &[Record]| -> BTreeSet<(String, String, String)> {
+        (log.iter().filter_map(Estimate::of))
+            .filter(|e| e.hypothesis == r.hypothesis)
+            .map(|e| e.identity())
+            .collect()
+    };
+    Ok(Field::Recorded {
+        value: Replication {
+            study: r.study.clone(),
+            done: r.done.clone(),
+            hypothesis: r.hypothesis.clone(),
+            original_verdict: verdict.verdict,
+            criterion: r.criterion,
+            result: criterion_state(all, r).into(),
+            same_estimate_key: keys(all) == keys(original),
+            same_payload: own.payload == theirs.payload,
+        },
+    })
 }
 
 /// One registered hypothesis: its claim, and the e-value its test must reach.

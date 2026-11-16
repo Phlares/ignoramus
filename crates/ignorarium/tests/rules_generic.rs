@@ -375,6 +375,10 @@ fn fat_templates() -> Vec<Value> {
             s["design"]["row_memory_mib"] = json!(1024);
             s["design"]["resize"] = json!({ "rule": "blinded-once" });
             s["family"] = json!({ "members": ["spec/b.toml", "spec/c.toml"] });
+            s["study"]["replicates"] = json!({
+                "study": "original", "done": "ab".repeat(32), "hypothesis": "H1",
+                "criterion": "verdict",
+            });
             s["pins"]["deviations"] = json!([
                 { "from": "pilot", "reason": "r", "timing": "before-collection" },
                 { "from": "early", "reason": "r", "timing": "after-results" },
