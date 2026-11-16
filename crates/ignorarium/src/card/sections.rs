@@ -6,8 +6,8 @@ use super::sidecar::DataList;
 use crate::analysis::{IntervalResult, claim_strata};
 use crate::canon::sha256_file;
 use crate::derived::{
-    Analysis, DoneRecord, End, Estimate, GroupClip, Instrument, Register, Resolved, Selection,
-    Stamp, Trigger, Verdict, criterion_state, first_done, stamp_flag,
+    Analysis, DONE, DoneRecord, End, Estimate, GroupClip, Instrument, Register, Resolved, STAMP,
+    Selection, Stamp, Trigger, Verdict, criterion_state, first_done, stamp_flag,
 };
 use crate::files::optional;
 use crate::records::{Log, Record};
@@ -331,14 +331,19 @@ pub struct StampLine {
     pub flag: Option<String>,
 }
 
-/// The `stamp` records of `all`, in order.
-pub fn stamps(all: &[Record]) -> Vec<StampLine> {
+/// Why record `r` of `kind` cannot be read.
+fn unreadable(r: &Record, kind: &str) -> String {
+    format!("record {}: the {kind} record is not readable", r.seq)
+}
+
+/// The `stamp` records of `all`, in order. A body that does not parse is refused.
+pub fn stamps(all: &[Record]) -> Result<Vec<StampLine>, String> {
     let done = first_done(all).map(|r| r.seq);
-    (all.iter())
-        .filter_map(|r| Some((r, Stamp::of(r)?)))
-        .map(|(r, s)| {
+    (all.iter().filter(|r| r.kind == STAMP))
+        .map(|r| {
+            let s = Stamp::of(r).ok_or_else(|| unreadable(r, STAMP))?;
             let head = s.lines.head.as_ref().map(|h| h.seq);
-            StampLine {
+            Ok(StampLine {
                 seq: r.seq,
                 flag: stamp_flag(all, &s),
                 results: matches!((head, done), (Some(h), Some(d)) if h >= d),
@@ -350,40 +355,47 @@ pub fn stamps(all: &[Record]) -> Vec<StampLine> {
                 authority: s.authority,
                 file_sha256: s.file_sha256,
                 reply_sha256: s.reply_sha256,
-            }
+            })
         })
         .collect()
 }
 
-/// The first `done` record of `all`.
-pub fn ended(all: &[Record]) -> Field<Ended> {
-    let done = first_done(all).and_then(|r| Some((r, DoneRecord::of(r)?)));
-    Field::of(
-        done.map(|(r, d)| Ended {
-            end: d.end,
-            ended_at: d.ended_at,
-            seq: r.seq,
-            hash: crate::records::hash(r),
-        }),
-        None,
-    )
+/// The first `done` record of `all`. A body that does not parse is refused.
+pub fn ended(all: &[Record]) -> Result<Field<Ended>, String> {
+    let ended = first_done(all)
+        .map(|r| {
+            let d = DoneRecord::of(r).ok_or_else(|| unreadable(r, DONE))?;
+            Ok::<_, String>(Ended {
+                end: d.end,
+                ended_at: d.ended_at,
+                seq: r.seq,
+                hash: crate::records::hash(r),
+            })
+        })
+        .transpose()?;
+    Ok(Field::of(ended, None))
 }
 
 /// The header of a study whose register record `own` was written at `registered_at`; `all` is
-/// its verified log.
-pub fn header(own: &Register, registered_at: &str, spec: &Spec, all: &[Record]) -> Header {
-    Header {
+/// its verified log. An unreadable `stamp` or `done` record is refused.
+pub fn header(
+    own: &Register,
+    registered_at: &str,
+    spec: &Spec,
+    all: &[Record],
+) -> Result<Header, String> {
+    Ok(Header {
         mode: spec.study.mode,
         blind: spec.access.blind,
         spec_hash: own.spec_hash.clone(),
         registered_at: registered_at.into(),
-        stamps: stamps(all),
-        ended: ended(all),
+        stamps: stamps(all)?,
+        ended: ended(all)?,
         population: Field::of(
             Some(spec.question.population.clone()).filter(|p| !p.is_empty()),
             None,
         ),
-    }
+    })
 }
 
 /// The pair a replication's card prints: the original, its `done` hash, the hypothesis, the

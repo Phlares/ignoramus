@@ -1672,6 +1672,43 @@ fn the_card_lists_each_stamp_in_order() {
 }
 
 #[test]
+fn an_unreadable_stamp_is_a_build_error() {
+    let lab = lab();
+    done_study(&lab, |_, _| vec![json!({ "x": 1 })]);
+    let seq = records_of_id(&lab).len() - 1;
+    let e = build_in(&lab, ID, None).unwrap_err();
+    assert_eq!(e.code, 1);
+    assert!(
+        e.msg
+            .contains(&format!("record {seq}: the stamp record is not readable")),
+        "{}",
+        e.msg
+    );
+}
+
+#[test]
+fn an_unreadable_done_record_is_a_build_error() {
+    let lab = lab();
+    plant(&lab.home, ID, &bodies(&lab, MEAN, rows_on_level_2()));
+    plant(&lab.home, ID, &[("done", json!({ "x": 1 }))]);
+    let seq = records_of_id(&lab).len() - 1;
+    let e = build_in(&lab, ID, None).unwrap_err();
+    assert!(
+        e.msg
+            .contains(&format!("record {seq}: the done record is not readable")),
+        "{}",
+        e.msg
+    );
+}
+
+/// The verified records of `ID`.
+fn records_of_id(lab: &Lab) -> Vec<records::Record> {
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let path = lab.home.study_dir(ID).join("records.jsonl");
+    records::read_all(&path, &key.verifying_key()).unwrap()
+}
+
+#[test]
 fn a_stamp_without_its_signature_lines_says_so() {
     let lab = lab();
     done_study(&lab, |hashes, done| {

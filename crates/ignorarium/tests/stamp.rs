@@ -763,15 +763,18 @@ fn verify_prints_each_stamp() {
     common::plain(&lab, "v1");
     stop(&lab, "v1");
     let (out, s, seq) = verified_after(&lab, "v1", 4_000_000_000);
-    let head = s.lines.head.as_ref().unwrap().seq;
+    let head = s.lines.head.as_ref().unwrap();
     let line = format!(
-        "stamp {seq}: {}, CN=T; lines: register yes, signature yes, key yes, head {head}, head signature yes; file {}, reply {}
+        "stamp {seq}: {}, CN=T; lines: register yes, signature yes, key yes, head {} {}, head signature yes; file {}, reply {}
 ",
-        s.stamped_at, s.file_sha256, s.reply_sha256
+        s.stamped_at, head.seq, head.hash, s.file_sha256, s.reply_sha256
     );
     assert!(out.contains(&line), "{out}");
     assert!(!out.contains("flag:"), "{out}");
     assert!(out.contains("done: stop at "), "{out}");
+    // The reader compares the stamped file's lines with these hashes.
+    let register = format!("register record hash: {}\n", seals_of(&lab, "v1")[0].hash);
+    assert!(out.contains(&register), "{out}");
 }
 
 /// An authority name that holds a line break, a terminal escape and a bidirectional control.
@@ -806,6 +809,74 @@ fn verify_escapes_the_authority() {
     assert!(!out.contains(['\u{1b}', '\u{202e}']), "{out}");
     // The record keeps the authority as the reply stated it.
     assert_eq!(stamps_of(&lab, "v3")[0].authority.as_deref(), Some(FORGING));
+}
+
+/// A `stamp` body dated `at` whose lines name `head`.
+fn stamp_body(at: &str, head: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "file_sha256": "01".repeat(32), "reply_sha256": "a1".repeat(32), "authority": "CN=T",
+        "stamped_at": at, "serial": "1", "policy": "1.2.3",
+        "lines": { "register": true, "register_signature": true, "key": true, "head": head,
+                   "head_signature": !head.is_null() },
+        "checked": STAMP_CHECKED,
+    })
+}
+
+#[test]
+fn verify_fails_on_a_stamp_head_the_log_does_not_hold() {
+    let lab = common::lab();
+    /// The head of a stamp, from the hash of the register record.
+    type Head = fn(&str) -> serde_json::Value;
+    let cases: [(&str, Head); 3] = [
+        ("h1", |reg| serde_json::json!({ "seq": 999, "hash": reg })),
+        (
+            "h2",
+            |_| serde_json::json!({ "seq": 0, "hash": "ab".repeat(32) }),
+        ),
+        // Record 1 is the stamp itself, whose own hash it cannot hold.
+        ("h3", |reg| serde_json::json!({ "seq": 1, "hash": reg })),
+    ];
+    for (id, head) in cases {
+        common::plain(&lab, id);
+        let reg = seals_of(&lab, id)[0].hash.clone();
+        let body = stamp_body("2099-01-01T00:00:00.000Z", head(&reg));
+        common::plant(&lab.home, id, &[("stamp", body)]);
+        let a = common::bin(&lab)
+            .args(["verify", "--study", id])
+            .assert()
+            .code(1);
+        assert!(
+            err(&a).contains(&format!(
+                "study {id}: record 1: the stamp record names no earlier record "
+            )),
+            "{id}: {}",
+            err(&a)
+        );
+    }
+}
+
+#[test]
+fn a_stamp_in_the_second_of_its_head_record_is_not_flagged() {
+    let lab = common::lab();
+    common::plain(&lab, "w1");
+    let all = common::records_of(&lab, "w1");
+    let reg = seals_of(&lab, "w1")[0].hash.clone();
+    let head = By {
+        seq: 0,
+        hash: reg.clone(),
+    };
+    let mut log = all.clone();
+    log[0].ts = "2026-11-10T12:00:00.500Z".into();
+    let flag = |at: &str| {
+        let body = stamp_body(at, serde_json::to_value(&head).unwrap());
+        let s: Stamp = serde_json::from_value(body).unwrap();
+        ignorarium::derived::stamp_flag(&log, &s)
+    };
+    assert_eq!(flag("2026-11-10T12:00:00.000Z"), None);
+    assert_eq!(
+        flag("2026-11-10T11:59:59.000Z").as_deref(),
+        Some("dated before record 0, which it covers")
+    );
 }
 
 #[test]

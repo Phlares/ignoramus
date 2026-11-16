@@ -2807,14 +2807,36 @@ fn a_public_key_with_white_space_around_it_is_read() {
     verify_away(&away, "pad").code(0);
 }
 
-/// The records of a finished study, a `done` record, then `tail`, planted as `id`.
-fn plant_done(lab: &common::Lab, id: &str, tail: &[(&str, Value)]) {
-    let mut bodies = common::finished(vec![common::arm_a()]);
-    let done = json!({"end": "rows", "ended_at": "2026-11-15T00:00:00Z",
-        "by": {"seq": 2, "hash": "ab".repeat(32)}});
-    bodies.push(("done", done));
-    bodies.extend(tail.iter().map(|(k, b)| (*k, b.clone())));
-    common::plant(&lab.home, id, &bodies);
+/// The records of a finished study, a `done` record whose `by` is `by(hashes)`, then `tail`,
+/// planted as `id`. Returns the seq of the `done` record.
+fn plant_ended(
+    lab: &common::Lab,
+    id: &str,
+    by: impl FnOnce(&[String]) -> Value,
+    tail: &[(&str, Value)],
+) -> usize {
+    let hashes = common::plant(&lab.home, id, &common::finished(vec![common::arm_a()]));
+    let done = json!({"end": "rows", "ended_at": "2026-11-15T00:00:00Z", "by": by(&hashes)});
+    let mut rest = vec![("done", done)];
+    rest.extend(tail.iter().map(|(k, b)| (*k, b.clone())));
+    common::plant(&lab.home, id, &rest);
+    hashes.len()
+}
+
+/// `plant_ended` with the `done` record met by record 2.
+fn plant_done(lab: &common::Lab, id: &str, tail: &[(&str, Value)]) -> usize {
+    plant_ended(lab, id, |h| json!({"seq": 2, "hash": h[2]}), tail)
+}
+
+/// A `stamp` body that covers the registration alone.
+fn stamp_body() -> Value {
+    json!({
+        "file_sha256": "01".repeat(32), "reply_sha256": "a1".repeat(32), "authority": "CN=T",
+        "stamped_at": "2099-01-01T00:00:00.000Z", "serial": "1", "policy": "1.2.3",
+        "lines": { "register": true, "register_signature": true, "key": true, "head": null,
+                   "head_signature": false },
+        "checked": ignorarium::derived::STAMP_CHECKED,
+    })
 }
 
 fn verify_study(lab: &common::Lab, id: &str) -> assert_cmd::assert::Assert {
@@ -2849,7 +2871,7 @@ fn verify_allows_stamp_and_opened_after_done() {
     plant_done(
         &lab,
         "a3",
-        &[("stamp", json!({"x": 1})), ("opened", json!({}))],
+        &[("stamp", stamp_body()), ("opened", json!({}))],
     );
     let a = verify_study(&lab, "a3").code(0);
     let out = common::text(&a);
@@ -2857,6 +2879,82 @@ fn verify_allows_stamp_and_opened_after_done() {
         out.contains("done: rows at 2026-11-15T00:00:00Z (record "),
         "{out}"
     );
+}
+
+/// Text that holds a carriage return, a terminal escape and a bidirectional control.
+const HIDDEN: &str = "a\rerror: forged\u{1b}[2K\u{202e}b";
+
+#[test]
+fn verify_with_a_public_key_prints_no_raw_control_character() {
+    let lab = common::lab();
+    let key = keys::load_or_create(&lab.home).unwrap();
+    let away = lab.root.join("away");
+    std::fs::create_dir_all(&away).unwrap();
+    std::fs::write(away.join("key.txt"), format!("{}\n", public_hex(&lab))).unwrap();
+    let log = away.join("records.jsonl");
+    let append = |kind: &str, body: Value| {
+        let draft = ignorarium::records::RecordDraft::new(HIDDEN, kind, body);
+        ignorarium::records::hash(&ignorarium::records::append(&log, &key, draft).unwrap())
+    };
+    let register = append("register", json!({}));
+    let start = |binary: char, from: Option<char>| {
+        json!({
+            "session": "0123456789abcdef0123456789abcdef", "verb": "run", "pid": 1,
+            "box_version": "0.0.0", "rules_sha256": "sha256:ab",
+            "binary_sha256": common::fake_binary(binary),
+            "started": "2026-11-15T00:00:00Z", "reason": from.map(|_| HIDDEN),
+            "changed_from": from.map(common::fake_binary),
+        })
+    };
+    append("session.start", start('1', None));
+    append("session.start", start('2', Some('1')));
+    let done = json!({"end": "stop", "ended_at": HIDDEN, "by": {"seq": 0, "hash": register}});
+    append("done", done);
+    append(HIDDEN, json!({}));
+    let a = verify_away(&away, "key.txt").code(1);
+    let (out, err) = (stdout(&a), stderr(&a));
+    assert!(
+        out.contains("binary changed at session 2: declared ("),
+        "{out}"
+    );
+    assert!(err.contains("follows the done record"), "{err}");
+    for text in [&out, &err] {
+        let raw = |c: char| c != '\n' && (c.is_control() || c == '\u{202e}');
+        assert!(!text.contains(raw), "{text:?}");
+    }
+    assert!(out.contains(r"a\rerror: forged\u{1b}[2K\u{202e}b"), "{out}");
+}
+
+#[test]
+fn verify_fails_on_an_unreadable_stamp() {
+    let lab = common::lab();
+    let done = plant_done(&lab, "a6", &[("stamp", json!({"x": 1}))]);
+    let a = verify_study(&lab, "a6").code(1);
+    let want = format!(
+        "study a6: record {}: the stamp record is not readable",
+        done + 1
+    );
+    assert!(stderr(&a).contains(&want), "{}", stderr(&a));
+}
+
+#[test]
+fn verify_fails_when_done_names_a_record_the_log_does_not_hold() {
+    let lab = common::lab();
+    /// The `by` of a done record, from the hashes of the records before it.
+    type By = fn(&[String]) -> Value;
+    let cases: [(&str, By); 3] = [
+        ("a7", |h| json!({"seq": 2, "hash": h[1]})),
+        ("a8", |h| json!({"seq": 999, "hash": h[2]})),
+        // The done record itself, whose own hash it cannot hold.
+        ("a9", |h| json!({"seq": h.len(), "hash": h[h.len() - 1]})),
+    ];
+    for (id, by) in cases {
+        let done = plant_ended(&lab, id, by, &[]);
+        let a = verify_study(&lab, id).code(1);
+        let err = stderr(&a);
+        let want = format!("study {id}: record {done}: the done record names no earlier record ");
+        assert!(err.contains(&want), "{id}: {err}");
+    }
 }
 
 #[test]

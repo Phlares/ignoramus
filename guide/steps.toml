@@ -87,6 +87,6 @@ command = "ignorarium stamp <id> --request"
 [[step]]
 id = "verify"
 title = "Let a reader check the study"
-does = "Print the box's public key with key export, and give it to the reader with a copy of the study's records.jsonl and its stamps folder. The reader checks the hashes, the signatures and the chain with verify --public-key <key file> --records <records.jsonl>, with no box home. It prints the done record, each stamp record and its flags."
+does = "Print the box's public key with key export, and give it to the reader with a copy of the study's records.jsonl and its stamps folder. The reader checks the hashes, the signatures and the chain with verify --public-key <key file> --records <records.jsonl>, with no box home. It prints the done record, each stamp record and its flags. Compare the lines of each stamped file with what verify prints: the register record hash and the head hash."
 produces = "The public key as hex, and a pass or the list of what failed."
 command = "ignorarium verify --public-key <key file> --records <records.jsonl>"

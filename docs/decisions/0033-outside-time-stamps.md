@@ -34,10 +34,10 @@ Decision:
   - `stamped_at` is the reply's time. `serial` is lowercase hex without the DER sign byte, as `openssl ts -reply -text` prints it.
   - `checked` reads "digest and lines; signature checked by the reader".
   - What a stamp covers is read from `lines`: the registration always, and the results when the head's seq is at or after the `done` record's seq.
-- **A flag, not a refusal.** `verify` and the card flag a stamp whose `stamped_at` is earlier than the time of the record it covers: the head record, else the register record.
+- **A flag, not a refusal.** `verify` and the card flag a stamp whose `stamped_at` is earlier than the time of the record it covers: the head record, else the register record. The two times are compared to the second, because `stamped_at` holds whole seconds.
 - **The card.** One "Outside time stamp" line per `stamp` record, in log order: the stamped time, the authority, what it covers, which key and signature lines the file held, and "signature checked by the reader". Then the check line once: `openssl ts -verify -data stamps/<file_sha256>.txt -in stamps/<reply_sha256>.tsr -CAfile <bundle>`. A study with no stamp prints "not in the records". The register record's `timestamp: "pending"` stays; the card does not read it.
 - **The public key.** `key export` prints the box's ed25519 public key as lowercase hex and a newline: the text of the key line above. A box with no key refuses.
-- **A check away from the box.** `verify --public-key <file> --records <file>` checks a copy of a study's log with that key. The two flags come together and exclude `--study`. This mode opens no box home and writes nothing. One function checks the log in both modes, so both print the same study lines: the record count, the registered box, the sessions and binary changes, the `done` line or "no done record", one line per `stamp` record, and the flags. Neither mode reads a stamp file. The public-key mode reads no plan log.
+- **A check away from the box.** `verify --public-key <file> --records <file>` checks a copy of a study's log with that key. The two flags come together and exclude `--study`. This mode opens no box home and writes nothing. One function checks the log in both modes, so both print the same study lines: the record count, the register record hash, the registered box, the sessions and binary changes, the `done` line or "no done record", one line per `stamp` record with the seq and hash of its head, and the flags. Both modes fail on a `stamp` record that does not parse, and on a head that names no earlier record of the log with that hash. Both escape every line they print, because in the public-key mode the signer under check chose every string. Neither mode reads a stamp file. The public-key mode reads no plan log.
 - **The parser.** `x509-tsp` reads the reply (0001). The box parses the reply and does not verify the authority's signature.
 
 Why:
@@ -47,7 +47,7 @@ Why:
 - A time stamp is checkable only when anyone can recompute the hash from the archived bytes (dhimmel). So the box keeps the stamped file and the reply in `stamps/`, and the record names both by hash.
 - The box writes the file from its verified records. A person or a script that calls the verb cannot mistype a hash. A file made by hand still records when it holds the register line, as the first confirmatory study's file does.
 - The reader checks the authority's signature with the authority's certificate chain (sigstore). The box checks what it can compute: the digest and the lines. It keeps no trust store and needs no network.
-- A stamp of the head after `done` fixes the result records in time. After that, the key holder cannot rewrite the chain without the change showing: the stamped head hash no longer matches.
+- A stamp of the head after `done` fixes the result records in time. After that, the key holder cannot rewrite the chain without the change showing: the stamped head hash no longer matches. `verify` checks the head hash against the log and prints it, so a reader compares it with the stamped file.
 - With `key export` and `verify --public-key`, a reader with the log, the key and the stamp files checks a study without the box's private key.
 
 Case against:
@@ -65,6 +65,7 @@ Limits:
 - `opened` records written after a head stamp sit outside that stamp. They hold no result.
 - The parser refuses two kinds of valid reply: one whose time has fractional seconds, and one that holds the same certificate twice. Both limits come from the `der` crate that `x509-tsp` uses, and tests pin them. Each refusal carries the parser's message; neither is a crash. A signer named by key identifier gives no authority name.
 - A compact export of the log is not built (#85).
+- The TeX card prints no stamp line and no "Study ended" line; only `card.md` and `card.json` do.
 
 What failure this prevents: a stamp no record points to. The first confirmatory study was stamped by an outside authority, and its card printed "not in the records" (observed, #79). Also a key holder who could rewrite the chain after registration with no outside check (expected, #85).
 

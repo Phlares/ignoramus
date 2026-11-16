@@ -2,12 +2,13 @@
 //! study's log with a public key alone.
 use super::{CliError, Ctx, Done, Run, key, out};
 use crate::derived::{
-    DONE, DoneRecord, OPENED, Register, STAMP, SessionStart, Stamp, first_done, sessions,
+    By, DONE, DoneRecord, OPENED, Register, STAMP, SessionStart, Stamp, first_done, sessions,
     stamp_flag,
 };
 use crate::diag::printable;
 use crate::identity::same_binary;
 use crate::planlog::store::PlanLog;
+use crate::records::Seal;
 use crate::telemetry::Reading;
 use crate::{keys, records};
 use ed25519_dalek::VerifyingKey;
@@ -77,19 +78,21 @@ pub fn run(ctx: &Ctx, study: Option<&str>) -> Run {
     fail_or_pass(failed)
 }
 
-/// Print what a study check found, and return its failures.
+/// Print what a study check found, and return its failures. Each line is escaped: with a
+/// public key, the signer under check chose every string in it.
 fn finish(check: StudyCheck) -> Result<Vec<String>, CliError> {
     for line in &check.lines {
-        out(&format!("{line}\n"))?;
+        out(&format!("{}\n", printable(line)))?;
     }
     Ok(check.failed)
 }
 
-/// Exit 0 when nothing failed; otherwise a refusal that lists every failure.
+/// Exit 0 when nothing failed; otherwise a refusal that lists every failure, escaped.
 fn fail_or_pass(failed: Vec<String>) -> Run {
     if failed.is_empty() {
         Ok(Done::exit(0))
     } else {
+        let failed: Vec<String> = failed.iter().map(|f| printable(f)).collect();
         Err(CliError::refuse(format!(
             "verify failed: {}",
             failed.join("; ")
@@ -111,19 +114,22 @@ fn check_study(id: Option<&str>, log: &Path, key: &VerifyingKey) -> StudyCheck {
         failed: Vec::new(),
     };
     let prefix = id.map_or(String::new(), |id| format!("study {id}: "));
-    let all = match records::read_all(log, key) {
-        Ok(all) => all,
+    let read = records::read_all(log, key).and_then(|all| Ok((all, records::seals(log, key)?)));
+    let (all, seals) = match read {
+        Ok(read) => read,
         Err(e) => {
             c.failed.push(format!("{prefix}{e}"));
             return c;
         }
     };
-    let Some(first) = all.first() else {
+    let (Some(first), Some(sealed)) = (all.first(), seals.first()) else {
         c.failed.push(format!("{prefix}no register record"));
         return c;
     };
     let id = id.unwrap_or(&first.study);
     c.lines.push(format!("study {id}: {} records", all.len()));
+    c.lines
+        .push(format!("register record hash: {}", sealed.hash));
     // The register is the first record of the log.
     let registered = Register::of(first).and_then(|r| r.box_identity);
     c.lines
@@ -152,23 +158,49 @@ fn check_study(id: Option<&str>, log: &Path, key: &VerifyingKey) -> StudyCheck {
             ));
         }
     }
-    done_lines(id, &all, &mut c);
-    stamp_lines(&all, &mut c);
+    done_lines(id, &all, &seals, &mut c);
+    stamp_lines(id, &all, &seals, &mut c);
     c
 }
 
+/// A failure unless `by`, which record `seq` (a `kind` record) names, is a record before it
+/// with that stored hash.
+fn names_earlier(id: &str, seals: &[Seal], seq: u64, kind: &str, by: &By) -> Option<String> {
+    let seal = usize::try_from(by.seq).ok().and_then(|i| seals.get(i));
+    let held = seal.is_some_and(|s| s.seq < seq && s.hash == by.hash);
+    (!held).then(|| {
+        format!(
+            "study {id}: record {seq}: the {kind} record names no earlier record {} with hash {}",
+            by.seq, by.hash
+        )
+    })
+}
+
 /// One line for each `stamp` record, and a flag line for each stamp dated before a record it
-/// covers. A flag does not fail the check.
-fn stamp_lines(all: &[records::Record], c: &mut StudyCheck) {
+/// covers. A flag does not fail the check; an unreadable stamp, or a head the log does not
+/// hold, does.
+fn stamp_lines(id: &str, all: &[records::Record], seals: &[Seal], c: &mut StudyCheck) {
     let yes = |b: bool| if b { "yes" } else { "no" };
-    for (r, s) in all.iter().filter_map(|r| Some((r, Stamp::of(r)?))) {
+    for r in all.iter().filter(|r| r.kind == STAMP) {
+        let Some(s) = Stamp::of(r) else {
+            c.failed.push(format!(
+                "study {id}: record {}: the stamp record is not readable",
+                r.seq
+            ));
+            continue;
+        };
         let l = &s.lines;
-        let head = l.head.as_ref().map_or("none".into(), |h| h.seq.to_string());
+        let head = (l.head.as_ref()).map_or("none".into(), |h| format!("{} {}", h.seq, h.hash));
+        let named = l
+            .head
+            .as_ref()
+            .and_then(|h| names_earlier(id, seals, r.seq, STAMP, h));
+        c.failed.extend(named);
         c.lines.push(format!(
             "stamp {}: {}, {}; lines: register {}, signature {}, key {}, head {head}, head signature {}; file {}, reply {}",
             r.seq,
             s.stamped_at,
-            s.authority.as_deref().map_or("authority not stated".into(), printable),
+            s.authority.as_deref().unwrap_or("authority not stated"),
             yes(l.register),
             yes(l.register_signature),
             yes(l.key),
@@ -182,9 +214,9 @@ fn stamp_lines(all: &[records::Record], c: &mut StudyCheck) {
     }
 }
 
-/// The `done` line, and a failure for each record after `done` that is not a `stamp` or an
-/// `opened` record.
-fn done_lines(id: &str, all: &[records::Record], c: &mut StudyCheck) {
+/// The `done` line, a failure when its `by` is not an earlier record of the log, and a failure
+/// for each record after `done` that is not a `stamp` or an `opened` record.
+fn done_lines(id: &str, all: &[records::Record], seals: &[Seal], c: &mut StudyCheck) {
     let Some(done) = first_done(all) else {
         c.lines.push("no done record".into());
         return;
@@ -196,6 +228,7 @@ fn done_lines(id: &str, all: &[records::Record], c: &mut StudyCheck) {
             let end = end.as_ref().and_then(|v| v.as_str()).unwrap_or_default();
             c.lines
                 .push(format!("done: {end} at {} (record {seq})", d.ended_at));
+            c.failed.extend(names_earlier(id, seals, seq, DONE, &d.by));
         }
         None => c.failed.push(format!(
             "study {id}: record {seq}: the done record is not readable"
