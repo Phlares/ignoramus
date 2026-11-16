@@ -1,10 +1,6 @@
 //! Tests for the RFC 3161 time-stamp reply parser.
-use cms::cert::x509::der::asn1::OctetString;
-use cms::cert::x509::der::{Any, Decode, Encode, Tag};
-use cms::signed_data::SignedData;
 use ignorarium::tsp::{self, SHA256};
 use sha2::{Digest, Sha256};
-use x509_tsp::TimeStampResp;
 
 const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tsp");
 
@@ -114,75 +110,100 @@ fn tlv(tag: u8, content: &[u8]) -> Vec<u8> {
     out
 }
 
-/// The content of the DER element `der`, without its tag and length.
-fn content(der: &[u8]) -> &[u8] {
+/// The header length and the content length of the DER element at the start of `der`.
+fn header(der: &[u8]) -> (usize, usize) {
     match der[1] {
-        n @ 0..=0x7f => &der[2..2 + n as usize],
-        long => &der[2 + (long & 0x7f) as usize..],
+        n @ 0..=0x7f => (2, n as usize),
+        long => {
+            let k = (long & 0x7f) as usize;
+            let n = der[2..2 + k].iter().fold(0, |n, &b| n << 8 | b as usize);
+            (2 + k, n)
+        }
     }
 }
 
-/// `reply` with its signed data replaced by the SEQUENCE whose content `edit` returns.
-fn with_signed_data(reply: &[u8], edit: impl FnOnce(&SignedData) -> Vec<u8>) -> Vec<u8> {
-    let mut resp = TimeStampResp::from_der(reply).unwrap();
-    let token = resp.time_stamp_token.as_mut().unwrap();
-    let signed: SignedData = token.content.decode_as().unwrap();
-    token.content = Any::new(Tag::Sequence, edit(&signed)).unwrap();
-    resp.to_der().unwrap()
+/// The elements inside the DER element `der`, each with its tag and length.
+fn children(der: &[u8]) -> Vec<&[u8]> {
+    let (h, n) = header(der);
+    let mut rest = &der[h..h + n];
+    let mut out = Vec::new();
+    while !rest.is_empty() {
+        let (h, n) = header(rest);
+        let (one, after) = rest.split_at(h + n);
+        out.push(one);
+        rest = after;
+    }
+    out
 }
+
+/// `der` with the element at `path` replaced by what `edit` makes of it. Each step of `path`
+/// picks a child; the elements around it get new lengths.
+fn edit_at(der: &[u8], path: &[usize], edit: impl FnOnce(&[u8]) -> Vec<u8>) -> Vec<u8> {
+    let Some((&at, path)) = path.split_first() else {
+        return edit(der);
+    };
+    let mut kids: Vec<Vec<u8>> = children(der).into_iter().map(<[u8]>::to_vec).collect();
+    kids[at] = edit_at(&kids[at], path, edit);
+    tlv(der[0], &kids.concat())
+}
+
+/// Reply, token content, signed data, encapsulated content, its OCTET STRING, the TSTInfo.
+const TST_INFO: [usize; 7] = [1, 1, 0, 2, 1, 0, 0];
 
 /// `fixture`'s reply with its time field `time`, as GeneralizedTime text.
 fn stamped_at(time: &[u8]) -> Vec<u8> {
-    let whole = b"20261110224149Z";
-    with_signed_data(&tsp::fixture(&[7u8; 32], 1_794_350_509, None), |signed| {
-        let octets: OctetString = (signed.encap_content_info.econtent.as_ref())
-            .unwrap()
-            .decode_as()
-            .unwrap();
-        let tst = octets.as_bytes();
-        let mut fields = content(tst).to_vec();
-        let at = fields
-            .windows(whole.len())
-            .position(|w| w == whole)
-            .unwrap();
-        assert_eq!(fields[at - 2..at], [0x18, 0x0f]);
-        fields.splice(at - 2..at + whole.len(), tlv(0x18, time));
-        let mut signed = signed.clone();
-        let tst = OctetString::new(tlv(0x30, &fields)).unwrap();
-        signed.encap_content_info.econtent = Some(Any::encode_from(&tst).unwrap());
-        content(&signed.to_der().unwrap()).to_vec()
+    let reply = tsp::fixture(&[7u8; 32], 1_794_350_509, None);
+    let path = [&TST_INFO[..], &[4]].concat();
+    edit_at(&reply, &path, |old| {
+        assert_eq!(old, tlv(0x18, b"20261110224149Z"));
+        tlv(0x18, time)
     })
 }
 
-/// The DER crate reads a GeneralizedTime with no fraction of a second only.
 #[test]
-fn a_time_with_a_fraction_of_a_second_is_an_error() {
-    let reply = tsp::parse(&stamped_at(b"20261110224149Z")).unwrap();
-    assert_eq!(reply.stamped_at, "2026-11-10T22:41:49.000Z");
-    let e = tsp::parse(&stamped_at(b"20261110224149.5Z")).unwrap_err();
-    assert!(e.to_string().starts_with("not a time-stamp reply"), "{e}");
+fn a_time_with_a_fraction_of_a_second_parses_to_the_millisecond() {
+    let at = |time: &[u8]| tsp::parse(&stamped_at(time)).map(|r| r.stamped_at);
+    assert_eq!(at(b"20261110224149Z").unwrap(), "2026-11-10T22:41:49.000Z");
+    assert_eq!(
+        at(b"20261110224149.5Z").unwrap(),
+        "2026-11-10T22:41:49.500Z"
+    );
+    assert_eq!(
+        at(b"20261110224149.25Z").unwrap(),
+        "2026-11-10T22:41:49.250Z"
+    );
+    assert_eq!(
+        at(b"20261110224149.1239Z").unwrap(),
+        "2026-11-10T22:41:49.123Z"
+    );
+    // DER writes no trailing zero, no empty fraction and no comma (X.690 11.7).
+    for time in [
+        &b"20261110224149.50Z"[..],
+        b"20261110224149.Z",
+        b"20261110224149,5Z",
+    ] {
+        let e = at(time).unwrap_err();
+        assert!(e.to_string().starts_with("not a time-stamp reply"), "{e}");
+    }
 }
 
 /// The openssl-made reply with its certificate set listing its one certificate `times` times.
 fn certificate_times(times: usize) -> Vec<u8> {
-    with_signed_data(&read("local.tsr"), |signed| {
-        let set = signed.certificates.as_ref().unwrap();
-        assert_eq!(set.0.len(), 1);
-        let cert = set.0.get(0).unwrap().to_der().unwrap();
-        let mut fields = Vec::new();
-        fields.extend(signed.version.to_der().unwrap());
-        fields.extend(signed.digest_algorithms.to_der().unwrap());
-        fields.extend(signed.encap_content_info.to_der().unwrap());
-        fields.extend(tlv(0xa0, &cert.repeat(times)));
-        fields.extend(signed.signer_infos.to_der().unwrap());
-        fields
+    // Reply, token content, signed data, its certificate set.
+    edit_at(&read("local.tsr"), &[1, 1, 0, 3], |set| {
+        assert_eq!(set[0], 0xa0);
+        let one = children(set);
+        assert_eq!(one.len(), 1);
+        tlv(0xa0, &one[0].repeat(times))
     })
 }
 
-/// The DER crate refuses a certificate set that lists one certificate twice.
 #[test]
-fn a_certificate_set_with_a_repeat_is_an_error() {
+fn a_certificate_set_with_a_repeat_parses() {
     assert_eq!(certificate_times(1), read("local.tsr"));
-    let e = tsp::parse(&certificate_times(2)).unwrap_err();
-    assert!(e.to_string().starts_with("not a time-stamp reply"), "{e}");
+    let reply = tsp::parse(&certificate_times(2)).unwrap();
+    assert_eq!(
+        reply.authority.as_deref(),
+        Some("CN=ignorarium test authority")
+    );
 }

@@ -22,9 +22,7 @@ libc = "0.2"
 seccompiler = "0.5"
 tar = { version = "0.4", default-features = false }
 flate2 = "1"
-x509-tsp = "0.1"
-cms = "0.2"
-cmpv2 = "0.2"
+der = { version = "0.8", features = ["derive", "oid", "alloc"] }
 evidence = { path = "../evidence" }
 ignorarium-guest = { path = "../ignorarium-guest" }
 

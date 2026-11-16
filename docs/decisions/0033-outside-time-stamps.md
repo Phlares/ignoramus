@@ -31,14 +31,14 @@ Decision:
 - **The record.** A `stamp` record holds `file_sha256`, `reply_sha256`, `authority`, `stamped_at`, `serial`, `policy`, `lines` and `checked`.
   - `lines` says which box lines the file held. Its `head` is the seq and hash of the head record, or null.
   - `authority` is the reply's own authority field when that field is a directory name. Else it is the subject of the signer certificate inside the reply, else null. It is text from outside the box, so every terminal line and the card print it escaped.
-  - `stamped_at` is the reply's time. `serial` is lowercase hex without the DER sign byte, as `openssl ts -reply -text` prints it.
+  - `stamped_at` is the reply's time, to the millisecond; digits past the third are cut. `serial` is lowercase hex without the DER sign byte, as `openssl ts -reply -text` prints it.
   - `checked` reads "digest and lines; signature checked by the reader".
   - What a stamp covers is read from `lines`: the registration always, and the results when the head's seq is at or after the `done` record's seq.
-- **A flag, not a refusal.** `verify` and the card flag a stamp whose `stamped_at` is earlier than the time of the record it covers: the head record, else the register record. The two times are compared to the second, because `stamped_at` holds whole seconds.
+- **A flag, not a refusal.** `verify` and the card flag a stamp whose `stamped_at` is earlier than the time of the record it covers: the head record, else the register record. The two times are compared to the second, because a reply's time may hold whole seconds only.
 - **The card.** One "Outside time stamp" line per `stamp` record, in log order: the stamped time, the authority, what it covers, which key and signature lines the file held, and "signature checked by the reader". Then the check line once: `openssl ts -verify -data stamps/<file_sha256>.txt -in stamps/<reply_sha256>.tsr -CAfile <bundle>`. A study with no stamp prints "not in the records". The register record's `timestamp: "pending"` stays; the card does not read it.
 - **The public key.** `key export` prints the box's ed25519 public key as lowercase hex and a newline: the text of the key line above. A box with no key refuses.
 - **A check away from the box.** `verify --public-key <file> --records <file>` checks a copy of a study's log with that key. The two flags come together and exclude `--study`. This mode opens no box home and writes nothing. One function checks the log in both modes, so both print the same study lines: the record count, the register record hash, the registered box, the sessions and binary changes, the `done` line or "no done record", one line per `stamp` record with the seq and hash of its head, and the flags. Both modes fail on a `stamp` record that does not parse, and on a head that names no earlier record of the log with that hash. Both escape every line they print, because in the public-key mode the signer under check chose every string. Neither mode reads a stamp file. The public-key mode reads no plan log.
-- **The parser.** `x509-tsp` reads the reply (0001). The box parses the reply and does not verify the authority's signature.
+- **The parser.** The box declares the reply's ASN.1 shapes itself and decodes them with `der` (0001). The box parses the reply and does not verify the authority's signature.
 
 Why:
 
@@ -56,6 +56,7 @@ Case against:
 - The box does not call the authority. A person or a script must run three printed commands and pass the reply back. We rejected an HTTP client in the box for now: a box may have no network, and #79 leaves the call for later. A later call replaces the printed commands and nothing else.
 - We rejected a box that writes the request itself and accepts only its own file. It needs DER writing, and it would refuse the first confirmatory study's hand-made file, which holds only the register line.
 - `authority` read from the signer certificate is text the authority chose. The box checks none of it.
+- The box declares the reply's shapes itself, so a shape it declares wrongly refuses a valid reply. The tests on an `openssl`-made reply and on a real authority's reply are the guard.
 
 Limits:
 
@@ -63,7 +64,7 @@ Limits:
 - A stamp proves that the bytes existed by a date. It does not prove that no other version was also stamped, or who wrote the bytes (dhimmel). The plan log and its head line carry the single version.
 - A file made by hand, such as the first confirmatory study's, holds no key line, no signature line and no head line. A record of such a file says so in `lines`: `key` is false and `head` is null.
 - `opened` records written after a head stamp sit outside that stamp. They hold no result.
-- The parser refuses two kinds of valid reply: one whose time has fractional seconds, and one that holds the same certificate twice. Both limits come from the `der` crate that `x509-tsp` uses, and tests pin them. Each refusal carries the parser's message; neither is a crash. A signer named by key identifier gives no authority name.
+- A signer named by key identifier gives no authority name.
 - A compact export of the log is not built (#85).
 - The TeX card prints no stamp line and no "Study ended" line; only `card.md` and `card.json` do.
 
