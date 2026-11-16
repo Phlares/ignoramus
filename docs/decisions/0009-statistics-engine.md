@@ -94,7 +94,7 @@ What the margins mean:
 - The loose grid at α = 0.5 shows the split at work. A null hypothesis over 20 units rejects 4.2% of the time at that level. A null root fires a trigger at θ = 2 for 18.0% of trees. Both rates are from 1,000,000 seeded draws. So the four ordinary loose rows hold even with no split.
 - The partly-null row is the last loose row: a firing root with 16 null children. With the split its FWER is 0.02142 (upper end 0.02234). Without the split each child is tested at the full level, so its FWER is about 0.50. That figure is computed as 1 - (1 - 0.042)^16. This row is the one that fails when the split is dropped.
 - The planted defect shows clearly with 100 undeclared children. At 10 undeclared children the FWER is 0.031 (upper end 0.040), still under 0.05; at 20 it is 0.053 (upper end 0.064). The true FWER crosses 0.05 near 20 children.
-- FDR can exceed FWER in a null row, though no row of this run shows it. The tree's e-value is a mean. It can reach 1/α without any single hypothesis passing its own level.
+- In a null row FDR equals FWER. The tree's e-value is the largest share-weighted e-value, so a tree is a discovery exactly when a hypothesis is rejected. Until #31 it was the weighted mean, and FDR could exceed FWER.
 
 Planning consequence:
 
@@ -111,7 +111,7 @@ Why:
 Case against:
 
 - The box calls no scan p-value, no `Sign` or `Clip` score, no two-sided test and no unbounded gamma. The null-tree suite simulates `Clip` two-sided trees with triggers. A confirmatory study carries no trigger (0024) and tests with `Bounded` (0013). By this record's own words, the strict grid "cannot tell a dropped split from a kept one".
-- The first reason says both facts hold "without a model of how the data were collected". A later simulation breaks the level when clusters share a source: at a spread of a quarter of the score scale, 16 groups that share half the variance pass 13.7% of null runs at level 0.005 (#110, #111). At a spread of 0.027 it finds no break.
+- The first reason says both facts hold "without a model of how the data were collected". A later simulation breaks the level when clusters share a source: at a spread of a quarter of the score scale, 16 groups that share half the variance pass 13.7% of null runs at level 0.005 (#110, #111). At a spread of 0.027, 64 or 16 groups give 0 passes in 100,000.
 - Final tests never stop, though a stop would not raise the error rate. In the first confirmatory study one stratum's e-value stayed at 0.9997 from the first batch to the end. The study then ran 4,784 more rows, and none could change the verdict (#78).
 - The selection stage has one rule, `best-mean`, which pools strata. A claim over strata needs every stratum. In the first confirmatory study the pick sat above the margin in one stratum of the selection data (#75), and on 8 selection units it won 57% of resamples (0030).
 - The tree's e-value was first the weighted mean of the hypotheses' e-values (#18). It became the largest share-weighted e-value (#31). The weighted mean is a valid e-value and, in this record's words, "would give more discoveries".
@@ -124,6 +124,7 @@ Constants:
 
 - bet cap = 3/4 (`MAX_BET`). Basis: set in 0022. Rule for change: as in 0022.
 - pseudo-observation = 1, in the bet `S / (1 + Q)`. Basis: the record names this the aGRAPA bet (Waudby-Smith and Ramdas). Rule for change: none stated.
+- `C` = 0.07720838, in the unbounded gamma. Basis: Javanmard and Montanari 2018, eq. 31. Rule for change: none stated.
 
 (written 2026-11-15)
 

@@ -12,13 +12,7 @@ Decision:
 
 Mechanism. The bet is the aGRAPA bet, `S / (1 + Q)`, capped (0009). With units tight against a wide declared range, each score is small and of one sign, so the bet reaches the cap within a few observations and stays there. Past that point the units needed scale about as 1 / cap. For a "mean below ln 1.04" claim on [−0.614706, 0.693147] at level 0.005 and power 0.894, with unit sd 0.0133 to 0.0217, a test needs about 400 units at a cap of 1/2, 281 at 3/4 and 225 at 0.99. Any test that assumes only the range needs at least about 183. The counts in this section, the next and Open come from a simulation outside this repository, with 4,000 replicates per count. Its range, [−0.614706, 0.693147], is centred on the margin, so scores reach ±1. The 0020 suite uses [−ln 2, ln 2] instead.
 
-Why:
-
-- At a cap of 1/2 the example claim under Mechanism needs about 400 units. At 3/4 it needs 281. Any test that assumes only the range needs at least about 183.
-- The cap changes power, not validity (Validity, below).
-- "Why 3/4 and not higher" gives the reasons against a higher cap.
-
-(written 2026-11-15)
+Why: a cap of 1/2 costs units and buys no validity. Mechanism gives the counts, Validity the proof, and "Why 3/4 and not higher" the reasons against a higher cap. (written 2026-11-15)
 
 Why 3/4 and not higher:
 
@@ -45,7 +39,7 @@ What failure this prevents: two failures. A cap of 1/2 made a wide-range claim n
 
 Constants:
 
-- `MAX_BET` = 0.75. Basis: the value to start with, informed by the record's sources; hedged betting uses 1/2 or 3/4 as defaults (Waudby-Smith and Ramdas), and the record's simulation needs 281 units at 3/4 against about 400 at 1/2. Rule for change: the record says only "to be tuned after the first study". The first study has run. A dated amendment with a freeze rule is owed (#96) and waits for #78.
+- `MAX_BET` = 0.75. Basis: the value to start with, among the defaults 1/2 and 3/4 of hedged betting (Waudby-Smith and Ramdas); Mechanism gives the counts. Rule for change: the record says only "to be tuned after the first study". The first study has run. A dated amendment with a freeze rule is owed (#96) and waits for #78.
 
 (written 2026-11-15)
 

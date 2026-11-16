@@ -2,11 +2,14 @@
 
 Date: 2026-11-15. The settings were decided on 2026-10-29 and have been in the code since 2026-10-31 (0013, "Stream settings"). This record adds their date, their basis and the rule for change.
 
+Amended: 2026-11-15. The test stream uses the plan stream's alpha and slot count (#118).
+
 The plan stream gives each confirmatory study its level. Its two settings sat in 0013 with no date, no stated basis and no rule for change. A full stream refuses the next study and says nothing more.
 
 Decision:
 
 - **Box constants.** alpha = 0.05 and 10 slots. A slot's level is 0.005 × (D + 1), where D counts the discoveries closed before the slot opened (0013). Neither is a spec value.
+- **Test stream.** The test stream uses the same alpha and the same slot count per epoch. It bounds no claim.
 - **Basis of alpha.** 0.05 is the false discovery rate over every claim the box confirms. e-LOND keeps it under any dependence between the studies.
 - **Basis of the 10 slots.** The weights are spread evenly over a fixed number of slots, 1/10 each. With 10 slots the first study's level is 0.005. That is the default level for a new claim that brings no justified level of its own.
 - **Rejected.**
