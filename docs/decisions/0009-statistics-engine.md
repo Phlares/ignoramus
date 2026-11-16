@@ -108,6 +108,25 @@ Why:
 - An unrun hypothesis's share returns to those that ran. This keeps power, and it is valid under the stated condition.
 - The Wilson interval is sound near 0. The error rates here sit near 0, where the usual normal interval is not.
 
+Case against:
+
+- The box calls no scan p-value, no `Sign` or `Clip` score, no two-sided test and no unbounded gamma. The null-tree suite simulates `Clip` two-sided trees with triggers. A confirmatory study carries no trigger (0024) and tests with `Bounded` (0013). By this record's own words, the strict grid "cannot tell a dropped split from a kept one".
+- The first reason says both facts hold "without a model of how the data were collected". A later simulation breaks the level when clusters share a source: at a spread of a quarter of the score scale, 16 groups that share half the variance pass 13.7% of null runs at level 0.005 (#110, #111). At a spread of 0.027 it finds no break.
+- Final tests never stop, though a stop would not raise the error rate. In the first confirmatory study one stratum's e-value stayed at 0.9997 from the first batch to the end. The study then ran 4,784 more rows, and none could change the verdict (#78).
+- The selection stage has one rule, `best-mean`, which pools strata. A claim over strata needs every stratum. In the first confirmatory study the pick sat above the margin in one stratum of the selection data (#75), and on 8 selection units it won 57% of resamples (0030).
+- The tree's e-value was first the weighted mean of the hypotheses' e-values (#18). It became the largest share-weighted e-value (#31). The weighted mean is a valid e-value and, in this record's words, "would give more discoveries".
+
+(written 2026-11-15)
+
+What failure this prevents: false discoveries that grow with the number of studies and of follow-up tests, with no bound; and a result that a second run cannot repeat, because a draw came from no seed. Both are expected, not observed in a study. The record's planted defect measures the first in simulation: 100 undeclared null children give a family-wise error of 0.247 at a level of 0.05. (written 2026-11-15)
+
+Constants:
+
+- bet cap = 3/4 (`MAX_BET`). Basis: set in 0022. Rule for change: as in 0022.
+- pseudo-observation = 1, in the bet `S / (1 + Q)`. Basis: the record names this the aGRAPA bet (Waudby-Smith and Ramdas). Rule for change: none stated.
+
+(written 2026-11-15)
+
 Sources:
 
 - Xu and Ramdas, "Online multiple testing with e-values", https://arxiv.org/abs/2311.06412

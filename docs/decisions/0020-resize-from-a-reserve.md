@@ -80,6 +80,17 @@ Case against:
 - The rounded-up table makes the gate's count larger than the runner's, so the gate errs low on power. A replicate with an s past the table's top value stops in the gate even if the reserve could reach it.
 - The model is normal within a stratum, and the reserve is assumed to come from the same population as the first batch. A reserve gathered later or from another source changes what the claim is about, though not its level.
 
+What failure this prevents: a confirmatory study sized from an outside sd and icc that its first batch shows to be wrong, with no valid way to add data; and a person who adds data, or stops, after seeing results. Both are expected. (written 2026-11-15)
+
+Constants:
+
+- power replicates = 4,000 (`REPS`), for the count search and for the gate. Basis: set in 0013. Rule for change: as in 0013.
+- table = 8 values of s, geometric from s0 / 4 to 4 s0. Basis: none on file. Rule for change: none stated.
+- cluster search limit = 16,384 per stratum (`CAP`). Basis: none on file. Rule for change: none stated.
+- draw limit = 2,000 million values per call (`WORK`). Basis: none on file. Rule for change: none stated.
+
+(written 2026-11-15)
+
 Sources:
 
 - FDA (2019), "Adaptive Designs for Clinical Trials of Drugs and Biologics", https://www.fda.gov/media/78495/download

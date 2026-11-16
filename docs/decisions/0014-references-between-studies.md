@@ -16,3 +16,18 @@ Decision:
 Why: a value the author can type is a value the author can invent. The box reads it from signed records, so every number that sizes a study or picks its condition traces to a record hash.
 
 Cost: the earlier study must run in the same box. An estimate from another box needs an import path.
+
+Case against:
+
+- The reason says every number that sizes a study traces to a record hash. The margin, `power_at`, the range and the power target stay typed (0030). In the first confirmatory study the size ran from about 270 to about 420 clusters over the interval of the borrowed spread; a nearer typed ceiling alone took one stratum from 276 clusters to 135 (0030).
+- For a contrast on `selected`, the matching rule pairs the largest sd of one candidate with the largest icc of another. Five days later 0021 said that pair "describes none" and dropped it for mean claims. Quantile claims keep it.
+- Two other forms were proposed and not taken. Issue #9 keeps a typed value and checks it against a named record. Issue #8 names the parent spec and the field. Either keeps the number or its exact source readable in the spec. Here the box finds the estimate by a key, a pooled fallback and a rule over candidates.
+- The rule ranks where a number comes from above how good it is. A study with 5 clusters per stratum in the same box may lend; in the first confirmatory study one borrowed icc had a 95% interval from 0 to 0.66 (0030). A larger study from another box may not lend.
+
+(written 2026-11-15)
+
+What failure this prevents: a study sized from an sd or an icc that its author typed, or run on a condition its author picked by hand, with no signed record behind the value. Expected, not observed. (written 2026-11-15)
+
+Constants: none. The record fixes a form and matching rules, not a value. (written 2026-11-15)
+
+Sources: none. The record cites no outside work. (written 2026-11-15)

@@ -30,6 +30,28 @@ Why:
 
 Cost: power is computed under a normal model, so a skewed outcome can differ. The sd and icc come from a smaller earlier study, which estimates the icc with few clusters.
 
+Case against:
+
+- The power gate checks power only at `power_at`, a value the author types. Issue #5 proposed that the assumed truth come from a record; this record rejects reading it from a pilot. The first confirmatory study registered with a printed power of 0.98, and at its lending study's own estimate the chance of a pass was 0.00 (0030).
+- The test is fixed-size and never stops, yet it pays "the price of validity at any stopping time" (0009). It needs more units than the classical z formula gives for the same power (0009). In the first confirmatory study one stratum's e-value reached 25.5 of the 200 it needed (0031).
+- A mean claim is about a clipped mean over a range the author types, and a wide range costs clusters. In the first confirmatory study one stratum needed 276 clusters at the registered ceiling and 135 at a nearer one; no unit clipped at either (0030). The clip counts describe and decide nothing.
+- Until a discovery closes, the stream gives every study a level of 0.005, the typed default it replaced (#15). For that the box keeps a signed log, a replay, a lock and a refusal at slot 11. The test stream bounds nothing: its studies never count, and it starts afresh after each 10 slots.
+- The stream binds one box home. A new home starts a new stream at slot 1, and no rule on one machine can stop that (#87). A fixed level of 0.005 for every study is the alternative not chosen (0032).
+
+(written 2026-11-15)
+
+What failure this prevents: a study that passes the power gate under one test and is judged by another; a level that an author sets per study, so that no rule bounds false discoveries over the box's studies; and a test that counts the units of one cluster as independent. All three are expected, not observed: the box had registered no confirmatory study when this record went on file. (written 2026-11-15)
+
+Constants:
+
+- alpha = 0.05 (`ALPHA`). Basis: set in 0032. Rule for change: as in 0032.
+- slots = 10 (`M`); the code uses the same value for the length of a test-stream epoch. Basis: set in 0032. Rule for change: as in 0032.
+- power replicates = 4,000 (`REPS`). Basis: none on file. Rule for change: none stated.
+- cluster search limit: this record says 1,024; the value in force is 16,384 (`CAP`). Basis: set in 0020. Rule for change: as in 0020.
+- draw limit: this record says 100 million values; the value in force is 2,000 million (`WORK`). Basis: set in 0020. Rule for change: as in 0020.
+
+(written 2026-11-15)
+
 Sources:
 
 - Berger (1982), "Multiparameter hypothesis testing and acceptance sampling", Technometrics 24(4), doi:10.1080/00401706.1982.10487790
