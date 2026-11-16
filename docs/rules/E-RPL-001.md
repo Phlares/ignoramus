@@ -14,10 +14,6 @@ Copy the hash from the Study ended line of the original's card into study.replic
 
 The pin names the end of the original that the replication repeats. The box finds the original by its id and checks the pin against its signed log, so a plan cannot name an end the original does not have.
 
-## Sources
-
-- <https://elifesciences.org/articles/71601>
-
 ## Applies to
 
 - `study.replicates` (named:replicates-done)

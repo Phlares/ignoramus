@@ -17,12 +17,13 @@ Decision:
   plan log head (<log>): <the last head of that plan log, as canonical JSON>
   ```
 
-  The bytes of `--with` follow, for lines the box cannot know. The file goes to `<study>/stamps/<sha256 of the file>.txt`, write-once. The same log gives the same file. The head is the last record of the log when the file is written. The chain makes a head at seq n cover records 0 to n. The plan log head line comes from the verified plan log, and `--request` fails when that log does not verify. `--request` appends no record.
+  The bytes of `--with` follow, for lines the box cannot know. The file goes to `<study>/stamps/<sha256 of the file>.txt`, write-once. The same log gives the same file. The head is the last record of the log when the file is written. The chain makes a head at seq n cover records 0 to n. The plan log head line comes from the verified plan log. It is left out when the plan log folder is missing or its log holds no signed head; when the folder exists and its log does not verify, `--request` fails. `--request` appends no record. The register line keeps one exact form, `register record hash of <id>: <hex>`, so a file made before this verb existed can still be recorded.
 - **The commands.** `--request` prints the file's path and, for each authority URL in `<home>/config.toml` (`[stamp] authorities = [...]`), three commands: `openssl ts -query`, a `curl` call to the authority, and `ignorarium stamp <id> --reply`. With no authority set, the URL prints as a placeholder and the verb says so. The box makes no network call.
 - **The reply.** `stamp <id> --reply <R> [--file <F>]` makes every check before its first write:
   - the reply is granted, its digest algorithm is SHA-256, and its digest is 32 bytes (`E-STP-001`);
   - the stamped file is `--file`, else `stamps/<digest>.txt`; it exists, and its SHA-256 is the reply's digest (`E-STP-002`);
-  - the log verifies, and the file holds this study's register line byte for byte (`E-STP-003`);
+  - the study's record log verifies; a log that does not fails with the verify error;
+  - the file holds this study's register line byte for byte, no box line with another value than the box computes, no two different values for one line, and no head signature line without a head line (`E-STP-003`);
   - a head line names a record that the log holds with that hash (`E-STP-004`).
 
   It then copies the file and the reply into `stamps/`, write-once, and appends one signed `stamp` record. A reply already recorded appends nothing and prints "already recorded". Several replies are several records, in log order. The verb works before and after `done` (0034), with no terminal. It does not check the plan log head line of a file it is given.
@@ -35,8 +36,8 @@ Decision:
   - What a stamp covers is read from `lines`: the registration always, and the results when the head's seq is at or after the `done` record's seq.
 - **A flag, not a refusal.** `verify` and the card flag a stamp whose `stamped_at` is earlier than the time of the record it covers: the head record, else the register record.
 - **The card.** One "Outside time stamp" line per `stamp` record, in log order: the stamped time, the authority, what it covers, which key and signature lines the file held, and "signature checked by the reader". Then the check line once: `openssl ts -verify -data stamps/<file_sha256>.txt -in stamps/<reply_sha256>.tsr -CAfile <bundle>`. A study with no stamp prints "not in the records". The register record's `timestamp: "pending"` stays; the card does not read it.
-- **The public key.** `key export` prints the box's ed25519 public key as lowercase hex and a newline: the text of the key line above.
-- **A check away from the box.** `verify --public-key <file> --records <file>` checks a copy of a study's log with that key. The two flags come together and exclude `--study`. This mode opens no box home and writes nothing. One function checks the log in both modes. It prints what `verify --study` prints, then the `done` line or "no done record", one line per `stamp` record, and the flags. It reads no stamp file and no plan log.
+- **The public key.** `key export` prints the box's ed25519 public key as lowercase hex and a newline: the text of the key line above. A box with no key refuses.
+- **A check away from the box.** `verify --public-key <file> --records <file>` checks a copy of a study's log with that key. The two flags come together and exclude `--study`. This mode opens no box home and writes nothing. One function checks the log in both modes, so both print the same study lines: the record count, the registered box, the sessions and binary changes, the `done` line or "no done record", one line per `stamp` record, and the flags. Neither mode reads a stamp file. The public-key mode reads no plan log.
 - **The parser.** `x509-tsp` reads the reply (0001). The box parses the reply and does not verify the authority's signature.
 
 Why:
@@ -62,7 +63,7 @@ Limits:
 - A stamp proves that the bytes existed by a date. It does not prove that no other version was also stamped, or who wrote the bytes (dhimmel). The plan log and its head line carry the single version.
 - A file made by hand, such as the first confirmatory study's, holds no key line, no signature line and no head line. A record of such a file says so in `lines`: `key` is false and `head` is null.
 - `opened` records written after a head stamp sit outside that stamp. They hold no result.
-- The parser refuses two kinds of valid reply: one whose time has fractional seconds, and one that holds the same certificate twice. Each refusal carries the parser's message; neither is a crash. A signer named by key identifier gives no authority name.
+- The parser refuses two kinds of valid reply: one whose time has fractional seconds, and one that holds the same certificate twice. Both limits come from the `der` crate that `x509-tsp` uses, and tests pin them. Each refusal carries the parser's message; neither is a crash. A signer named by key identifier gives no authority name.
 - A compact export of the log is not built (#85).
 
 What failure this prevents: a stamp no record points to. The first confirmatory study was stamped by an outside authority, and its card printed "not in the records" (observed, #79). Also a key holder who could rewrite the chain after registration with no outside check (expected, #85).
