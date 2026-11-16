@@ -1,5 +1,9 @@
 # 0013 Claims, the test, power, and the stream
 
+Date: 2026-10-31. The stream settings were decided on 2026-10-29 (0032).
+
+Amended: 2026-11-06. The analysis record holds clip counts per mean claim (#46).
+
 One claim model serves every hypothesis. One e-value test checks every confirmatory claim, the power gate simulates that same test, and the box-wide e-LOND stream gives each confirmatory study its level.
 
 Decision:

@@ -1,5 +1,7 @@
 # 0011 Publish bundle
 
+Date: 2026-10-30.
+
 Two crates prepare a study for publication. `bundle` builds the files. `deposit` sends them to an archive. This release deposits only on the Zenodo sandbox.
 
 Decision:

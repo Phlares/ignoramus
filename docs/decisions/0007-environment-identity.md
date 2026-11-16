@@ -1,5 +1,7 @@
 # 0007 Environment identity
 
+Date: 2026-10-29.
+
 A result is only comparable if the environment that made it can be named and rebuilt. The box names an environment four ways.
 
 Decision:

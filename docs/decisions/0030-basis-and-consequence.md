@@ -49,6 +49,8 @@ Case against:
 
 What failure this prevents: a confirmatory study registered with a printed power of 0.98. Its lending study's estimates gave it no chance of a pass. It ran 5,319 rows and ended "not shown". No record said that the assumed truth had no source.
 
+Constants: none. This record sets no value.
+
 Open:
 
 - The list of kinds for each value.

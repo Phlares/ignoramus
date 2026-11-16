@@ -1,5 +1,7 @@
 # 0022 Bet cap three quarters
 
+Date: 2026-11-06.
+
 The betting e-process (0009) caps each bet at `MAX_BET`. The cap was 1/2. It is now 3/4.
 
 Decision:

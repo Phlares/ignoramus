@@ -1,5 +1,9 @@
 # 0019 Row memory
 
+Date: 2026-11-01.
+
+Amended: 2026-11-10. The box reads each row's peak memory from a cgroup and limits nothing with it (#62).
+
 A plan can declare the most memory one payload process may use. The box enforces that one size at every level, so a row that keeps its data in private memory gets the same result at every level. Shared memory is outside the cap (Limits).
 
 Decision:

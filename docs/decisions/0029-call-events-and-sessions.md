@@ -1,5 +1,9 @@
 # 0029 Call events and sessions
 
+Date: 2026-11-15.
+
+Amended: 2026-11-15. The card prints run sessions and the registered box (#105).
+
 Each call of the box writes two events to the box's event log. Each `run` or `resume` call that holds the run lock also writes two signed records to the study's record log. They say who started a call, how long it ran, how much memory it used, and how it ended. Nothing in a study's verdict reads them.
 
 Decision:
@@ -28,7 +32,7 @@ Decision:
 
 Evidence: during a 22-hour run, the event log gained 282 `status` lines with nothing saying who made them. The kernel killed one `status` call for memory, and it left no event.
 
-## Sources
+Sources:
 
 - Workflow Run RO-Crate, "Process Run Crate" 0.5: https://www.researchobject.org/workflow-run-crate/profiles/0.5/process_run_crate
 - getrusage(2), `RUSAGE_SELF` and what it counts: https://man7.org/linux/man-pages/man2/getrusage.2.html

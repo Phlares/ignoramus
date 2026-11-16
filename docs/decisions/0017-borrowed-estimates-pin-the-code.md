@@ -1,5 +1,7 @@
 # 0017 Borrowed estimates pin the code
 
+Date: 2026-11-01.
+
 A confirmatory hypothesis can take its sd and icc from a finished study (0014). Those numbers describe the code that measured them. This record fixes how a finished study names its code, what counts as the same code, and how a plan that runs other code says so.
 
 Decision:

@@ -1,5 +1,7 @@
 # 0014 References between studies
 
+Date: 2026-10-31.
+
 A follow-on study is written and checked before the study it builds on has run. Some of its values exist only in that earlier study's records: the sd and icc that size it, and the condition a selection stage picked. The author never types such a value or a record hash. The spec names the study, and the box finds the records.
 
 Decision:

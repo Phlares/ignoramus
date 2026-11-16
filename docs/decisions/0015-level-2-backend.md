@@ -1,5 +1,11 @@
 # 0015 Level 2 through the runner
 
+Date: 2026-10-31.
+
+Amended: 2026-11-01. The machine's memory comes from the study's `design.row_memory_mib` (#34).
+
+Amended: 2026-11-15. `vsock` reads `blocked` or `open`; the row record holds `vcpus` and `vm_mem_mib` (#116).
+
 Level 2 rows run through the box's runner. The backend `backend::level2::Level2` wraps `ignorarium_guest::host::run_row` (0010), so each row runs in one fresh Cloud Hypervisor machine. The guest crate still knows nothing of the box.
 
 Decision:

@@ -1,5 +1,11 @@
 # 0008 Level 1 through bubblewrap
 
+Date: 2026-10-30.
+
+Amended: 2026-11-10. Each row's cgroup records its CPU time, as observation only (#62).
+
+Amended: 2026-11-15. The self-test result also goes into the signed row record (#116).
+
 Level 1 runs each row in a bubblewrap sandbox. bubblewrap is the first level 1 launcher. We evaluate it later against a launcher of our own (issue #2). It sits behind the `Backend` trait, so a replacement touches one module.
 
 Decision:

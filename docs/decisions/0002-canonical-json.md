@@ -1,5 +1,7 @@
 # 0002 Canonical JSON
 
+Date: 2026-10-29.
+
 A study spec is one TOML file. We hash its parsed values, not its bytes.
 
 Decision:
