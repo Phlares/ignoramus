@@ -4,6 +4,8 @@ Date: 2026-11-06.
 
 Amended: 2026-11-07. The report names the family and each member's state (#49).
 
+Amended: 2026-11-15. `opened` and `stamp` records may follow a `done` record; nothing else may (0034).
+
 `ignorarium report <id> [--json]` prints the verdicts of a finished study. It refuses every other study. It verifies the record log, appends one signed `opened` record, and only then prints.
 
 Decision:
@@ -16,6 +18,7 @@ Decision:
 
   The finish time is the later of the last counted estimate or verdict record and the close record. A repeat of an estimate or verdict is not counted. With neither, it is the time of the analysis record. A study whose results are complete reports even if a stop record follows them. A stopped study that never finished refuses and gives its stop reason.
 - **Every read is recorded.** `report` verifies the log (hashes, signatures, chain) under the log's lock, with the code `verify` uses. A broken log, in the study or in its stream, is refused, and the message names the record or line. The report then appends one signed `opened` record with body `{}`, and prints only after that append. A refused report appends nothing. The log holds each read, and the chain fixes the last record the read saw.
+- **After `done`.** A `done` record ends a study (0034). `report` still works on a done study and appends its `opened` record after `done`. `opened` and `stamp` records (0033) may follow `done`; no other record may. `report` still refuses a stopped study that never finished.
 - **Contents.** Per hypothesis: the verdict, its basis, the e-value and level of a test, and the reason when the log holds one. Per mean claim and group: the units below `lo`, above `hi`, and in all. The count is descriptive and never changes a verdict. The text report prints each number in full, as JSON does. A quantile claim, or an analysis record written before the counts existed, prints no count.
 - **Family.** A study in a family names the family. It lists every other member, the root first, then in lock order.
   - An unfinished member shows as `not finished`. A member with no log shows as `not registered`.

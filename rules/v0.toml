@@ -495,7 +495,7 @@ severity = "error"
 problem = "study.replicates.done is not the hash of the original's done record."
 instruction = "Copy the hash from the Study ended line of the original's card into study.replicates.done. If the original ended in another way than you planned for, read its card again before you plan the replication."
 why = "The pin names the end of the original that the replication repeats. The box finds the original by its id and checks the pin against its signed log, so a plan cannot name an end the original does not have."
-sources = []
+sources = ["https://elifesciences.org/articles/71601"]
 target = [
   { path = "study.replicates", check = "named:replicates-done" },
 ]
@@ -506,7 +506,7 @@ severity = "error"
 problem = "The original's verdict for the hypothesis is not a pass on its test, or the original is in the test log and this study is not."
 instruction = "Replicate a hypothesis whose registered test passed in the original: its verdict record says pass, on basis test. A claim that passed on its point estimate comes from an exploratory study; test it in an ordinary confirmatory study, with no study.replicates."
 why = "A replication tests a result that a registered test already showed. The criterion is the two-trials rule: the replication succeeds when its own registered test passes, given that the original's test passed. Two results that both fail to pass are not a replication, and a pass on a point estimate was never tested. A study in the test log never counts, so its pass backs only a replication in the test log."
-sources = []
+sources = ["https://arxiv.org/html/2204.06960v3"]
 target = [
   { path = "study.replicates", check = "named:replicates-passed" },
 ]
@@ -517,7 +517,7 @@ severity = "error"
 problem = "This study is not confirmatory, or has no hypothesis with a claim under the original's hypothesis id."
 instruction = "Make the study confirmatory, and give it a hypothesis with the id that study.replicates.hypothesis names, with a claim. The original and the replication test one hypothesis under one id."
 why = "The criterion reads the replication's own verdict for the hypothesis. Only a confirmatory hypothesis with a claim gets its verdict from a registered test."
-sources = []
+sources = ["https://elifesciences.org/articles/71601"]
 target = [
   { path = "study.replicates", check = "named:replicates-confirmatory" },
 ]

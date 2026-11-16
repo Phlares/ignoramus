@@ -64,7 +64,7 @@ fn guide_json_lists_every_step_with_its_output() {
         ids,
         [
             "brief", "template", "fill", "payload", "import", "check", "review", "register", "run",
-            "status", "report"
+            "status", "report", "stamp", "verify"
         ]
     );
     for s in steps {
@@ -2462,6 +2462,30 @@ fn the_fill_step_explains_the_family_table() {
     let fill = steps.as_array().unwrap().iter().find(|s| s["id"] == "fill");
     let does = fill.unwrap()["does"].as_str().unwrap();
     assert!(does.contains("[family]") && does.contains("stream slot"));
+}
+
+#[test]
+fn the_guide_names_done_stamp_and_the_public_key_check() {
+    let dir = TempDir::new().unwrap();
+    let a = bin(dir.path()).args(["guide", "--json"]).assert().success();
+    let steps = json_out(&a);
+    let step = |id: &str| {
+        let s = steps.as_array().unwrap().iter().find(|s| s["id"] == id);
+        s.unwrap_or_else(|| panic!("{id}")).to_string()
+    };
+    let run = step("run");
+    assert!(
+        run.contains("done record") && run.contains("refuse"),
+        "{run}"
+    );
+    let stamp = step("stamp");
+    for part in ["stamp <id> --request", "--reply", "config.toml"] {
+        assert!(stamp.contains(part), "{part}: {stamp}");
+    }
+    let verify = step("verify");
+    for part in ["key export", "--public-key", "--records"] {
+        assert!(verify.contains(part), "{part}: {verify}");
+    }
 }
 
 #[test]

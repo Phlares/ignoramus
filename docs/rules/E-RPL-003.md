@@ -14,6 +14,10 @@ Make the study confirmatory, and give it a hypothesis with the id that study.rep
 
 The criterion reads the replication's own verdict for the hypothesis. Only a confirmatory hypothesis with a claim gets its verdict from a registered test.
 
+## Sources
+
+- <https://elifesciences.org/articles/71601>
+
 ## Applies to
 
 - `study.replicates` (named:replicates-confirmatory)

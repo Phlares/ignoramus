@@ -14,6 +14,10 @@ Replicate a hypothesis whose registered test passed in the original: its verdict
 
 A replication tests a result that a registered test already showed. The criterion is the two-trials rule: the replication succeeds when its own registered test passes, given that the original's test passed. Two results that both fail to pass are not a replication, and a pass on a point estimate was never tested. A study in the test log never counts, so its pass backs only a replication in the test log.
 
+## Sources
+
+- <https://arxiv.org/html/2204.06960v3>
+
 ## Applies to
 
 - `study.replicates` (named:replicates-passed)
