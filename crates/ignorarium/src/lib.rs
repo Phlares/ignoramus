@@ -40,6 +40,7 @@ pub mod stream;
 pub mod sys;
 pub mod telemetry;
 pub mod time;
+pub mod tsp;
 pub mod units;
 pub mod values;
 pub mod view;

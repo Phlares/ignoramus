@@ -1,0 +1,1 @@
+A file to time-stamp. The test compares its SHA-256 with the digest in local.tsr.
