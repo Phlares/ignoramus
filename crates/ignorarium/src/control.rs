@@ -3,13 +3,14 @@
 //! `deviations.jsonl` in the study folder. A stop is final: no later request replaces it,
 //! and a study with a stop record runs no further row.
 use crate::canon::canonical_line;
-use crate::derived::Register;
+use crate::derived::{ANALYSIS, Analysis, DONE, Register};
 use crate::events::{self, Event};
 use crate::files::{append_line, open_log, replace_atomic};
 use crate::home::Home;
 use crate::records::{self, Record, RecordDraft, RecordError, VerifyError};
+use crate::stream::{self, LogName, StreamError};
 use crate::time::now_rfc3339;
-use crate::{spec, sys};
+use crate::{done, spec, sys};
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -167,7 +168,8 @@ fn run_path(home: &Home, study_id: &str, name: &str, make: bool) -> io::Result<P
 }
 
 /// The exclusive lock a run holds on `run/lock` for its whole length; dropping it unlocks.
-/// Only its holder writes the study's stop trace.
+/// Only its holder writes the study's stop trace and its `done` record, and a run holds it
+/// until both its `session.end` and its `done` are written.
 pub struct RunLock {
     _file: File,
     home: Home,
@@ -268,10 +270,59 @@ impl RunLock {
         }
         Ok(record)
     }
+
+    /// Write the stop trace when the control file holds a stop; `None` when it holds none.
+    pub fn stop_pending(&self, key: &SigningKey) -> Result<Option<Record>, ControlError> {
+        let Some(Signal::Stop(reason)) = ControlFile::of(&self.home, &self.study_id).peek()? else {
+            return Ok(None);
+        };
+        self.stop(key, &reason, None).map(Some)
+    }
+
+    /// Append the study's `done` record when an end holds (`done::end_of`) and the log holds
+    /// no `done`. Both are decided under the log's lock, so a second call adds nothing.
+    /// Returns the record appended.
+    pub fn close(&self, key: &SigningKey) -> Result<Option<Record>, ControlError> {
+        let log = self.home.study_dir(&self.study_id).join("records.jsonl");
+        let mut made = records::append_with(&log, key, |log| -> Result<_, ControlError> {
+            let all = &log.records;
+            if all.iter().any(|r| r.kind == DONE) {
+                return Ok(vec![]);
+            }
+            let close = self.slot_closed_at(key, all)?;
+            let Some(done) = done::end_of(all, close.as_deref()) else {
+                return Ok(vec![]);
+            };
+            let body = serde_json::to_value(done).map_err(io::Error::other)?;
+            Ok(vec![RecordDraft::new(&self.study_id, DONE, body)])
+        })?;
+        Ok(made.pop())
+    }
+
+    /// The close time of the stream slot the analysis record of `all` promises; `None` when
+    /// it promises none or the slot is open.
+    fn slot_closed_at(
+        &self,
+        key: &SigningKey,
+        all: &[Record],
+    ) -> Result<Option<String>, ControlError> {
+        let slot = all
+            .iter()
+            .find(|r| r.kind == ANALYSIS)
+            .and_then(Analysis::of);
+        let log = all.iter().find_map(Register::of).map(|r| r.log);
+        let (Some(slot), Some(log)) = (slot.and_then(|a| a.slot), log) else {
+            return Ok(None);
+        };
+        let stream = |e: StreamError| ControlError::Records(e.to_string());
+        let stream_log = stream::Log::of(&self.home, LogName::parse(&log).map_err(stream)?);
+        (stream_log.closed_at(&key.verifying_key(), &self.study_id, slot)).map_err(stream)
+    }
 }
 
-/// Write the stop trace here when a stop is pending and no run holds the lock. `None` when
-/// no stop is pending, or when a live run holds the lock: it sees the stop at its next tick.
+/// Write the stop trace and the `done` record here when a stop is pending and no run holds
+/// the lock. `None` when no stop is pending, or when a live run holds the lock: it sees the
+/// stop at its next tick.
 pub fn stop_if_idle(
     home: &Home,
     study_id: &str,
@@ -283,7 +334,9 @@ pub fn stop_if_idle(
     let Some(lock) = RunLock::try_take(home, study_id)? else {
         return Ok(None);
     };
-    lock.stop(key, &reason, None).map(Some)
+    let stop = lock.stop(key, &reason, None)?;
+    lock.close(key)?;
+    Ok(Some(stop))
 }
 
 /// Whether a run holds the study's lock now. A shared probe, released at once: it never

@@ -9,9 +9,10 @@ use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome, Watch};
 use ignorarium::control::{
     self, ControlError, ControlFile, DeviationRow, RunLock, Signal, State, Timing,
 };
+use ignorarium::derived::{DONE, DoneRecord, SESSION_END};
 use ignorarium::home::Home;
 use ignorarium::keys;
-use ignorarium::records::Record;
+use ignorarium::records::{self, Record};
 use ignorarium::runner::{HEARTBEAT, RunError, RunPlan, RunStatus, prepare_with};
 use ignorarium::telemetry::Reading;
 use serde_json::{Value, json};
@@ -1369,4 +1370,98 @@ fn run_is_live_probes_without_taking_the_lock() {
     assert!(!control::run_is_live(&lab.home, "lv").unwrap());
     // A probe in progress does not make a run Busy: the lock is free once it returns.
     assert!(RunLock::try_take(&lab.home, "lv").unwrap().is_some());
+}
+
+/// The kinds of the records of study `id`, in order.
+fn kinds_of(lab: &Lab, id: &str) -> Vec<String> {
+    common::records_of(lab, id)
+        .into_iter()
+        .map(|r| r.kind)
+        .collect()
+}
+
+#[test]
+fn an_idle_stop_ends_with_done() {
+    let lab = lab();
+    plain(&lab, "idle-done");
+    let stop = send_stop(&lab.home, "idle-done", "abandon").unwrap();
+    let all = common::records_of(&lab, "idle-done");
+    let last = all.last().unwrap();
+    assert_eq!(last.kind, DONE);
+    let done = DoneRecord::of(last).unwrap();
+    assert_eq!(serde_json::to_value(done.end).unwrap(), "stop");
+    assert_eq!(done.by.seq, stop.seq);
+    assert_eq!(done.by.hash, records::hash(&stop));
+    assert_eq!(done.ended_at, stop.ts);
+    // A second stop adds nothing.
+    send_stop(&lab.home, "idle-done", "again");
+    assert_eq!(common::records_of(&lab, "idle-done"), all);
+}
+
+#[test]
+fn a_stop_during_a_run_puts_done_after_session_end() {
+    let lab = lab();
+    with_payload(&lab, "mid-done", &slow_row(2));
+    let plan = plan_of(&lab, "mid-done");
+    let other = once_started(&lab.home, "mid-done", 2, |home| {
+        send_stop(home, "mid-done", "manual");
+    });
+    assert_eq!(go(&plan).unwrap(), RunStatus::Stopped("manual".into()));
+    other.join().unwrap();
+    let kinds = kinds_of(&lab, "mid-done");
+    let ends: Vec<&str> = (kinds.iter().map(String::as_str))
+        .filter(|k| ["stop", SESSION_END, DONE].contains(k))
+        .collect();
+    assert_eq!(ends, ["stop", SESSION_END, DONE]);
+    assert_eq!(kinds.last().map(String::as_str), Some(DONE));
+}
+
+/// Row 1, the last, marks itself started and takes 50 ms.
+const SLOW_LAST: &str = r#"#!/bin/sh
+if [ "$IGNORARIUM_ROW" = 1 ]; then
+  echo started > "$IGNORARIUM_OUT/started"
+  sleep 0.05
+fi
+printf '{"ppl": 1.5}' > "$IGNORARIUM_OUT/values.json"
+"#;
+
+#[test]
+fn done_never_precedes_the_session_end_of_a_racing_run() {
+    let lab = lab();
+    // Each round sends the stop from the `stop` command a little later, from the middle of
+    // the last row to after the run's end.
+    for round in 0..20u64 {
+        let id = format!("race-{round}");
+        let one_unit = |t: String| {
+            t.replace("units_per_cluster = 3", "units_per_cluster = 1")
+                .replace("units = 3", "units = 1")
+        };
+        common::edited(&lab, &id, one_unit, SLOW_LAST);
+        let plan = plan_of(&lab, &id);
+        assert_eq!(plan.schedule.rows.len(), 2);
+        let root = lab.home.root.clone();
+        let (who, wait) = (id.clone(), Duration::from_millis(5 * round));
+        let other = once_started(&lab.home, &id, 1, move |_| {
+            thread::sleep(wait);
+            let mut stop = assert_cmd::Command::cargo_bin("ignorarium").unwrap();
+            stop.env("IGNORARIUM_HOME", &root);
+            stop.args(["stop", &who, "--reason", "race"])
+                .assert()
+                .success();
+        });
+        let status = go(&plan).unwrap();
+        other.join().unwrap();
+        let kinds = kinds_of(&lab, &id);
+        let done: Vec<usize> = (kinds.iter().enumerate())
+            .filter(|(_, k)| *k == DONE)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(done.len(), 1, "round {round} ({status:?}): {kinds:?}");
+
+        let later = &kinds[done[0]..];
+        assert!(
+            !later.iter().any(|k| common::is_session(k)),
+            "round {round} ({status:?}): {kinds:?}"
+        );
+    }
 }

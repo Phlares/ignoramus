@@ -202,6 +202,8 @@ fn a_stop_after_the_last_admitted_row_is_after_collection() {
     let root = common::work_of(&lab.home, "rs-stop");
     let plan = prepare_with(&lab.home, "rs-stop", &root, vec![Box::new(Level0)]).unwrap();
     assert_eq!(common::run(&plan).unwrap(), RunStatus::Done);
+    // A finished study without its `done` record, as a box that predates it leaves one.
+    common::drop_last_record(&dir);
     let ran = common::kind_of(&lab, "rs-stop", "row").len();
     assert!(
         ran < plan.schedule.rows.len(),
@@ -213,6 +215,33 @@ fn a_stop_after_the_last_admitted_row_is_after_collection() {
     let rows = common::deviations_of(&dir);
     let stop = rows.iter().find(|r| r.kind == "stop").unwrap();
     assert_eq!(stop.timing, Timing::AfterCollectionBeforeAccess);
+}
+
+#[test]
+fn a_resize_stop_ends_with_done() {
+    use ignorarium::backend::level0::Level0;
+    use ignorarium::runner::{RunStatus, prepare_with};
+    let lab = common::lab();
+    common::resize_pilot(&lab.home);
+    let files = common::reserve_files(32);
+    let before: Vec<(&str, &str)> = files.iter().map(|(p, t)| (&p[..], &t[..])).collect();
+    let far = FLAT.replace("v=99", "v=98");
+    common::register_study(&lab, "rs-done", common::resize_plan(32), &before, &far);
+    let root = common::work_of(&lab.home, "rs-done");
+    let plan = prepare_with(&lab.home, "rs-done", &root, vec![Box::new(Level0)]).unwrap();
+    assert_eq!(common::run(&plan).unwrap(), RunStatus::Done);
+    let resize = common::kind_of(&lab, "rs-done", "resize");
+    assert_eq!(resize[0].body["decision"], STOP);
+    let all = common::records_of(&lab, "rs-done");
+    let done = derived::DoneRecord::of(all.last().unwrap()).unwrap();
+    assert_eq!(serde_json::to_value(done.end).unwrap(), "resize-stop");
+    // The study holds a stream slot: it ended when the slot closed, after its last verdict.
+    let log = ignorarium::stream::Log::of(&lab.home, ignorarium::stream::LogName::Plan);
+    let key = ignorarium::keys::load(&lab.home).unwrap().unwrap();
+    let alpha = all.iter().find_map(derived::Register::of).unwrap().alpha;
+    let close = (log.closed_at(&key.verifying_key(), "rs-done", alpha.unwrap().slot)).unwrap();
+    assert!(close.is_some());
+    assert_eq!(Some(done.ended_at), close);
 }
 
 #[test]

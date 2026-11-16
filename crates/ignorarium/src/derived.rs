@@ -14,6 +14,7 @@ use std::path::Path;
 
 pub const ANALYSIS: &str = "analysis";
 pub const CHILD_ESTIMATE: &str = "child-estimate";
+pub const DONE: &str = "done";
 pub const ESTIMATE: &str = "estimate";
 pub const INPUTS: &str = "inputs";
 pub const OPENED: &str = "opened";
@@ -623,6 +624,41 @@ pub struct BoundResult {
     pub clusters: u64,
     #[serde(deserialize_with = "Option::deserialize")]
     pub value: Option<f64>,
+}
+
+/// How a study ended: it finished (`rows`), it finished after a re-size that did not
+/// continue (`resize-stop`), or a `stop` record ended it (`stop`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum End {
+    Rows,
+    ResizeStop,
+    Stop,
+}
+
+/// A record of the study's log, by its sequence number and stored hash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct By {
+    pub seq: u64,
+    pub hash: String,
+}
+
+/// The study is over: how it ended, when the end was met, and the record that met it. The
+/// record's own `ts` is when it was written, which can be much later than `ended_at`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DoneRecord {
+    pub end: End,
+    pub ended_at: String,
+    pub by: By,
+}
+
+impl DoneRecord {
+    /// `None` for another kind of record, or a body that does not parse.
+    pub fn of(r: &Record) -> Option<DoneRecord> {
+        body_of(r, DONE)
+    }
 }
 
 /// What a study's records allow a later study to read.

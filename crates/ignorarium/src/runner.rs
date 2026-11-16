@@ -1033,7 +1033,7 @@ fn no_links(base: &Path, parts: &[&str]) -> Result<(), RunError> {
 /// or SIGHUP ends the row as a stop does, and the run pauses. The library leaves signal
 /// handling to its caller. Once it holds the lock, the run passes `binary_gate`, signs a
 /// `session.start` record, and at its end, after the late stop, a `session.end` record of how
-/// it ended.
+/// it ended, then the `done` record when the study has ended (`RunLock::close`).
 pub fn run(plan: &RunPlan) -> Result<RunStatus, RunError> {
     run_as(plan, &crate::identity::current())
 }
@@ -1061,11 +1061,11 @@ pub fn run_as(plan: &RunPlan, now: &BoxIdentity) -> Result<RunStatus, RunError> 
             session = Some(start_session(plan, &log, now, changed_from)?);
             run_locked(plan, &lock, all)
         });
-    drop(lock);
     // A stop sent while this run held the lock, after its last look or before an error,
     // found the lock taken: finish it here, on every path. A failure of this check leaves
     // the run's own result, which already ended the run safely.
-    let late = control::stop_if_idle(&plan.home, &plan.study_id, &plan.key);
+    let late = lock.stop_pending(&plan.key);
+    let ended = session.is_some() || matches!(late, Ok(Some(_)));
     let result = match (result, late) {
         (Ok(_), Ok(Some(r))) => Ok(RunStatus::Stopped(why_of(&r))),
         (result, _) => result,
@@ -1074,6 +1074,12 @@ pub fn run_as(plan: &RunPlan, now: &BoxIdentity) -> Result<RunStatus, RunError> 
     if let Some(session) = session {
         let _ = end_session(plan, &log, session, &result);
     }
+    // The lock is held to here, so no `stop` from elsewhere writes `done` before the
+    // `session.end`. A failed close leaves the run's own result; the next run or stop adds it.
+    if ended {
+        let _ = lock.close(&plan.key);
+    }
+    drop(lock);
     result
 }
 

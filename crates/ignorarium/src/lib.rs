@@ -10,6 +10,7 @@ pub mod control;
 pub mod derived;
 pub mod deviations;
 pub mod diag;
+pub mod done;
 pub mod environ;
 pub mod estimate;
 pub mod events;
