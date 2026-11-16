@@ -255,6 +255,13 @@ fn the_config_reads_as_a_machine_file_does() {
 }
 
 #[test]
+fn a_config_that_cannot_be_read_is_an_error_not_the_defaults() {
+    let lab = common::lab();
+    std::fs::create_dir(lab.home.root.join("config.toml")).unwrap();
+    assert!(config::load(&lab.home.root).is_err());
+}
+
+#[test]
 fn with_needs_request() {
     let lab = common::lab();
     common::plain(&lab, "u1");
@@ -739,6 +746,16 @@ fn a_request_with_no_plan_log_folder_makes_none() {
     let text = std::fs::read_to_string(file).unwrap();
     assert!(text.starts_with("register record hash of m1: "), "{text}");
     assert!(!text.contains("plan log head"), "{text}");
+}
+
+#[test]
+fn a_file_that_cannot_be_read_is_an_io_fault_not_e_stp_002() {
+    let lab = common::lab();
+    common::plain(&lab, "g2");
+    let r = reply_over(&lab, "g2.tsr", b"x", UNIX);
+    let a = reply(&lab, "g2", &r, Some(&lab.root)).code(2);
+    assert!(!err(&a).contains("E-STP-002"), "{}", err(&a));
+    assert!(stamps_of(&lab, "g2").is_empty());
 }
 
 #[test]

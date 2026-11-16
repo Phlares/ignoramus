@@ -166,8 +166,10 @@ fn check_study(id: Option<&str>, log: &Path, key: &VerifyingKey) -> StudyCheck {
 /// A failure unless `by`, which record `seq` (a `kind` record) names, is a record before it
 /// with that stored hash.
 fn names_earlier(id: &str, seals: &[Seal], seq: u64, kind: &str, by: &By) -> Option<String> {
-    let seal = usize::try_from(by.seq).ok().and_then(|i| seals.get(i));
-    let held = seal.is_some_and(|s| s.seq < seq && s.hash == by.hash);
+    // A checked log numbers its records from 0, so `seals[i]` is record `i`.
+    let earlier = usize::try_from(seq).ok().and_then(|n| seals.get(..n));
+    let seal = usize::try_from(by.seq).ok().and_then(|i| earlier?.get(i));
+    let held = seal.is_some_and(|s| s.hash == by.hash);
     (!held).then(|| {
         format!(
             "study {id}: record {seq}: the {kind} record names no earlier record {} with hash {}",

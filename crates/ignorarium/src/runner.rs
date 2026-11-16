@@ -153,7 +153,8 @@ pub enum RunError {
     NoKey,
     /// Another run of this study holds the run lock.
     Busy,
-    /// The log holds `done`, read under the log's lock before this run appended anything to it.
+    /// The log holds `done`, found under the lock that guards this run's first append (the log's
+    /// lock for `inputs`, the run lock for a run), before this run appended anything to it.
     Ended,
     /// The box binary differs from the last session's, or the register record's when no
     /// session exists, and no change was declared. Each side as `identity::binary_text`.

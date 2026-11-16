@@ -72,6 +72,16 @@ fn an_analysis_that_promises_nothing_ends_the_study_itself() {
 }
 
 #[test]
+fn an_estimate_before_the_analysis_does_not_end_the_study() {
+    let mut bodies = finished();
+    bodies.swap(1, 2);
+    bodies[2].1["estimates"] = json!(0);
+    let all = log(&bodies);
+    assert_eq!(all[1].kind, "estimate");
+    assert_eq!(end_of(&all, None), done(&all, End::Rows, &all[2].ts, 2));
+}
+
+#[test]
 fn a_resize_that_stops_ends_as_a_resize_stop() {
     let resize = |decision: &str| {
         let reason = (decision != "continue").then_some("short");

@@ -244,7 +244,10 @@ pub fn parse(der: &[u8]) -> Result<Reply, TspError> {
 /// digits with no trailing zero (X.690 11.7); digits past the third are cut.
 fn unix_millis(time: AnyRef) -> Result<i64, TspError> {
     time.tag().assert_eq(Tag::GeneralizedTime).map_err(bad)?;
-    let text = (time.value().strip_suffix(b"Z")).ok_or_else(|| bad("the time is not in UTC"))?;
+    let text = time
+        .value()
+        .strip_suffix(b"Z")
+        .ok_or_else(|| bad("the time is not in UTC"))?;
     let mut parts = text.splitn(2, |&b| b == b'.');
     let whole = parts.next().unwrap_or_default();
     let mut ms = 0;
@@ -427,7 +430,9 @@ pub fn fixture(digest: &[u8], unix: u64, authority: Option<&str>) -> Vec<u8> {
         accuracy: None,
         ordering: None,
         nonce: None,
-        tsa: (name.as_deref()).map(|n| AnyRef::new(DIRECTORY_NAME, n).unwrap()),
+        tsa: name
+            .as_deref()
+            .map(|n| AnyRef::new(DIRECTORY_NAME, n).unwrap()),
         extensions: Rest(&[]),
     };
     let tst = tst.to_der().unwrap();
@@ -458,8 +463,16 @@ pub fn fixture(digest: &[u8], unix: u64, authority: Option<&str>) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Name, serial_hex, shown};
-    use der::Decode;
+    use super::{Name, PkiStatusInfo, serial_hex, shown};
+    use der::{Decode, Encode};
+
+    #[test]
+    fn skipped_trailing_fields_encode_back() {
+        // status 0, then a statusString that the parser does not read.
+        let der = [0x30, 0x06, 0x02, 0x01, 0x00, 0x0c, 0x01, 0x61];
+        let info = PkiStatusInfo::from_der(&der).unwrap();
+        assert_eq!(info.to_der().unwrap(), der);
+    }
 
     #[test]
     fn the_serial_has_no_sign_byte() {
@@ -508,6 +521,7 @@ mod tests {
             ),
             ("300d310b300906035504030c026101", r"CN=a\01"),
             ("300c310a300806035504030c017f", r"CN=\7f"),
+            ("300e310c300a06035504030c03612362", "CN=a#b"),
             ("300d310b300906035504030c02c3a9", "CN=\u{e9}"),
             (
                 "30163114300806035504030c01783008060355040a0c0179",

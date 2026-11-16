@@ -741,8 +741,9 @@ impl Stamp {
 }
 
 /// The flag for `s` when it is dated before the second of the newest record it covers: the
-/// head record, else the register record. `stamped_at` holds whole seconds only, so a reply in
-/// the same second as its head is not flagged. A head the log does not hold also falls back to
+/// head record, else the register record. Many authorities give whole seconds, and a record's
+/// `ts` has milliseconds, so the two are compared at whole seconds: a reply in the same second
+/// as its head is not flagged. A head the log does not hold also falls back to
 /// the register record; `verify` fails on such a head. `ts` and `stamped_at` share one UTC
 /// format, so comparing the strings compares the times.
 pub fn stamp_flag(all: &[Record], s: &Stamp) -> Option<String> {

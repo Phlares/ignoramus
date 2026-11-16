@@ -207,3 +207,70 @@ fn a_certificate_set_with_a_repeat_parses() {
         Some("CN=ignorarium test authority")
     );
 }
+
+/// The openssl-made reply with its first signer info naming the certificate by key identifier.
+fn named_by_key() -> Vec<u8> {
+    // Reply, token content, signed data, signer infos, the first, its signer identifier.
+    edit_at(&read("local.tsr"), &[1, 1, 0, 4, 0, 1], |sid| {
+        assert_eq!(sid[0], 0x30);
+        tlv(0x80, &[1, 2, 3, 4])
+    })
+}
+
+#[test]
+fn a_signer_named_by_key_identifier_gives_no_authority() {
+    assert_eq!(
+        tsp::parse(&read("local.tsr")).unwrap().authority.as_deref(),
+        Some("CN=ignorarium test authority")
+    );
+    let reply = tsp::parse(&named_by_key()).unwrap();
+    assert!(reply.granted);
+    assert_eq!(reply.authority, None);
+}
+
+#[test]
+fn a_tsa_that_is_not_a_directory_name_gives_no_authority() {
+    // The `tsa` field, `[0]` explicit, holds a GeneralName: a URI `[6]` or an e-mail `[1]`.
+    let reply = tsp::fixture(&[7u8; 32], 1_794_350_509, Some("CN=T"));
+    let path = [&TST_INFO[..], &[5, 0]].concat();
+    for (tag, value) in [(0x86, &b"http://tsa.test"[..]), (0x81, b"tsa@test")] {
+        let der = edit_at(&reply, &path, |old| {
+            assert_eq!(old[0], 0xa4);
+            tlv(tag, value)
+        });
+        let reply = tsp::parse(&der).unwrap();
+        assert!(reply.granted);
+        assert_eq!(reply.authority, None, "{tag:#x}");
+    }
+}
+
+/// `fixture`'s reply with its status INTEGER set to `status`.
+fn with_status(status: u8) -> Vec<u8> {
+    let reply = tsp::fixture(&[7u8; 32], 1_794_350_509, None);
+    edit_at(&reply, &[0, 0], |_| tlv(0x02, &[status]))
+}
+
+#[test]
+fn a_refusal_status_parses_and_an_unknown_one_does_not() {
+    for status in 2..=5 {
+        let reply = tsp::parse(&with_status(status)).unwrap();
+        assert!(!reply.granted, "{status}");
+        assert!(reply.digest.is_empty(), "{status}");
+    }
+    for status in [6, 7, 100] {
+        let e = tsp::parse(&with_status(status)).unwrap_err();
+        assert!(e.to_string().contains("unknown status"), "{status}: {e}");
+    }
+}
+
+#[test]
+fn a_time_that_is_not_utc_is_refused() {
+    for time in [
+        &b"20261110224149+0000"[..],
+        b"20261110224149",
+        b"20261110224149-0500",
+    ] {
+        let e = tsp::parse(&stamped_at(time)).unwrap_err();
+        assert!(e.to_string().starts_with("not a time-stamp reply"), "{e}");
+    }
+}

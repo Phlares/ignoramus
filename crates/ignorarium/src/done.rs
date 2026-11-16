@@ -23,14 +23,14 @@ pub fn end_of(all: &[Record], slot_closed_at: Option<&str>) -> Option<DoneRecord
 }
 
 /// The end of a finished study, met by the last estimate or verdict it counts, else by its
-/// analysis record.
+/// analysis record. The analysis record is in `after` and never counts.
 fn finished<'a>(all: &'a [Record], close: Option<&str>) -> Option<(End, String, &'a Record)> {
     let state = StudyState::of(Some(all.to_vec()), |_, _| Ok(close.is_some()));
     if !matches!(state, Ok(StudyState::Finished(_))) {
         return None;
     }
     let at = all.iter().position(|r| r.kind == ANALYSIS)?;
-    let after = &all[at + 1..];
+    let after = &all[at..];
     let by = counted(after).last().unwrap_or(&all[at]);
     let end = match crate::resize::recorded(all).ok().flatten() {
         Some(r) if r.decision != CONTINUE => End::ResizeStop,
