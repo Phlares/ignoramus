@@ -1,7 +1,7 @@
 //! `register`: a person approves a checked plan; the box stores it, its payload and its
 //! inputs, and logs it.
 use super::check::{self, Assessed, HomeRecords};
-use super::{CliError, Ctx, Done};
+use super::{CliError, Ctx, Done, refusal};
 use crate::backend::output::file_digest;
 use crate::canon::to_canonical;
 use crate::derived::{Alpha, Carried, GatePrediction, PinDeviated, REGISTER, Register, Resolved};
@@ -40,23 +40,6 @@ pub fn approve(typed: &str, spec_hash: &str) -> bool {
                 && p.bytes()
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         })
-}
-
-/// A refusal for a code that only the command line raises; the text comes from the rule
-/// file. `found` says what this case found, when the rule text alone does not.
-fn refusal(code: &str, found: &str) -> CliError {
-    let text = rules::builtin()
-        .iter()
-        .find(|r| r.code == code)
-        .map_or(String::new(), |r| {
-            format!("{} {}", r.problem, r.instruction)
-        });
-    let found = if found.is_empty() {
-        String::new()
-    } else {
-        format!(" Found: {found}.")
-    };
-    CliError::refuse(format!("{code}: {text}{found} See docs/rules/{code}.md"))
 }
 
 fn io(what: &str, e: impl std::fmt::Display) -> CliError {

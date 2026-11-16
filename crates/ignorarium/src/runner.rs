@@ -320,6 +320,7 @@ impl From<ControlError> for RunError {
         match e {
             ControlError::Io(e) => RunError::Io(e.to_string()),
             ControlError::Records(e) => RunError::Records(e),
+            ControlError::Done => RunError::Records(ControlError::Done.to_string()),
         }
     }
 }

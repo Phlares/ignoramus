@@ -84,6 +84,11 @@ impl ControlFile {
         self.swap(false, |s| s)
     }
 
+    /// Drop the pending request, a stop included. Only for a study that is done.
+    pub fn clear(&self) -> io::Result<()> {
+        self.swap(true, |_| None).map(drop)
+    }
+
     fn send(&self, next: Signal) -> io::Result<()> {
         self.swap(true, |held| Some(Signal::then(held, next.clone())))
             .map(drop)
@@ -207,7 +212,8 @@ impl RunLock {
     /// deviation row and a `run.stop` event. `in_flight` names a row the caller's run
     /// killed; a row a dead box left running is killed here while its leader lives. Each
     /// piece is written once: a second call adds nothing, and a later call writes what an
-    /// earlier one could not. Returns the study's stop record.
+    /// earlier one could not. Returns the study's stop record. A log that holds `done` and no
+    /// stop record gets none: the request is cleared and the result is `ControlError::Done`.
     pub fn stop(
         &self,
         key: &SigningKey,
@@ -217,33 +223,48 @@ impl RunLock {
         let (home, id) = (&self.home, self.study_id.as_str());
         let dir = home.study_dir(id);
         let log = dir.join("records.jsonl");
-        let all = records::read_all(&log, &key.verifying_key())?;
-        let record = match all.iter().find(|r| r.kind == "stop") {
-            Some(r) => r.clone(),
-            None => {
-                let (left, note) = match end_orphan(home, id) {
-                    Ok(Some(o)) => (Some(o.row), Some(o.note)),
-                    Ok(None) => (None, None),
-                    Err(e) => (
-                        None,
-                        Some(format!(
-                            "cannot end the row a dead box left: {e}; group not killed"
-                        )),
-                    ),
-                };
-                let rows_done = records::row_indices(&all).len();
-                let body = json!({
-                    "who": who(),
-                    "when": now_rfc3339(),
-                    "why": reason,
-                    "label_before": spec_label(&dir),
-                    "label_after": LABEL_AFTER_STOP,
-                    "rows_done": rows_done,
-                    "in_flight": in_flight.or(left),
-                    "note": note,
-                });
-                records::append(&log, key, RecordDraft::new(id, "stop", body))?
+        let mut all = Vec::new();
+        let made = records::append_with(&log, key, |log| -> Result<_, ControlError> {
+            all.clone_from(&log.records);
+            if all.iter().any(|r| r.kind == "stop") {
+                return Ok(vec![]);
             }
+            if all.iter().any(|r| r.kind == DONE) {
+                return Err(ControlError::Done);
+            }
+            let (left, note) = match end_orphan(home, id) {
+                Ok(Some(o)) => (Some(o.row), Some(o.note)),
+                Ok(None) => (None, None),
+                Err(e) => (
+                    None,
+                    Some(format!(
+                        "cannot end the row a dead box left: {e}; group not killed"
+                    )),
+                ),
+            };
+            let body = json!({
+                "who": who(),
+                "when": now_rfc3339(),
+                "why": reason,
+                "label_before": spec_label(&dir),
+                "label_after": LABEL_AFTER_STOP,
+                "rows_done": records::row_indices(&all).len(),
+                "in_flight": in_flight.or(left),
+                "note": note,
+            });
+            Ok(vec![RecordDraft::new(id, "stop", body)])
+        });
+        let record = match made {
+            Ok(mut made) => match made.pop() {
+                Some(r) => r,
+                None => (all.iter().find(|r| r.kind == "stop").cloned())
+                    .ok_or_else(|| ControlError::Records("no stop record".into()))?,
+            },
+            Err(ControlError::Done) => {
+                ControlFile::of(home, id).clear()?;
+                return Err(ControlError::Done);
+            }
+            Err(e) => return Err(e),
         };
         let why = record.body["why"].as_str().unwrap_or(reason);
         State::Stopped(why.into()).write(home, id)?;
@@ -276,7 +297,10 @@ impl RunLock {
         let Some(Signal::Stop(reason)) = ControlFile::of(&self.home, &self.study_id).peek()? else {
             return Ok(None);
         };
-        self.stop(key, &reason, None).map(Some)
+        match self.stop(key, &reason, None) {
+            Err(ControlError::Done) => Ok(None),
+            r => r.map(Some),
+        }
     }
 
     /// Append the study's `done` record when an end holds (`done::end_of`) and the log holds
@@ -321,8 +345,9 @@ impl RunLock {
 }
 
 /// Write the stop trace and the `done` record here when a stop is pending and no run holds
-/// the lock. `None` when no stop is pending, or when a live run holds the lock: it sees the
-/// stop at its next tick.
+/// the lock. `None` when no stop is pending, when the study is done, or when a live run
+/// holds the lock: it sees the stop at its next tick. A `done` that cannot be written leaves
+/// the stop standing; the next stop adds it.
 pub fn stop_if_idle(
     home: &Home,
     study_id: &str,
@@ -334,8 +359,11 @@ pub fn stop_if_idle(
     let Some(lock) = RunLock::try_take(home, study_id)? else {
         return Ok(None);
     };
-    let stop = lock.stop(key, &reason, None)?;
-    lock.close(key)?;
+    let stop = match lock.stop(key, &reason, None) {
+        Err(ControlError::Done) => return Ok(None),
+        r => r?,
+    };
+    let _ = lock.close(key);
     Ok(Some(stop))
 }
 
@@ -360,7 +388,8 @@ pub fn run_is_live(home: &Home, study_id: &str) -> io::Result<bool> {
 const STOP_POLL: Duration = Duration::from_millis(50);
 
 /// Wait up to `wait` for the study's stop record: write the trace here when no run holds
-/// the lock, else let the live run write it. `None` when the wait runs out.
+/// the lock, else let the live run write it. `None` when the wait runs out;
+/// `ControlError::Done` when the study ended with no stop record and the request is gone.
 pub fn await_stop(
     home: &Home,
     study_id: &str,
@@ -374,8 +403,13 @@ pub fn await_stop(
             return Ok(Some(r));
         }
         let all = records::read_all(&log, &key.verifying_key())?;
-        if let Some(r) = all.into_iter().find(|r| r.kind == "stop") {
-            return Ok(Some(r));
+        if let Some(r) = all.iter().find(|r| r.kind == "stop") {
+            return Ok(Some(r.clone()));
+        }
+        // A run that holds the lock can write `done` before it sees the request; the request
+        // stays until a stop that takes the lock clears it.
+        if all.iter().any(|r| r.kind == DONE) && ControlFile::of(home, study_id).peek()?.is_none() {
+            return Err(ControlError::Done);
         }
         if start.elapsed() >= wait {
             return Ok(None);
@@ -546,6 +580,8 @@ pub enum ControlError {
     Io(io::Error),
     /// The record log does not verify or cannot take a record.
     Records(String),
+    /// The study is done: no stop record may follow its `done` record.
+    Done,
 }
 
 impl fmt::Display for ControlError {
@@ -553,6 +589,7 @@ impl fmt::Display for ControlError {
         match self {
             ControlError::Io(e) => write!(f, "I/O failed: {e}"),
             ControlError::Records(e) => write!(f, "records: {e}"),
+            ControlError::Done => write!(f, "the study is done"),
         }
     }
 }

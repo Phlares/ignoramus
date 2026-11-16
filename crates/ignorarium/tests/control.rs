@@ -529,8 +529,10 @@ fn deviation_row_has_the_five_stage_timing() {
     assert!(Timing::of_stop(3, false, missing).is_err());
     // A stop after the last row is after collection.
     let lab = lab();
-    plain(&lab, "after");
+    let dir = plain(&lab, "after");
     assert_eq!(go(&plan_of(&lab, "after")).unwrap(), RunStatus::Done);
+    // A finished study without its `done` record, as a box that predates it leaves one.
+    common::drop_last_record(&dir);
     send_stop(&lab.home, "after", "late").unwrap();
     let devs = deviations_of(&lab, "after");
     assert_eq!(devs[0]["timing"], "after-collection-before-access");
@@ -1145,6 +1147,8 @@ fn a_later_stop_fills_in_what_an_earlier_one_could_not_write() {
     let lab = lab();
     let dir = plain(&lab, "repair");
     assert_eq!(go(&plan_of(&lab, "repair")).unwrap(), RunStatus::Done);
+    // A finished study without its `done` record, as a box that predates it leaves one.
+    common::drop_last_record(&dir);
     // A corrupt spec: the stop record and the state land, the deviation row cannot.
     let spec = std::fs::read(dir.join("spec.toml")).unwrap();
     std::fs::write(dir.join("spec.toml"), "{").unwrap();
@@ -1445,9 +1449,11 @@ fn done_never_precedes_the_session_end_of_a_racing_run() {
             thread::sleep(wait);
             let mut stop = assert_cmd::Command::cargo_bin("ignorarium").unwrap();
             stop.env("IGNORARIUM_HOME", &root);
-            stop.args(["stop", &who, "--reason", "race"])
-                .assert()
-                .success();
+            // A stop that comes after the run's `done` is refused.
+            let a = stop.args(["stop", &who, "--reason", "race"]).assert();
+            let out = a.get_output();
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success() || err.contains("E-DON-001"), "{err}");
         });
         let status = go(&plan).unwrap();
         other.join().unwrap();
@@ -1464,4 +1470,76 @@ fn done_never_precedes_the_session_end_of_a_racing_run() {
             "round {round} ({status:?}): {kinds:?}"
         );
     }
+}
+
+#[test]
+fn a_stale_stop_request_on_a_done_study_is_cleared() {
+    let lab = lab();
+    plain(&lab, "stale");
+    assert_eq!(go(&plan_of(&lab, "stale")).unwrap(), RunStatus::Done);
+    let before = common::records_of(&lab, "stale");
+    assert_eq!(before.last().unwrap().kind, DONE);
+    let got = try_stop(&lab.home, "stale", "late").unwrap();
+    assert_eq!(got, None);
+    assert!(kind_of(&lab, "stale", "stop").is_empty());
+    assert_eq!(common::records_of(&lab, "stale"), before);
+    assert_eq!(control_of(&lab, "stale").peek().unwrap(), None);
+    // A run's late look at the request meets the same end.
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    control_of(&lab, "stale").request_stop("later").unwrap();
+    let lock = RunLock::try_take(&lab.home, "stale").unwrap().unwrap();
+    assert!(lock.stop_pending(&key).unwrap().is_none());
+    assert!(matches!(
+        lock.stop(&key, "x", None),
+        Err(ControlError::Done)
+    ));
+    assert_eq!(common::records_of(&lab, "stale"), before);
+}
+
+#[test]
+fn await_stop_on_a_done_study_waits_for_the_request_to_clear() {
+    let lab = lab();
+    plain(&lab, "aw-done");
+    assert_eq!(go(&plan_of(&lab, "aw-done")).unwrap(), RunStatus::Done);
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    control_of(&lab, "aw-done").request_stop("late").unwrap();
+    // While a run holds the lock, the request stays and the wait runs out.
+    let held = RunLock::try_take(&lab.home, "aw-done").unwrap().unwrap();
+    let wait = Duration::from_millis(100);
+    let got = control::await_stop(&lab.home, "aw-done", &key, wait).unwrap();
+    assert!(got.is_none());
+    drop(held);
+    let got = control::await_stop(&lab.home, "aw-done", &key, Duration::from_secs(10));
+    assert!(matches!(got, Err(ControlError::Done)), "{got:?}");
+    assert_eq!(control_of(&lab, "aw-done").peek().unwrap(), None);
+    assert!(kind_of(&lab, "aw-done", "stop").is_empty());
+}
+
+#[test]
+fn a_stopped_log_without_done_is_repaired_by_stop() {
+    let lab = lab();
+    let dir = plain(&lab, "cut");
+    send_stop(&lab.home, "cut", "first").unwrap();
+    common::drop_last_record(&dir);
+    let before = kinds_of(&lab, "cut");
+    assert_eq!(before.last().map(String::as_str), Some("stop"));
+    let unchanged = common::files_under(&dir);
+    let mut run = common::bin(&lab);
+    run.current_dir(common::work(&lab, "cut"));
+    let a = run.args(["run", "cut"]).assert().code(1);
+    let err = String::from_utf8_lossy(&a.get_output().stderr).into_owned();
+    assert!(err.contains("is stopped: first"), "{err}");
+    assert_eq!(common::files_under(&dir), unchanged);
+    let a = common::bin(&lab)
+        .args(["stop", "cut", "--reason", "y"])
+        .assert()
+        .code(0);
+    let after = kinds_of(&lab, "cut");
+    assert_eq!(after[..before.len()], before);
+    assert_eq!(after[before.len()..], [DONE]);
+    assert_eq!(kind_of(&lab, "cut", "stop")[0].body["why"], "first");
+    let out = common::text(&a);
+    assert!(out.contains("the first stop's reason stands"), "{out}");
+    let done = common::records_of(&lab, "cut").last().unwrap().seq;
+    assert!(out.contains(&format!("done record: {done}")), "{out}");
 }

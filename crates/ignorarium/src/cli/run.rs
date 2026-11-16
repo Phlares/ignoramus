@@ -1,5 +1,5 @@
 //! `run`: prepare a registered study and run its rows.
-use super::{CliError, Ctx, Done, Run, out, refuse_if_stopped, registered};
+use super::{CliError, Ctx, Done, Run, out, refuse_if_done, refuse_if_stopped, registered};
 use crate::control::{ControlFile, Signal, run_is_live};
 use crate::runner::{self, RunError, RunStatus};
 use crate::{machine, sys};
@@ -19,6 +19,7 @@ pub fn go(
     box_changed: Option<String>,
 ) -> Run {
     let (home, _, all) = registered(ctx, id)?;
+    refuse_if_done(id, &all)?;
     refuse_if_stopped(id, &all)?;
     let control = ControlFile::of(home, id);
     // A live run reads the request at its next row boundary; this call starts nothing.

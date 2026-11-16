@@ -606,6 +606,9 @@ fn a_run_the_binary_gate_refuses_writes_no_done() {
     assert!(run_as(&plan_of(&lab, "gate-done"), &rebuilt('0')).is_err());
     let after = kinds_of(&lab, "gate-done");
     assert_eq!(after[before.len()..], ["stop", DONE]);
+    // The last verdict comes before the new stop record, so the rows end the study.
+    let done = DoneRecord::of(common::records_of(&lab, "gate-done").last().unwrap()).unwrap();
+    assert_eq!(serde_json::to_value(done.end).unwrap(), "rows");
 }
 
 #[test]

@@ -218,6 +218,55 @@ fn a_stop_after_the_last_admitted_row_is_after_collection() {
 }
 
 #[test]
+fn a_stop_whose_done_cannot_be_written_still_stops() {
+    use ignorarium::backend::level0::Level0;
+    use ignorarium::control::{self, ControlFile};
+    use ignorarium::runner::{RunStatus, prepare_with};
+    let lab = common::lab();
+    common::resize_pilot(&lab.home);
+    let files = common::reserve_files(32);
+    let before: Vec<(&str, &str)> = files.iter().map(|(p, t)| (&p[..], &t[..])).collect();
+    let dir = common::register_study(&lab, "rs-close", common::resize_plan(32), &before, FLAT);
+    let root = common::work_of(&lab.home, "rs-close");
+    let plan = prepare_with(&lab.home, "rs-close", &root, vec![Box::new(Level0)]).unwrap();
+    assert_eq!(common::run(&plan).unwrap(), RunStatus::Done);
+    common::drop_last_record(&dir);
+    // A stream log that does not verify: the close cannot read the slot's close time.
+    let path = ignorarium::stream::Log::of(&lab.home, ignorarium::stream::LogName::Plan)
+        .path()
+        .to_path_buf();
+    let good = std::fs::read(&path).unwrap();
+    let mut bad = good.clone();
+    let close = bad
+        .windows(14)
+        .rposition(|w| w == b"\"stream.close\"")
+        .unwrap();
+    let digit = close + bad[close..].iter().position(u8::is_ascii_digit).unwrap();
+    bad[digit] = if bad[digit] == b'7' { b'8' } else { b'7' };
+    std::fs::write(&path, &bad).unwrap();
+    let key = ignorarium::keys::load(&lab.home).unwrap().unwrap();
+    ControlFile::of(&lab.home, "rs-close")
+        .request_stop("x")
+        .unwrap();
+    let stop = control::stop_if_idle(&lab.home, "rs-close", &key).unwrap();
+    assert_eq!(stop.unwrap().kind, "stop");
+    let kinds = || -> Vec<String> {
+        (common::records_of(&lab, "rs-close").into_iter())
+            .map(|r| r.kind)
+            .collect()
+    };
+    assert_eq!(kinds().last().map(String::as_str), Some("stop"));
+    // The next stop adds the missing `done`.
+    std::fs::write(&path, &good).unwrap();
+    assert!(
+        control::stop_if_idle(&lab.home, "rs-close", &key)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(kinds().last().map(String::as_str), Some(derived::DONE));
+}
+
+#[test]
 fn a_resize_stop_ends_with_done() {
     use ignorarium::backend::level0::Level0;
     use ignorarium::runner::{RunStatus, prepare_with};

@@ -1062,3 +1062,12 @@ instruction = "Put the payload in `payload/` under the study root: an executable
 why = "The box copies the payload folder at registration and every row runs that copy. A copy of other code than the pinned code, or code outside the folder, would make the records name code that did not run."
 sources = []
 check = "documented"
+
+[[rule]]
+code = "E-DON-001"
+severity = "error"
+problem = "The study is done."
+instruction = "Read it with `report`, `status` or `verify`. Start new work as a new study."
+why = "A signed `done` record ends the study and states how and when. A row, a session or a stop after it would change a study whose end is already fixed, so `run`, `resume`, `stop` and `pause` refuse before they write anything."
+sources = []
+check = "documented"

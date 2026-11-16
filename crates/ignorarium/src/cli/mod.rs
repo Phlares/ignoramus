@@ -1,6 +1,7 @@
 //! The command line: argument parsing, the shared context, and one event per call.
 use crate::events::{self, Event};
 use crate::home::Home;
+use crate::rules;
 use crate::sys;
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
@@ -493,6 +494,34 @@ fn registered<'a>(
         return Err(not_registered(id));
     }
     Ok((home, key, all))
+}
+
+/// A refusal for a code that only the command line raises; the text comes from the rule
+/// file. `found` says what this case found, when the rule text alone does not.
+pub fn refusal(code: &str, found: &str) -> CliError {
+    let text = rules::builtin()
+        .iter()
+        .find(|r| r.code == code)
+        .map_or(String::new(), |r| {
+            format!("{} {}", r.problem, r.instruction)
+        });
+    let found = if found.is_empty() {
+        String::new()
+    } else {
+        format!(" Found: {found}.")
+    };
+    CliError::refuse(format!("{code}: {text}{found} See docs/rules/{code}.md"))
+}
+
+/// Refuse a study whose log holds a `done` record (E-DON-001).
+pub fn refuse_if_done(id: &str, all: &[crate::records::Record]) -> Result<(), CliError> {
+    match all.iter().find(|r| r.kind == crate::derived::DONE) {
+        Some(r) => Err(refusal(
+            "E-DON-001",
+            &format!("study {id} has a done record, seq {}", r.seq),
+        )),
+        None => Ok(()),
+    }
 }
 
 /// Refuse a study that has a stop record.

@@ -3,7 +3,7 @@
 use super::{CliError, Ctx, Done, Run, out, registered, stopped_why};
 use crate::canon::sha256_hex;
 use crate::control::{ControlFile, Signal, State, run_is_live};
-use crate::derived::{self, SpawnStop};
+use crate::derived::{self, DoneRecord, SpawnStop};
 use crate::diag::printable;
 use crate::home::Home;
 use crate::records::Record;
@@ -208,6 +208,10 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
         json!({ "decision": r.decision, "strata": strata })
     });
     let triggers = triggers(spec, &all, &shown).map_err(|e| bad(&e))?;
+    let ended = (all.iter()).find_map(|r| {
+        let d = DoneRecord::of(r)?;
+        Some(json!({ "end": d.end, "ended_at": d.ended_at, "seq": r.seq }))
+    });
     let stopped_children: Vec<String> = (all.iter().filter_map(SpawnStop::of))
         .flat_map(|s| s.children)
         .map(|c| relabelled(&shown, &c))
@@ -217,6 +221,7 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
         "state": state,
         "detail": detail,
         "request": request,
+        "ended": ended,
         "done": done,
         "total": total,
         "rows_per_hour": per_hour,
@@ -266,6 +271,9 @@ fn render(r: &Value) -> String {
     }
     if let Some(q) = r["request"].as_str() {
         s.push_str(&format!("request: {q}\n"));
+    }
+    if let (Some(end), Some(at)) = (r["ended"]["end"].as_str(), r["ended"]["ended_at"].as_str()) {
+        s.push_str(&format!("ended: {end} at {at}\n"));
     }
     s.push_str(&format!("rows: {}/{}\n", r["done"], r["total"]));
     if let Some(d) = r["resize"]["decision"].as_str() {

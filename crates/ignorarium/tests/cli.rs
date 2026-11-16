@@ -2508,3 +2508,69 @@ fn box_changed_refuses_a_blank_reason() {
     }
     assert!(common::kind_of(&lab, "b2", SESSION_START).is_empty());
 }
+
+#[test]
+fn stop_keeps_the_reason_as_typed() {
+    let lab = common::lab();
+    common::plain(&lab, "typed");
+    common::bin(&lab)
+        .args(["stop", "typed", "--reason", " x "])
+        .assert()
+        .code(0);
+    let stops = common::kind_of(&lab, "typed", "stop");
+    assert_eq!(stops.len(), 1);
+    assert_eq!(stops[0].body["why"], " x ");
+}
+
+#[test]
+fn stop_on_an_unreadable_log_still_sends_the_request() {
+    use ignorarium::control::{ControlFile, Signal};
+    let lab = common::lab();
+    let dir = common::plain(&lab, "torn");
+    let log = dir.join("records.jsonl");
+    let mut bytes = std::fs::read(&log).unwrap();
+    bytes.extend_from_slice(b"{\"cut\":");
+    std::fs::write(&log, &bytes).unwrap();
+    let a = common::bin(&lab)
+        .args(["stop", "torn", "--reason", "torn log"])
+        .assert()
+        .code(2);
+    let err = String::from_utf8_lossy(&a.get_output().stderr).into_owned();
+    assert!(err.contains("the stop request is sent, but"), "{err}");
+    assert_eq!(
+        ControlFile::of(&lab.home, "torn").peek().unwrap(),
+        Some(Signal::Stop("torn log".into()))
+    );
+}
+
+#[test]
+fn status_shows_the_end() {
+    let lab = common::lab();
+    common::plain(&lab, "ends");
+    let s = common::status(&lab, "ends");
+    assert_eq!(s["ended"], Value::Null);
+    let a = common::bin(&lab)
+        .args(["status", "ends"])
+        .assert()
+        .success();
+    assert!(!common::text(&a).contains("ended:"), "{}", common::text(&a));
+    common::bin(&lab)
+        .current_dir(common::work(&lab, "ends"))
+        .args(["run", "ends"])
+        .assert()
+        .code(0);
+    let all = common::records_of(&lab, "ends");
+    let done = all.last().unwrap();
+    let body = ignorarium::derived::DoneRecord::of(done).unwrap();
+    let s = common::status(&lab, "ends");
+    assert_eq!(
+        s["ended"],
+        json!({"end": "rows", "ended_at": body.ended_at, "seq": done.seq})
+    );
+    let a = common::bin(&lab)
+        .args(["status", "ends"])
+        .assert()
+        .success();
+    let line = format!("ended: rows at {}\n", body.ended_at);
+    assert!(common::text(&a).contains(&line), "{}", common::text(&a));
+}

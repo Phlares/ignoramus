@@ -88,6 +88,29 @@ pub fn drop_last_record(dir: &Path) {
     std::fs::write(&log, &text[..keep]).unwrap();
 }
 
+/// Every file and folder under `dir`, by its path, with its bytes (a folder has none, a link
+/// its target).
+pub fn files_under(dir: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            let m = std::fs::symlink_metadata(&p).unwrap();
+            if m.is_dir() {
+                out.insert(p.clone(), Vec::new());
+                todo.push(p);
+            } else if m.is_symlink() {
+                let to = std::fs::read_link(&p).unwrap();
+                out.insert(p, to.into_os_string().into_encoded_bytes());
+            } else {
+                out.insert(p.clone(), std::fs::read(&p).unwrap());
+            }
+        }
+    }
+    out
+}
+
 /// `runner::run` as the suite's box.
 pub fn run(plan: &RunPlan) -> Result<RunStatus, RunError> {
     runner::run_as(plan, box_identity())

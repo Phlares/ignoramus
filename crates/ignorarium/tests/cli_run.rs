@@ -417,6 +417,8 @@ fn stop_writes_a_record_and_status_shows_stopped() {
     let s = status(&lab, "x1");
     assert_eq!(s["state"], "stopped");
     assert_eq!(s["detail"], "enough");
+    // A stopped log without its `done` record, so the stop refuses and not the end.
+    common::drop_last_record(&lab.home.study_dir("x1"));
     let a = bin_at(&lab, "x1").args(["run", "x1"]).assert().code(1);
     assert!(err(&a).contains("stopped"), "{}", err(&a));
     let a = bin_at(&lab, "x1").args(["resume", "x1"]).assert().code(1);
@@ -801,7 +803,9 @@ fn resume_with_box_changed_passes_the_gate() {
     assert_eq!(start.reason.as_deref(), Some(reason));
     let deviations = std::fs::read_to_string(lab.home.study_dir(id).join("deviations.jsonl"));
     assert!(deviations.unwrap().contains("\"box-changed\""));
-    // The binary that ran is the baseline now: a declaration of nothing refuses.
+    // The binary that ran is the baseline now: a declaration of nothing refuses. The finished
+    // log loses its `done` record, which would refuse first.
+    common::drop_last_record(&lab.home.study_dir(id));
     let a = (bin_at(&lab, id).args(["run", id, "--box-changed", reason]))
         .assert()
         .code(1);
@@ -992,6 +996,8 @@ fn pause_refuses_a_stopped_study() {
         .args(["stop", "ps", "--reason", "x"])
         .assert()
         .code(0);
+    // A stopped log without its `done` record, so the stop refuses and not the end.
+    common::drop_last_record(&lab.home.study_dir("ps"));
     let a = bin(&lab).args(["pause", "ps"]).assert().code(1);
     assert!(err(&a).contains("stopped"), "{}", err(&a));
     assert_eq!(
@@ -2634,4 +2640,26 @@ cgroup, level 2: no cgroup 1
         ),
         "{t}"
     );
+}
+
+#[test]
+fn nothing_writes_after_done() {
+    let lab = lab();
+    let dir = plain(&lab, "over");
+    bin_at(&lab, "over").args(["run", "over"]).assert().code(0);
+    let before = common::files_under(&dir);
+    for args in [
+        &["run", "over"][..],
+        &["resume", "over"],
+        &["stop", "over", "--reason", "x"],
+        &["pause", "over"],
+    ] {
+        let a = bin_at(&lab, "over").args(args).assert().code(1);
+        assert!(
+            err(&a).contains("E-DON-001: The study is done."),
+            "{args:?}: {}",
+            err(&a)
+        );
+        assert_eq!(common::files_under(&dir), before, "{args:?}");
+    }
 }
