@@ -94,7 +94,7 @@ Case against:
 - The test's seed is fixed, so it sees one draw of `edge`. Over many seeds `edge` passes at most at the test's level. One seed cannot show that rate.
 - The gate's counts depend on the pilot's sd, which changes with the seed. The sweep covers 100 seeds; a rarer seed may need a reserve larger than 60.
 
-What failure this prevents: a box that gives a wrong verdict, a pass for a false claim or a fail for a true one, after a change to its code or its host, with nothing that shows it before a real study runs. Expected, not observed in a study. The record's three planted changes each turn the test red (under Measured). (written 2026-11-15)
+What failure this prevents: a box that, after a change to its code or its host, passes a false claim or fails a true one, with nothing that shows it before a real study runs. Expected, not observed in a study. The record's three planted changes each turn the test red (under Measured). (written 2026-11-15)
 
 Constants:
 
@@ -102,8 +102,9 @@ Constants:
 - noise half-width = 0.2 (`SPREAD`). Basis: none on file. Rule for change: none stated.
 - range = [−1, 1] (`RANGE`) and margin = 0 (`MARGIN`). Basis: none on file. Rule for change: none stated.
 - level shares = 0.34, 0.33 and 0.33 (`ALPHA_SHARES`). Basis: none on file. Rule for change: none stated.
-- default counts: a pilot of 8 clusters, a first batch of 12, a reserve of 60, 2 units per cluster. Basis: the record's gate table and its 100-seed sweep; the reserve is twice the smallest that passes at seed `e2e`. Rule for change: none stated.
-- budget rule: a row time of 1 s plus `work_ms`; per row max(10 × the row time, 60 s) + 30 s; caps rounded up to 0.01 hour. Basis: the 10 and the 60 s copy the box's row timeout (`TIMEOUT_FACTOR`, `MIN_TIMEOUT`), and the 30 s copies the level 2 host deadline (0015); for the 1 s, none on file. Rule for change: none stated.
+- default counts: pilot 8, first 12, reserve 60, 2 units per cluster (Default counts). Basis: the record's gate table and its 100-seed sweep. Rule for change: none stated.
+- base row time = 1 s, before `work_ms`; caps rounded up to 0.01 hour. Basis: none on file. Rule for change: none stated.
+- per-row allowance in the caps = max(10 × the row time, 60 s) + 30 s. Basis: copies of the box's row timeout (`TIMEOUT_FACTOR`, `MIN_TIMEOUT`) and of the level 2 host deadline (0015). Rule for change: none stated.
 
 (written 2026-11-15)
 

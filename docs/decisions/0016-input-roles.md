@@ -2,7 +2,7 @@
 
 Date: 2026-11-01.
 
-Every input declares a role from a closed set. This record named four: `selection`, `confirmation`, `calibration` and `model`. 0020 added a fifth, `reserve`. The schedule and the data rules read it. This record fixes how a row learns each input's role, and which roles a confirmation input may not share data with.
+Every input declares a role from a closed set. This record named four: `selection`, `confirmation`, `calibration` and `model`. 0020 added a fifth, `reserve`. The schedule and the data rules read the role. This record fixes how a row learns each input's role, and which roles a confirmation input may not share data with.
 
 Decision:
 
@@ -27,16 +27,15 @@ Cost: a payload must know one reserved name. The manifest's blob has no `import`
 
 Case against:
 
-- The evidence for the calibration pair is about the calibration source. The rule compares bytes: the exact and the normalized hash. A calibration input from the same source as a confirmation input, with other text, passes.
-- The row record names the manifest's digest so that "a reader can see which roles a row saw". The box writes that field and reads it nowhere. The manifest's blob has no `import` record, and no command writes a bundle that would carry it (#89).
-- A payload cannot name a role of its own, so the box's words must fit every payload. Issue #27 proposed an optional free word per input; the record keeps the set closed.
-- A closed set makes every new purpose a change to the box. The first came one day later: 0020 added `reserve`. Two open issues propose more fields per input (#111, #114).
+- The evidence for the calibration pair is about the calibration source. The rule compares the exact and the normalized hash of the data. A calibration input from the same source as a confirmation input, with other text, passes.
+- The row record names the manifest's digest so that "a reader can see which roles a row saw". The box writes that field and reads it nowhere. No command writes the bundle that Cost asks to carry the blob (#89).
+- The set is closed. The box's words must fit every payload, and every new purpose is a change to the box. Issue #27 proposed an optional free word per input. The first new role came one day later (0020). Issues #111 and #114 propose more fields per input.
 
 (written 2026-11-15)
 
 What failure this prevents: a confirmatory study that scores a model on the text that calibrated it, so the score is not the model's error on new text; and a payload that cannot tell which input serves which purpose (#27). Both are expected, not observed in a study. (written 2026-11-15)
 
-Constants: none. The record fixes the manifest's name and form and one comparison rule. It sets no number. (written 2026-11-15)
+Constants: none. The record fixes the manifest's name and form and one comparison rule, not a value. (written 2026-11-15)
 
 Sources:
 

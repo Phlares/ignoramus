@@ -61,15 +61,15 @@ Cost:
 
 Case against:
 
-- The need has a route with no family: each later study registers alone, on fresh data, in its own slot. Issue #10 lists it as option (a), "Simple; costs data", and the first decision there took it. The family saves data, and the Cost part states what the saving gives up.
-- Issue #10 proposed another form, (b): one alpha split over all the family's hypotheses, which bounds the familywise error under any dependence. A fixed serial graph in one slot was also considered there. The record gives the family the false discovery rate over the stream (Cost).
-- The validity argument is the box's own. No source states the rule as a practice (Cost). The record adds a step to the cited proof, and no test simulates studies of one stream on shared data. Issue #2 lists a null-tree scenario where trees in one stream share data as work not done.
-- A member can be locked and then refused (Cost), and it then has no way back to the shared data. A changed member registers under a new id as a study outside the family, and for an outsider the family leaf counts as a use of every member's confirmation data. Issue #51 proposed that the root's `register` run every member's gates first; the amendment took a narrower rule (#58).
-- Reserved slots protect a bound that a second box home resets. A family holds its slots whether or not its members run, and an author can register each study in a fresh home at slot 1 (#87).
+- The need has a route with no family: each later study registers alone, on fresh data, in its own slot. Issue #10 lists it as option (a), "Simple; costs data", and the first decision there took it.
+- Issue #10 proposed another form, (b): one alpha split over all the family's hypotheses, which bounds the familywise error under any dependence. A family in one slot, with all of alpha on the first study and passed on when it rejects, was also considered there. The record gives the family the false discovery rate over the stream (Cost).
+- The validity argument is the box's own (Cost), and the record adds a step to the cited proof. No test simulates studies of one stream on shared data. Issue #2 lists a null-tree scenario where trees in one stream share data as work not done.
+- A member can be locked and then refused (Cost). It then has no way back to the shared data: a changed member is an outsider (The lock), and an outsider cannot confirm on that data (After the lock). Issue #51 proposed that the root's `register` run every member's gates first; the amendment took a narrower rule (#58).
+- Reserved slots protect a bound that a second box home resets (0013, Case against; #87). A family holds them whether or not its members run (Cost).
 
 (written 2026-11-15)
 
-What failure this prevents: two failures. Without the family, each of several studies declared together needs its own fresh confirmation data, though the error bound does not need it; issue #10 observed the refusal and counted four times the data for four studies. With reuse and no lock, a member's hypothesis, payload or data could be chosen from data its e-value uses, or its evidence could come from the data that picked its condition; both are expected. The amendment prevents a third, also expected: a family locked around a member that waits on a study outside it and is later refused (#51). (written 2026-11-15)
+What failure this prevents: three failures. Without the family, each of several studies declared together needs its own fresh confirmation data, though the error bound does not need it; issue #10 observed the refusal and counted four times the data for four studies. With reuse and no lock, a member's hypothesis, payload or data could be chosen from data its e-value uses, or its evidence could come from the data that picked its condition; this is expected. The amendment prevents the third, also expected: a family locked around a member that waits on a study outside it and is later refused (#51). (written 2026-11-15)
 
 Constants:
 
