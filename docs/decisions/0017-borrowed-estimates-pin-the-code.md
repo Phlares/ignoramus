@@ -31,6 +31,21 @@ Why:
 
 Cost: a deviation is free text, and the box cannot tell a harmless change from one that breaks the estimate. A plan that changes its code after the pilot must pin the pilot's code again or say why it does not.
 
+Case against:
+
+- E-REF-003 refuses only until the plan declares a deviation. One declared deviation with any reason that is not empty ends the refusal (Cost).
+- The record's evidence is a change of data (Recht and co-authors, under Why). The instrument leaves data out. A borrower's confirmation data is new unless the lender is in its family (E-CNF-005, 0023). So a borrower outside a family changes the part that the cited case changed.
+- The borrowed sd and icc size a study and do not enter its test (0023). A study that re-sizes corrects a wrong outside value from its own first batch (0020).
+- A pin on the code does nothing for a loose estimate. A lender with 5 clusters per stratum may lend (0014, Case against).
+- A lender that ran at level 0 names no image, so no pin matches it, and each of its borrowers must declare a deviation. The box's own litmus always declares one (0027).
+- The box now holds a deviation table for a whole study (#70). `pins.deviations` feeds it for one case, and the code defines the five timings twice.
+
+(written 2026-11-15)
+
+What failure this prevents: a confirmatory study sized from an sd and an icc that other code measured, with no record that the code changed. Expected, not observed: before this record nothing compared the lender's code with the borrower's (#28). (written 2026-11-15)
+
+Constants: none. The record fixes what is compared and what `register` records, not a value. (written 2026-11-15)
+
 Sources:
 
 - Allen and Mehler (2019), "Open science challenges, benefits and tips in early career and beyond", PLOS Biology 17(5), https://journals.plos.org/plosbiology/article?id=10.1371/journal.pbio.3000246

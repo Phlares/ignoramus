@@ -48,6 +48,23 @@ Cost:
 - Selection rows run for every candidate the triggers name, so a study with triggers costs more than one without.
 - Child results are descriptive. They add no claim.
 
+Case against:
+
+- A child gets a mean and counts: no spread, no e-value, no verdict. The record's first reason is the validity of the tree split, and the box does not call the tree split for children.
+- The need that opened #16 was met without the engine. The study that prompted it registers with no trigger, and the tests of settings near its selected one became an exploratory follow-on study on its verdict.
+- For a contrast on `selected`, the firing rule has no measured error: the trigger value is then "a decision statistic, not a valid e-value". Issue #60 asks for a measured hit rate and a measured false-lead rate per candidate stop and go rule. Its output is the list of rules that enter the spawn engine.
+- The open issues describe another engine. Issue #61 wants a child that is "a small difference over a shared base" under a search controller; today a child is one changed parameter at depth 1. Issue #56 wants a child's sd and icc.
+
+(written 2026-11-15)
+
+What failure this prevents: follow-up variants that a person picks after seeing a study's results and then tests on the same data, and a betting rule chosen after the data. Both are expected, not observed in a study. Before this record no code evaluated a declared trigger (#16). (written 2026-11-15)
+
+Constants:
+
+- `threshold_e` above 1 (E-RNG-001). Basis: an e-process starts at 1, so a threshold at or below 1 would fire before any data (E-RNG-001, Why). Rule for change: none stated.
+
+(written 2026-11-15)
+
 Sources:
 
 - FDA (2019), "Adaptive Designs for Clinical Trials of Drugs and Biologics", https://www.fda.gov/media/78495/download

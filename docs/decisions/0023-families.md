@@ -59,6 +59,24 @@ Cost:
 - One payload folder serves a whole family, so one payload fix after the root registers removes every member.
 - A family registers only after every study outside it that its members borrow from has finished, so each member gate that can run before the lock has run. A member gate that needs the root or another member can still fail at the member's own registration. That member is refused and never opens its slot, which stays reserved and unused. Size its reserves generously.
 
+Case against:
+
+- The need has a route with no family: each later study registers alone, on fresh data, in its own slot. Issue #10 lists it as option (a), "Simple; costs data", and the first decision there took it.
+- Issue #10 proposed another form, (b): one alpha split over all the family's hypotheses, which bounds the familywise error under any dependence. A family in one slot, with all of alpha on the first study and passed on when it rejects, was also considered there. The record gives the family the false discovery rate over the stream (Cost).
+- The validity argument is the box's own (Cost), and the record adds a step to the cited proof. No test simulates studies of one stream on shared data. Issue #2 lists a null-tree scenario where trees in one stream share data as work not done.
+- A member can be locked and then refused (Cost). It then has no way back to the shared data: a changed member is an outsider (The lock), and an outsider cannot confirm on that data (After the lock). Issue #51 proposed that the root's `register` run every member's gates first; the amendment took a narrower rule (#58).
+- Reserved slots protect a bound that a second box home resets (0013, Case against; #87). A family holds them whether or not its members run (Cost).
+
+(written 2026-11-15)
+
+What failure this prevents: three failures. Without the family, each of several studies declared together needs its own fresh confirmation data, though the error bound does not need it; issue #10 observed the refusal and counted four times the data for four studies. With reuse and no lock, a member's hypothesis, payload or data could be chosen from data its e-value uses, or its evidence could come from the data that picked its condition; this is expected. The amendment prevents the third, also expected: a family locked around a member that waits on a study outside it and is later refused (#51). (written 2026-11-15)
+
+Constants:
+
+- slots = 10 (`M`); the 0.005 in a member's level is alpha, 0.05, over the slots. Basis: set in 0032. Rule for change: as in 0032.
+
+(written 2026-11-15)
+
 Sources:
 
 - Xu and Ramdas, e-LOND, online false discovery rate control with e-values, https://arxiv.org/abs/2311.06412

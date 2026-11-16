@@ -40,6 +40,10 @@ Case against:
 - In a family on shared data, an early member's means hint at later members' effects (Żebrowska et al.). No member can change after the first one registers. e-LOND is the stream's rule for giving each study its level and counting discoveries. It controls the false discovery rate under any dependence (Xu and Ramdas). That includes shared data. Credibility rests on the planned family line.
 - The `opened` record is signed before the print. A failed print still leaves the record. The record marks the box releasing the results, not a reader seeing them.
 
+What failure this prevents: a person who reads a study's results through the box before it finishes and then changes what is left of the study or of its family; and a read through the box that leaves no record. Both are expected. (written 2026-11-15)
+
+Constants: none. The record fixes when a report is allowed, what it holds and what it records, not a value. (written 2026-11-15)
+
 Sources:
 
 - ICH E9 (1998), "Statistical Principles for Clinical Trials", https://www.govinfo.gov/content/pkg/FR-1998-09-16/html/98-24754.htm
