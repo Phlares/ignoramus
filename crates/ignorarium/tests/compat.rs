@@ -294,3 +294,21 @@ fn a_register_record_written_before_the_field_still_reads() {
     // Written again, it holds the fields it held: none was added.
     assert_eq!(serde_json::to_value(&r).unwrap(), old_register().body);
 }
+
+/// A card file written before the header held `stamps` and `ended`; it holds `timestamp`.
+#[test]
+fn a_card_file_written_before_stamps_still_reads() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/card/before-stamps.json");
+    let text = std::fs::read_to_string(path).unwrap();
+    assert!(text.contains("\"timestamp\""));
+    assert!(!text.contains("\"stamps\"") && !text.contains("\"ended\""));
+    let card: ignorarium::card::Card = serde_json::from_str(&text).unwrap();
+    assert!(card.header.stamps.is_empty());
+    assert_eq!(
+        card.header.ended,
+        ignorarium::card::sections::Field::Missing { link: None }
+    );
+    let md = ignorarium::card::render::markdown(&card);
+    assert!(md.contains("- Outside time stamp: not in the records\n"));
+    assert!(md.contains("- Study ended: no done record\n"));
+}

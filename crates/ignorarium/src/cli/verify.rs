@@ -1,7 +1,8 @@
 //! `verify`: check the plan logs and, for one study, its record chain; or check a copy of a
 //! study's log with a public key alone.
 use super::{CliError, Ctx, Done, Run, key, out};
-use crate::derived::{DONE, DoneRecord, OPENED, Register, STAMP, SessionStart, sessions};
+use crate::card::sections::stamp_flag;
+use crate::derived::{DONE, DoneRecord, OPENED, Register, STAMP, SessionStart, Stamp, sessions};
 use crate::identity::same_binary;
 use crate::planlog::store::PlanLog;
 use crate::telemetry::Reading;
@@ -153,7 +154,33 @@ pub(crate) fn check_study(id: Option<&str>, log: &Path, key: &VerifyingKey) -> S
         }
     }
     done_lines(id, &all, &mut c);
+    stamp_lines(&all, &mut c);
     c
+}
+
+/// One line for each `stamp` record, and a flag line for each stamp dated before a record it
+/// covers. A flag does not fail the check.
+fn stamp_lines(all: &[records::Record], c: &mut StudyCheck) {
+    let yes = |b: bool| if b { "yes" } else { "no" };
+    for (r, s) in all.iter().filter_map(|r| Some((r, Stamp::of(r)?))) {
+        let l = &s.lines;
+        let head = l.head.as_ref().map_or("none".into(), |h| h.seq.to_string());
+        c.lines.push(format!(
+            "stamp {}: {}, {}; lines: register {}, signature {}, key {}, head {head}, head signature {}; file {}, reply {}",
+            r.seq,
+            s.stamped_at,
+            s.authority.as_deref().unwrap_or("authority not stated"),
+            yes(l.register),
+            yes(l.register_signature),
+            yes(l.key),
+            yes(l.head_signature),
+            s.file_sha256,
+            s.reply_sha256,
+        ));
+        if let Some(flag) = stamp_flag(all, &s) {
+            c.lines.push(format!("flag: stamp {} is {flag}", r.seq));
+        }
+    }
 }
 
 /// The `done` line, and a failure for each record after `done` that is not a `stamp` or an

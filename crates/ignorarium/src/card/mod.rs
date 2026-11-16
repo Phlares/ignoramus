@@ -490,7 +490,7 @@ pub fn build(
     let recipe = recipe::recipe(&walked, lacks, signed, id, levels, &analysis.box_version);
     let citation = recipe::citation(held(recipe::CITATION_FILE), id).map_err(CliError::usage)?;
     Ok(Card {
-        header: sections::header(&own, &registered.ts, spec),
+        header: sections::header(&own, &registered.ts, spec, all),
         claims: sections::claims(&after, spec),
         pick: sections::pick(log),
         verdicts: sections::verdicts(&after),

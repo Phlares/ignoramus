@@ -3,8 +3,8 @@ mod common;
 use common::{Lab, commit_all, estimate, finished_with, git, instrument, lab, plant, study_repo};
 use ignorarium::canon::sha256_hex;
 use ignorarium::card::sections::{
-    Attempt, Field, Listed, NOT_APPLICABLE, NOT_IN_RECORDS, Outside, ROW_SEED, SelfTestTally,
-    Source, UNRECORDED,
+    Attempt, Ended, Field, Listed, NOT_APPLICABLE, NOT_IN_RECORDS, Outside, ROW_SEED,
+    SelfTestTally, Source, UNRECORDED,
 };
 use ignorarium::card::{self, Card};
 use ignorarium::derived::GatePrediction;
@@ -1588,4 +1588,150 @@ fn self_test_tally_adds_up_to_the_rows() {
         n - 3
     );
     assert!(md.contains(&line), "{md}");
+}
+
+/// A `stamp` body that covers record `head` (of `hashes`), or only the registration.
+fn stamp_body(n: u8, at: &str, head: Option<usize>, hashes: &[String]) -> Value {
+    json!({
+        "file_sha256": format!("{n:02}").repeat(32),
+        "reply_sha256": format!("{:02x}", n + 0xa0).repeat(32),
+        "authority": "CN=T", "stamped_at": at, "serial": "1", "policy": "1.2.3",
+        "lines": {
+            "register": true, "register_signature": true, "key": n == 1,
+            "head": head.map(|h| json!({ "seq": h, "hash": hashes[h] })),
+            "head_signature": head.is_some(),
+        },
+        "checked": ignorarium::derived::STAMP_CHECKED,
+    })
+}
+
+/// The planted finished study with a `done` record, and `stamps` made by `plant_stamps`.
+fn done_study(lab: &Lab, stamps: impl Fn(&[String], usize) -> Vec<Value>) {
+    let mut hashes = plant(&lab.home, ID, &bodies(lab, MEAN, rows_on_level_2()));
+    let last = hashes.len() - 1;
+    let done = json!({
+        "end": "rows", "ended_at": "2026-11-14T20:21:09.383Z",
+        "by": { "seq": last, "hash": hashes[last] },
+    });
+    hashes.extend(plant(&lab.home, ID, &[("done", done)]));
+    let done_seq = hashes.len() - 1;
+    let more: Vec<_> = (stamps(&hashes, done_seq).into_iter())
+        .map(|b| ("stamp", b))
+        .collect();
+    plant(&lab.home, ID, &more);
+}
+
+#[test]
+fn the_card_lists_each_stamp_in_order() {
+    let lab = lab();
+    done_study(&lab, |hashes, done| {
+        vec![
+            stamp_body(1, "2099-01-01T00:00:00.000Z", Some(0), hashes),
+            stamp_body(2, "2099-01-02T00:00:00.000Z", Some(done), hashes),
+        ]
+    });
+    let card = card_of(&lab);
+    let s = &card.header.stamps;
+    assert_eq!(s.len(), 2);
+    assert_eq!(s[0].stamped_at, "2099-01-01T00:00:00.000Z");
+    assert_eq!(s[1].stamped_at, "2099-01-02T00:00:00.000Z");
+    assert_eq!((s[0].head_seq, s[0].results), (Some(0), false));
+    assert!(s[1].head_seq.is_some());
+    assert!(s[1].results);
+    assert_eq!((s[0].key, s[1].key), (true, false));
+    assert!(s[0].signatures && s[1].signatures);
+    assert_eq!(s[0].authority.as_deref(), Some("CN=T"));
+    assert_eq!((s[0].flag.clone(), s[1].flag.clone()), (None, None));
+    let Field::Recorded { value: ended } = &card.header.ended else {
+        panic!("{:?}", card.header.ended)
+    };
+    assert_eq!(ended.ended_at, "2026-11-14T20:21:09.383Z");
+    let md = card::render::markdown(&card);
+    let first = "- Outside time stamp: 2099-01-01T00:00:00.000Z, CN=T; covers the registration, \
+                 records 0 to 0; key line yes, signature lines yes; signature checked by the reader\n";
+    assert!(md.contains(first), "{md}");
+    let second = format!(
+        "- Outside time stamp: 2099-01-02T00:00:00.000Z, CN=T; covers the registration, \
+         records 0 to {}, the results; key line no, signature lines yes; \
+         signature checked by the reader\n",
+        s[1].head_seq.unwrap()
+    );
+    assert!(md.contains(&second), "{md}");
+    assert!(md.find(first).unwrap() < md.find(&second).unwrap());
+    let check = format!(
+        "- Check a stamp: openssl ts -verify -data stamps/{}.txt -in stamps/{}.tsr -CAfile \\<bundle\\>\n",
+        s[0].file_sha256, s[0].reply_sha256
+    );
+    assert_eq!(md.matches("Check a stamp").count(), 1);
+    assert!(md.contains(&check), "{md}");
+    let line = format!(
+        "- Study ended: rows at 2026-11-14T20:21:09.383Z (done record {}, {})\n",
+        ended.seq, ended.hash
+    );
+    assert!(md.contains(&line), "{md}");
+}
+
+#[test]
+fn a_stamp_without_its_signature_lines_says_so() {
+    let lab = lab();
+    done_study(&lab, |hashes, done| {
+        let mut a = stamp_body(1, "2099-01-01T00:00:00.000Z", Some(done), hashes);
+        a["lines"]["head_signature"] = json!(false);
+        let mut b = stamp_body(2, "2099-01-01T00:00:00.000Z", None, hashes);
+        b["lines"]["register_signature"] = json!(false);
+        vec![a, b]
+    });
+    let s = card_of(&lab).header.stamps;
+    assert!(!s[0].signatures);
+    assert!(!s[1].signatures);
+    assert!(s[0].results);
+    assert_eq!(s[1].head_seq, None);
+    assert!(!s[1].results);
+}
+
+#[test]
+fn a_stamp_dated_before_its_record_is_flagged() {
+    let lab = lab();
+    done_study(&lab, |hashes, done| {
+        vec![
+            stamp_body(1, "2000-01-01T00:00:00.000Z", None, hashes),
+            stamp_body(2, "2000-01-01T00:00:00.000Z", Some(done), hashes),
+            stamp_body(3, "2099-01-01T00:00:00.000Z", Some(done), hashes),
+        ]
+    });
+    let card = card_of(&lab);
+    let s = &card.header.stamps;
+    let at = s[1].head_seq.unwrap();
+    assert_eq!(
+        s[0].flag.as_deref(),
+        Some("dated before record 0, which it covers")
+    );
+    assert_eq!(
+        s[1].flag,
+        Some(format!("dated before record {at}, which it covers"))
+    );
+    assert_eq!(s[2].flag, None);
+    let md = card::render::markdown(&card);
+    assert!(
+        md.contains(
+            "signature checked by the reader; flag: dated before record 0, which it covers\n"
+        ),
+        "{md}"
+    );
+}
+
+#[test]
+fn an_older_log_reads_as_not_recorded() {
+    let lab = lab();
+    plant(&lab.home, ID, &bodies(&lab, MEAN, rows_on_level_2()));
+    let card = card_of(&lab);
+    assert!(card.header.stamps.is_empty());
+    assert_eq!(card.header.ended, Field::<Ended>::Missing { link: None });
+    let md = card::render::markdown(&card);
+    assert!(
+        md.contains("- Outside time stamp: not in the records\n"),
+        "{md}"
+    );
+    assert!(md.contains("- Study ended: no done record\n"), "{md}");
+    assert!(!md.contains("Check a stamp"));
 }

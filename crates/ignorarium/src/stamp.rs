@@ -119,12 +119,18 @@ pub fn lines(home: &Home, id: &str, key: &VerifyingKey) -> Result<String, StampE
     push(Line::Key, &hex::encode(key.to_bytes()));
     push(Line::Head, &format!("seq {}, hash {}", head.seq, head.hash));
     push(Line::HeadSignature, &head.sig);
-    let plan = PlanLog::open(&home.root.join(&register.log))
-        .and_then(|l| l.verified_head(key))
-        .map_err(|cause| StampError::PlanLog {
-            log: register.log.clone(),
-            cause,
-        })?;
+    // `PlanLog::open` makes a missing folder and its lock file; a request must make neither.
+    let folder = home.root.join(&register.log);
+    let plan = if folder.is_dir() {
+        (PlanLog::open(&folder).and_then(|l| l.verified_head(key))).map_err(|cause| {
+            StampError::PlanLog {
+                log: register.log.clone(),
+                cause,
+            }
+        })?
+    } else {
+        None
+    };
     if let Some(head) = plan {
         let json = String::from_utf8(canonical_of(&head)?).map_err(io::Error::other)?;
         text.push_str(&format!("plan log head ({}): {json}\n", register.log));
@@ -263,6 +269,12 @@ pub fn record(
         return Err(refused(
             "E-STP-001",
             format!("digest algorithm {}", parsed.digest_alg),
+        ));
+    }
+    if parsed.digest.len() != 32 {
+        return Err(refused(
+            "E-STP-001",
+            format!("digest length {} bytes, not 32", parsed.digest.len()),
         ));
     }
     let digest = hex::encode(&parsed.digest);

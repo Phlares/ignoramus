@@ -1,7 +1,8 @@
 //! The Markdown and LaTeX renderers and the figure: pure functions of one card.
 use ignorarium::card::Card;
 use ignorarium::card::render::{self, figure, latex, markdown, tex_escape};
-use ignorarium::card::sections::Field;
+use ignorarium::card::sections::{Ended, Field, StampLine};
+use ignorarium::derived::End;
 use std::path::PathBuf;
 
 fn fixture(name: &str) -> PathBuf {
@@ -649,4 +650,65 @@ fn cgroup_lines_name_the_level_class() {
         ),
         "{md}"
     );
+}
+
+fn stamp(seq: u64, head: Option<u64>, results: bool, flag: Option<&str>) -> StampLine {
+    StampLine {
+        seq,
+        stamped_at: "2026-11-10T22:41:49.000Z".into(),
+        authority: (seq == 5).then(|| "CN=T".into()),
+        head_seq: head,
+        results,
+        key: seq == 5,
+        signatures: seq != 5,
+        file_sha256: format!("f{seq}"),
+        reply_sha256: format!("r{seq}"),
+        flag: flag.map(Into::into),
+    }
+}
+
+#[test]
+fn the_header_prints_each_stamp_the_command_and_the_end() {
+    let mut c = card();
+    c.header.stamps = vec![
+        stamp(5, None, false, None),
+        stamp(
+            9,
+            Some(8),
+            true,
+            Some("dated before record 8, which it covers"),
+        ),
+    ];
+    c.header.ended = Field::Recorded {
+        value: Ended {
+            end: End::ResizeStop,
+            ended_at: "2026-11-14T20:21:09.383Z".into(),
+            seq: 7,
+            hash: "ab".repeat(32),
+        },
+    };
+    let md = markdown(&c);
+    let want = [
+        "- Outside time stamp: 2026-11-10T22:41:49.000Z, CN=T; covers the registration; key line yes, signature lines no; signature checked by the reader\n",
+        "- Outside time stamp: 2026-11-10T22:41:49.000Z, authority not stated; covers the registration, records 0 to 8, the results; key line no, signature lines yes; signature checked by the reader; flag: dated before record 8, which it covers\n",
+        "- Check a stamp: openssl ts -verify -data stamps/f5.txt -in stamps/r5.tsr -CAfile \\<bundle\\>\n",
+        &format!(
+            "- Study ended: resize-stop at 2026-11-14T20:21:09.383Z (done record 7, {})\n",
+            "ab".repeat(32)
+        ),
+    ];
+    let at: Vec<usize> = want
+        .iter()
+        .map(|l| md.find(l).unwrap_or_else(|| panic!("{l}\n{md}")))
+        .collect();
+    assert!(at.windows(2).all(|w| w[0] < w[1]));
+    assert!(!md.contains("not in the records\n- Finished") && !md.contains("no done record"));
+}
+
+#[test]
+fn a_card_with_no_stamp_and_no_end_prints_both_lines() {
+    let md = markdown(&card());
+    assert!(md.contains("- Outside time stamp: not in the records\n"));
+    assert!(md.contains("- Study ended: no done record\n"));
+    assert!(!md.contains("Check a stamp"));
 }

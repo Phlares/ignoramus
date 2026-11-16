@@ -1,0 +1,473 @@
+{
+  "card_version": 2,
+  "study": "s1",
+  "finished_at": "2026-11-14T20:21:09.383Z",
+  "records": 87,
+  "opened": {
+    "seq": 0,
+    "ts": ""
+  },
+  "hypotheses": [
+    {
+      "hypothesis": "H1",
+      "verdict": "fail",
+      "basis": "test",
+      "e_value": 3.1,
+      "level": 0.005,
+      "reason": null,
+      "clipped": null
+    }
+  ],
+  "children": [],
+  "family": null,
+  "deviations": [
+    {
+      "mark": "unsigned",
+      "entry": "deviation",
+      "subject": "analysis",
+      "reason": "the payload crashed on one seed",
+      "timing": "after-access-before-results",
+      "original": "five seeds",
+      "justification": "one seed hung",
+      "impact": "four seeds reach the test",
+      "source": "notes.md:12",
+      "sha256": "37b4026807fe5c96bcacafec1a782e37abc01ea0de834218d37cc3b5f65fab26"
+    },
+    {
+      "mark": "unsigned",
+      "entry": "unregistered",
+      "subject": "reran the extractor",
+      "reason": "disk full",
+      "timing": "during-collection",
+      "original": null,
+      "justification": null,
+      "impact": null,
+      "source": "sha256:ab",
+      "sha256": "37b4026807fe5c96bcacafec1a782e37abc01ea0de834218d37cc3b5f65fab26"
+    }
+  ],
+  "header": {
+    "mode": "confirmatory",
+    "blind": false,
+    "spec_hash": "sha256:0a8dd75d8ea12c0b0fa61d8181b7f4644ba0e99710894279075edc760f1ad0df",
+    "registered_at": "2026-11-14T20:21:09.221Z",
+    "timestamp": {
+      "state": "missing",
+      "link": null
+    },
+    "population": {
+      "state": "recorded",
+      "value": "every text file of the four strata"
+    }
+  },
+  "claims": [
+    {
+      "hypothesis": "H1",
+      "statement": "",
+      "outcome": "ppl-ratio",
+      "strata": [
+        "code",
+        "article"
+      ],
+      "claim": {
+        "below": 0.039221
+      },
+      "statistic": {
+        "mean": [
+          -0.693147,
+          0.693147
+        ]
+      },
+      "level": 0.005,
+      "pass_e_value": 200.0
+    }
+  ],
+  "verdicts": [
+    {
+      "hypothesis": "H1",
+      "display": "not shown",
+      "label": "label not computed"
+    }
+  ],
+  "results": [
+    {
+      "hypothesis": "H1",
+      "stratum": "code",
+      "outcome": "ppl-ratio",
+      "estimate": 0.0287,
+      "clusters": 4,
+      "units": 20,
+      "percent_change": 0.029115813416263014,
+      "e_value": 3.1,
+      "intervals": [
+        {
+          "stratum": "code",
+          "side": "below",
+          "estimate": 0.028699999999999726,
+          "bound": null,
+          "method": "inverted registered e-process",
+          "grid": {
+            "from": 0.028621,
+            "to": 0.693147,
+            "step": 0.0001
+          },
+          "contiguous": true,
+          "registered": false,
+          "margin": 0.039221
+        }
+      ],
+      "note": null,
+      "registered": true,
+      "descriptive": false
+    },
+    {
+      "hypothesis": "H1",
+      "stratum": "article",
+      "outcome": "ppl-ratio",
+      "estimate": 0.0287,
+      "clusters": 4,
+      "units": 20,
+      "percent_change": 0.029115813416263014,
+      "e_value": 3.1,
+      "intervals": [
+        {
+          "stratum": "article",
+          "side": "below",
+          "estimate": 0.028699999999999726,
+          "bound": null,
+          "method": "inverted registered e-process",
+          "grid": {
+            "from": 0.028621,
+            "to": 0.693147,
+            "step": 0.0001
+          },
+          "contiguous": true,
+          "registered": false,
+          "margin": 0.039221
+        }
+      ],
+      "note": null,
+      "registered": true,
+      "descriptive": false
+    },
+    {
+      "hypothesis": "H1",
+      "stratum": "",
+      "outcome": "ppl-ratio",
+      "estimate": 0.0287,
+      "clusters": 8,
+      "units": 40,
+      "percent_change": 0.029115813416263014,
+      "e_value": null,
+      "intervals": [],
+      "note": null,
+      "registered": true,
+      "descriptive": true
+    }
+  ],
+  "sensitivity": [
+    {
+      "hypothesis": "H1",
+      "power": 0.98,
+      "target": 0.8,
+      "power_at": 0.0198,
+      "curve": [
+        {
+          "margin": 0.039221,
+          "points": [
+            {
+              "fraction": 0.0,
+              "mean": 0.0198,
+              "power": 0.98
+            },
+            {
+              "fraction": 0.25,
+              "mean": 0.02465525,
+              "power": 0.81
+            },
+            {
+              "fraction": 0.5,
+              "mean": 0.029510500000000002,
+              "power": 0.33
+            },
+            {
+              "fraction": 0.75,
+              "mean": 0.03436575,
+              "power": 0.04
+            },
+            {
+              "fraction": 1.0,
+              "mean": 0.039221,
+              "power": 0.0
+            }
+          ]
+        }
+      ],
+      "placed": [
+        {
+          "margin": 0.039221,
+          "stratum": "code",
+          "estimate": 0.0287,
+          "lower": {
+            "fraction": 0.25,
+            "mean": 0.02465525,
+            "power": 0.81
+          },
+          "upper": {
+            "fraction": 0.5,
+            "mean": 0.029510500000000002,
+            "power": 0.33
+          }
+        },
+        {
+          "margin": 0.039221,
+          "stratum": "article",
+          "estimate": 0.0287,
+          "lower": {
+            "fraction": 0.25,
+            "mean": 0.02465525,
+            "power": 0.81
+          },
+          "upper": {
+            "fraction": 0.5,
+            "mean": 0.029510500000000002,
+            "power": 0.33
+          }
+        }
+      ]
+    }
+  ],
+  "setup": {
+    "data": {
+      "count": 8,
+      "absent": 2,
+      "list_sha256": "e5c522272fde8c9d554fc18b865dbff94bdfe688baa365c38169f44891655c97",
+      "file": "data.sha256"
+    },
+    "data_grade": {
+      "state": "missing",
+      "link": null
+    },
+    "instrument": {
+      "payload": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "environment": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+      "inputs": [
+        [
+          "model/m.bin",
+          "model",
+          "13e35c44395f6cade670c076230362267c5288989d3498e207877d62b859a6d8"
+        ]
+      ]
+    },
+    "defaults": [],
+    "resolved": [],
+    "seeds": {
+      "root": {
+        "state": "recorded",
+        "value": "sha256:0a8dd75d8ea12c0b0fa61d8181b7f4644ba0e99710894279075edc760f1ad0df"
+      },
+      "rule": "SHA-256(plan hash bytes || \"row/<index>\"); a recheck copy keeps the seed of the row it repeats",
+      "rows": 0,
+      "derived": 0
+    },
+    "stack": {
+      "isolation": {
+        "state": "recorded",
+        "value": [
+          2
+        ]
+      },
+      "launcher": {
+        "state": "recorded",
+        "value": [
+          "cloud-hypervisor v41.0"
+        ]
+      },
+      "agent_sha256": {
+        "state": "recorded",
+        "value": [
+          "abababababababababababababababababababababababababababababababab"
+        ]
+      },
+      "vcpus": {
+        "state": "missing",
+        "link": null
+      },
+      "memory_cap_mib": {
+        "state": "recorded",
+        "value": 2304
+      }
+    }
+  },
+  "observations": {
+    "rows": 16,
+    "sha256": "26118cd324e5bb03652f87664f3e2045cbc30924fd3879c08694a926481c18a2",
+    "file": "observations.csv",
+    "forced": []
+  },
+  "surprises": {
+    "failed": [],
+    "retried": 0,
+    "clipped": [],
+    "triggers": [],
+    "box_versions": [
+      "0.1.0"
+    ]
+  },
+  "cost": {
+    "cpu_seconds": 0.0,
+    "wall_seconds": 0.0,
+    "rows": 80,
+    "unknown_cpu": 0,
+    "usd": {
+      "state": "missing",
+      "link": null
+    },
+    "budget": {
+      "cpu_hours": 1.0,
+      "wall_hours": 1.0,
+      "money_usd": 0.0
+    },
+    "telemetry": {
+      "rows": 80,
+      "recorded": 0,
+      "host_cpu": {
+        "read": 0,
+        "unavailable": 0,
+        "value": []
+      },
+      "cpu_ticks": {
+        "read": 0,
+        "unavailable": 0,
+        "value": {}
+      },
+      "cgroup": {
+        "read": 0,
+        "unavailable": 0,
+        "value": {}
+      },
+      "memory_peak_max": null
+    }
+  },
+  "runs": {
+    "ok": [
+      {
+        "stage": "confirmation",
+        "rows": 80
+      }
+    ],
+    "attempts": [],
+    "sessions": {
+      "state": "missing",
+      "link": {
+        "path": "events.jsonl",
+        "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+      }
+    },
+    "stopped": null
+  },
+  "outside": {
+    "files": [
+      {
+        "path": "gaps.md",
+        "sha256": null,
+        "note": null
+      },
+      {
+        "path": "decisions.md",
+        "sha256": null,
+        "note": null
+      },
+      {
+        "path": "deviations.toml",
+        "sha256": "37b4026807fe5c96bcacafec1a782e37abc01ea0de834218d37cc3b5f65fab26",
+        "note": null
+      },
+      {
+        "path": "CITATION.cff",
+        "sha256": null,
+        "note": null
+      },
+      {
+        "path": "prereg/statement.md",
+        "sha256": "41223cbbb20ae697e44152d58bac670e18fa614caf3b68c827bc1733d80feacd",
+        "note": null
+      }
+    ],
+    "readings": "readings.md"
+  },
+  "outside_source": {
+    "path": "studies/example/",
+    "commit": "0123456789abcdef0123456789abcdef01234567"
+  },
+  "recipe": {
+    "command": "ignorarium run s1 --max-level 2",
+    "isolation_levels": [
+      2
+    ],
+    "requires": [
+      "a box home where the study is registered",
+      "the study folder as the working directory",
+      "the box version recorded in `box_version`"
+    ],
+    "box_binary_sha256": {
+      "state": "missing",
+      "link": null
+    },
+    "box_version": {
+      "state": "recorded",
+      "value": "0.1.0"
+    },
+    "bundle_doi": {
+      "state": "missing",
+      "link": null
+    },
+    "manifest": {
+      "roots": [
+        "spec.toml",
+        "spec.json",
+        "spec.hash",
+        "salt",
+        "schedule.json",
+        "in/",
+        "payload/"
+      ],
+      "missing": [
+        "spec.json",
+        "spec.hash",
+        "salt",
+        "schedule.json",
+        "in/",
+        "payload/"
+      ],
+      "files": 1,
+      "list_sha256": "53c7939fa1b6a82466144408e7ed4dcdc51ace61a01a933da54727d670c884db",
+      "in_folder": {
+        "agrees": true,
+        "missing": 0,
+        "extra": 0,
+        "differ": 0
+      }
+    }
+  },
+  "citation": {
+    "bibtex": {
+      "state": "missing",
+      "link": null
+    },
+    "cff": {
+      "state": "missing",
+      "link": null
+    }
+  },
+  "builder": {
+    "version": {
+      "state": "recorded",
+      "value": "0.0.2"
+    },
+    "binary_sha256": {
+      "state": "recorded",
+      "value": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+    }
+  }
+}

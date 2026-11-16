@@ -6,7 +6,8 @@ use super::sidecar::DataList;
 use crate::analysis::{IntervalResult, claim_strata};
 use crate::canon::sha256_file;
 use crate::derived::{
-    Analysis, Estimate, GroupClip, Instrument, Register, Resolved, Selection, Trigger, Verdict,
+    Analysis, DONE, DoneRecord, End, Estimate, GroupClip, Instrument, Register, Resolved,
+    Selection, Stamp, Trigger, Verdict,
 };
 use crate::files::optional;
 use crate::records::{Log, Record};
@@ -52,7 +53,6 @@ pub const NO_STUDY_FOLDER: &str = "no study folder given";
 pub const LINK_NOT_FOLLOWED: &str = "link not followed";
 /// The run log, which no key signs.
 pub const EVENTS: &str = "events.jsonl";
-const PENDING: &str = "pending";
 
 /// A file of the study folder, by its path in the folder and its SHA-256. Never parsed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -287,22 +287,108 @@ pub struct Header {
     pub spec_hash: String,
     /// The time on the register record, from the box's clock.
     pub registered_at: String,
-    /// An outside time stamp of the registration; a confirmatory plan waits for one.
-    pub timestamp: Field<String>,
+    /// Each outside time stamp of the log, in record order. Empty in a card written before
+    /// stamps existed.
+    #[serde(default)]
+    pub stamps: Vec<StampLine>,
+    /// How the study ended; missing for a log with no `done` record. A stopped study has no
+    /// card, so the end here is `rows` or `resize-stop`.
+    #[serde(default = "missing")]
+    pub ended: Field<Ended>,
     /// The plan's `question.population`: the frame every claim covers. Missing when the plan
     /// leaves it empty.
     #[serde(default = "missing")]
     pub population: Field<String>,
 }
 
-/// The header of a study whose register record `own` was written at `registered_at`.
-pub fn header(own: &Register, registered_at: &str, spec: &Spec) -> Header {
+/// The `done` record: how the study ended, when, and the record's seq and hash.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Ended {
+    pub end: End,
+    pub ended_at: String,
+    pub seq: u64,
+    pub hash: String,
+}
+
+/// One `stamp` record. `head_seq` is the last record the stamp covers, `None` when the file
+/// held no head line: the registration alone. `results` is true when it covers the `done`
+/// record. `signatures` is true when the file held the register signature line and, with a
+/// head, the head signature line. `flag` is set when the stamp is dated before a record it
+/// covers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StampLine {
+    pub seq: u64,
+    pub stamped_at: String,
+    pub authority: Option<String>,
+    pub head_seq: Option<u64>,
+    pub results: bool,
+    pub key: bool,
+    pub signatures: bool,
+    pub file_sha256: String,
+    pub reply_sha256: String,
+    pub flag: Option<String>,
+}
+
+/// The flag for `s` when it is dated before the newest record it covers: the head record,
+/// else the register record. `ts` and `stamped_at` share one UTC format, so comparing the
+/// strings compares the times.
+pub fn stamp_flag(all: &[Record], s: &Stamp) -> Option<String> {
+    let head = s.lines.head.as_ref().map(|h| h.seq);
+    let covered = head
+        .and_then(|h| all.iter().find(|r| r.seq == h))
+        .or(all.first())?;
+    (s.stamped_at < covered.ts)
+        .then(|| format!("dated before record {}, which it covers", covered.seq))
+}
+
+/// The `stamp` records of `all`, in order.
+pub fn stamps(all: &[Record]) -> Vec<StampLine> {
+    let done = all.iter().find(|r| r.kind == DONE).map(|r| r.seq);
+    (all.iter())
+        .filter_map(|r| Some((r, Stamp::of(r)?)))
+        .map(|(r, s)| {
+            let head = s.lines.head.as_ref().map(|h| h.seq);
+            StampLine {
+                seq: r.seq,
+                flag: stamp_flag(all, &s),
+                results: matches!((head, done), (Some(h), Some(d)) if h >= d),
+                key: s.lines.key,
+                signatures: s.lines.register_signature
+                    && (head.is_none() || s.lines.head_signature),
+                head_seq: head,
+                stamped_at: s.stamped_at,
+                authority: s.authority,
+                file_sha256: s.file_sha256,
+                reply_sha256: s.reply_sha256,
+            }
+        })
+        .collect()
+}
+
+/// The first `done` record of `all`.
+pub fn ended(all: &[Record]) -> Field<Ended> {
+    let done = all.iter().find_map(|r| Some((r, DoneRecord::of(r)?)));
+    Field::of(
+        done.map(|(r, d)| Ended {
+            end: d.end,
+            ended_at: d.ended_at,
+            seq: r.seq,
+            hash: crate::records::hash(r),
+        }),
+        None,
+    )
+}
+
+/// The header of a study whose register record `own` was written at `registered_at`; `all` is
+/// its verified log.
+pub fn header(own: &Register, registered_at: &str, spec: &Spec, all: &[Record]) -> Header {
     Header {
         mode: spec.study.mode,
         blind: spec.access.blind,
         spec_hash: own.spec_hash.clone(),
         registered_at: registered_at.into(),
-        timestamp: Field::of(own.timestamp.clone().filter(|t| t != PENDING), None),
+        stamps: stamps(all),
+        ended: ended(all),
         population: Field::of(
             Some(spec.question.population.clone()).filter(|p| !p.is_empty()),
             None,

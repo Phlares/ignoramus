@@ -708,3 +708,81 @@ fn found_checks_each_line_against_the_log() {
         assert_eq!(found_of(file), Err(code), "{file:?}");
     }
 }
+
+#[test]
+fn a_request_with_no_plan_log_folder_makes_none() {
+    let lab = common::lab();
+    common::plain(&lab, "m1");
+    let folder = lab.home.root.join("planlog");
+    std::fs::rename(&folder, lab.root.join("planlog-aside")).unwrap();
+    // Through the library: every verb opens the home, which makes the folder again.
+    let file = stamp::request(&lab.home, "m1", &key_of(&lab), None).unwrap();
+    assert!(!folder.exists());
+    let text = std::fs::read_to_string(file).unwrap();
+    assert!(text.starts_with("register record hash of m1: "), "{text}");
+    assert!(!text.contains("plan log head"), "{text}");
+}
+
+#[test]
+fn a_digest_that_is_not_32_bytes_is_e_stp_001() {
+    let lab = common::lab();
+    common::plain(&lab, "g1");
+    let study = lab.home.study_dir("g1");
+    let before = common::files_under(&study);
+    for n in [0, 31, 33, 4096] {
+        let r = lab.root.join(format!("long{n}.tsr"));
+        std::fs::write(&r, tsp::fixture(&vec![7; n], UNIX, None)).unwrap();
+        let a = reply(&lab, "g1", &r, None).code(1);
+        assert!(err(&a).contains("E-STP-001"), "{n}: {}", err(&a));
+        assert!(err(&a).contains("digest length"), "{n}: {}", err(&a));
+        assert_eq!(common::files_under(&study), before, "{n}");
+    }
+}
+
+/// `verify --study` after a stamp made at `unix`: its stdout, and the stamp record.
+fn verified_after(lab: &common::Lab, id: &str, unix: u64) -> (String, Stamp, u64) {
+    let bytes = std::fs::read(requested(lab, id)).unwrap();
+    let r = lab.root.join(format!("{id}.tsr"));
+    std::fs::write(&r, tsp::fixture(&sha(&bytes), unix, Some("CN=T"))).unwrap();
+    reply(lab, id, &r, None).code(0);
+    let out = common::bin(lab)
+        .args(["verify", "--study", id])
+        .assert()
+        .code(0);
+    let seq = common::records_of(lab, id)
+        .iter()
+        .find(|r| r.kind == STAMP)
+        .unwrap()
+        .seq;
+    (common::text(&out), stamps_of(lab, id).remove(0), seq)
+}
+
+#[test]
+fn verify_prints_each_stamp() {
+    let lab = common::lab();
+    common::plain(&lab, "v1");
+    stop(&lab, "v1");
+    let (out, s, seq) = verified_after(&lab, "v1", 4_000_000_000);
+    let head = s.lines.head.as_ref().unwrap().seq;
+    let line = format!(
+        "stamp {seq}: {}, CN=T; lines: register yes, signature yes, key yes, head {head}, head signature yes; file {}, reply {}
+",
+        s.stamped_at, s.file_sha256, s.reply_sha256
+    );
+    assert!(out.contains(&line), "{out}");
+    assert!(!out.contains("flag:"), "{out}");
+    assert!(out.contains("done: stop at "), "{out}");
+}
+
+#[test]
+fn verify_flags_a_stamp_dated_before_its_record_and_exits_0() {
+    let lab = common::lab();
+    common::plain(&lab, "v2");
+    let (out, s, seq) = verified_after(&lab, "v2", 1);
+    let head = s.lines.head.as_ref().unwrap().seq;
+    let flag = format!(
+        "flag: stamp {seq} is dated before record {head}, which it covers
+"
+    );
+    assert!(out.contains(&flag), "{out}");
+}

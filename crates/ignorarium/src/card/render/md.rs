@@ -6,7 +6,7 @@ use super::{
 };
 use crate::card::Card;
 use crate::card::readings::NOT_READ;
-use crate::card::sections::{Field, Pick, UNRECORDED};
+use crate::card::sections::{Field, Pick, StampLine, UNRECORDED};
 use crate::spec::model::{SelectionRule, StatisticSpec};
 use crate::telemetry::CgroupTotals;
 
@@ -50,6 +50,36 @@ fn names(v: &[String]) -> String {
     v.join(", ")
 }
 
+/// One line per stamp, then the command that checks the first one.
+fn stamp_lines(stamps: &[StampLine]) -> Vec<String> {
+    let yes = |b: bool| if b { "yes" } else { "no" };
+    let Some(first) = stamps.first() else {
+        return vec!["Outside time stamp: not in the records".into()];
+    };
+    let line = |s: &StampLine| {
+        let records = s
+            .head_seq
+            .map_or(String::new(), |n| format!(", records 0 to {n}"));
+        let results = if s.results { ", the results" } else { "" };
+        let flag = s
+            .flag
+            .as_ref()
+            .map_or(String::new(), |f| format!("; flag: {f}"));
+        format!(
+            "Outside time stamp: {}, {}; covers the registration{records}{results}; key line {}, signature lines {}; signature checked by the reader{flag}",
+            s.stamped_at,
+            s.authority.as_deref().unwrap_or("authority not stated"),
+            yes(s.key),
+            yes(s.signatures)
+        )
+    };
+    let check = format!(
+        "Check a stamp: openssl ts -verify -data stamps/{}.txt -in stamps/{}.tsr -CAfile <bundle>",
+        first.file_sha256, first.reply_sha256
+    );
+    stamps.iter().map(line).chain([check]).collect()
+}
+
 fn header_section(c: &Card) -> String {
     let h = &c.header;
     let members: Vec<String> = (c.family["members"].as_array().into_iter().flatten())
@@ -64,7 +94,7 @@ fn header_section(c: &Card) -> String {
         None => "none".into(),
     };
     let levels = |l: &Vec<u8>| l.iter().map(u8::to_string).collect::<Vec<_>>().join(", ");
-    list(vec![
+    let mut items = vec![
         format!("Study: {}", c.study),
         format!("Family: {family}"),
         format!("Mode: {}", word(&h.mode)),
@@ -77,10 +107,21 @@ fn header_section(c: &Card) -> String {
             "Registered: {} (plan hash {})",
             h.registered_at, h.spec_hash
         ),
-        format!("Outside time stamp: {}", field(&h.timestamp, |t| t.clone())),
-        format!("Finished: {}", c.finished_at),
-        format!("Records verified: {}", c.records),
-    ])
+    ];
+    items.extend(stamp_lines(&h.stamps));
+    items.push(format!("Finished: {}", c.finished_at));
+    items.push(match &h.ended {
+        Field::Recorded { value: e } => format!(
+            "Study ended: {} at {} (done record {}, {})",
+            word(&e.end),
+            e.ended_at,
+            e.seq,
+            e.hash
+        ),
+        _ => "Study ended: no done record".into(),
+    });
+    items.push(format!("Records verified: {}", c.records));
+    list(items)
 }
 
 fn claim_section(c: &Card) -> String {

@@ -98,7 +98,7 @@ impl ChildEstimate {
     }
 }
 
-/// What `register` records about a plan. A confirmatory plan carries `timestamp = "pending"`.
+/// What `register` records about a plan.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Register {
@@ -131,6 +131,8 @@ pub struct Register {
     /// `null`, never left out.
     #[serde(deserialize_with = "Option::deserialize")]
     pub alpha: Option<Alpha>,
+    /// A slot nothing fills: a confirmatory plan carries `"pending"`. Outside time stamps are
+    /// `stamp` records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
     /// What the power gate predicted for each hypothesis it simulates, as `register` read it.
