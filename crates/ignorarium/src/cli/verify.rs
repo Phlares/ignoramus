@@ -2,7 +2,8 @@
 //! study's log with a public key alone.
 use super::{CliError, Ctx, Done, Run, key, out};
 use crate::derived::{
-    DONE, DoneRecord, OPENED, Register, STAMP, SessionStart, Stamp, sessions, stamp_flag,
+    DONE, DoneRecord, OPENED, Register, STAMP, SessionStart, Stamp, first_done, sessions,
+    stamp_flag,
 };
 use crate::diag::printable;
 use crate::identity::same_binary;
@@ -184,12 +185,12 @@ fn stamp_lines(all: &[records::Record], c: &mut StudyCheck) {
 /// The `done` line, and a failure for each record after `done` that is not a `stamp` or an
 /// `opened` record.
 fn done_lines(id: &str, all: &[records::Record], c: &mut StudyCheck) {
-    let Some(at) = all.iter().position(|r| r.kind == DONE) else {
+    let Some(done) = first_done(all) else {
         c.lines.push("no done record".into());
         return;
     };
-    let seq = all[at].seq;
-    match DoneRecord::of(&all[at]) {
+    let seq = done.seq;
+    match DoneRecord::of(done) {
         Some(d) => {
             let end = serde_json::to_value(d.end).ok();
             let end = end.as_ref().and_then(|v| v.as_str()).unwrap_or_default();
@@ -200,7 +201,7 @@ fn done_lines(id: &str, all: &[records::Record], c: &mut StudyCheck) {
             "study {id}: record {seq}: the done record is not readable"
         )),
     }
-    for r in &all[at + 1..] {
+    for r in all.iter().filter(|r| r.seq > seq) {
         match r.kind.as_str() {
             STAMP | OPENED => {}
             DONE => c.failed.push(format!(

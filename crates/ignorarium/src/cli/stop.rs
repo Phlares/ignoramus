@@ -1,7 +1,7 @@
 //! `stop`: end a study for good. A live run writes the stop record; an idle study gets it here.
 use super::{CliError, Ctx, Done, Run, located, out, refuse_if_done, registered, stopped_why};
 use crate::control::{ControlError, ControlFile, await_stop};
-use crate::derived::DONE;
+use crate::derived::first_done;
 use crate::records;
 use std::io::Write;
 use std::time::Duration;
@@ -48,7 +48,7 @@ pub fn run(ctx: &Ctx, id: &str, reason: &str) -> Run {
     if stopped_why(&all).is_some() {
         out("the first stop's reason stands\n")?;
         let now = records::read_all(&log, &key.verifying_key()).map_err(|e| fault(&e))?;
-        if let Some(done) = now.iter().find(|r| r.kind == DONE) {
+        if let Some(done) = first_done(&now) {
             out(&format!("done record: {}\n", done.seq))?;
         }
     }

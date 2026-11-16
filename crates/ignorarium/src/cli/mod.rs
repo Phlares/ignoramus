@@ -593,7 +593,7 @@ pub fn refusal(code: &str, found: &str) -> CliError {
 
 /// Refuse a study whose log holds a `done` record (E-DON-001).
 pub fn refuse_if_done(id: &str, all: &[crate::records::Record]) -> Result<(), CliError> {
-    match all.iter().find(|r| r.kind == crate::derived::DONE) {
+    match crate::derived::first_done(all) {
         Some(r) => Err(refusal(
             "E-DON-001",
             &format!("study {id} has a done record, seq {}", r.seq),

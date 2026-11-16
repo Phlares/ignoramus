@@ -2091,7 +2091,7 @@ fn finish_waits_for_admitted_rows_only() {
 fn a_run_study_reports_its_recorded_verdict() {
     use common::run;
     use ignorarium::derived::Analysis;
-    use ignorarium::runner::RunStatus;
+    use ignorarium::runner::{RunError, RunStatus};
     let lab = lab();
     common::resize_pilot(&lab.home);
     let plan = resize_study(&lab, "told", &flat("99"));
@@ -2133,17 +2133,9 @@ fn a_run_study_reports_its_recorded_verdict() {
     let log = lab.home.study_dir("told").join("records.jsonl");
     let before = std::fs::read(&log).unwrap();
     let estimates = kind_of(&lab, "told", "estimate");
-    let count = common::records_of(&lab, "told").len();
-    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
-    // The run adds its session pair and nothing else.
-    assert!(std::fs::read(&log).unwrap().starts_with(&before));
-    let now = common::records_of(&lab, "told");
-    let added: Vec<&str> = now[count..].iter().map(|r| &r.kind[..]).collect();
-    assert_eq!(added, ["session.start", "session.end"]);
-    assert_eq!(
-        common::study_records_of(&lab, "told").last().unwrap().kind,
-        "opened"
-    );
+    // The study is done: a later run is refused and adds nothing.
+    assert!(matches!(run(&plan), Err(RunError::Ended)));
+    assert_eq!(std::fs::read(&log).unwrap(), before);
     assert_eq!(kind_of(&lab, "told", "estimate"), estimates);
 }
 
@@ -2380,6 +2372,8 @@ fn a_declared_change_after_the_last_row_that_runs_is_after_collection() {
         binary_sha256: fake_binary('0'),
         ..common::box_identity().clone()
     };
+    // Lose the `done` record, so the study runs again.
+    common::drop_last_record(&lab.home.study_dir("ended"));
     assert_eq!(run_as(&plan, &now).unwrap(), RunStatus::Done);
     let rows = common::deviations_of(&lab.home.study_dir("ended"));
     assert_eq!(rows.len(), 1);

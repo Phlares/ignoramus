@@ -175,7 +175,7 @@ pub fn criterion_state(own: &[Record], r: &Replicated) -> &'static str {
     match verdict.as_deref() {
         Some("pass") => "met",
         Some("fail") => "not met",
-        _ if own.iter().any(|x| x.kind == DONE) => "no result",
+        _ if first_done(own).is_some() => "no result",
         _ => "pending",
     }
 }
@@ -695,6 +695,12 @@ impl DoneRecord {
     pub fn of(r: &Record) -> Option<DoneRecord> {
         body_of(r, DONE)
     }
+}
+
+/// The first record of kind `done` in `all`, whether its body parses or not; `DoneRecord::of`
+/// reads the body.
+pub fn first_done(all: &[Record]) -> Option<&Record> {
+    all.iter().find(|r| r.kind == DONE)
 }
 
 /// What a `stamp` record says the box checked. The authority's signature is not in it.

@@ -299,10 +299,17 @@ fn stop_with_no_live_run_writes_one_record_and_one_deviation_row() {
     );
     assert_eq!(stop_ev[0]["level"], "warn");
     // The trace id is the study's: the first 16 bytes of the spec hash.
-    let plan = plan_of(&lab, "idle");
-    assert_eq!(stop_ev[0]["trace_id"], hex::encode(&plan.spec_hash[..16]));
-    // The study never runs a row after the stop.
-    assert_eq!(go(&plan).unwrap(), RunStatus::Stopped("abandon".into()));
+    let hash = kind_of(&lab, "idle", "register")[0].body["spec_hash"].clone();
+    let trace = &hash.as_str().unwrap()["sha256:".len()..][..32];
+    assert_eq!(stop_ev[0]["trace_id"], trace);
+    // The study never runs a row after the stop: the `done` record after it refuses the run.
+    let e = prepare_with(
+        &lab.home,
+        "idle",
+        &common::work_of(&lab.home, "idle"),
+        vec![Box::new(Level0)],
+    );
+    assert!(matches!(e, Err(RunError::Ended)));
     assert!(rows_of(&lab, "idle").is_empty());
     assert!(!dir.join("run/rows").exists());
     assert_eq!(kind_of(&lab, "idle", "stop").len(), 1);
@@ -426,10 +433,11 @@ fn stop_cannot_be_resumed() {
         state_of(&lab, "final"),
         Some(State::Stopped("manual".into()))
     );
-    let plan = plan_of(&lab, "final");
-    assert_eq!(go(&plan).unwrap(), RunStatus::Stopped("manual".into()));
-    // The signed stop record decides, even when the control file loses its stop.
+    // The signed stop record decides, even when the control file loses its stop and the log
+    // its `done` record.
     std::fs::write(&c.path, "").unwrap();
+    common::drop_last_record(&dir);
+    let plan = plan_of(&lab, "final");
     assert_eq!(go(&plan).unwrap(), RunStatus::Stopped("manual".into()));
     assert!(rows_of(&lab, "final").is_empty());
     assert!(!dir.join("run/rows").exists());
@@ -1404,6 +1412,50 @@ fn an_idle_stop_ends_with_done() {
     // A second stop adds nothing.
     send_stop(&lab.home, "idle-done", "again");
     assert_eq!(common::records_of(&lab, "idle-done"), all);
+}
+
+/// The log of study `id` verifies as `verify` checks it.
+fn verifies(lab: &Lab, id: &str) {
+    let a = common::bin(lab).args(["verify", "--study", id]).assert();
+    let err = String::from_utf8_lossy(&a.get_output().stderr);
+    assert!(a.get_output().status.success(), "{}{err}", common::text(&a));
+}
+
+#[test]
+fn a_run_prepared_before_an_idle_stop_adds_no_record_after_done() {
+    let lab = lab();
+    plain(&lab, "late-run");
+    let plan = plan_of(&lab, "late-run");
+    send_stop(&lab.home, "late-run", "abandon").unwrap();
+    let before = common::records_of(&lab, "late-run");
+    assert_eq!(before.last().unwrap().kind, DONE);
+    let e = go(&plan).unwrap_err();
+    assert!(matches!(e, RunError::Ended), "{e:?}");
+    assert_eq!(
+        e.to_string(),
+        "the study ended before this run took its lock; no record was added"
+    );
+    assert_eq!(common::records_of(&lab, "late-run"), before);
+    verifies(&lab, "late-run");
+}
+
+#[test]
+fn a_first_prepare_overtaken_by_done_adds_no_inputs_record() {
+    let lab = lab();
+    plain(&lab, "late-prep");
+    send_stop(&lab.home, "late-prep", "abandon").unwrap();
+    let before = common::records_of(&lab, "late-prep");
+    let e = prepare_with(
+        &lab.home,
+        "late-prep",
+        &common::work_of(&lab.home, "late-prep"),
+        vec![Box::new(Level0)],
+    )
+    .err()
+    .unwrap();
+    assert!(matches!(e, RunError::Ended), "{e:?}");
+    assert_eq!(common::records_of(&lab, "late-prep"), before);
+    verifies(&lab, "late-prep");
 }
 
 #[test]

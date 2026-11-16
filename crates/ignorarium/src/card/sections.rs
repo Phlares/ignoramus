@@ -6,8 +6,8 @@ use super::sidecar::DataList;
 use crate::analysis::{IntervalResult, claim_strata};
 use crate::canon::sha256_file;
 use crate::derived::{
-    Analysis, DONE, DoneRecord, End, Estimate, GroupClip, Instrument, Register, Resolved,
-    Selection, Stamp, Trigger, Verdict, criterion_state, stamp_flag,
+    Analysis, DoneRecord, End, Estimate, GroupClip, Instrument, Register, Resolved, Selection,
+    Stamp, Trigger, Verdict, criterion_state, first_done, stamp_flag,
 };
 use crate::files::optional;
 use crate::records::{Log, Record};
@@ -333,7 +333,7 @@ pub struct StampLine {
 
 /// The `stamp` records of `all`, in order.
 pub fn stamps(all: &[Record]) -> Vec<StampLine> {
-    let done = all.iter().find(|r| r.kind == DONE).map(|r| r.seq);
+    let done = first_done(all).map(|r| r.seq);
     (all.iter())
         .filter_map(|r| Some((r, Stamp::of(r)?)))
         .map(|(r, s)| {
@@ -357,7 +357,7 @@ pub fn stamps(all: &[Record]) -> Vec<StampLine> {
 
 /// The first `done` record of `all`.
 pub fn ended(all: &[Record]) -> Field<Ended> {
-    let done = all.iter().find_map(|r| Some((r, DoneRecord::of(r)?)));
+    let done = first_done(all).and_then(|r| Some((r, DoneRecord::of(r)?)));
     Field::of(
         done.map(|(r, d)| Ended {
             end: d.end,

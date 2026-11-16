@@ -80,3 +80,16 @@ fn run_error(e: RunError) -> CliError {
         e => CliError::refuse(e.to_string()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_run_that_loses_the_race_to_done_refuses_with_no_rule_code() {
+        let e = super::run_error(crate::runner::RunError::Ended);
+        assert_eq!(e.code, 1);
+        assert_eq!(
+            e.msg,
+            "the study ended before this run took its lock; no record was added"
+        );
+    }
+}

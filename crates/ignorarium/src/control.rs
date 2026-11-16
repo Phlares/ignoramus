@@ -3,7 +3,7 @@
 //! `deviations.jsonl` in the study folder. A stop is final: no later request replaces it,
 //! and a study with a stop record runs no further row.
 use crate::canon::canonical_line;
-use crate::derived::{ANALYSIS, Analysis, DONE, Register};
+use crate::derived::{ANALYSIS, Analysis, DONE, Register, first_done};
 use crate::events::{self, Event};
 use crate::files::{append_line, open_log, replace_atomic};
 use crate::home::Home;
@@ -229,7 +229,7 @@ impl RunLock {
             if all.iter().any(|r| r.kind == "stop") {
                 return Ok(vec![]);
             }
-            if all.iter().any(|r| r.kind == DONE) {
+            if first_done(&all).is_some() {
                 return Err(ControlError::Done);
             }
             let (left, note) = match end_orphan(home, id) {
@@ -310,7 +310,7 @@ impl RunLock {
         let log = self.home.study_dir(&self.study_id).join("records.jsonl");
         let mut made = records::append_with(&log, key, |log| -> Result<_, ControlError> {
             let all = &log.records;
-            if all.iter().any(|r| r.kind == DONE) {
+            if first_done(all).is_some() {
                 return Ok(vec![]);
             }
             let close = self.slot_closed_at(key, all)?;
@@ -420,7 +420,7 @@ pub fn await_stop(
         }
         // A run that holds the lock can write `done` before it sees the request; the request
         // stays until a stop that takes the lock clears it.
-        if all.iter().any(|r| r.kind == DONE) && ControlFile::of(home, study_id).peek()?.is_none() {
+        if first_done(&all).is_some() && ControlFile::of(home, study_id).peek()?.is_none() {
             return Err(ControlError::Done);
         }
         if start.elapsed() >= wait {

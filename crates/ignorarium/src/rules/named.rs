@@ -1776,8 +1776,8 @@ fn ended(ctx: &CheckCtx, r: &Replicates) -> Result<Ended, Taken<Original>> {
         Ok(None) => return Err(Taken::Pending(waits(id, "not registered"))),
         Ok(Some(all)) => all,
     };
-    let done = (all.iter().find(|x| x.kind == crate::derived::DONE))
-        .ok_or_else(|| Taken::Pending(waits(id, "not done")))?;
+    let done =
+        crate::derived::first_done(&all).ok_or_else(|| Taken::Pending(waits(id, "not done")))?;
     let verdict = all.iter().find_map(|x| {
         let v = Verdict::of(x).filter(|v| v.hypothesis == r.hypothesis)?;
         Some((records::hash(x), v))

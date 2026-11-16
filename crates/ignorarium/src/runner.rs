@@ -10,7 +10,7 @@ use crate::cli::check::HomeRecords;
 use crate::control::{self, ControlError, ControlFile, RunLock, Signal, State};
 use crate::derived::{
     CONTINUE, INPUTS, Inputs, REGISTER, RESIZE, Register, SELECTION, SESSION_END, SESSION_START,
-    SPAWN_STOP, Selection, SessionEnd, SessionStart, SpawnStop, TRIGGER,
+    SPAWN_STOP, Selection, SessionEnd, SessionStart, SpawnStop, TRIGGER, first_done,
 };
 use crate::diag::printable;
 use crate::environ::{Builder, Built, Recipe};
@@ -153,6 +153,8 @@ pub enum RunError {
     NoKey,
     /// Another run of this study holds the run lock.
     Busy,
+    /// The log holds `done`, read under the log's lock before this run appended anything to it.
+    Ended,
     /// The box binary differs from the last session's, or the register record's when no
     /// session exists, and no change was declared. Each side as `identity::binary_text`.
     BoxChanged {
@@ -237,6 +239,10 @@ impl fmt::Display for RunError {
             RunError::Disk(e) => write!(f, "level 2 cannot make a disk of {e}; rename it"),
             RunError::NoKey => write!(f, "the box key does not exist"),
             RunError::Busy => write!(f, "another run of this study is in progress"),
+            RunError::Ended => write!(
+                f,
+                "the study ended before this run took its lock; no record was added"
+            ),
             RunError::BoxChanged { was, now } => write!(
                 f,
                 "the box binary changed since the last session ({was} to {now}); \
@@ -484,7 +490,14 @@ pub fn prepare_with(
     if frozen.is_none() {
         let body = serde_json::to_value(&now).map_err(io)?;
         let draft = RecordDraft::new(study_id, INPUTS, body);
-        records::append(&dir.join("records.jsonl"), &key, draft)?;
+        // No run lock is held here, so a `done` written since the read above is looked for
+        // under the log's lock.
+        records::append_with(&dir.join("records.jsonl"), &key, |log| {
+            match first_done(&log.records) {
+                Some(_) => Err(RunError::Ended),
+                None => Ok(vec![draft]),
+            }
+        })?;
     }
     if let Some((reason, _)) = unfit {
         let attrs = json!({ "level": backend.level(), "skipped": skipped, "reason": reason });
@@ -1052,6 +1065,11 @@ pub fn run_as(plan: &RunPlan, now: &BoxIdentity) -> Result<RunStatus, RunError> 
     let result = records::read_all(&log, &plan.key.verifying_key())
         .map_err(RunError::from)
         .and_then(|all| {
+            // Only a holder of the run lock writes `done`, so none appears while this run holds
+            // it: the appends below need no check of their own.
+            if first_done(&all).is_some() {
+                return Err(RunError::Ended);
+            }
             let changed_from = binary_gate(plan, now, &all)?;
             // Only a resume the gate lets through clears a pending pause.
             if plan.resumed_by {

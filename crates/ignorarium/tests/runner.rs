@@ -456,8 +456,8 @@ fn run_writes_one_record_per_row_in_order() {
     assert!(plan.schedule.rows.iter().all(|r| r.recheck_of.is_none()));
     let analysis = &kind_of(&lab, "s1", "analysis")[0].body;
     assert_eq!(analysis.get("recheck"), Some(&serde_json::Value::Null));
-    // A second run has nothing left to do.
-    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
+    // The study is done: a second run is refused.
+    assert!(matches!(run(&plan), Err(RunError::Ended)));
     assert_eq!(rows_of(&lab, "s1").len(), 6);
 }
 
@@ -741,9 +741,12 @@ fn a_declared_change_writes_a_deviation_row_and_names_the_old_hash() {
     assert_eq!(start.binary_sha256, now.binary_sha256);
     assert_eq!(start.changed_from, Some(was.binary_sha256.clone()));
     assert_eq!(start.reason.as_deref(), Some(reason));
-    // The declared binary is the baseline now: it runs on, and the old one refuses.
+    // The declared binary is the baseline now: it runs on, and the old one refuses. Each run
+    // follows the loss of the `done` record, so the study runs again.
     plan.box_changed = None;
+    common::drop_last_record(&dir);
     assert_eq!(run_as(&plan, &now).unwrap(), RunStatus::Done);
+    common::drop_last_record(&dir);
     let e = run_as(&plan, was).unwrap_err();
     assert!(
         matches!(&e, RunError::BoxChanged { was: w, now: n } if *w == new && *n == old),
@@ -806,7 +809,8 @@ fn an_old_register_without_box_runs_and_records_a_session() {
     assert_eq!(starts[0].0.changed_from, None);
     assert_eq!(starts[0].0.reason, None);
     assert!(deviations_of(&dir).is_empty());
-    // That session is the baseline from here.
+    // That session is the baseline from here, once the `done` record is lost.
+    common::drop_last_record(&dir);
     let e = run_as(&plan_of(&lab, "old"), common::box_identity()).unwrap_err();
     assert!(matches!(e, RunError::BoxChanged { .. }), "{e:?}");
 }
@@ -814,7 +818,7 @@ fn an_old_register_without_box_runs_and_records_a_session() {
 #[test]
 fn a_killed_session_does_not_block_the_next_run() {
     let lab = lab();
-    plain(&lab, "dead");
+    let dir = plain(&lab, "dead");
     let was = common::box_identity();
     common::sign_session_start(&lab, "dead", &was.binary_sha256, None);
     assert_eq!(
@@ -823,7 +827,8 @@ fn a_killed_session_does_not_block_the_next_run() {
     );
     let (starts, ends) = sessions_of(&lab, "dead");
     assert_eq!((starts.len(), ends.len()), (2, 1));
-    // A killed session of another binary is the baseline too.
+    // A killed session of another binary is the baseline too, once the `done` record is lost.
+    common::drop_last_record(&dir);
     common::sign_session_start(&lab, "dead", &rebuilt('3').binary_sha256, None);
     let e = run_as(&plan_of(&lab, "dead"), was).unwrap_err();
     assert!(matches!(e, RunError::BoxChanged { .. }), "{e:?}");
@@ -2343,10 +2348,10 @@ fn an_overrun_on_child_rows_stops_the_children_and_finishes() {
     assert_eq!(kind_of(&lab, "overrun", "verdict").len(), 1);
     let p = ignorarium::runner::progress(&lab.home, "overrun", &all).unwrap();
     assert_eq!((p.done, p.total), (19, 19));
-    // A resume runs no child row and adds nothing but its session pair.
-    let study = common::study_records_of(&lab, "overrun");
-    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
-    assert_eq!(common::study_records_of(&lab, "overrun"), study);
+    // The study is done: a resume is refused and adds nothing.
+    let before = common::records_of(&lab, "overrun");
+    assert!(matches!(run(&plan), Err(RunError::Ended)));
+    assert_eq!(common::records_of(&lab, "overrun"), before);
 }
 
 #[test]
@@ -3510,7 +3515,9 @@ fn retried_attempts_count_in_the_record_the_tally_and_the_meter() {
     }
     // Rows 1..5 cost 50 cpu seconds each; row 0 cost 3 attempts of 50 -> 400 in all.
     assert_eq!(plan.meter.sample().unwrap().cpu_seconds, 400.0);
-    // A resume reads the same 400 from the records: no attempt counts twice.
+    // A resume after the loss of the `done` record reads the same 400 from the records: no
+    // attempt counts twice.
+    common::drop_last_record(&lab.home.study_dir("b7"));
     let resumed = plan_of(&lab, "b7");
     assert_eq!(run(&resumed).unwrap(), RunStatus::Done);
     assert_eq!(resumed.meter.sample().unwrap().cpu_seconds, 400.0);
@@ -4100,9 +4107,10 @@ fn a_finished_run_writes_each_record_once_and_heals_a_crash() {
         assert_eq!((e.stratum.as_str(), e.clusters, e.units), ("", 1, 3));
         assert_eq!((e.mean, e.var, e.icc), (0.0, 0.0, None));
     }
-    // A second run adds nothing.
-    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
-    assert_eq!(common::study_records_of(&lab, "fin").len(), 14);
+    // A second run is refused and adds nothing.
+    let before = common::records_of(&lab, "fin");
+    assert!(matches!(run(&plan), Err(RunError::Ended)));
+    assert_eq!(common::records_of(&lab, "fin"), before);
     // A crash after any record of the tail, the last verdict included: the next run adds what
     // is missing, once.
     for kept in [13, 12, 11, 10, 9] {
@@ -4535,9 +4543,10 @@ fn verdicts_and_the_close_are_written_once() {
     let bodies = |rs: &[records::Record]| -> Vec<serde_json::Value> {
         rs.iter().map(|r| r.body.clone()).collect()
     };
-    // A second run adds nothing, to the study's log or to the stream.
-    assert_eq!(run(&plan).unwrap(), RunStatus::Done);
-    assert_eq!(common::study_records_of(&lab, "once").len(), n + 1);
+    // A second run is refused and adds nothing, to the study's log or to the stream.
+    let before = common::records_of(&lab, "once");
+    assert!(matches!(run(&plan), Err(RunError::Ended)));
+    assert_eq!(common::records_of(&lab, "once"), before);
     assert_eq!(stream_of(&lab, LogName::Plan), closed);
     // A crash before the close: after the verdict, after the estimate, after the analysis
     // record, or before it. The next run adds what is missing, once, and closes the slot
@@ -4708,7 +4717,9 @@ fn a_mismatch_flags_an_exploratory_run() {
     };
     assert_eq!(r, flagged);
     assert!(!r.passed());
-    // A later run finds the mismatch in the records and still ends: the study is exploratory.
+    // A later run, after the loss of the `done` record, finds the mismatch in the records and
+    // still ends: the study is exploratory.
+    common::drop_last_record(&dir);
     assert_eq!(run(&plan).unwrap(), RunStatus::Done);
 }
 
@@ -4748,7 +4759,7 @@ fn a_mismatch_stops_a_confirmatory_run() {
     assert_eq!(indices(&lab, "strict"), ran);
     assert!(kind_of(&lab, "strict", "analysis").is_empty());
     assert!(rechecks(&dir).is_empty());
-    assert_eq!(run(&plan).unwrap(), RunStatus::Stopped(why));
+    assert!(matches!(run(&plan), Err(RunError::Ended)));
     assert_eq!(indices(&lab, "strict"), ran);
 }
 
@@ -5399,8 +5410,8 @@ fn each_admitted_child_gets_one_estimate_per_outcome_before_the_analysis_record(
     let all = common::study_records_of(&lab, "kids");
     let at = |kind: &str| all.iter().position(|r| r.kind == kind).unwrap();
     assert!(at("child-estimate") < at("analysis"));
-    // A second finish adds nothing.
-    assert_eq!(run(&plan_of(&lab, "kids")).unwrap(), RunStatus::Done);
+    // The study is done: a second finish is refused and adds nothing.
+    assert!(matches!(run(&plan_of(&lab, "kids")), Err(RunError::Ended)));
     assert_eq!(child_estimates(&lab, "kids").len(), 2);
     // A crash between the first estimate and the analysis record heals to the same two.
     keep_records(&lab.home.study_dir("kids"), at("child-estimate") + 1);

@@ -3,7 +3,7 @@
 use super::{CliError, Ctx, Done, Run, out, registered, stopped_why};
 use crate::canon::sha256_hex;
 use crate::control::{ControlFile, Signal, State, run_is_live};
-use crate::derived::{self, DoneRecord, Register, SpawnStop, criterion_state};
+use crate::derived::{self, DoneRecord, Register, SpawnStop, criterion_state, first_done};
 use crate::diag::printable;
 use crate::home::Home;
 use crate::records::Record;
@@ -208,7 +208,7 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
         json!({ "decision": r.decision, "strata": strata })
     });
     let triggers = triggers(spec, &all, &shown).map_err(|e| bad(&e))?;
-    let ended = (all.iter()).find_map(|r| {
+    let ended = first_done(&all).and_then(|r| {
         let d = DoneRecord::of(r)?;
         Some(json!({ "end": d.end, "ended_at": d.ended_at, "seq": r.seq }))
     });
