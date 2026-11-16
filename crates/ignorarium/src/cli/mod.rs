@@ -25,6 +25,7 @@ mod resume;
 mod review;
 mod run;
 mod selftest;
+mod stamp;
 pub mod status;
 pub mod stop;
 mod verify;
@@ -256,6 +257,17 @@ enum Verb {
         #[arg(long, value_name = "REASON", value_parser = non_blank)]
         reason: String,
     },
+    /// Write the file an outside time-stamp authority signs, and print the commands that ask it.
+    Stamp {
+        /// Study id.
+        study: String,
+        /// Write the file to stamp.
+        #[arg(long, required = true)]
+        request: bool,
+        /// A file whose bytes follow the box's lines in the stamped file.
+        #[arg(long, requires = "request")]
+        with: Option<PathBuf>,
+    },
     #[command(hide = true, subcommand)]
     Dev(Dev),
 }
@@ -287,7 +299,8 @@ impl Verb {
             | Verb::Report { study, .. }
             | Verb::Pause { study }
             | Verb::Resume { study, .. }
-            | Verb::Stop { study, .. } => Some(study),
+            | Verb::Stop { study, .. }
+            | Verb::Stamp { study, .. } => Some(study),
             Verb::Verify { study, .. } => study.as_deref(),
             _ => None,
         }
@@ -322,6 +335,7 @@ impl Verb {
             Verb::Pause { .. } => "pause",
             Verb::Resume { .. } => "resume",
             Verb::Stop { .. } => "stop",
+            Verb::Stamp { .. } => "stamp",
             Verb::Dev(Dev::GenRuleDocs { .. }) => "dev.gen-rule-docs",
             Verb::Dev(Dev::Selftest) => "dev.selftest",
         }
@@ -372,6 +386,7 @@ impl Verb {
             Verb::Pause { study } => pause::run(ctx, &study),
             Verb::Resume { study, box_changed } => resume::run(ctx, &study, box_changed),
             Verb::Stop { study, reason } => stop::run(ctx, &study, &reason),
+            Verb::Stamp { study, with, .. } => stamp::request(ctx, &study, with.as_deref()),
             Verb::Dev(Dev::GenRuleDocs { out }) => docs::run(&out),
             Verb::Dev(Dev::Selftest) => selftest::run(),
         }

@@ -1142,3 +1142,35 @@ fn find_matches_the_stored_hash_of_a_row_that_shares_its_data() {
     assert_eq!(found.keys().collect::<Vec<_>>().len(), 2);
     assert!(found.contains_key(&want[1]));
 }
+
+#[test]
+fn seals_hold_the_stored_hash_of_a_row_that_shares_data_hashes() {
+    let lab = common::lab();
+    let dir = common::plain(&lab, "sh1");
+    common::bin(&lab)
+        .current_dir(common::work(&lab, "sh1"))
+        .args(["run", "sh1"])
+        .assert()
+        .code(0);
+    let log = dir.join("records.jsonl");
+    let vk = keys::load(&lab.home).unwrap().unwrap().verifying_key();
+    let seals = records::seals(&log, &vk).unwrap();
+    let raw: Vec<Value> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(seals.len(), raw.len());
+    assert!(common::rows_of(&lab, "sh1").len() >= 2);
+    for (s, l) in seals.iter().zip(&raw) {
+        assert_eq!(l["hash"], s.hash);
+        assert_eq!(l["sig"], s.sig);
+    }
+    let read = records::read_all(&log, &vk).unwrap();
+    assert!(
+        read.iter()
+            .filter(|r| r.kind == "row")
+            .any(|r| records::hash(r) != seals[r.seq as usize].hash),
+        "a later row drops shared data_hashes, so its recomputed hash differs"
+    );
+}
