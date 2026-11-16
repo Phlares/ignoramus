@@ -344,15 +344,22 @@ impl RunLock {
     }
 }
 
+/// A study's stop record, and why the `done` record after it was not written, when this call
+/// tried and failed. The stop stands either way; the next stop adds the missing `done`.
+#[derive(Debug)]
+pub struct Stopped {
+    pub record: Record,
+    pub close_error: Option<ControlError>,
+}
+
 /// Write the stop trace and the `done` record here when a stop is pending and no run holds
 /// the lock. `None` when no stop is pending, when the study is done, or when a live run
-/// holds the lock: it sees the stop at its next tick. A `done` that cannot be written leaves
-/// the stop standing; the next stop adds it.
+/// holds the lock: it sees the stop at its next tick.
 pub fn stop_if_idle(
     home: &Home,
     study_id: &str,
     key: &SigningKey,
-) -> Result<Option<Record>, ControlError> {
+) -> Result<Option<Stopped>, ControlError> {
     let Some(Signal::Stop(reason)) = ControlFile::of(home, study_id).peek()? else {
         return Ok(None);
     };
@@ -363,8 +370,10 @@ pub fn stop_if_idle(
         Err(ControlError::Done) => return Ok(None),
         r => r?,
     };
-    let _ = lock.close(key);
-    Ok(Some(stop))
+    Ok(Some(Stopped {
+        record: stop,
+        close_error: lock.close(key).err(),
+    }))
 }
 
 /// Whether a run holds the study's lock now. A shared probe, released at once: it never
@@ -395,16 +404,19 @@ pub fn await_stop(
     study_id: &str,
     key: &SigningKey,
     wait: Duration,
-) -> Result<Option<Record>, ControlError> {
+) -> Result<Option<Stopped>, ControlError> {
     let log = home.study_dir(study_id).join("records.jsonl");
     let start = Instant::now();
     loop {
-        if let Some(r) = stop_if_idle(home, study_id, key)? {
-            return Ok(Some(r));
+        if let Some(s) = stop_if_idle(home, study_id, key)? {
+            return Ok(Some(s));
         }
         let all = records::read_all(&log, &key.verifying_key())?;
         if let Some(r) = all.iter().find(|r| r.kind == "stop") {
-            return Ok(Some(r.clone()));
+            return Ok(Some(Stopped {
+                record: r.clone(),
+                close_error: None,
+            }));
         }
         // A run that holds the lock can write `done` before it sees the request; the request
         // stays until a stop that takes the lock clears it.

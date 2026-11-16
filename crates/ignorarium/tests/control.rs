@@ -74,7 +74,7 @@ fn go(plan: &RunPlan) -> Result<RunStatus, RunError> {
 fn try_stop(home: &Home, id: &str, why: &str) -> Result<Option<Record>, ControlError> {
     let key = keys::load(home).unwrap().unwrap();
     ControlFile::of(home, id).request_stop(why).unwrap();
-    control::stop_if_idle(home, id, &key)
+    control::stop_if_idle(home, id, &key).map(|s| s.map(|s| s.record))
 }
 
 /// A stop sent the way the `stop` command sends it: the request, then the trace when no run
@@ -1314,8 +1314,9 @@ fn await_stop_returns_the_record_an_idle_study_gets() {
     let r = control::await_stop(&lab.home, "aw1", &key, Duration::from_millis(100))
         .unwrap()
         .expect("an idle study records the stop at once");
-    assert_eq!(r.kind, "stop");
-    assert_eq!(r.body["why"], "enough");
+    assert_eq!(r.record.kind, "stop");
+    assert_eq!(r.record.body["why"], "enough");
+    assert!(r.close_error.is_none());
     assert_eq!(kind_of(&lab, "aw1", "stop").len(), 1);
 }
 
@@ -1352,7 +1353,7 @@ fn await_stop_returns_a_record_the_live_run_writes_while_it_waits() {
     thread::sleep(Duration::from_millis(200));
     held.stop(&key, "live", None).unwrap();
     let r = waiter.join().unwrap().expect("the record the run wrote");
-    assert_eq!(r.kind, "stop");
+    assert_eq!(r.record.kind, "stop");
 }
 
 #[test]
@@ -1449,11 +1450,21 @@ fn done_never_precedes_the_session_end_of_a_racing_run() {
             thread::sleep(wait);
             let mut stop = assert_cmd::Command::cargo_bin("ignorarium").unwrap();
             stop.env("IGNORARIUM_HOME", &root);
-            // A stop that comes after the run's `done` is refused.
+            // A stop that reads `done` refuses before it writes; one that a `done` overtakes
+            // after its read says so.
             let a = stop.args(["stop", &who, "--reason", "race"]).assert();
             let out = a.get_output();
             let err = String::from_utf8_lossy(&out.stderr);
-            assert!(out.status.success() || err.contains("E-DON-001"), "{err}");
+            let read_first = err.contains("E-DON-001") && err.contains("has a done record");
+            let overtaken = err.contains(
+                "the stop request is sent, but the study ended first; the request is cleared",
+            );
+            assert!(
+                out.status.success()
+                    || (out.status.code() == Some(1) && read_first)
+                    || (out.status.code() == Some(2) && overtaken && !err.contains("E-DON")),
+                "{err}"
+            );
         });
         let status = go(&plan).unwrap();
         other.join().unwrap();
@@ -1542,4 +1553,40 @@ fn a_stopped_log_without_done_is_repaired_by_stop() {
     assert!(out.contains("the first stop's reason stands"), "{out}");
     let done = common::records_of(&lab, "cut").last().unwrap().seq;
     assert!(out.contains(&format!("done record: {done}")), "{out}");
+}
+
+#[test]
+fn a_stop_overtaken_by_done_after_its_read_says_the_study_ended_first() {
+    let lab = lab();
+    let dir = plain(&lab, "overtaken");
+    assert_eq!(go(&plan_of(&lab, "overtaken")).unwrap(), RunStatus::Done);
+    // A finished log without `done`, as a run leaves it just before its close.
+    common::drop_last_record(&dir);
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let held = RunLock::try_take(&lab.home, "overtaken").unwrap().unwrap();
+    let mut cmd = common::bin(&lab);
+    let stop = thread::spawn(move || {
+        cmd.args(["stop", "overtaken", "--reason", "late"])
+            .assert()
+            .get_output()
+            .clone()
+    });
+    // The request is written after the log is read: then the run writes `done` and lets go.
+    let t = Instant::now();
+    while control_of(&lab, "overtaken").peek().unwrap().is_none() {
+        assert!(t.elapsed() < Duration::from_secs(20), "no request");
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(held.close(&key).unwrap().is_some());
+    drop(held);
+    let out = stop.join().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(
+        err.contains("the stop request is sent, but the study ended first; the request is cleared"),
+        "{err}"
+    );
+    assert!(!err.contains("E-DON"), "{err}");
+    assert!(kind_of(&lab, "overtaken", "stop").is_empty());
+    assert_eq!(control_of(&lab, "overtaken").peek().unwrap(), None);
 }

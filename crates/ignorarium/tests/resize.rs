@@ -220,7 +220,6 @@ fn a_stop_after_the_last_admitted_row_is_after_collection() {
 #[test]
 fn a_stop_whose_done_cannot_be_written_still_stops() {
     use ignorarium::backend::level0::Level0;
-    use ignorarium::control::{self, ControlFile};
     use ignorarium::runner::{RunStatus, prepare_with};
     let lab = common::lab();
     common::resize_pilot(&lab.home);
@@ -244,26 +243,34 @@ fn a_stop_whose_done_cannot_be_written_still_stops() {
     let digit = close + bad[close..].iter().position(u8::is_ascii_digit).unwrap();
     bad[digit] = if bad[digit] == b'7' { b'8' } else { b'7' };
     std::fs::write(&path, &bad).unwrap();
-    let key = ignorarium::keys::load(&lab.home).unwrap().unwrap();
-    ControlFile::of(&lab.home, "rs-close")
-        .request_stop("x")
-        .unwrap();
-    let stop = control::stop_if_idle(&lab.home, "rs-close", &key).unwrap();
-    assert_eq!(stop.unwrap().kind, "stop");
-    let kinds = || -> Vec<String> {
-        (common::records_of(&lab, "rs-close").into_iter())
-            .map(|r| r.kind)
-            .collect()
+    let stop = |why: &str| {
+        let a = common::bin(&lab)
+            .args(["stop", "rs-close", "--reason", why])
+            .assert()
+            .code(0);
+        let err = String::from_utf8_lossy(&a.get_output().stderr).into_owned();
+        (common::text(&a), err)
     };
-    assert_eq!(kinds().last().map(String::as_str), Some("stop"));
-    // The next stop adds the missing `done`.
-    std::fs::write(&path, &good).unwrap();
+    let (out, err) = stop("x");
+    let all = common::records_of(&lab, "rs-close");
+    let last = all.last().unwrap();
+    assert_eq!(last.kind, "stop");
+    assert!(out.contains(&format!("stop record: {}", last.seq)), "{out}");
     assert!(
-        control::stop_if_idle(&lab.home, "rs-close", &key)
-            .unwrap()
-            .is_some()
+        err.contains("the done record is not written: ") && err.ends_with("; run stop again\n"),
+        "{err}"
     );
-    assert_eq!(kinds().last().map(String::as_str), Some(derived::DONE));
+    // The next stop adds the missing `done`, and says nothing is missing.
+    std::fs::write(&path, &good).unwrap();
+    let (out, err) = stop("y");
+    let all = common::records_of(&lab, "rs-close");
+    assert_eq!(all.last().unwrap().kind, derived::DONE);
+    assert!(out.contains("the first stop's reason stands"), "{out}");
+    assert!(
+        out.contains(&format!("done record: {}", all.last().unwrap().seq)),
+        "{out}"
+    );
+    assert!(!err.contains("done record"), "{err}");
 }
 
 #[test]
