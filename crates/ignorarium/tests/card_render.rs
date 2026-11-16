@@ -712,3 +712,22 @@ fn a_card_with_no_stamp_and_no_end_prints_both_lines() {
     assert!(md.contains("- Study ended: no done record\n"));
     assert!(!md.contains("Check a stamp"));
 }
+
+#[test]
+fn the_replication_block_escapes_its_text() {
+    let mut c = card();
+    c.replication = Field::Recorded {
+        value: ignorarium::card::sections::Replication {
+            study: "orig".into(),
+            done: "ab".repeat(32),
+            hypothesis: "H1".into(),
+            original_verdict: "pass_*[x]*".into(),
+            criterion: ignorarium::spec::model::Criterion::Verdict,
+            result: "met".into(),
+            same_estimate_key: true,
+            same_payload: true,
+        },
+    };
+    let md = markdown(&c);
+    assert!(md.contains(r"- Original verdict: pass\_\*\[x\]\*"), "{md}");
+}

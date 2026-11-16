@@ -341,12 +341,13 @@ target = [
 [[rule]]
 code = "E-FMT-003"
 severity = "error"
-problem = "An input hash is not a SHA-256 digest."
-instruction = "Use 64 lowercase hex characters, or leave it empty until the input is pinned."
+problem = "An input hash or a record hash is not a SHA-256 digest."
+instruction = "Use 64 lowercase hex characters, with no sha256: prefix. An input hash may stay empty until the input is pinned; study.replicates.done may not."
 why = "The run compares this hash with the file it reads. Any other form can never match."
 sources = ["https://toml.io/en/v1.0.0"]
 target = [
   { path = "inputs[*].sha256", check = "format", pattern = "^([0-9a-f]{64})?$" },
+  { path = "study.replicates.done", check = "format", pattern = "^[0-9a-f]{64}$" },
 ]
 
 [[rule]]
@@ -453,12 +454,13 @@ target = [
 code = "E-REF-002"
 severity = "error"
 problem = "A reference names this study, or a study that recorded no selection."
-instruction = "Set estimates.from or a param's from to the id of another study: one that has run, or will run, before this one. A param takes the condition that study selected, so that study needs a selection stage."
+instruction = "Set estimates.from, a param's from or study.replicates.study to the id of another study: one that has run, or will run, before this one. A param takes the condition that study selected, so that study needs a selection stage."
 why = "A value taken from a study exists only once that study has finished. This study's own values come from this run, so a plan cannot be sized by them or take a condition from them. A study without a selection stage selects no condition."
 sources = []
 target = [
   { path = "question.hypotheses[*].estimates.from", check = "named:reference-not-self" },
   { path = "design.conditions[*].params.*.from", check = "named:reference-not-self" },
+  { path = "study.replicates.study", check = "named:reference-not-self" },
 ]
 
 [[rule]]
@@ -501,9 +503,9 @@ target = [
 [[rule]]
 code = "E-RPL-002"
 severity = "error"
-problem = "The original's verdict for the hypothesis is not a pass on its test."
+problem = "The original's verdict for the hypothesis is not a pass on its test, or the original is in the test log and this study is not."
 instruction = "Replicate a hypothesis whose registered test passed in the original: its verdict record says pass, on basis test. A claim that passed on its point estimate comes from an exploratory study; test it in an ordinary confirmatory study, with no study.replicates."
-why = "A replication tests a result that a registered test already showed. The criterion is the two-trials rule: the replication succeeds when its own registered test passes, given that the original's test passed. Two results that both fail to pass are not a replication, and a pass on a point estimate was never tested."
+why = "A replication tests a result that a registered test already showed. The criterion is the two-trials rule: the replication succeeds when its own registered test passes, given that the original's test passed. Two results that both fail to pass are not a replication, and a pass on a point estimate was never tested. A study in the test log never counts, so its pass backs only a replication in the test log."
 sources = []
 target = [
   { path = "study.replicates", check = "named:replicates-passed" },

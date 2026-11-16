@@ -6462,7 +6462,13 @@ fn rule_base_other_value_raises_e_hsh_002() {
 /// The log of the original `orig`: a finished study whose test of `H1` ended `verdict` on
 /// `basis`, then, with `done`, its `done` record.
 fn original_log(verdict: &str, basis: &str, done: bool) -> Vec<records::Record> {
-    let bodies = common::judged(verdict, basis, vec![common::arm_a()]);
+    original_in("planlog", verdict, basis, done)
+}
+
+/// `original_log`, registered in the stream log `log`.
+fn original_in(log: &str, verdict: &str, basis: &str, done: bool) -> Vec<records::Record> {
+    let mut bodies = common::judged(verdict, basis, vec![common::arm_a()]);
+    bodies[0].1["log"] = json!(log);
     let mut log = common::records_for("orig", &bodies);
     if done {
         let body = common::done_body(&log);
@@ -6564,7 +6570,7 @@ fn an_original_that_failed_is_e_rpl_002() {
     assert_eq!(codes(&found), ["E-RPL-002"]);
     assert_eq!(
         found[0].1,
-        "The original's verdict for the hypothesis is not a pass on its test. Study orig's verdict for H1 is fail, on basis test."
+        "The original's verdict for the hypothesis is not a pass on its test, or the original is in the test log and this study is not. Study orig's verdict for H1 is fail, on basis test."
     );
     // A wrong hash as well: both, the hash first.
     let log = original_log("fail", "test", true);
@@ -6676,5 +6682,85 @@ fn the_replication_table_is_typed() {
     ] {
         let want = (want.0.to_string(), want.1.to_string());
         assert!(found.contains(&want), "{want:?}: {found:?}");
+    }
+}
+
+/// The diagnostics at `study.replicates` of a replication in the test log or not, of an original
+/// that passed its test and registered in `log`.
+fn across_logs(log: &str, test_log: bool) -> Vec<(String, String)> {
+    let original = original_in(log, "pass", "test", true);
+    let spec = replication(
+        &done_hash(&original),
+        vec![("/study/test_log", j(json!(test_log)))],
+    );
+    at_link(&spec, with_original(Some(original)))
+}
+
+#[test]
+fn a_plan_log_original_backs_a_plan_log_replication() {
+    assert_eq!(across_logs("planlog", false), []);
+}
+
+#[test]
+fn a_plan_log_original_backs_a_test_log_replication() {
+    assert_eq!(across_logs("planlog", true), []);
+}
+
+#[test]
+fn a_test_log_original_backs_a_test_log_replication() {
+    assert_eq!(across_logs("testlog", true), []);
+}
+
+#[test]
+fn a_test_log_original_backs_no_plan_log_replication() {
+    let found = across_logs("testlog", false);
+    assert_eq!(codes(&found), ["E-RPL-002"]);
+    assert!(
+        found[0].1.ends_with(
+            "Study orig is registered in the test log, which never counts, and this study is not."
+        ),
+        "{found:?}"
+    );
+    // The log decides before the verdict: a failed test-log original names the log.
+    let original = original_in("testlog", "fail", "test", true);
+    let spec = replication(&done_hash(&original), vec![]);
+    let found = at_link(&spec, with_original(Some(original)));
+    assert_eq!(codes(&found), ["E-RPL-002"]);
+    assert!(found[0].1.contains("test log"), "{found:?}");
+}
+
+#[test]
+fn a_replication_of_itself_is_e_ref_002() {
+    let log = original_log("pass", "test", true);
+    let mut spec = replication(&done_hash(&log), vec![]);
+    spec["study"]["replicates"]["study"] = json!("my-study");
+    let dir = study_dir();
+    let d = rules::check_named(&spec, v0(), &with_box(dir.path(), with_original(Some(log))));
+    assert_eq!(
+        codes_paths(&d),
+        [("E-REF-002", "study.replicates.study")],
+        "{d:?}"
+    );
+}
+
+#[test]
+fn a_done_pin_is_a_bare_record_hash() {
+    let log = original_log("pass", "test", true);
+    let mut spec = replication(&done_hash(&log), vec![]);
+    let at_done = |s: &Value| -> Vec<String> {
+        (rules::check_generic(s, v0()).into_iter())
+            .filter(|d| d.path == "study.replicates.done")
+            .map(|d| d.code)
+            .collect()
+    };
+    assert_eq!(at_done(&spec), Vec::<String>::new());
+    for bad in [
+        String::new(),
+        format!("sha256:{}", "ab".repeat(32)),
+        "AB".repeat(32),
+        "ab".repeat(31),
+    ] {
+        spec["study"]["replicates"]["done"] = json!(bad);
+        assert_eq!(at_done(&spec), ["E-FMT-003"], "{bad}");
     }
 }

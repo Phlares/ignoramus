@@ -376,7 +376,7 @@ fn resolve(
 /// The original `r` names, as the box finds it now; the check found it done, with the `done`
 /// hash the plan pins and a passed test.
 fn frozen_link(a: &Assessed, r: &Replicates) -> Result<Replicated, CliError> {
-    match rules::replicated(&a.ctx, r) {
+    match rules::replicated(&a.ctx, r, rules::in_test_log(&a.value)) {
         Taken::Found(o) => Ok(Replicated {
             study: r.study.clone(),
             done: o.done,

@@ -6,7 +6,7 @@ label = "signal"                # signal | confirmed | replicated | generalized
 test_log = true                 # true: register into the test log, never counts
 # [study.replicates]            # confirmatory, optional: the study in this box that this one replicates
 # study = "my-original"         # its study id
-# done = ""                     # the hash of its done record, from the Study ended line of its card
+# done = "<64 hex>"             # the hash of its done record, from the Study ended line of its card
 # hypothesis = "H1"             # the hypothesis id, the same in both studies; this study's needs a claim
 # criterion = "verdict"         # verdict: met when this study's test passes; the original's test must have passed
 

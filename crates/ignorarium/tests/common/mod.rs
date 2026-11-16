@@ -900,8 +900,8 @@ pub fn plant(home: &Home, id: &str, bodies: &[(&str, serde_json::Value)]) -> Vec
 }
 
 /// The records of a finished confirmatory study with `estimates`, as (kind, body): `finished`,
-/// with an analysis record that promises one verdict, and `H1`'s verdict `verdict` on `basis`
-/// after the estimates.
+/// registered in the plan log, with an analysis record that promises one verdict, and `H1`'s
+/// verdict `verdict` on `basis` after the estimates.
 pub fn judged(
     verdict: &str,
     basis: &str,
@@ -909,6 +909,7 @@ pub fn judged(
 ) -> Vec<(&'static str, serde_json::Value)> {
     let n = estimates.len();
     let mut all = finished(estimates);
+    all[0].1["log"] = serde_json::json!("planlog");
     all[1].1["verdicts"] = serde_json::json!(1);
     let body = serde_json::json!({
         "hypothesis": "H1", "verdict": verdict, "basis": basis, "level": 0.005,

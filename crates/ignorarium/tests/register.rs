@@ -873,6 +873,29 @@ fn register_refuses_a_pending_replication() {
 }
 
 #[test]
+fn register_refuses_a_refused_replication() {
+    let arm = || vec![common::arm_a()];
+    // A pass with the wrong pin, then a failed original with the right one.
+    for (verdict, wrong_pin, code) in [("pass", true, "E-RPL-001"), ("fail", false, "E-RPL-002")] {
+        let (f, spec) = setup("numeric-ablation", same);
+        common::pilot(&f.home, arm());
+        let hashes = common::original(&f.home, "my-original", verdict, "test", arm());
+        let done = if wrong_pin {
+            "ab".repeat(32)
+        } else {
+            hashes.last().unwrap().clone()
+        };
+        let text = std::fs::read_to_string("../../templates/numeric-ablation.toml").unwrap();
+        std::fs::write(&spec, replication(&done)(text)).unwrap();
+        let (r, out) = go(&f, &spec, &answer(&spec), true);
+        assert_eq!(r.unwrap().code, 1, "{out}");
+        assert!(out.contains(&format!("error[{code}]")), "{out}");
+        assert!(!out.contains(PROMPT), "{out}");
+        assert!(!f.home.study_dir("my-study").exists());
+    }
+}
+
+#[test]
 fn a_registered_replication_freezes_the_pair() {
     let arm = || vec![common::arm_a()];
     // The spec is written once the original's done hash is known.

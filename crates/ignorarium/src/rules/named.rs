@@ -1737,27 +1737,30 @@ pub struct Original {
     pub verdict: String,
 }
 
-/// The original `r` names. Pending while it is not registered here or its log holds no `done`
-/// record. Refused when that record is not the one `r` pins, or its first verdict for the
-/// hypothesis is not `pass` on a `test`.
-pub fn replicated(ctx: &CheckCtx, r: &Replicates) -> Taken<Original> {
-    let Ended { done, verdict } = match ended(ctx, r) {
+/// The original `r` names, for a plan in the test log when `test_log`. Pending while it is not
+/// registered here or its log holds no `done` record. Refused when that record is not the one
+/// `r` pins, when the original is in the test log and the plan is not, or when its first
+/// verdict for the hypothesis is not `pass` on a `test`.
+pub fn replicated(ctx: &CheckCtx, r: &Replicates, test_log: bool) -> Taken<Original> {
+    let e = match ended(ctx, r) {
         Ok(found) => found,
         Err(taken) => return taken,
     };
-    if done != r.done {
-        return Taken::Refused(other_done(r, &done));
+    if e.done != r.done {
+        return Taken::Refused(other_done(r, &e.done));
     }
-    match passed(r, verdict) {
+    let done = e.done.clone();
+    match backs(r, e, test_log) {
         Ok(verdict) => Taken::Found(Original { done, verdict }),
         Err(why) => Taken::Refused(why),
     }
 }
 
-/// An original whose log holds `done`: the hash of that record, and its first verdict record
-/// for the hypothesis, with that record's hash.
+/// An original whose log holds `done`: the hash of that record, whether its register record
+/// names the test log, and its first verdict record for the hypothesis, with that record's hash.
 struct Ended {
     done: String,
+    test_log: bool,
     verdict: Option<(String, Verdict)>,
 }
 
@@ -1779,14 +1782,31 @@ fn ended(ctx: &CheckCtx, r: &Replicates) -> Result<Ended, Taken<Original>> {
         let v = Verdict::of(x).filter(|v| v.hypothesis == r.hypothesis)?;
         Some((records::hash(x), v))
     });
+    let log = all
+        .iter()
+        .find_map(crate::derived::Register::of)
+        .map(|g| g.log);
     Ok(Ended {
         done: records::hash(done),
+        test_log: log.as_deref() == Some(LogName::Test.as_str()),
         verdict,
     })
 }
 
 fn other_done(r: &Replicates, done: &str) -> String {
     format!("The done record of study {} has hash {done}.", r.study)
+}
+
+/// The hash of the verdict record of the original `e` when it can back a plan in the test log
+/// (`test_log`) or not; else why not. A test-log original backs only a test-log plan.
+fn backs(r: &Replicates, e: Ended, test_log: bool) -> Result<String, String> {
+    if e.test_log && !test_log {
+        return Err(format!(
+            "Study {} is registered in the test log, which never counts, and this study is not.",
+            r.study
+        ));
+    }
+    passed(r, e.verdict)
 }
 
 /// The hash of the original's verdict record `v` for the hypothesis of `r` when it is `pass`
@@ -1804,12 +1824,17 @@ fn passed(r: &Replicates, v: Option<(String, Verdict)>) -> Result<String, String
     }
 }
 
-/// The plan's `study.replicates`; `None` when it has none, or one that a generic rule reports.
-/// Its ids have their formats, so a diagnostic may print them.
+/// The plan's `study.replicates`; `None` when it has none, or one that a generic rule or
+/// E-REF-002 reports. Its ids have their formats, so a diagnostic may print them.
 fn link(spec: &Value) -> Option<Replicates> {
     let r: Replicates = serde_json::from_value(val(spec, REPLICATES)?.clone()).ok()?;
     let formed = is_study_id(&r.study) && has_format("study.replicates.hypothesis", &r.hypothesis);
-    formed.then_some(r)
+    (formed && Some(r.study.as_str()) != text(spec, "study.id")).then_some(r)
+}
+
+/// The plan registers into the test log.
+pub fn in_test_log(spec: &Value) -> bool {
+    val(spec, "study.test_log") == Some(&Value::Bool(true))
 }
 
 /// E-RPL-001, at `study.replicates`: the original is done, and its `done` record is not the
@@ -1827,7 +1852,7 @@ fn replicates_done(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
 fn replicates_passed(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
     let Some(r) = link(spec) else { return vec![] };
     let why = match ended(ctx, &r) {
-        Ok(e) => passed(&r, e.verdict).err(),
+        Ok(e) => backs(&r, e, in_test_log(spec)).err(),
         Err(Taken::Refused(why)) => Some(why),
         Err(_) => None,
     };
