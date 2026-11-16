@@ -17,7 +17,7 @@ Decision:
 - **Order of evidence.** In each stratum the test reads the first batch in its seeded order (0013), then the appended reserve clusters in reserve order.
 - **Release.** At the end, `finish` appends one plan-log leaf of kind `release`, labelled with the study id, that lists the exact and normalized hashes of every reserve input the study did not append. The freshness check (E-CNF-005; 0012) then ignores the study's own plan leaf for those data, so a later study may use them. A `release` leaf alone is never a use; appended reserve data stay used.
 - **The registration gate.** For a study that re-sizes, the power gate simulates the whole design at the borrowed sd and icc, with units about `power_at`. Per replicate and stratum, it draws the first batch, takes its s, reads the count from a table, stops the replicate when the count exceeds the first batch plus the reserve, and otherwise draws the appended clusters and tests the first batch then the appended ones. A replicate that stops fails. The gate passes when the share of passing replicates reaches `design.power`. The table holds 8 values of s, geometric from s0 / 4 to 4 s0, with s0 = √(sd_c² + `power_at`²) and sd_c the sd of a first-batch cluster's mean (0013). Each value has its count as above. A replicate's s takes the count of the first value at or above it, which rounds the count up; past the top value it stops. The z count floor (0013) is skipped, since it assumes a fixed count of clusters.
-- **Limits.** The search for a count tries up to 16,384 clusters per stratum, and one call draws at most 2,000 million values. The numbers in 0013 (1,024 clusters, 100 million values) describe the earlier version.
+- **Limits.** The search for a count tries up to 16,384 clusters per stratum, and one call draws at most 2,000 million values. The limits were 1,024 clusters and 100 million values before this record.
 
 Measured. A null simulation of the design, in release mode on one 6-CPU cloud host, all 22 scenarios below at once, took 1,915 s (32 minutes), with the bet cap at 3/4 (0022). Each scenario has one stratum, a first batch of 21 clusters of 4 units, a mean claim below ln 1.04 on [−ln 2, ln 2] at level 0.005, and a re-size at `power_at` = ln 1.02 for power 0.894 (0.8^(1/2), one stratum's share of a two-stratum claim at power 0.8). The data are drawn with their mean at the margin, the edge of the null. Each scenario runs 100,000 replicates in 25 batches of 4,000, each batch on its own seed with its own table. A rejection is a pass of the claim. The test passes when every rejection share is at most 0.005 + 3 × √(0.005 × 0.995 / 100,000) = 0.0056691. A crossed replicate is one whose e-value reached 1 / level after some observation, not only the last; by Ville's inequality its share is at most the level too. A replicate that stops is neither passed nor crossed. That share is shown and not tested. Shares are given with their Monte Carlo standard error.
 
@@ -79,6 +79,17 @@ Case against:
 - The e-value test pays for its validity in power. At an sd of 0.176 and an icc of 0.82, 2,500 reserve clusters reach the count in only 13% of replicates, and the design passes 9% of the time; such a study fails the registration gate. At a third of that sd it never stops and passes 97% of the time. The rejection shares under the null, at most 0.00008 against a level of 0.005 and 0.00300 against 0.05, show how far the test sits inside its level.
 - The rounded-up table makes the gate's count larger than the runner's, so the gate errs low on power. A replicate with an s past the table's top value stops in the gate even if the reserve could reach it.
 - The model is normal within a stratum, and the reserve is assumed to come from the same population as the first batch. A reserve gathered later or from another source changes what the claim is about, though not its level.
+
+What failure this prevents: a confirmatory study sized from an outside sd and icc that its first batch shows to be wrong, with no valid way to add data; and a person who adds data, or stops, after seeing results. Both are expected. (written 2026-11-15)
+
+Constants:
+
+- power replicates = 4,000 (`REPS`), for the count search and for the gate. Basis: none on file (0013 sets the value). Rule for change: none stated.
+- table = 8 values of s, geometric from s0 / 4 to 4 s0. Basis: none on file. Rule for change: none stated.
+- cluster search limit = 16,384 per stratum (`CAP`). Basis: none on file. Rule for change: none stated.
+- draw limit = 2,000 million values per call (`WORK`). Basis: none on file. Rule for change: none stated.
+
+(written 2026-11-15)
 
 Sources:
 

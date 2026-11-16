@@ -12,6 +12,8 @@ Decision:
 
 Mechanism. The bet is the aGRAPA bet, `S / (1 + Q)`, capped (0009). With units tight against a wide declared range, each score is small and of one sign, so the bet reaches the cap within a few observations and stays there. Past that point the units needed scale about as 1 / cap. For a "mean below ln 1.04" claim on [−0.614706, 0.693147] at level 0.005 and power 0.894, with unit sd 0.0133 to 0.0217, a test needs about 400 units at a cap of 1/2, 281 at 3/4 and 225 at 0.99. Any test that assumes only the range needs at least about 183. The counts in this section, the next and Open come from a simulation outside this repository, with 4,000 replicates per count. Its range, [−0.614706, 0.693147], is centred on the margin, so scores reach ±1. The 0020 suite uses [−ln 2, ln 2] instead.
 
+Why: a cap of 1/2 costs units and buys no validity. Mechanism gives the counts, Validity the proof, and "Why 3/4 and not higher" the reasons against a higher cap. (written 2026-11-15)
+
 Why 3/4 and not higher:
 
 - One observation at the ceiling multiplies wealth by 1 − cap: ln 0.25 = −1.39 nats at 3/4, and −4.6 nats at 0.99, against the ln 200 = 5.3 nats a test at level 0.005 needs.
@@ -32,6 +34,14 @@ Case against:
 - When 1% or more of units sit at the ceiling, 3/4 needs more units than 1/2.
 - At narrow ranges, near the margin, a higher cap can need slightly more units.
 - A higher cap gives the null e-values a heavier right tail, and the sample mean of a heavy right tail tends to fall below the true mean. The claim test's old null check asked the mean of 20,000 e-values to lie within 4 standard errors of 1. At the repository's seeds it failed on one case: the q = 0.5 quantile null above its margin, n = 110, with mean e 0.784 and standard error 0.032, 6.7 standard errors below 1. A replica of that case failed in 4 of 20 seeds at 3/4 and 1 of 20 at 1/2; the n = 30 uniform null failed in 0 of 40 seeds. The check now tests the mean e-value on the validity side only, at most 1 + 4 standard errors, and the mean of every step's factor, pooled, within 4 standard errors of 1.
+
+What failure this prevents: two failures. A cap of 1/2 made a wide-range claim need about twice the units that the range alone requires; this was observed in a replica of the test (#41). A NaN e-value counted as a pass in the power simulation and passed any level in the analysis; this was observed as a defect in the code (#42) and is expected in a run. (written 2026-11-15)
+
+Constants:
+
+- `MAX_BET` = 0.75. Basis: the value to start with, among the defaults 1/2 and 3/4 of hedged betting (Waudby-Smith and Ramdas); Mechanism gives the counts. Rule for change: the record says only "to be tuned after the first study". The first study has run. A dated amendment with a freeze rule is owed (#96) and waits for #78.
+
+(written 2026-11-15)
 
 Open:
 

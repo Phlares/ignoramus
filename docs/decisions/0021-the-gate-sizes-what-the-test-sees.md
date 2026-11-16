@@ -32,6 +32,14 @@ Case against:
 - A quantile claim with several arms is sized for a worse case than any one arm, so it can ask for more clusters than it needs.
 - The rows must give back the estimate exactly before a clip is lent. A box version that reads a study's rows differently cannot lend a clipped spread from that study.
 
+What failure this prevents: a power gate that sizes a study from a spread its test never sees: unit values past the declared range, or the largest sd of one arm with the largest icc of another. The gate then asks for more clusters than the test needs. Expected; the record's example computes the first case: an sd of 94.5 from the raw values against 24.4 from the clipped ones. (written 2026-11-15)
+
+Constants:
+
+- curve points = 0, 25, 50, 75 and 100% of the way from `power_at` to the margin (`CURVE`). Basis: none on file. Rule for change: none stated.
+
+(written 2026-11-15)
+
 Sources:
 
 - Wang and Ramdas, "Catoni-style confidence sequences for heavy-tailed mean estimation", https://arxiv.org/abs/2202.01250
