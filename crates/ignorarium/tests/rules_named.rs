@@ -6687,7 +6687,8 @@ fn the_replication_table_is_typed() {
 
 #[test]
 fn a_link_with_one_bad_id_gets_no_named_diagnostic() {
-    // The format rule reports the bad id; the named rules read the link only when both are well formed.
+    // The format rule reports the bad id; the named rules read the link only when both ids
+    // are well formed.
     let log = original_log("pass", "test", true);
     for (key, bad) in [("study", "Orig!"), ("hypothesis", "H 1")] {
         let mut spec = replication(&done_hash(&log), vec![]);

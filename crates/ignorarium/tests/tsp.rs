@@ -272,5 +272,6 @@ fn a_time_that_is_not_utc_is_refused() {
     ] {
         let e = tsp::parse(&stamped_at(time)).unwrap_err();
         assert!(e.to_string().starts_with("not a time-stamp reply"), "{e}");
+        assert!(e.to_string().contains("not in UTC"), "{e}");
     }
 }
