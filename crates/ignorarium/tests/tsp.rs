@@ -24,7 +24,23 @@ fn parses_a_reply_openssl_made() {
     );
     assert_eq!(reply.policy, "1.2.3.4.1");
     assert!(!reply.serial.is_empty());
-    assert_eq!(reply.stamped_at.len(), "2026-11-10T22:41:49.000Z".len());
+    let at = reply.stamped_at.as_bytes();
+    assert_eq!(at.len(), "2026-11-10T22:41:49.000Z".len());
+    assert_eq!(at[10], b'T');
+    assert_eq!(at.last(), Some(&b'Z'));
+}
+
+#[test]
+fn granted_with_mods_is_granted() {
+    let d = [7u8; 32];
+    let mut der = tsp::fixture(&d, 1_794_350_509, None);
+    // The status INTEGER, granted (0), is the first such field; granted with mods is 1.
+    let status = [0x30, 0x03, 0x02, 0x01, 0x00];
+    let at = der.windows(5).position(|w| w == status).unwrap();
+    der[at + 4] = 0x01;
+    let reply = tsp::parse(&der).unwrap();
+    assert!(reply.granted);
+    assert_eq!(reply.digest, d);
 }
 
 #[test]

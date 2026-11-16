@@ -9,6 +9,7 @@ use cms::cert::x509::name::Name;
 use cms::cert::x509::spki::AlgorithmIdentifier;
 use cms::content_info::{CmsVersion, ContentInfo};
 use cms::signed_data::{EncapsulatedContentInfo, SignedData, SignerIdentifier, SignerInfos};
+use std::fmt::Write;
 use std::str::FromStr;
 use std::time::Duration;
 use x509_tsp::{MessageImprint, TimeStampResp, TspVersion, TstInfo};
@@ -78,18 +79,34 @@ pub fn parse(der: &[u8]) -> Result<Reply, TspError> {
     let ms = i64::try_from(tst.gen_time.to_unix_duration().as_millis())
         .map_err(|_| bad("time out of range"))?;
     let authority = match &tst.tsa {
-        Some(GeneralName::DirectoryName(name)) => Some(name.to_string()),
-        _ => signer_subject(&signed),
-    };
+        Some(GeneralName::DirectoryName(name)) => shown(name),
+        _ => None,
+    }
+    .or_else(|| signer_subject(&signed));
     Ok(Reply {
         granted,
         digest_alg: tst.message_imprint.hash_algorithm.oid.to_string(),
         digest: tst.message_imprint.hashed_message.as_bytes().to_vec(),
         stamped_at: crate::time::rfc3339_from_unix_millis(ms),
-        serial: hex::encode(tst.serial_number.as_bytes()),
+        serial: serial_hex(tst.serial_number.as_bytes()),
         policy: tst.policy.to_string(),
         authority,
     })
+}
+
+/// A name as text; `None` when its formatter fails.
+fn shown(name: &Name) -> Option<String> {
+    let mut s = String::new();
+    write!(s, "{name}").ok().map(|()| s)
+}
+
+/// The serial's DER content as lowercase hex, without the `00` that only marks a positive
+/// number, as `openssl ts -reply -text` prints it. Zero stays `00`.
+fn serial_hex(der: &[u8]) -> String {
+    match der {
+        [0, rest @ ..] if !rest.is_empty() => hex::encode(rest),
+        _ => hex::encode(der),
+    }
 }
 
 /// The subject of the certificate in the reply that the first signer info names.
@@ -107,7 +124,7 @@ fn signer_subject(signed: &SignedData) -> Option<String> {
                 if c.tbs_certificate.issuer == sid.issuer
                     && c.tbs_certificate.serial_number == sid.serial_number =>
             {
-                Some(c.tbs_certificate.subject.to_string())
+                shown(&c.tbs_certificate.subject)
             }
             _ => None,
         })
@@ -159,4 +176,17 @@ pub fn fixture(digest: &[u8; 32], unix: u64, authority: Option<&str>) -> Vec<u8>
         }),
     };
     resp.to_der().unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::serial_hex;
+
+    #[test]
+    fn the_serial_has_no_sign_byte() {
+        assert_eq!(serial_hex(&[0x01]), "01");
+        assert_eq!(serial_hex(&[0x00]), "00");
+        assert_eq!(serial_hex(&[0x00, 0x9a, 0xbc]), "9abc");
+        assert_eq!(serial_hex(&[0x7f, 0x00]), "7f00");
+    }
 }

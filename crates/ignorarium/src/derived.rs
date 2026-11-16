@@ -662,6 +662,43 @@ impl DoneRecord {
     }
 }
 
+/// What a `stamp` record says the box checked. The authority's signature is not in it.
+pub const STAMP_CHECKED: &str = "digest and lines; signature checked by the reader";
+
+/// Which of the box's lines the stamped file holds. `head` is the record the head line names,
+/// `None` when the file has no head line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StampLines {
+    pub register: bool,
+    pub register_signature: bool,
+    pub key: bool,
+    pub head: Option<By>,
+    pub head_signature: bool,
+}
+
+/// An outside time stamp of a file of the box's lines. `authority` and `stamped_at` are as
+/// the reply states them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Stamp {
+    pub file_sha256: String,
+    pub reply_sha256: String,
+    pub authority: Option<String>,
+    pub stamped_at: String,
+    pub serial: String,
+    pub policy: String,
+    pub lines: StampLines,
+    pub checked: String,
+}
+
+impl Stamp {
+    /// `None` for another kind of record, or a body that does not parse.
+    pub fn of(r: &Record) -> Option<Stamp> {
+        body_of(r, STAMP)
+    }
+}
+
 /// What a study's records allow a later study to read.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StudyState {

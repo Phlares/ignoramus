@@ -257,16 +257,23 @@ enum Verb {
         #[arg(long, value_name = "REASON", value_parser = non_blank)]
         reason: String,
     },
-    /// Write the file an outside time-stamp authority signs, and print the commands that ask it.
+    /// Write the file an outside time-stamp authority signs and print the commands that ask
+    /// it, or record the authority's reply.
     Stamp {
         /// Study id.
         study: String,
         /// Write the file to stamp.
-        #[arg(long, required = true)]
+        #[arg(long, required_unless_present = "reply", conflicts_with = "reply")]
         request: bool,
         /// A file whose bytes follow the box's lines in the stamped file.
-        #[arg(long, requires = "request")]
+        #[arg(long, requires = "request", conflicts_with = "reply")]
         with: Option<PathBuf>,
+        /// The authority's reply (.tsr) to record.
+        #[arg(long)]
+        reply: Option<PathBuf>,
+        /// The stamped file, when it is not in the study's stamps folder.
+        #[arg(long, requires = "reply", conflicts_with = "request")]
+        file: Option<PathBuf>,
     },
     #[command(hide = true, subcommand)]
     Dev(Dev),
@@ -386,6 +393,12 @@ impl Verb {
             Verb::Pause { study } => pause::run(ctx, &study),
             Verb::Resume { study, box_changed } => resume::run(ctx, &study, box_changed),
             Verb::Stop { study, reason } => stop::run(ctx, &study, &reason),
+            Verb::Stamp {
+                study,
+                reply: Some(reply),
+                file,
+                ..
+            } => stamp::reply(ctx, &study, &reply, file.as_deref()),
             Verb::Stamp { study, with, .. } => stamp::request(ctx, &study, with.as_deref()),
             Verb::Dev(Dev::GenRuleDocs { out }) => docs::run(&out),
             Verb::Dev(Dev::Selftest) => selftest::run(),

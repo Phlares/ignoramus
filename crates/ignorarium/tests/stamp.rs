@@ -2,10 +2,13 @@ mod common;
 
 use ed25519_dalek::VerifyingKey;
 use ignorarium::config;
+use ignorarium::derived::{By, STAMP, STAMP_CHECKED, Stamp, StampLines};
 use ignorarium::keys;
 use ignorarium::records;
-use ignorarium::stamp::{self, Line};
-use std::path::PathBuf;
+use ignorarium::stamp::{self, Line, StampError};
+use ignorarium::tsp;
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
 
 fn key_of(lab: &common::Lab) -> VerifyingKey {
     keys::load(&lab.home).unwrap().unwrap().verifying_key()
@@ -161,18 +164,12 @@ fn a_study_that_is_not_registered_is_refused() {
 fn the_plan_log_head_is_the_last_line_of_heads() {
     let lab = common::lab();
     common::plain(&lab, "s9");
+    common::plain(&lab, "s9b");
     let key = key_of(&lab);
     let heads = lab.home.root.join("planlog").join("heads.jsonl");
     let text = std::fs::read_to_string(&heads).unwrap();
+    assert_eq!(text.lines().count(), 2);
     let last = text.lines().last().unwrap().to_string();
-    std::fs::write(
-        &heads,
-        format!(
-            "{{\"older\":1}}
-{text}"
-        ),
-    )
-    .unwrap();
     let got = stamp::lines(&lab.home, "s9", &key).unwrap();
     assert_eq!(
         got.lines().last().unwrap(),
@@ -203,13 +200,14 @@ fn the_commands_name_each_authority() {
     let curls: Vec<&&str> = lines.iter().filter(|l| l.starts_with("curl")).collect();
     assert_eq!(curls.len(), 2);
     assert!(curls[0].contains("https://one.example/tsr"));
-    assert!(curls[0].ends_with(&format!("-o {file}.1.tsr")));
+    assert!(curls[0].contains(&format!("--data-binary @\"{file}.tsq\"")));
+    assert!(curls[0].ends_with(&format!("-o \"{file}.1.tsr\"")));
     assert!(curls[1].contains("https://two.example/tsr"));
-    assert!(curls[1].ends_with(&format!("-o {file}.2.tsr")));
+    assert!(curls[1].ends_with(&format!("-o \"{file}.2.tsr\"")));
     assert!(out.contains(&format!(
-        "openssl ts -query -data {file} -sha256 -cert -out {file}.tsq"
+        "openssl ts -query -data \"{file}\" -sha256 -cert -out \"{file}.tsq\""
     )));
-    assert!(out.contains(&format!("ignorarium stamp c1 --reply {file}.2.tsr")));
+    assert!(out.contains(&format!("ignorarium stamp c1 --reply \"{file}.2.tsr\"")));
     assert!(!out.contains("no authority"));
 }
 
@@ -247,4 +245,466 @@ fn with_needs_request() {
         .args(["stamp", "u1", "--with", "x"])
         .assert()
         .code(2);
+    for args in [
+        &["--request", "--reply", "r"][..],
+        &["--file", "f"],
+        &["--request", "--file", "f"],
+        &["--reply", "r", "--with", "x"],
+    ] {
+        common::bin(&lab)
+            .args(["stamp", "u1"])
+            .args(args)
+            .assert()
+            .code(2);
+    }
+}
+
+#[test]
+fn a_request_works_on_a_done_study() {
+    let lab = common::lab();
+    common::plain(&lab, "d1");
+    stop(&lab, "d1");
+    assert!(
+        common::records_of(&lab, "d1")
+            .iter()
+            .any(|r| r.kind == "done")
+    );
+    let file = requested(&lab, "d1");
+    assert!(file.is_file());
+}
+
+#[test]
+fn a_request_that_fails_writes_nothing() {
+    let lab = common::lab();
+    common::plain(&lab, "f1");
+    let stamps = lab.home.study_dir("f1").join("stamps");
+    common::bin(&lab)
+        .args(["stamp", "f1", "--request", "--with"])
+        .arg(lab.root.join("missing.txt"))
+        .assert()
+        .failure();
+    assert!(!stamps.exists());
+    let log = lab.home.study_dir("f1").join("records.jsonl");
+    let text = std::fs::read_to_string(&log).unwrap();
+    std::fs::write(&log, text.replacen("\"register\"", "\"registeR\"", 1)).unwrap();
+    request(&lab, "f1").failure();
+    assert!(!stamps.exists());
+}
+
+#[test]
+fn an_altered_plan_log_head_fails_the_request() {
+    let lab = common::lab();
+    common::plain(&lab, "p1");
+    let heads = lab.home.root.join("planlog").join("heads.jsonl");
+    let text = std::fs::read_to_string(&heads).unwrap();
+    let at = text.find("\"root\":\"").unwrap() + "\"root\":\"".len();
+    let flip = if &text[at..=at] == "0" { "1" } else { "0" };
+    let changed = format!("{}{flip}{}", &text[..at], &text[at + 1..]);
+    let torn = text[..text.len() / 2].to_string();
+    let stamps = lab.home.study_dir("p1").join("stamps");
+    for bad in [changed, torn] {
+        std::fs::write(&heads, &bad).unwrap();
+        let a = request(&lab, "p1").failure();
+        assert!(err(&a).contains("planlog"), "{}", err(&a));
+        assert!(!stamps.exists());
+    }
+}
+
+const UNIX: u64 = 1_794_350_509;
+
+fn sha(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
+fn err(a: &assert_cmd::assert::Assert) -> String {
+    String::from_utf8_lossy(&a.get_output().stderr).into_owned()
+}
+
+fn stop(lab: &common::Lab, id: &str) {
+    common::bin(lab)
+        .args(["stop", id, "--reason", "enough"])
+        .assert()
+        .code(0);
+}
+
+/// `stamp --request`, and the file it wrote.
+fn requested(lab: &common::Lab, id: &str) -> PathBuf {
+    let out = common::text(&request(lab, id).code(0));
+    PathBuf::from(out.lines().next().unwrap())
+}
+
+/// A granted reply over `bytes` at `unix`, written to `name` in the lab.
+fn reply_over(lab: &common::Lab, name: &str, bytes: &[u8], unix: u64) -> PathBuf {
+    let path = lab.root.join(name);
+    std::fs::write(&path, tsp::fixture(&sha(bytes), unix, Some("CN=T"))).unwrap();
+    path
+}
+
+fn reply(lab: &common::Lab, id: &str, r: &Path, file: Option<&Path>) -> assert_cmd::assert::Assert {
+    let mut c = common::bin(lab);
+    c.args(["stamp", id, "--reply"]).arg(r);
+    if let Some(f) = file {
+        c.arg("--file").arg(f);
+    }
+    c.assert()
+}
+
+fn stamps_of(lab: &common::Lab, id: &str) -> Vec<Stamp> {
+    common::records_of(lab, id)
+        .iter()
+        .filter(|r| r.kind == STAMP)
+        .map(|r| Stamp::of(r).unwrap())
+        .collect()
+}
+
+/// A file of `text` in the lab, and a reply over it.
+fn file_and_reply(lab: &common::Lab, name: &str, text: &str) -> (PathBuf, PathBuf) {
+    let f = lab.root.join(format!("{name}.txt"));
+    std::fs::write(&f, text).unwrap();
+    let r = reply_over(lab, &format!("{name}.tsr"), text.as_bytes(), UNIX);
+    (f, r)
+}
+
+fn register_line(lab: &common::Lab, id: &str) -> String {
+    format!(
+        "register record hash of {id}: {}\n",
+        seals_of(lab, id)[0].hash
+    )
+}
+
+#[test]
+fn a_reply_is_recorded() {
+    let lab = common::lab();
+    common::plain(&lab, "r1");
+    let file = requested(&lab, "r1");
+    let bytes = std::fs::read(&file).unwrap();
+    let r = reply_over(&lab, "r1.tsr", &bytes, UNIX);
+    let a = reply(&lab, "r1", &r, None).code(0);
+    let all = common::records_of(&lab, "r1");
+    let last = all.last().unwrap();
+    assert_eq!(last.kind, STAMP);
+    assert_eq!(common::text(&a), format!("stamp record: {}\n", last.seq));
+    let s = Stamp::of(last).unwrap();
+    let reply_bytes = std::fs::read(&r).unwrap();
+    assert_eq!(s.file_sha256, hex::encode(sha(&bytes)));
+    assert_eq!(s.reply_sha256, hex::encode(sha(&reply_bytes)));
+    assert_eq!(s.stamped_at, "2026-11-10T22:41:49.000Z");
+    assert_eq!(s.authority.as_deref(), Some("CN=T"));
+    assert_eq!(s.serial, "01");
+    assert_eq!(s.policy, "1.2.3.4.1");
+    assert_eq!(s.checked, STAMP_CHECKED);
+    let seals = seals_of(&lab, "r1");
+    let head = &seals[seals.len() - 2];
+    assert_eq!(
+        s.lines,
+        StampLines {
+            register: true,
+            register_signature: true,
+            key: true,
+            head: Some(By {
+                seq: head.seq,
+                hash: head.hash.clone()
+            }),
+            head_signature: true,
+        }
+    );
+    let dir = lab.home.study_dir("r1").join("stamps");
+    assert_eq!(
+        std::fs::read(dir.join(format!("{}.txt", s.file_sha256))).unwrap(),
+        bytes
+    );
+    assert_eq!(
+        std::fs::read(dir.join(format!("{}.tsr", s.reply_sha256))).unwrap(),
+        reply_bytes
+    );
+}
+
+#[test]
+fn a_file_with_only_the_register_line_records() {
+    let lab = common::lab();
+    common::plain(&lab, "r2");
+    let (f, r) = file_and_reply(&lab, "only", &register_line(&lab, "r2"));
+    reply(&lab, "r2", &r, Some(&f)).code(0);
+    let s = stamps_of(&lab, "r2");
+    assert_eq!(s.len(), 1);
+    assert_eq!(
+        s[0].lines,
+        StampLines {
+            register: true,
+            register_signature: false,
+            key: false,
+            head: None,
+            head_signature: false,
+        }
+    );
+    let copy = lab
+        .home
+        .study_dir("r2")
+        .join("stamps")
+        .join(format!("{}.txt", s[0].file_sha256));
+    assert_eq!(std::fs::read(copy).unwrap(), std::fs::read(&f).unwrap());
+}
+
+#[test]
+fn each_refusal_writes_nothing() {
+    let lab = common::lab();
+    common::plain(&lab, "r3");
+    let file = requested(&lab, "r3");
+    let reg = register_line(&lab, "r3");
+    let zeros = "0".repeat(64);
+    let not_granted = lab.root.join("rejected.tsr");
+    std::fs::write(&not_granted, [0x30, 0x05, 0x30, 0x03, 0x02, 0x01, 0x02]).unwrap();
+    let other = reply_over(&lab, "other.tsr", b"another file", UNIX);
+    // The SHA-256 OID with its last arc made 2: SHA-384.
+    let sha384 = lab.root.join("sha384.tsr");
+    let mut der = tsp::fixture(&sha(&std::fs::read(&file).unwrap()), UNIX, None);
+    let oid = [
+        0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
+    ];
+    let at = der.windows(oid.len()).position(|w| w == oid).unwrap();
+    der[at + oid.len() - 1] = 0x02;
+    std::fs::write(&sha384, der).unwrap();
+    let cases: Vec<(&str, &str, PathBuf, Option<PathBuf>)> = vec![
+        ("E-STP-001", "not granted", not_granted, None),
+        ("E-STP-001", "digest algorithm", sha384, None),
+        ("E-STP-002", "no file", other.clone(), None),
+        ("E-STP-002", "has SHA-256", other, Some(file.clone())),
+        {
+            let (f, r) = file_and_reply(&lab, "noreg", "hello\n");
+            ("E-STP-003", "no line", r, Some(f))
+        },
+        {
+            let (f, r) = file_and_reply(
+                &lab,
+                "otherreg",
+                &format!("register record hash of r3: {zeros}\n"),
+            );
+            ("E-STP-003", "not the box's line", r, Some(f))
+        },
+        {
+            let (f, r) = file_and_reply(
+                &lab,
+                "badhead",
+                &format!("{reg}record head of r3: seq 0, hash {zeros}\n"),
+            );
+            ("E-STP-004", "names no record", r, Some(f))
+        },
+        {
+            let (f, r) = file_and_reply(
+                &lab,
+                "badkey",
+                &format!("{reg}box public key (ed25519): {zeros}\n"),
+            );
+            ("E-STP-003", "not the box's line", r, Some(f))
+        },
+    ];
+    let study = lab.home.study_dir("r3");
+    let before = common::files_under(&study);
+    for (code, why, r, f) in cases {
+        let a = reply(&lab, "r3", &r, f.as_deref()).code(1);
+        assert!(err(&a).contains(code), "{code}: {}", err(&a));
+        assert!(err(&a).contains(why), "{code}: {}", err(&a));
+        assert_eq!(common::files_under(&study), before, "{code}");
+    }
+}
+
+#[test]
+fn the_wrong_file_as_a_reply_is_e_stp_001() {
+    let lab = common::lab();
+    common::plain(&lab, "r4");
+    let file = requested(&lab, "r4");
+    let html = lab.root.join("page.tsr");
+    std::fs::write(&html, "<!doctype html><html><body>502</body></html>").unwrap();
+    let empty = lab.root.join("empty.tsr");
+    std::fs::write(&empty, "").unwrap();
+    let study = lab.home.study_dir("r4");
+    let before = common::files_under(&study);
+    for r in [file, html, empty] {
+        let a = reply(&lab, "r4", &r, None).code(1);
+        assert!(err(&a).contains("E-STP-001"), "{}", err(&a));
+        assert!(err(&a).contains("not a time-stamp reply"), "{}", err(&a));
+    }
+    assert_eq!(common::files_under(&study), before);
+}
+
+#[test]
+fn a_crlf_file_is_refused_and_names_the_line() {
+    let lab = common::lab();
+    common::plain(&lab, "r5");
+    let text = std::fs::read_to_string(requested(&lab, "r5")).unwrap();
+    let (f, r) = file_and_reply(&lab, "crlf", &text.replace('\n', "\r\n"));
+    let a = reply(&lab, "r5", &r, Some(&f)).code(1);
+    let want = register_line(&lab, "r5");
+    assert!(err(&a).contains("E-STP-003"), "{}", err(&a));
+    assert!(err(&a).contains(want.trim_end()), "{}", err(&a));
+    assert!(stamps_of(&lab, "r5").is_empty());
+}
+
+#[test]
+fn the_same_reply_twice_is_one_record() {
+    let lab = common::lab();
+    common::plain(&lab, "r6");
+    let bytes = std::fs::read(requested(&lab, "r6")).unwrap();
+    let r = reply_over(&lab, "r6.tsr", &bytes, UNIX);
+    reply(&lab, "r6", &r, None).code(0);
+    let all = common::records_of(&lab, "r6");
+    let a = reply(&lab, "r6", &r, None).code(0);
+    assert_eq!(common::text(&a), "already recorded\n");
+    assert_eq!(common::records_of(&lab, "r6"), all);
+}
+
+#[test]
+fn two_replies_are_two_records_in_order() {
+    let lab = common::lab();
+    common::plain(&lab, "r7");
+    let bytes = std::fs::read(requested(&lab, "r7")).unwrap();
+    let one = reply_over(&lab, "one.tsr", &bytes, UNIX);
+    let two = reply_over(&lab, "two.tsr", &bytes, UNIX + 60);
+    reply(&lab, "r7", &one, None).code(0);
+    reply(&lab, "r7", &two, None).code(0);
+    let s = stamps_of(&lab, "r7");
+    assert_eq!(s.len(), 2);
+    assert_eq!(
+        s[0].reply_sha256,
+        hex::encode(sha(&std::fs::read(&one).unwrap()))
+    );
+    assert_eq!(
+        s[1].reply_sha256,
+        hex::encode(sha(&std::fs::read(&two).unwrap()))
+    );
+    assert_eq!(s[0].file_sha256, s[1].file_sha256);
+}
+
+#[test]
+fn records_between_request_and_reply_do_not_matter() {
+    let lab = common::lab();
+    common::plain(&lab, "r8");
+    let old = seals_of(&lab, "r8").last().unwrap().clone();
+    let bytes = std::fs::read(requested(&lab, "r8")).unwrap();
+    run_study(&lab, "r8");
+    assert!(seals_of(&lab, "r8").last().unwrap().seq > old.seq);
+    let r = reply_over(&lab, "r8.tsr", &bytes, UNIX);
+    reply(&lab, "r8", &r, None).code(0);
+    let s = stamps_of(&lab, "r8");
+    assert_eq!(
+        s[0].lines.head,
+        Some(By {
+            seq: old.seq,
+            hash: old.hash
+        })
+    );
+    assert!(s[0].lines.head_signature);
+}
+
+#[test]
+fn a_stamp_after_done_is_allowed() {
+    let lab = common::lab();
+    common::plain(&lab, "r9");
+    stop(&lab, "r9");
+    let bytes = std::fs::read(requested(&lab, "r9")).unwrap();
+    let r = reply_over(&lab, "r9.tsr", &bytes, UNIX);
+    reply(&lab, "r9", &r, None).code(0);
+    let kinds: Vec<String> = common::records_of(&lab, "r9")
+        .into_iter()
+        .map(|r| r.kind)
+        .collect();
+    assert_eq!(&kinds[kinds.len() - 2..], ["done", STAMP]);
+    common::bin(&lab)
+        .args(["verify", "--study", "r9"])
+        .assert()
+        .code(0);
+}
+
+/// The code of a refusal of `found`, or the lines it found.
+fn found_of(file: &str) -> Result<StampLines, &'static str> {
+    let seals = [
+        records::Seal {
+            seq: 0,
+            hash: "h0".into(),
+            sig: "g0".into(),
+        },
+        records::Seal {
+            seq: 1,
+            hash: "h1".into(),
+            sig: "g1".into(),
+        },
+    ];
+    stamp::found(file.as_bytes(), "x", &seals, "k").map_err(|e| match e {
+        StampError::Refused { code, .. } => code,
+        e => panic!("{e}"),
+    })
+}
+
+#[test]
+fn found_checks_each_line_against_the_log() {
+    let reg = "register record hash of x: h0\n";
+    let all = format!(
+        "{reg}register record signature of x: g0\nbox public key (ed25519): k\n\
+         record head of x: seq 1, hash h1\nrecord head signature of x: g1\n"
+    );
+    let head = |seq: u64, hash: &str| {
+        Some(By {
+            seq,
+            hash: hash.into(),
+        })
+    };
+    let lines = |rs, k, h, hs| StampLines {
+        register: true,
+        register_signature: rs,
+        key: k,
+        head: h,
+        head_signature: hs,
+    };
+    assert_eq!(found_of(&all), Ok(lines(true, true, head(1, "h1"), true)));
+    assert_eq!(found_of(reg), Ok(lines(false, false, None, false)));
+    assert_eq!(
+        found_of(&format!("{reg}record head of x: seq 0, hash h0\n")),
+        Ok(lines(false, false, head(0, "h0"), false))
+    );
+    // Lines of another study or another kind are not the box's.
+    assert_eq!(
+        found_of(&format!("{reg}register record hash of x2: zz\nnote: y\n")),
+        Ok(lines(false, false, None, false))
+    );
+    assert_eq!(
+        found_of(&format!("{reg}{reg}")),
+        Ok(lines(false, false, None, false))
+    );
+    for (file, code) in [
+        ("", "E-STP-003"),
+        ("register record hash of x: h1\n", "E-STP-003"),
+        ("register record hash of x: h0\r\n", "E-STP-003"),
+        (
+            &format!("{reg}register record hash of x: h1\n"),
+            "E-STP-003",
+        ),
+        (
+            &format!("{reg}register record signature of x: g1\n"),
+            "E-STP-003",
+        ),
+        (&format!("{reg}box public key (ed25519): q\n"), "E-STP-003"),
+        (
+            &format!("{reg}record head of x: seq 1, hash h0\n"),
+            "E-STP-004",
+        ),
+        (
+            &format!("{reg}record head of x: seq 2, hash h1\n"),
+            "E-STP-004",
+        ),
+        (
+            &format!("{reg}record head of x: seq 01, hash h1\n"),
+            "E-STP-004",
+        ),
+        (&format!("{reg}record head of x: 1 h1\n"), "E-STP-004"),
+        (
+            &format!("{reg}record head of x: seq 1, hash h1\nrecord head signature of x: g0\n"),
+            "E-STP-003",
+        ),
+        (
+            &format!("{reg}record head signature of x: g1\n"),
+            "E-STP-003",
+        ),
+    ] {
+        assert_eq!(found_of(file), Err(code), "{file:?}");
+    }
 }

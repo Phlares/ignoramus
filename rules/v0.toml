@@ -1071,3 +1071,39 @@ instruction = "Read it with `report`, `status` or `verify`. Start new work as a 
 why = "A signed `done` record ends the study and states how and when. A row, a session or a stop after it would change a study whose end is already fixed, so `run`, `resume`, `stop` and `pause` refuse before they write anything."
 sources = []
 check = "documented"
+
+[[rule]]
+code = "E-STP-001"
+severity = "error"
+problem = "The reply is not a granted RFC 3161 time-stamp reply over a SHA-256 digest."
+instruction = "Pass the `.tsr` file the authority sent back, not the stamped file or an error page. When the authority refused, ask it again, or ask another, with `-sha256`."
+why = "Only a granted reply holds a time stamp. The box checks the digest against the file with SHA-256, so it records no reply over another digest."
+sources = ["https://www.rfc-editor.org/rfc/rfc3161"]
+check = "documented"
+
+[[rule]]
+code = "E-STP-002"
+severity = "error"
+problem = "The file the reply stamps is not found, or its SHA-256 is not the reply's digest."
+instruction = "Keep the file `stamp --request` wrote in the study's `stamps` folder, or name the stamped file with `--file`. Pass the reply for that file."
+why = "A reply covers the bytes whose digest it holds. The record names those bytes, so the box keeps a copy of them and records no reply it cannot match to a file."
+sources = ["https://www.rfc-editor.org/rfc/rfc3161"]
+check = "documented"
+
+[[rule]]
+code = "E-STP-003"
+severity = "error"
+problem = "The stamped file lacks this study's register line, or holds a box line with another value."
+instruction = "Stamp the file `stamp --request` writes, unchanged. A file of your own must hold the register line exactly as the box writes it, with LF line ends."
+why = "A stamp of a study must cover its registration. The record says which box lines the file holds, and each of those must be the value the box computes from the log, so the record never vouches for a value the box did not compute."
+sources = []
+check = "documented"
+
+[[rule]]
+code = "E-STP-004"
+severity = "error"
+problem = "The head line of the stamped file names a record the log does not hold with that hash."
+instruction = "Stamp a file `stamp --request` wrote from this study's log. Check the log with `verify --study <id>`."
+why = "The head line says the stamp covers the records up to that one. The chain makes that true only when the log holds that record with that hash."
+sources = []
+check = "documented"
