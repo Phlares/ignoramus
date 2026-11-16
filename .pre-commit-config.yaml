@@ -22,7 +22,8 @@ repos:
         entry: gitleaks git --redact --verbose
         stages: [manual]
   # Generic leaks gitleaks does not look for. Loopback and wildcard
-  # addresses pass. Cargo.lock carries only package names, versions and hashes.
+  # addresses pass, and so do dotted numbers longer than four groups.
+  # Cargo.lock carries only package names, versions and hashes.
   - repo: local
     hooks:
       - id: no-personal-paths
@@ -34,7 +35,7 @@ repos:
       - id: no-ip-addresses
         name: no IP addresses
         language: pygrep
-        entry: '\b(?!127\.|0\.0\.0\.0\b)(?:\d{1,3}\.){3}\d{1,3}\b'
+        entry: '(?<![\d.])(?!127\.|0\.0\.0\.0\b)(?:\d{1,3}\.){3}\d{1,3}(?!\.?\d)'
         types: [text]
         exclude: ^Cargo.lock$
       - id: no-email-addresses

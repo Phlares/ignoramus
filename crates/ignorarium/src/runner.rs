@@ -10,7 +10,7 @@ use crate::cli::check::HomeRecords;
 use crate::control::{self, ControlError, ControlFile, RunLock, Signal, State};
 use crate::derived::{
     CONTINUE, INPUTS, Inputs, REGISTER, RESIZE, Register, SELECTION, SESSION_END, SESSION_START,
-    SPAWN_STOP, Selection, SessionEnd, SessionStart, SpawnStop, TRIGGER,
+    SPAWN_STOP, Selection, SessionEnd, SessionStart, SpawnStop, TRIGGER, first_done,
 };
 use crate::diag::printable;
 use crate::environ::{Builder, Built, Recipe};
@@ -153,6 +153,9 @@ pub enum RunError {
     NoKey,
     /// Another run of this study holds the run lock.
     Busy,
+    /// The log holds `done`, found under the lock that guards this run's first append (the log's
+    /// lock for `inputs`, the run lock for a run), before this run appended anything to it.
+    Ended,
     /// The box binary differs from the last session's, or the register record's when no
     /// session exists, and no change was declared. Each side as `identity::binary_text`.
     BoxChanged {
@@ -237,6 +240,10 @@ impl fmt::Display for RunError {
             RunError::Disk(e) => write!(f, "level 2 cannot make a disk of {e}; rename it"),
             RunError::NoKey => write!(f, "the box key does not exist"),
             RunError::Busy => write!(f, "another run of this study is in progress"),
+            RunError::Ended => write!(
+                f,
+                "the study ended before this run took its lock; no record was added"
+            ),
             RunError::BoxChanged { was, now } => write!(
                 f,
                 "the box binary changed since the last session ({was} to {now}); \
@@ -320,6 +327,7 @@ impl From<ControlError> for RunError {
         match e {
             ControlError::Io(e) => RunError::Io(e.to_string()),
             ControlError::Records(e) => RunError::Records(e),
+            ControlError::Done => RunError::Records(ControlError::Done.to_string()),
         }
     }
 }
@@ -483,7 +491,14 @@ pub fn prepare_with(
     if frozen.is_none() {
         let body = serde_json::to_value(&now).map_err(io)?;
         let draft = RecordDraft::new(study_id, INPUTS, body);
-        records::append(&dir.join("records.jsonl"), &key, draft)?;
+        // No run lock is held here, so a `done` written since the read above is looked for
+        // under the log's lock.
+        records::append_with(&dir.join("records.jsonl"), &key, |log| {
+            match first_done(&log.records) {
+                Some(_) => Err(RunError::Ended),
+                None => Ok(vec![draft]),
+            }
+        })?;
     }
     if let Some((reason, _)) = unfit {
         let attrs = json!({ "level": backend.level(), "skipped": skipped, "reason": reason });
@@ -1033,7 +1048,7 @@ fn no_links(base: &Path, parts: &[&str]) -> Result<(), RunError> {
 /// or SIGHUP ends the row as a stop does, and the run pauses. The library leaves signal
 /// handling to its caller. Once it holds the lock, the run passes `binary_gate`, signs a
 /// `session.start` record, and at its end, after the late stop, a `session.end` record of how
-/// it ended.
+/// it ended, then the `done` record when the study has ended (`RunLock::close`).
 pub fn run(plan: &RunPlan) -> Result<RunStatus, RunError> {
     run_as(plan, &crate::identity::current())
 }
@@ -1051,6 +1066,11 @@ pub fn run_as(plan: &RunPlan, now: &BoxIdentity) -> Result<RunStatus, RunError> 
     let result = records::read_all(&log, &plan.key.verifying_key())
         .map_err(RunError::from)
         .and_then(|all| {
+            // Only a holder of the run lock writes `done`, so none appears while this run holds
+            // it: the appends below need no check of their own.
+            if first_done(&all).is_some() {
+                return Err(RunError::Ended);
+            }
             let changed_from = binary_gate(plan, now, &all)?;
             // Only a resume the gate lets through clears a pending pause.
             if plan.resumed_by {
@@ -1061,11 +1081,11 @@ pub fn run_as(plan: &RunPlan, now: &BoxIdentity) -> Result<RunStatus, RunError> 
             session = Some(start_session(plan, &log, now, changed_from)?);
             run_locked(plan, &lock, all)
         });
-    drop(lock);
     // A stop sent while this run held the lock, after its last look or before an error,
     // found the lock taken: finish it here, on every path. A failure of this check leaves
     // the run's own result, which already ended the run safely.
-    let late = control::stop_if_idle(&plan.home, &plan.study_id, &plan.key);
+    let late = lock.stop_pending(&plan.key);
+    let ended = session.is_some() || matches!(late, Ok(Some(_)));
     let result = match (result, late) {
         (Ok(_), Ok(Some(r))) => Ok(RunStatus::Stopped(why_of(&r))),
         (result, _) => result,
@@ -1074,6 +1094,12 @@ pub fn run_as(plan: &RunPlan, now: &BoxIdentity) -> Result<RunStatus, RunError> 
     if let Some(session) = session {
         let _ = end_session(plan, &log, session, &result);
     }
+    // The lock is held to here, so no `stop` from elsewhere writes `done` before the
+    // `session.end`. A failed close leaves the run's own result; the next run or stop adds it.
+    if ended {
+        let _ = lock.close(&plan.key);
+    }
+    drop(lock);
     result
 }
 

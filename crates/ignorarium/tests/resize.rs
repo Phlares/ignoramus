@@ -2,17 +2,19 @@
 mod common;
 use evidence::claim::{Bound, Statistic};
 use evidence::power::{Plan, resize_count};
+use ignorarium::backend::level0::Level0;
 use ignorarium::canon::sha256_hex;
 use ignorarium::derived::{self, CONTINUE, Resize, ResizeStratum, STOP};
 use ignorarium::estimate::apply_defaults;
 use ignorarium::records::Record;
 use ignorarium::resize::{decide, or_stop};
+use ignorarium::runner::{RunPlan, RunStatus, prepare_with};
 use ignorarium::schedule::reserve_order;
 use ignorarium::seed::seed;
 use ignorarium::spec::model::{Role, Spec};
 use ignorarium::units::{self, Cluster};
 use serde_json::{Value, json};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const HASH: [u8; 32] = [7; 32];
 /// The level the register record gives the study.
@@ -80,6 +82,7 @@ fn records(spec: &Spec, role: Role, value: impl Fn(&Cluster) -> f64) -> Vec<Reco
         timestamp: None,
         gate: vec![],
         box_identity: None,
+        replicates: None,
     };
     let mut bodies = vec![("register", serde_json::to_value(register).unwrap())];
     bodies.extend(rows(spec, role, value));
@@ -184,6 +187,120 @@ fn admitted(spec: &Spec, r: &Resize) -> Vec<String> {
     let rank = |p: &String| order.iter().position(|c| c.path == *p).unwrap();
     paths.sort_by_key(rank);
     paths
+}
+
+/// The reference at 100 and `arm-a` at 99 on every unit: the re-size admits some reserve rows.
+const FLAT: &str = "#!/bin/sh\ncase \"$2\" in exact) v=100;; *) v=99;; esac\nprintf '{\"ppl\": %s}' \"$v\" > \"$IGNORARIUM_OUT/values.json\"\n";
+
+/// Re-size study `id`, its rows run by `payload`, registered after a pilot and run to its end:
+/// the lab, the study folder and the run plan.
+fn ran(id: &str, payload: &str) -> (common::Lab, PathBuf, RunPlan) {
+    let lab = common::lab();
+    common::resize_pilot(&lab.home);
+    let files = common::reserve_files(32);
+    let before: Vec<(&str, &str)> = files.iter().map(|(p, t)| (&p[..], &t[..])).collect();
+    let dir = common::register_study(&lab, id, common::resize_plan(32), &before, payload);
+    let root = common::work_of(&lab.home, id);
+    let plan = prepare_with(&lab.home, id, &root, vec![Box::new(Level0)]).unwrap();
+    assert_eq!(common::run(&plan).unwrap(), RunStatus::Done);
+    (lab, dir, plan)
+}
+
+#[test]
+fn a_stop_after_the_last_admitted_row_is_after_collection() {
+    use ignorarium::control::{RunLock, Timing};
+    let (lab, dir, plan) = ran("rs-stop", FLAT);
+    // A finished study without its `done` record, as a box that predates it leaves one.
+    common::drop_last_record(&dir);
+    let ran = common::kind_of(&lab, "rs-stop", "row").len();
+    assert!(
+        ran < plan.schedule.rows.len(),
+        "the re-size leaves rows out"
+    );
+    let key = ignorarium::keys::load(&lab.home).unwrap().unwrap();
+    let lock = RunLock::try_take(&lab.home, "rs-stop").unwrap().unwrap();
+    lock.stop(&key, "x", None).unwrap();
+    let rows = common::deviations_of(&dir);
+    let stop = rows.iter().find(|r| r.kind == "stop").unwrap();
+    assert_eq!(stop.timing, Timing::AfterCollectionBeforeAccess);
+}
+
+#[test]
+fn a_stop_whose_done_cannot_be_written_still_stops() {
+    let (lab, dir, _) = ran("rs-close", FLAT);
+    common::drop_last_record(&dir);
+    // A stream log that does not verify: the close cannot read the slot's close time.
+    let path = ignorarium::stream::Log::of(&lab.home, ignorarium::stream::LogName::Plan)
+        .path()
+        .to_path_buf();
+    let good = std::fs::read(&path).unwrap();
+    let mut bad = good.clone();
+    let close = bad
+        .windows(14)
+        .rposition(|w| w == b"\"stream.close\"")
+        .unwrap();
+    let digit = close + bad[close..].iter().position(u8::is_ascii_digit).unwrap();
+    bad[digit] = if bad[digit] == b'7' { b'8' } else { b'7' };
+    std::fs::write(&path, &bad).unwrap();
+    let stop = |why: &str| {
+        let a = common::bin(&lab)
+            .args(["stop", "rs-close", "--reason", why])
+            .assert()
+            .code(0);
+        let err = String::from_utf8_lossy(&a.get_output().stderr).into_owned();
+        (common::text(&a), err)
+    };
+    let (out, err) = stop("x");
+    let all = common::records_of(&lab, "rs-close");
+    let last = all.last().unwrap();
+    assert_eq!(last.kind, "stop");
+    assert!(out.contains(&format!("stop record: {}", last.seq)), "{out}");
+    assert!(
+        err.contains("the done record is not written: ") && err.ends_with("; run stop again\n"),
+        "{err}"
+    );
+    // The next stop adds the missing `done`, and says nothing is missing.
+    std::fs::write(&path, &good).unwrap();
+    let (out, err) = stop("y");
+    let all = common::records_of(&lab, "rs-close");
+    assert_eq!(all.last().unwrap().kind, derived::DONE);
+    assert!(out.contains("the first stop's reason stands"), "{out}");
+    assert!(
+        out.contains(&format!("done record: {}", all.last().unwrap().seq)),
+        "{out}"
+    );
+    assert!(!err.contains("done record"), "{err}");
+}
+
+#[test]
+fn a_resize_stop_ends_with_done() {
+    let (lab, _, _) = ran("rs-done", &FLAT.replace("v=99", "v=98"));
+    let resize = common::kind_of(&lab, "rs-done", "resize");
+    assert_eq!(resize[0].body["decision"], STOP);
+    let all = common::records_of(&lab, "rs-done");
+    let done = derived::DoneRecord::of(all.last().unwrap()).unwrap();
+    assert_eq!(serde_json::to_value(done.end).unwrap(), "resize-stop");
+    // The study holds a stream slot: it ended when the slot closed, after its last verdict.
+    let log = ignorarium::stream::Log::of(&lab.home, ignorarium::stream::LogName::Plan);
+    let key = ignorarium::keys::load(&lab.home).unwrap().unwrap();
+    let alpha = all.iter().find_map(derived::Register::of).unwrap().alpha;
+    let close = (log.closed_at(&key.verifying_key(), "rs-done", alpha.unwrap().slot)).unwrap();
+    assert!(close.is_some());
+    assert_eq!(Some(done.ended_at), close);
+}
+
+#[test]
+fn dropping_the_last_record_leaves_a_log_that_verifies() {
+    let (lab, dir, _) = ran("rs-drop", FLAT);
+    let key = ignorarium::keys::load(&lab.home).unwrap().unwrap();
+    let log = dir.join("records.jsonl");
+    let read = || ignorarium::records::read_all(&log, &key.verifying_key()).unwrap();
+    let n = read().len();
+    common::drop_last_record(&dir);
+    assert_eq!(read().len(), n - 1);
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(text.ends_with('\n'), "{text:?}");
+    assert_eq!(text.lines().count(), n - 1);
 }
 
 #[test]

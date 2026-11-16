@@ -836,6 +836,98 @@ fn register_refuses_pending_values() {
     }
 }
 
+/// `common::confirmatory` as a replication of `H1` of `my-original`, pinned to `done`.
+fn replication(done: &str) -> impl Fn(String) -> String {
+    let done = done.to_string();
+    move |t| common::replicating(common::confirmatory(t), "my-original", &done)
+}
+
+#[test]
+fn register_refuses_a_pending_replication() {
+    let arm = || vec![common::arm_a()];
+    let (f, spec) = setup("numeric-ablation", replication(&"ab".repeat(32)));
+    common::pilot(&f.home, arm());
+    // Finished, and no done record yet.
+    common::plant(
+        &f.home,
+        "my-original",
+        &common::judged("pass", "test", arm()),
+    );
+    // check warns and exits 3.
+    let a = assert_cmd::Command::cargo_bin("ignorarium")
+        .unwrap()
+        .env("IGNORARIUM_HOME", &f.home.root)
+        .arg("check")
+        .arg(&spec)
+        .assert()
+        .code(3);
+    let out = String::from_utf8_lossy(&a.get_output().stdout).into_owned();
+    assert!(out.contains("warning[W-REF-001]"), "{out}");
+    let (r, out) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(
+        r.unwrap_err().msg,
+        "W-REF-001: a value waits on a study that has not finished; register after my-original finishes. See docs/rules/W-REF-001.md"
+    );
+    assert!(!out.contains(PROMPT), "{out}");
+    assert!(!f.home.study_dir("my-study").exists());
+}
+
+#[test]
+fn register_refuses_a_refused_replication() {
+    let arm = || vec![common::arm_a()];
+    // A pass with the wrong pin, then a failed original with the right one.
+    for (verdict, wrong_pin, code) in [("pass", true, "E-RPL-001"), ("fail", false, "E-RPL-002")] {
+        let (f, spec) = setup("numeric-ablation", same);
+        common::pilot(&f.home, arm());
+        let hashes = common::original(&f.home, "my-original", verdict, "test", arm());
+        let done = if wrong_pin {
+            "ab".repeat(32)
+        } else {
+            hashes.last().unwrap().clone()
+        };
+        let text = std::fs::read_to_string("../../templates/numeric-ablation.toml").unwrap();
+        std::fs::write(&spec, replication(&done)(text)).unwrap();
+        let (r, out) = go(&f, &spec, &answer(&spec), true);
+        assert_eq!(r.unwrap().code, 1, "{out}");
+        assert!(out.contains(&format!("error[{code}]")), "{out}");
+        assert!(!out.contains(PROMPT), "{out}");
+        assert!(!f.home.study_dir("my-study").exists());
+    }
+}
+
+#[test]
+fn a_registered_replication_freezes_the_pair() {
+    let arm = || vec![common::arm_a()];
+    // The spec is written once the original's done hash is known.
+    let (f, spec) = setup("numeric-ablation", same);
+    common::pilot(&f.home, arm());
+    let hashes = common::original(&f.home, "my-original", "pass", "test", arm());
+    let done = hashes.last().unwrap().clone();
+    let text = std::fs::read_to_string("../../templates/numeric-ablation.toml").unwrap();
+    std::fs::write(&spec, replication(&done)(text)).unwrap();
+    let (r, out) = go(&f, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap().code, 0, "{out}");
+    // The verdict record follows the estimate: register 0, analysis 1, estimate 2, verdict 3.
+    let verdict = &hashes[3];
+    assert_eq!(
+        body_of(&f)["replicates"],
+        json!({
+            "study": "my-original", "done": done, "hypothesis": "H1", "criterion": "verdict",
+            "verdict": verdict,
+        })
+    );
+    let shown = format!(
+        "replicates my-original (H1) on criterion verdict: done record {done}, verdict record {verdict}\n"
+    );
+    let at = out.find(&shown).unwrap_or_else(|| panic!("{out}"));
+    assert!(at < out.find(PROMPT).unwrap(), "{out}");
+    // A plan that replicates nothing writes no `replicates`.
+    let (g, spec) = setup("numeric-ablation", same);
+    let (r, out) = go(&g, &spec, &answer(&spec), true);
+    assert_eq!(r.unwrap().code, 0, "{out}");
+    assert!(body_of(&g).get("replicates").is_none());
+}
+
 #[test]
 fn register_freezes_the_estimate_records_it_used() {
     // Two more strata, each with 15 clusters, enough for the power gate.

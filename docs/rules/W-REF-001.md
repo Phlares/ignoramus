@@ -8,7 +8,7 @@ A value waits on a study that has not finished.
 
 ## Fix
 
-Run the study it names to its end, then check again. Until then check exits 3 and register refuses the plan; nothing else needs to change.
+Run the study it names to its end, then check again. A replication waits until its original's log holds its done record. Until then check exits 3 and register refuses the plan; nothing else needs to change.
 
 ## Why
 
@@ -18,3 +18,4 @@ A follow-on plan is written and checked before the study it builds on runs. Its 
 
 - `question.hypotheses[*].estimates` (named:reference-finished)
 - `design.conditions[*].params.*` (named:reference-finished)
+- `study.replicates` (named:reference-finished)

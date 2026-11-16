@@ -4,6 +4,8 @@ Date: 2026-10-31.
 
 Amended: 2026-11-15. The matching rule for `selected` reads as 0021 set it (#38); the text held the earlier rule until now (#118).
 
+Amended: 2026-11-15. A replication's `done` hash is a pin the box checks, the one record hash an author types (0035).
+
 A follow-on study is written and checked before the study it builds on has run. Some of its values exist only in that earlier study's records: the sd and icc that size it, and the condition a selection stage picked. The author never types such a value or a record hash. The spec names the study, and the box finds the records.
 
 Decision:
@@ -14,6 +16,7 @@ Decision:
 - **Matching.** A hypothesis takes the estimate with its own contrast's key, in the same stratum, else in the pooled group. An estimate with no icc, or no variance above 0, is skipped in favour of the pooled one, and `register` notes that it used the pooled estimate. Several matching estimates must agree. For a contrast on `selected`, the box looks up each candidate. A mean claim takes one candidate's own sd and icc, the one 0021 names. A quantile claim takes the largest sd and the largest icc. Until 0021 every claim took the largest of each.
 - **Pending.** A reference to a study that is not registered here, or has not finished, is pending: `check` warns (`W-REF-001`), skips the gates that need the value, and exits 3 (no errors, values pending). A study that has not finished is pending even when another pending reference leaves the contrast's key unknown. A finished study without a match is refused: no matching estimate, or no selection record.
 - **Freezing.** `register` refuses a plan with a pending reference. It resolves the rest and writes each value into the register record under `resolved`: the path in the plan, the study, the hashes of the records the value comes from, and the value. `run` reads condition params from that record and passes them to the payload as canonical JSON in `IGNORARIUM_PARAMS`. `run` refuses to start when a frozen record is gone from the study's log.
+- **One pinned hash.** `study.replicates.done` is the one record hash an author types (0035). It is a pin, not a reference: the box takes no value from it. The box finds the original by its id and checks the pin against that study's signed `done` record, as it checks `pins.payload` against the payload. Every reference stays a study id.
 
 Why: a value the author can type is a value the author can invent. The box reads it from signed records, so every number that sizes a study or picks its condition traces to a record hash.
 

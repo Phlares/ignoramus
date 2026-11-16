@@ -10,9 +10,10 @@ mod generic;
 mod named;
 pub use generic::{check_generic, safe_key};
 pub use named::{
-    Borrowed, CAP, CURVE, CheckCtx, Curve, CurvePoint, Gates, Lookup, Power, REPS, StratumInput,
-    Taken, borrowed, carried, check_named, differs_from_lock, estimate_inputs, granted, power,
-    powers, predictions, selected_by, selection_data, waited_on,
+    Borrowed, CAP, CURVE, CheckCtx, Curve, CurvePoint, Gates, Lookup, Original, Picked, Power,
+    REPS, StratumInput, Taken, borrowed, carried, check_named, differs_from_lock, estimate_inputs,
+    granted, in_test_log, power, powers, predictions, replicated, selected_by, selection_data,
+    waited_on,
 };
 
 /// The records of a box, by study. An `Err` is a log that cannot be read or trusted.
@@ -147,6 +148,9 @@ impl<B: BoxRecords> BoxRecords for ReadOnce<B> {
 
 /// The code of a value that waits on a study that has not finished.
 pub const PENDING: &str = "W-REF-001";
+
+/// Where a plan names the study it replicates.
+pub const REPLICATES: &str = "study.replicates";
 
 /// True when `id` has the form E-FMT-001 gives `study.id` in the built-in rules.
 pub fn is_study_id(id: &str) -> bool {

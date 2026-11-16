@@ -2854,6 +2854,9 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
         "E-RSV-003",
         "E-RSV-004",
         "E-RSV-005",
+        "E-RPL-001",
+        "E-RPL-002",
+        "E-RPL-003",
     ]
     .into_iter()
     .map(String::from)
@@ -2863,7 +2866,7 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
     // E-SEC-001 is in tests/scan.rs. E-FAM-003 and E-FAM-004 read member specs, E-FAM-005
     // the stream and the box records, E-FAM-006 the box records and the plan log, and
     // W-FAM-002 the follow-on specs, and E-CNF-007 the box records and the store:
-    // tests/family.rs.
+    // tests/family.rs. E-RPL-001 to E-RPL-003 have their own tests at the end of this file.
     let in_rows: BTreeSet<String> = faults()
         .iter()
         .flat_map(|r| r.want.iter().map(|w| w.0.to_string()))
@@ -2883,6 +2886,9 @@ fn the_named_rules_are_the_expected_set_and_rows_cover_the_pure_ones() {
                     | "E-FAM-005"
                     | "E-FAM-006"
                     | "W-FAM-002"
+                    | "E-RPL-001"
+                    | "E-RPL-002"
+                    | "E-RPL-003"
             )
         })
         .collect();
@@ -6450,5 +6456,324 @@ fn rule_base_other_value_raises_e_hsh_002() {
             .filter(|(c, _)| *c == "E-HSH-002")
             .collect();
         assert_eq!(got, [("E-HSH-002", "pins.rule_base")], "{other}");
+    }
+}
+
+/// The log of the original `orig`: a finished study whose test of `H1` ended `verdict` on
+/// `basis`, then, with `done`, its `done` record.
+fn original_log(verdict: &str, basis: &str, done: bool) -> Vec<records::Record> {
+    original_in("planlog", verdict, basis, done)
+}
+
+/// `original_log`, registered in the stream log `log`.
+fn original_in(log: &str, verdict: &str, basis: &str, done: bool) -> Vec<records::Record> {
+    let mut bodies = common::judged(verdict, basis, vec![common::arm_a()]);
+    bodies[0].1["log"] = json!(log);
+    let mut log = common::records_for("orig", &bodies);
+    if done {
+        let body = common::done_body(&log);
+        log.push(common::record("orig", log.len() as u64, "done", body));
+    }
+    log
+}
+
+/// The hash of the `done` record of `log`.
+fn done_hash(log: &[records::Record]) -> String {
+    records::hash(log.iter().find(|r| r.kind == "done").unwrap())
+}
+
+/// A box with `pilot` and, when given, the original `orig` with `log`.
+fn with_original(log: Option<Vec<records::Record>>) -> common::Studies {
+    let pilot = common::records_for("pilot", &common::finished(pilot_estimates()));
+    let mut all = vec![("pilot", Ok(pilot))];
+    all.extend(log.map(|l| ("orig", Ok(l))));
+    common::Studies(all)
+}
+
+/// `ok()` as a replication of `H1` of study `orig`, pinned to `done`, then `extra`.
+fn replication(done: &str, extra: Vec<Edit>) -> Value {
+    let link = json!({ "study": "orig", "done": done, "hypothesis": "H1", "criterion": "verdict" });
+    edited(&and(vec![("/study/replicates", j(link))], extra))
+}
+
+/// The named diagnostics of `spec` at `study.replicates`, in the box `b`, as (code, problem).
+fn at_link(spec: &Value, b: common::Studies) -> Vec<(String, String)> {
+    let dir = study_dir();
+    (rules::check_named(spec, v0(), &with_box(dir.path(), b)).into_iter())
+        .filter(|d| d.path == "study.replicates")
+        .map(|d| (d.code, d.problem))
+        .collect()
+}
+
+fn codes(found: &[(String, String)]) -> Vec<&str> {
+    found.iter().map(|(c, _)| c.as_str()).collect()
+}
+
+#[test]
+fn a_replication_of_a_passed_test_passes() {
+    let log = original_log("pass", "test", true);
+    let spec = replication(&done_hash(&log), vec![]);
+    let dir = study_dir();
+    let d = rules::check_named(&spec, v0(), &with_box(dir.path(), with_original(Some(log))));
+    assert_eq!(codes_paths(&d), []);
+    // An older spec, with no replication, checks as before.
+    assert_eq!(codes_paths(&named(&ok(), dir.path())), []);
+}
+
+#[test]
+fn a_replication_waits_for_the_originals_done() {
+    let log = original_log("pass", "test", false);
+    let spec = replication(&"ab".repeat(32), vec![]);
+    let dir = study_dir();
+    let d = rules::check_named(&spec, v0(), &with_box(dir.path(), with_original(Some(log))));
+    assert_eq!(codes_paths(&d), [("W-REF-001", "study.replicates")]);
+    assert_eq!(d[0].severity, Severity::Warning);
+    assert_eq!(
+        d[0].problem,
+        "A value waits on a study that has not finished. Waits on study orig, which is not done."
+    );
+    // Not registered here: pending too. A pending original raises no E-RPL-001 or E-RPL-002.
+    let found = at_link(&spec, with_original(None));
+    assert_eq!(
+        found,
+        [(
+            "W-REF-001".to_string(),
+            "A value waits on a study that has not finished. Waits on study orig, which is not registered.".to_string()
+        )]
+    );
+}
+
+#[test]
+fn a_wrong_done_hash_is_e_rpl_001() {
+    let log = original_log("pass", "test", true);
+    let hash = done_hash(&log);
+    let found = at_link(
+        &replication(&"ab".repeat(32), vec![]),
+        with_original(Some(log)),
+    );
+    assert_eq!(codes(&found), ["E-RPL-001"]);
+    assert_eq!(
+        found[0].1,
+        format!(
+            "study.replicates.done is not the hash of the original's done record. The done record of study orig has hash {hash}."
+        )
+    );
+}
+
+#[test]
+fn an_original_that_failed_is_e_rpl_002() {
+    let log = original_log("fail", "test", true);
+    let found = at_link(
+        &replication(&done_hash(&log), vec![]),
+        with_original(Some(log)),
+    );
+    assert_eq!(codes(&found), ["E-RPL-002"]);
+    assert_eq!(
+        found[0].1,
+        "The original's verdict for the hypothesis is not a pass on its test, or the original is in the test log and this study is not. Study orig's verdict for H1 is fail, on basis test."
+    );
+    // A wrong hash as well: both, the hash first.
+    let log = original_log("fail", "test", true);
+    let found = at_link(
+        &replication(&"ab".repeat(32), vec![]),
+        with_original(Some(log)),
+    );
+    assert_eq!(codes(&found), ["E-RPL-001", "E-RPL-002"]);
+}
+
+#[test]
+fn an_original_that_passed_on_an_estimate_is_e_rpl_002() {
+    let log = original_log("pass", "estimate", true);
+    let found = at_link(
+        &replication(&done_hash(&log), vec![]),
+        with_original(Some(log)),
+    );
+    assert_eq!(codes(&found), ["E-RPL-002"]);
+    assert!(
+        found[0]
+            .1
+            .ends_with("Study orig's verdict for H1 is pass, on basis estimate."),
+        "{found:?}"
+    );
+    // No verdict for the hypothesis at all.
+    let mut log = original_log("pass", "test", false);
+    for r in log.iter_mut().filter(|r| r.kind == "verdict") {
+        r.body["hypothesis"] = json!("H2");
+    }
+    let body = common::done_body(&log);
+    log.push(common::record("orig", log.len() as u64, "done", body));
+    let found = at_link(
+        &replication(&done_hash(&log), vec![]),
+        with_original(Some(log)),
+    );
+    assert_eq!(codes(&found), ["E-RPL-002"]);
+    assert!(
+        found[0].1.ends_with("Study orig holds no verdict for H1."),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn an_exploratory_replication_is_e_rpl_003() {
+    let log = original_log("pass", "test", true);
+    let done = done_hash(&log);
+    let exploratory = vec![("/study/mode", j(json!("exploratory")))];
+    let found = at_link(
+        &replication(&done, exploratory.clone()),
+        with_original(Some(log.clone())),
+    );
+    assert_eq!(codes(&found), ["E-RPL-003"]);
+    assert_eq!(
+        found[0].1,
+        "This study is not confirmatory, or has no hypothesis with a claim under the original's hypothesis id. This study is exploratory."
+    );
+    // No hypothesis of that id with a claim.
+    let unclaimed = vec![hyp("id", j(json!("H2")))];
+    let found = at_link(&replication(&done, unclaimed), with_original(Some(log)));
+    assert_eq!(codes(&found), ["E-RPL-003"]);
+    assert!(
+        found[0]
+            .1
+            .ends_with("This study has no hypothesis H1 with a claim."),
+        "{found:?}"
+    );
+    // E-RPL-003 is reported whatever the original's state.
+    let pending = original_log("pass", "test", false);
+    let found = at_link(
+        &replication(&done, exploratory),
+        with_original(Some(pending)),
+    );
+    assert_eq!(codes(&found), ["W-REF-001", "E-RPL-003"]);
+}
+
+#[test]
+fn the_replication_table_is_typed() {
+    let log = original_log("pass", "test", true);
+    let mut spec = replication(&done_hash(&log), vec![]);
+    let generic = |s: &Value| -> Vec<(String, String)> {
+        (rules::check_generic(s, v0()).into_iter())
+            .filter(|d| d.path.starts_with("study.replicates"))
+            .map(|d| (d.code, d.path))
+            .collect()
+    };
+    assert_eq!(generic(&spec), []);
+    spec["study"]["replicates"]["criterion"] = json!("votes");
+    spec["study"]["replicates"]["extra"] = json!(1);
+    spec["study"]["replicates"]
+        .as_object_mut()
+        .unwrap()
+        .remove("done");
+    let found = generic(&spec);
+    for want in [
+        ("E-REQ-001", "study.replicates.done"),
+        ("E-ENM-001", "study.replicates.criterion"),
+        ("E-KEY-001", "study.replicates.extra"),
+    ] {
+        let want = (want.0.to_string(), want.1.to_string());
+        assert!(found.contains(&want), "{want:?}: {found:?}");
+    }
+    spec["study"]["replicates"] =
+        json!({ "study": "Orig!", "done": 1, "hypothesis": "H 1", "criterion": "verdict" });
+    let found = generic(&spec);
+    for want in [
+        ("E-FMT-001", "study.replicates.study"),
+        ("E-FMT-001", "study.replicates.hypothesis"),
+        ("E-TYP-001", "study.replicates.done"),
+    ] {
+        let want = (want.0.to_string(), want.1.to_string());
+        assert!(found.contains(&want), "{want:?}: {found:?}");
+    }
+}
+
+#[test]
+fn a_link_with_one_bad_id_gets_no_named_diagnostic() {
+    // The format rule reports the bad id; the named rules read the link only when both ids
+    // are well formed.
+    let log = original_log("pass", "test", true);
+    for (key, bad) in [("study", "Orig!"), ("hypothesis", "H 1")] {
+        let mut spec = replication(&done_hash(&log), vec![]);
+        spec["study"]["replicates"][key] = json!(bad);
+        let found = at_link(&spec, with_original(Some(log.clone())));
+        assert_eq!(found, [], "{key}");
+    }
+}
+
+/// The diagnostics at `study.replicates` of a replication in the test log or not, of an original
+/// that passed its test and registered in `log`.
+fn across_logs(log: &str, test_log: bool) -> Vec<(String, String)> {
+    let original = original_in(log, "pass", "test", true);
+    let spec = replication(
+        &done_hash(&original),
+        vec![("/study/test_log", j(json!(test_log)))],
+    );
+    at_link(&spec, with_original(Some(original)))
+}
+
+#[test]
+fn a_plan_log_original_backs_a_plan_log_replication() {
+    assert_eq!(across_logs("planlog", false), []);
+}
+
+#[test]
+fn a_plan_log_original_backs_a_test_log_replication() {
+    assert_eq!(across_logs("planlog", true), []);
+}
+
+#[test]
+fn a_test_log_original_backs_a_test_log_replication() {
+    assert_eq!(across_logs("testlog", true), []);
+}
+
+#[test]
+fn a_test_log_original_backs_no_plan_log_replication() {
+    let found = across_logs("testlog", false);
+    assert_eq!(codes(&found), ["E-RPL-002"]);
+    assert!(
+        found[0].1.ends_with(
+            "Study orig is registered in the test log, which never counts, and this study is not."
+        ),
+        "{found:?}"
+    );
+    // The log decides before the verdict: a failed test-log original names the log.
+    let original = original_in("testlog", "fail", "test", true);
+    let spec = replication(&done_hash(&original), vec![]);
+    let found = at_link(&spec, with_original(Some(original)));
+    assert_eq!(codes(&found), ["E-RPL-002"]);
+    assert!(found[0].1.contains("test log"), "{found:?}");
+}
+
+#[test]
+fn a_replication_of_itself_is_e_ref_002() {
+    let log = original_log("pass", "test", true);
+    let mut spec = replication(&done_hash(&log), vec![]);
+    spec["study"]["replicates"]["study"] = json!("my-study");
+    let dir = study_dir();
+    let d = rules::check_named(&spec, v0(), &with_box(dir.path(), with_original(Some(log))));
+    assert_eq!(
+        codes_paths(&d),
+        [("E-REF-002", "study.replicates.study")],
+        "{d:?}"
+    );
+}
+
+#[test]
+fn a_done_pin_is_a_bare_record_hash() {
+    let log = original_log("pass", "test", true);
+    let mut spec = replication(&done_hash(&log), vec![]);
+    let at_done = |s: &Value| -> Vec<String> {
+        (rules::check_generic(s, v0()).into_iter())
+            .filter(|d| d.path == "study.replicates.done")
+            .map(|d| d.code)
+            .collect()
+    };
+    assert_eq!(at_done(&spec), Vec::<String>::new());
+    for bad in [
+        String::new(),
+        format!("sha256:{}", "ab".repeat(32)),
+        "AB".repeat(32),
+        "ab".repeat(31),
+    ] {
+        spec["study"]["replicates"]["done"] = json!(bad);
+        assert_eq!(at_done(&spec), ["E-FMT-003"], "{bad}");
     }
 }

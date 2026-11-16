@@ -214,10 +214,20 @@ impl PlanLog {
     /// Recompute each head's root from the leaves and check its signature.
     /// Head sizes must grow.
     pub fn verify(&self, key: &VerifyingKey) -> Result<Verified, LogError> {
+        self.verified(key).map(|(v, _)| v)
+    }
+
+    /// `verify`, and the last head it checked; `None` for a log with no head.
+    pub fn verified_head(&self, key: &VerifyingKey) -> Result<Option<TreeHead>, LogError> {
+        self.verified(key).map(|(_, h)| h)
+    }
+
+    fn verified(&self, key: &VerifyingKey) -> Result<(Verified, Option<TreeHead>), LogError> {
         let _lock = self.read_lock()?;
         let leaves = read_lines(&self.leaves_path())?;
+        let heads = self.read_heads()?;
         let mut last = 0u64;
-        for (index, head) in self.read_heads()?.iter().enumerate() {
+        for (index, head) in heads.iter().enumerate() {
             let bad = |reason| LogError::Head { index, reason };
             if head.size <= last {
                 return Err(bad("size does not grow"));
@@ -235,10 +245,11 @@ impl PlanLog {
             }
             last = head.size;
         }
-        Ok(Verified {
+        let verified = Verified {
             signed: last,
             leaves: leaves.len() as u64,
-        })
+        };
+        Ok((verified, heads.into_iter().last()))
     }
 
     /// Every leaf, oldest first.

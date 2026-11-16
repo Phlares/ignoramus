@@ -3,7 +3,7 @@
 use super::{CliError, Ctx, Done, Run, out, registered, stopped_why};
 use crate::canon::sha256_hex;
 use crate::control::{ControlFile, Signal, State, run_is_live};
-use crate::derived::{self, SpawnStop};
+use crate::derived::{self, DoneRecord, Register, SpawnStop, criterion_state, first_done};
 use crate::diag::printable;
 use crate::home::Home;
 use crate::records::Record;
@@ -208,6 +208,18 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
         json!({ "decision": r.decision, "strata": strata })
     });
     let triggers = triggers(spec, &all, &shown).map_err(|e| bad(&e))?;
+    let ended = first_done(&all).and_then(|r| {
+        let d = DoneRecord::of(r)?;
+        Some(json!({ "end": d.end, "ended_at": d.ended_at, "seq": r.seq }))
+    });
+    let replicates = (all.iter().find_map(Register::of))
+        .and_then(|g| g.replicates)
+        .map(|r| {
+            json!({
+                "study": r.study, "done": r.done, "hypothesis": r.hypothesis,
+                "criterion": r.criterion, "result": criterion_state(&all, &r),
+            })
+        });
     let stopped_children: Vec<String> = (all.iter().filter_map(SpawnStop::of))
         .flat_map(|s| s.children)
         .map(|c| relabelled(&shown, &c))
@@ -217,6 +229,8 @@ pub fn report(ctx: &Ctx, id: &str) -> Result<Value, CliError> {
         "state": state,
         "detail": detail,
         "request": request,
+        "ended": ended,
+        "replicates": replicates,
         "done": done,
         "total": total,
         "rows_per_hour": per_hour,
@@ -266,6 +280,19 @@ fn render(r: &Value) -> String {
     }
     if let Some(q) = r["request"].as_str() {
         s.push_str(&format!("request: {q}\n"));
+    }
+    if let (Some(end), Some(at)) = (r["ended"]["end"].as_str(), r["ended"]["ended_at"].as_str()) {
+        s.push_str(&format!("ended: {end} at {at}\n"));
+    }
+    let link = &r["replicates"];
+    if let Some(result) = link["result"].as_str() {
+        let at = |k: &str| link[k].as_str().unwrap_or_default();
+        s.push_str(&format!(
+            "replicates {} ({}): criterion {}: {result}\n",
+            at("study"),
+            at("hypothesis"),
+            at("criterion")
+        ));
     }
     s.push_str(&format!("rows: {}/{}\n", r["done"], r["total"]));
     if let Some(d) = r["resize"]["decision"].as_str() {

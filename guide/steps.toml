@@ -59,14 +59,14 @@ command = "ignorarium register studies/<id>/spec.toml"
 [[step]]
 id = "run"
 title = "Run the plan"
-does = "Runs each row of the registered plan and signs a record for each. At isolation level 0 a row is a plain process on this machine, with no network or file isolation. Pause, resume or stop it with the verbs of the same names. Start run and resume in the study root when an input was absent at registration: the box reads that input from there. With triggers, the box evaluates each one on selection data after the selection rows and signs one record per trigger. It then runs the children of fired triggers on confirmation data, while the budget allows. A child that overruns the budget stops, and the study still finishes."
+does = "Runs each row of the registered plan and signs a record for each. At isolation level 0 a row is a plain process on this machine, with no network or file isolation. Pause, resume or stop it with the verbs of the same names. Start run and resume in the study root when an input was absent at registration: the box reads that input from there. With triggers, the box evaluates each one on selection data after the selection rows and signs one record per trigger. It then runs the children of fired triggers on confirmation data, while the budget allows. A child that overruns the budget stops, and the study still finishes. When the study ends, by its last row or by a stop, the box signs a done record; run, resume, stop and pause then refuse the study and write nothing."
 produces = "A signed record for every row, and an event log."
 command = "ignorarium run <id>"
 
 [[step]]
 id = "status"
 title = "Check progress"
-does = "Shows rows done, time, cost against each budget cap, and voided or retried rows. Condition names stay hidden when the plan blinds them. For each trigger it shows whether it fired, its e-value, and the children admitted, skipped or stopped, with the reason."
+does = "Shows rows done, time, cost against each budget cap, voided or retried rows, and how and when the study ended. Condition names stay hidden when the plan blinds them. For each trigger it shows whether it fired, its e-value, and the children admitted, skipped or stopped, with the reason."
 produces = "A progress summary. Add --json for the same fields as JSON. Add --telemetry for the host readings of the rows, with no measured value."
 command = "ignorarium status <id>"
 
@@ -76,3 +76,17 @@ title = "Write the report"
 does = "Prints each hypothesis's verdict, its basis, the e-value and level of a test, the reason a claim failed early, and how many units each mean claim's range clipped. It verifies the record log first and refuses a broken one. It waits until the study is finished, blind or not, and records each read in the log. A study in a family also lists each other member's state, and when each finished one finished and was first opened."
 produces = "The verdicts as text, or JSON with --json."
 command = "ignorarium report <id>"
+
+[[step]]
+id = "stamp"
+title = "Stamp the records"
+does = "Optional. Have an outside time-stamp authority sign the time of the records: once after register, and again after the study ends, so the stamp covers the results. stamp <id> --request writes the file to stamp, from the verified records, and prints the commands that send it to each authority URL in the box's config.toml. Pass the authority's reply back with --reply. The box checks the reply's digest and the file's lines, and signs a stamp record; the reader checks the authority's signature with openssl ts -verify, as the card shows."
+produces = "The stamped file and the reply in the study's stamps folder, and a signed stamp record."
+command = "ignorarium stamp <id> --request"
+
+[[step]]
+id = "verify"
+title = "Let a reader check the study"
+does = "Print the box's public key with key export, and give it to the reader with a copy of the study's records.jsonl and its stamps folder. The reader checks the hashes, the signatures and the chain with verify --public-key <key file> --records <records.jsonl>, with no box home. It prints the done record, each stamp record and its flags. Compare the lines of each stamped file with what verify prints: the register record hash and the head hash."
+produces = "The public key as hex, and a pass or the list of what failed."
+command = "ignorarium verify --public-key <key file> --records <records.jsonl>"

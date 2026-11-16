@@ -79,6 +79,38 @@ pub fn deviations_of(dir: &Path) -> Vec<ignorarium::control::DeviationRow> {
     }
 }
 
+/// Cut the last record of the study folder's `records.jsonl`. The chain links backwards, so the
+/// rest still verifies.
+pub fn drop_last_record(dir: &Path) {
+    let log = dir.join("records.jsonl");
+    let text = std::fs::read_to_string(&log).unwrap();
+    let keep = text.trim_end().rfind('\n').map_or(0, |i| i + 1);
+    std::fs::write(&log, &text[..keep]).unwrap();
+}
+
+/// Every file and folder under `dir`, by its path, with its bytes (a folder has none, a link
+/// its target).
+pub fn files_under(dir: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            let m = std::fs::symlink_metadata(&p).unwrap();
+            if m.is_dir() {
+                out.insert(p.clone(), Vec::new());
+                todo.push(p);
+            } else if m.is_symlink() {
+                let to = std::fs::read_link(&p).unwrap();
+                out.insert(p, to.into_os_string().into_encoded_bytes());
+            } else {
+                out.insert(p.clone(), std::fs::read(&p).unwrap());
+            }
+        }
+    }
+    out
+}
+
 /// `runner::run` as the suite's box.
 pub fn run(plan: &RunPlan) -> Result<RunStatus, RunError> {
     runner::run_as(plan, box_identity())
@@ -681,6 +713,7 @@ pub fn finished_with(
         timestamp: None,
         gate: vec![],
         box_identity: None,
+        replicates: None,
     };
     let analysis = derived::Analysis {
         commit: "ef".repeat(32),
@@ -864,6 +897,63 @@ pub fn plant(home: &Home, id: &str, bodies: &[(&str, serde_json::Value)]) -> Vec
             records::hash(&records::append(&path, &key, draft).unwrap())
         })
         .collect()
+}
+
+/// The records of a finished confirmatory study with `estimates`, as (kind, body): `finished`,
+/// registered in the plan log, with an analysis record that promises one verdict, and `H1`'s
+/// verdict `verdict` on `basis` after the estimates.
+pub fn judged(
+    verdict: &str,
+    basis: &str,
+    estimates: Vec<serde_json::Value>,
+) -> Vec<(&'static str, serde_json::Value)> {
+    let n = estimates.len();
+    let mut all = finished(estimates);
+    all[0].1["log"] = serde_json::json!("planlog");
+    all[1].1["verdicts"] = serde_json::json!(1);
+    let body = serde_json::json!({
+        "hypothesis": "H1", "verdict": verdict, "basis": basis, "level": 0.005,
+        "e_value": 300.0, "bounds": [], "incomplete_units": 0, "reason": null,
+    });
+    all.insert(2 + n, ("verdict", body));
+    all
+}
+
+/// The body of the `done` record that ends the log `all`, as the box writes it.
+pub fn done_body(all: &[records::Record]) -> serde_json::Value {
+    serde_json::to_value(ignorarium::done::end_of(all, None).expect("the log has ended")).unwrap()
+}
+
+/// Plant `judged(verdict, basis, estimates)` as study `id` in the box at `home`, then its
+/// `done` record. Returns the hash of each record, the `done` record's last.
+pub fn original(
+    home: &Home,
+    id: &str,
+    verdict: &str,
+    basis: &str,
+    estimates: Vec<serde_json::Value>,
+) -> Vec<String> {
+    let mut hashes = plant(home, id, &judged(verdict, basis, estimates));
+    hashes.push(plant_done(home, id));
+    hashes
+}
+
+/// Plant the `done` record that ends the log of study `id` in the box at `home`. Returns its
+/// hash.
+pub fn plant_done(home: &Home, id: &str) -> String {
+    let key = keys::load(home).unwrap().unwrap();
+    let path = home.study_dir(id).join("records.jsonl");
+    let all = (records::read_log(&path, &key.verifying_key()).unwrap()).restored();
+    plant(home, id, &[("done", done_body(&all))]).remove(0)
+}
+
+/// The template text `t` with a `[study.replicates]` table: hypothesis `H1` of study `study`,
+/// whose `done` record has hash `done`, on the criterion `verdict`.
+pub fn replicating(t: String, study: &str, done: &str) -> String {
+    let table = format!(
+        "[study.replicates]\nstudy = \"{study}\"\ndone = \"{done}\"\nhypothesis = \"H1\"\ncriterion = \"verdict\"\n\n[question]\n"
+    );
+    t.replacen("\n[question]\n", &format!("\n{table}"), 1)
 }
 
 /// A finished study `my-pilot`, the one the template's commented `estimates` names, with

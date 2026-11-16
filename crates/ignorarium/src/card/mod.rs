@@ -269,6 +269,9 @@ pub struct Card {
     /// The box that registered the plan, beside the one that built the card.
     #[serde(default = "sections::missing")]
     pub registered_box: Field<crate::identity::BoxIdentity>,
+    /// The original a replication repeats; not applicable for any other study.
+    #[serde(default = "sections::missing")]
+    pub replication: Field<sections::Replication>,
 }
 
 impl Card {
@@ -286,22 +289,26 @@ impl Card {
 /// The time the results were complete: the later of the last counted estimate or verdict
 /// record and, when the study holds a stream slot, the close of that slot. A record the report
 /// drops as a repeat does not count. With neither, the analysis record's time.
-fn finished_at(close: Option<String>, analysed: &str, after: &[Record]) -> String {
-    let mut estimates = BTreeSet::new();
-    let mut verdicts = BTreeSet::new();
-    let mut stamps: Vec<String> = (after.iter())
-        .filter(|r| match (Estimate::of(r), Verdict::of(r)) {
-            (Some(e), _) => estimates.insert(e.identity()),
-            (_, Some(v)) => verdicts.insert(v.hypothesis),
-            _ => false,
-        })
-        .map(|r| r.ts.clone())
-        .collect();
+pub(crate) fn finished_at(close: Option<String>, analysed: &str, after: &[Record]) -> String {
+    let mut stamps: Vec<String> = counted(after).map(|r| r.ts.clone()).collect();
     stamps.extend(close);
     stamps
         .into_iter()
         .max()
         .unwrap_or_else(|| analysed.to_string())
+}
+
+/// The estimate and verdict records of `after` that count, in log order: the first of each
+/// estimate identity and of each hypothesis's verdict.
+pub(crate) fn counted(after: &[Record]) -> impl Iterator<Item = &Record> {
+    let (mut estimates, mut verdicts) = (BTreeSet::new(), BTreeSet::new());
+    after
+        .iter()
+        .filter(move |r| match (Estimate::of(r), Verdict::of(r)) {
+            (Some(e), _) => estimates.insert(e.identity()),
+            (_, Some(v)) => verdicts.insert(v.hypothesis),
+            _ => false,
+        })
 }
 
 /// How a finished study finished: its records after the analysis, and when.
@@ -474,6 +481,12 @@ pub fn build(
         })
         .collect();
     let family = family_block(&box_records, id, &own, &at).map_err(refuse)?;
+    let original = (own.replicates.as_ref())
+        .map(|r| box_records.study(&r.study))
+        .transpose()
+        .map_err(refuse)?
+        .flatten();
+    let replication = sections::replication(&own, all, original.as_deref()).map_err(refuse)?;
     let spec = &source.spec;
     let sidecars = Sidecars::from_source(&source, log).map_err(refuse)?;
     let setup = sections::setup(log, &own, spec, events.as_ref(), sidecars.data_list());
@@ -486,7 +499,7 @@ pub fn build(
     let recipe = recipe::recipe(&walked, lacks, signed, id, levels, &analysis.box_version);
     let citation = recipe::citation(held(recipe::CITATION_FILE), id).map_err(CliError::usage)?;
     Ok(Card {
-        header: sections::header(&own, &registered.ts, spec),
+        header: sections::header(&own, &registered.ts, spec, all).map_err(refuse)?,
         claims: sections::claims(&after, spec),
         pick: sections::pick(log),
         verdicts: sections::verdicts(&after),
@@ -499,6 +512,7 @@ pub fn build(
         citation,
         builder: Builder::this(),
         registered_box: Field::of(own.box_identity.clone(), None),
+        replication,
         cost: sections::cost(log, spec),
         runs: sections::runs(log, events.as_ref()),
         outside,

@@ -6,7 +6,8 @@ use super::{
 };
 use crate::card::Card;
 use crate::card::readings::NOT_READ;
-use crate::card::sections::{Field, Pick, UNRECORDED};
+use crate::card::sections::{Field, Pick, Replication, StampLine, UNRECORDED};
+use crate::diag::printable;
 use crate::spec::model::{SelectionRule, StatisticSpec};
 use crate::telemetry::CgroupTotals;
 
@@ -50,6 +51,41 @@ fn names(v: &[String]) -> String {
     v.join(", ")
 }
 
+fn yes(b: bool) -> &'static str {
+    if b { "yes" } else { "no" }
+}
+
+/// One line per stamp, then the command that checks the first one.
+fn stamp_lines(stamps: &[StampLine]) -> Vec<String> {
+    let Some(first) = stamps.first() else {
+        return vec!["Outside time stamp: not in the records".into()];
+    };
+    let line = |s: &StampLine| {
+        let records = s
+            .head_seq
+            .map_or(String::new(), |n| format!(", records 0 to {n}"));
+        let results = if s.results { ", the results" } else { "" };
+        let flag = s
+            .flag
+            .as_ref()
+            .map_or(String::new(), |f| format!("; flag: {f}"));
+        format!(
+            "Outside time stamp: {}, {}; covers the registration{records}{results}; key line {}, signature lines {}; signature checked by the reader{flag}",
+            s.stamped_at,
+            s.authority
+                .as_deref()
+                .map_or("authority not stated".into(), printable),
+            yes(s.key),
+            yes(s.signatures)
+        )
+    };
+    let check = format!(
+        "Check a stamp: openssl ts -verify -data stamps/{}.txt -in stamps/{}.tsr -CAfile <bundle>",
+        first.file_sha256, first.reply_sha256
+    );
+    stamps.iter().map(line).chain([check]).collect()
+}
+
 fn header_section(c: &Card) -> String {
     let h = &c.header;
     let members: Vec<String> = (c.family["members"].as_array().into_iter().flatten())
@@ -64,11 +100,11 @@ fn header_section(c: &Card) -> String {
         None => "none".into(),
     };
     let levels = |l: &Vec<u8>| l.iter().map(u8::to_string).collect::<Vec<_>>().join(", ");
-    list(vec![
+    let mut items = vec![
         format!("Study: {}", c.study),
         format!("Family: {family}"),
         format!("Mode: {}", word(&h.mode)),
-        format!("Blind: {}", if h.blind { "yes" } else { "no" }),
+        format!("Blind: {}", yes(h.blind)),
         format!(
             "Isolation level: {}",
             field(&c.setup.stack.isolation, levels)
@@ -77,10 +113,21 @@ fn header_section(c: &Card) -> String {
             "Registered: {} (plan hash {})",
             h.registered_at, h.spec_hash
         ),
-        format!("Outside time stamp: {}", field(&h.timestamp, |t| t.clone())),
-        format!("Finished: {}", c.finished_at),
-        format!("Records verified: {}", c.records),
-    ])
+    ];
+    items.extend(stamp_lines(&h.stamps));
+    items.push(format!("Finished: {}", c.finished_at));
+    items.push(match &h.ended {
+        Field::Recorded { value: e } => format!(
+            "Study ended: {} at {} (done record {}, {})",
+            word(&e.end),
+            e.ended_at,
+            e.seq,
+            e.hash
+        ),
+        _ => "Study ended: no done record".into(),
+    });
+    items.push(format!("Records verified: {}", c.records));
+    list(items)
 }
 
 fn claim_section(c: &Card) -> String {
@@ -158,6 +205,19 @@ fn verdict_section(c: &Card) -> String {
               It does not show the claim is false.\n";
     }
     s
+}
+
+fn replication_section(r: &Replication) -> String {
+    list(vec![
+        format!("Original study: {}", r.study),
+        format!("Original done record: {}", r.done),
+        format!("Hypothesis: {}", r.hypothesis),
+        format!("Original verdict: {}", r.original_verdict),
+        format!("Criterion: {}", r.criterion.as_str()),
+        format!("Result: {}", r.result),
+        format!("Same estimate key: {}", yes(r.same_estimate_key)),
+        format!("Same payload: {}", yes(r.same_payload)),
+    ])
 }
 
 fn sensitivity_section(c: &Card) -> String {
@@ -531,11 +591,19 @@ pub fn markdown(c: &Card) -> String {
         first.to_uppercase(),
         esc(&c.outside.readings)
     );
+    let replication = match &c.replication {
+        Field::Recorded { value } => vec![("Replication", replication_section(value))],
+        _ => vec![],
+    };
     let sections = [
         ("Header", header_section(c)),
         ("Claim", claim_section(c)),
         ("Verdicts", verdict_section(c)),
         ("Claim label", label),
+    ]
+    .into_iter()
+    .chain(replication)
+    .chain([
         ("Results", table_or_none(&results_table(c))),
         ("Sensitivity", sensitivity_section(c)),
         ("Figures", figures_section(c)),
@@ -547,9 +615,7 @@ pub fn markdown(c: &Card) -> String {
         ("Re-run recipe", recipe_section(c)),
         ("Citation", citation_section(c)),
         ("Author readings", readings),
-    ];
-    let body: Vec<String> = (sections.iter())
-        .map(|(h, b)| format!("## {h}\n\n{b}"))
-        .collect();
+    ]);
+    let body: Vec<String> = sections.map(|(h, b)| format!("## {h}\n\n{b}")).collect();
     format!("# Study card: {}\n\n{}", esc(&c.study), body.join("\n"))
 }

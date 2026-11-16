@@ -1,8 +1,8 @@
 //! The command line: argument parsing, the shared context, and one event per call.
 use crate::events::{self, Event};
 use crate::home::Home;
+use crate::rules;
 use crate::sys;
-use clap::builder::NonEmptyStringValueParser;
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 use std::ffi::OsString;
@@ -15,6 +15,7 @@ mod docs;
 mod guide;
 mod history;
 mod import;
+mod key;
 mod new;
 mod pause;
 mod probe;
@@ -24,6 +25,7 @@ mod resume;
 mod review;
 mod run;
 mod selftest;
+mod stamp;
 pub mod status;
 pub mod stop;
 mod verify;
@@ -85,6 +87,14 @@ impl Ctx {
     fn home(&self) -> Result<&Home, CliError> {
         self.home.as_ref().map_err(|e| CliError::usage(e.clone()))
     }
+}
+
+/// A reason goes into a signed record, so it must say something. The value stays as typed.
+fn non_blank(s: &str) -> Result<String, String> {
+    if s.trim().is_empty() {
+        return Err("the reason must not be blank".into());
+    }
+    Ok(s.to_owned())
 }
 
 /// Write to stdout. A closed pipe is not an error; any other failure is.
@@ -167,7 +177,17 @@ enum Verb {
         /// Study id.
         #[arg(long)]
         study: Option<String>,
+        /// A file holding the box's public key as hex. Checks the log in `--records` with it,
+        /// and opens no box home.
+        #[arg(long, requires = "records", conflicts_with = "study")]
+        public_key: Option<PathBuf>,
+        /// A copy of a study's records.jsonl, to check with `--public-key`.
+        #[arg(long, requires = "public_key", conflicts_with = "study")]
+        records: Option<PathBuf>,
     },
+    /// Work with the box's signing key.
+    #[command(subcommand)]
+    Key(KeyVerb),
     /// Measure this machine and write machine.toml. Run it before `check`.
     Probe,
     /// Run a registered study. Rows with a signed record are skipped.
@@ -179,7 +199,7 @@ enum Verb {
         max_level: Option<u8>,
         /// Run on a box binary that differs from the last session's, for this reason. The
         /// reason goes into the deviation log and the session record.
-        #[arg(long, value_name = "REASON", value_parser = NonEmptyStringValueParser::new())]
+        #[arg(long, value_name = "REASON", value_parser = non_blank)]
         box_changed: Option<String>,
     },
     /// Show how far a study has run and what it has spent.
@@ -226,7 +246,7 @@ enum Verb {
         /// Resume on a box binary that differs from the last session's, for this reason. The
         /// reason goes into the deviation log and the session record. Ignored when a live run
         /// takes the resume request.
-        #[arg(long, value_name = "REASON", value_parser = NonEmptyStringValueParser::new())]
+        #[arg(long, value_name = "REASON", value_parser = non_blank)]
         box_changed: Option<String>,
     },
     /// End a study for good and record why. Works on a paused or idle study.
@@ -234,11 +254,35 @@ enum Verb {
         /// Study id.
         study: String,
         /// Why the study stops.
-        #[arg(long)]
+        #[arg(long, value_name = "REASON", value_parser = non_blank)]
         reason: String,
+    },
+    /// Write the file an outside time-stamp authority signs and print the commands that ask
+    /// it, or record the authority's reply.
+    Stamp {
+        /// Study id.
+        study: String,
+        /// Write the file to stamp.
+        #[arg(long, required_unless_present = "reply", conflicts_with = "reply")]
+        request: bool,
+        /// A file whose bytes follow the box's lines in the stamped file.
+        #[arg(long, requires = "request", conflicts_with = "reply")]
+        with: Option<PathBuf>,
+        /// The authority's reply (.tsr) to record.
+        #[arg(long)]
+        reply: Option<PathBuf>,
+        /// The stamped file, when it is not in the study's stamps folder.
+        #[arg(long, requires = "reply", conflicts_with = "request")]
+        file: Option<PathBuf>,
     },
     #[command(hide = true, subcommand)]
     Dev(Dev),
+}
+
+#[derive(Subcommand)]
+enum KeyVerb {
+    /// Print the public key as hex, for `verify --public-key`.
+    Export,
 }
 
 #[derive(Subcommand)]
@@ -262,10 +306,22 @@ impl Verb {
             | Verb::Report { study, .. }
             | Verb::Pause { study }
             | Verb::Resume { study, .. }
-            | Verb::Stop { study, .. } => Some(study),
-            Verb::Verify { study } => study.as_deref(),
+            | Verb::Stop { study, .. }
+            | Verb::Stamp { study, .. } => Some(study),
+            Verb::Verify { study, .. } => study.as_deref(),
             _ => None,
         }
+    }
+
+    /// True for a verb that must not open or write a box home.
+    fn homeless(&self) -> bool {
+        matches!(
+            self,
+            Verb::Verify {
+                public_key: Some(_),
+                ..
+            }
+        )
     }
 
     fn name(&self) -> &'static str {
@@ -278,6 +334,7 @@ impl Verb {
             Verb::ImportHistory { .. } => "import-history",
             Verb::Import { .. } => "import",
             Verb::Verify { .. } => "verify",
+            Verb::Key(KeyVerb::Export) => "key.export",
             Verb::Probe => "probe",
             Verb::Run { .. } => "run",
             Verb::Status { .. } => "status",
@@ -285,6 +342,7 @@ impl Verb {
             Verb::Pause { .. } => "pause",
             Verb::Resume { .. } => "resume",
             Verb::Stop { .. } => "stop",
+            Verb::Stamp { .. } => "stamp",
             Verb::Dev(Dev::GenRuleDocs { .. }) => "dev.gen-rule-docs",
             Verb::Dev(Dev::Selftest) => "dev.selftest",
         }
@@ -299,7 +357,13 @@ impl Verb {
             Verb::Register { spec } => register::run_stdio(ctx, &spec),
             Verb::ImportHistory { phase, files } => history::run(ctx, &phase, &files),
             Verb::Import { source, files } => import::run(ctx, &source, &files),
-            Verb::Verify { study } => verify::run(ctx, study.as_deref()),
+            Verb::Verify {
+                public_key: Some(key),
+                records: Some(records),
+                ..
+            } => verify::run_public(&key, &records),
+            Verb::Verify { study, .. } => verify::run(ctx, study.as_deref()),
+            Verb::Key(KeyVerb::Export) => key::export(ctx),
             Verb::Probe => probe::run(ctx),
             Verb::Run {
                 study,
@@ -329,6 +393,13 @@ impl Verb {
             Verb::Pause { study } => pause::run(ctx, &study),
             Verb::Resume { study, box_changed } => resume::run(ctx, &study, box_changed),
             Verb::Stop { study, reason } => stop::run(ctx, &study, &reason),
+            Verb::Stamp {
+                study,
+                reply: Some(reply),
+                file,
+                ..
+            } => stamp::reply(ctx, &study, &reply, file.as_deref()),
+            Verb::Stamp { study, with, .. } => stamp::request(ctx, &study, with.as_deref()),
             Verb::Dev(Dev::GenRuleDocs { out }) => docs::run(&out),
             Verb::Dev(Dev::Selftest) => selftest::run(),
         }
@@ -352,13 +423,18 @@ where
     let started = Instant::now();
     let trace_id = events::new_trace_id();
     let span_id = events::new_span_id();
+    let homeless = cli.verb.homeless();
     let ctx = Ctx {
-        home: Home::open().map_err(|e| e.to_string()),
+        home: if homeless {
+            Err("this call opens no box home".into())
+        } else {
+            Home::open().map_err(|e| e.to_string())
+        },
     };
     // The selftest runs in a sandbox where the event log is out of reach. A box home that
     // cannot be opened warns once, for the call, not for each event.
     let log = match &ctx.home {
-        _ if name == "dev.selftest" => None,
+        _ if name == "dev.selftest" || homeless => None,
         Ok(home) => Some(home.root.join("events.jsonl")),
         Err(e) => {
             let _ = writeln!(
@@ -460,8 +536,21 @@ pub(crate) fn not_registered(id: &str) -> CliError {
     CliError::refuse(format!("study {id} is not registered"))
 }
 
+/// A study with a record log and a box key, before the log is read: the box home, the path of
+/// the log and the key. Refuses what `located` refuses, and a box with no key.
+fn keyed<'a>(
+    ctx: &'a Ctx,
+    id: &str,
+) -> Result<(&'a Home, PathBuf, ed25519_dalek::SigningKey), CliError> {
+    let (home, log) = located(ctx, id)?;
+    let key = crate::keys::load(home)
+        .map_err(|e| CliError::usage(format!("box key: {e}")))?
+        .ok_or_else(|| not_registered(id))?;
+    Ok((home, log, key))
+}
+
 /// A registered study: the box key and the study's verified records.
-/// Refuses what `located` refuses, and a study with no `register` record.
+/// Refuses what `keyed` refuses, and a study with no `register` record.
 fn registered<'a>(
     ctx: &'a Ctx,
     id: &str,
@@ -473,10 +562,7 @@ fn registered<'a>(
     ),
     CliError,
 > {
-    let (home, log) = located(ctx, id)?;
-    let key = crate::keys::load(home)
-        .map_err(|e| CliError::usage(format!("box key: {e}")))?
-        .ok_or_else(|| not_registered(id))?;
+    let (home, log, key) = keyed(ctx, id)?;
     let all = crate::records::read_all(&log, &key.verifying_key())
         .map_err(|e| CliError::usage(format!("records of {id}: {e}")))?;
     if !all
@@ -486,6 +572,34 @@ fn registered<'a>(
         return Err(not_registered(id));
     }
     Ok((home, key, all))
+}
+
+/// A refusal for a code that only the command line raises; the text comes from the rule
+/// file. `found` says what this case found, when the rule text alone does not.
+pub fn refusal(code: &str, found: &str) -> CliError {
+    let text = rules::builtin()
+        .iter()
+        .find(|r| r.code == code)
+        .map_or(String::new(), |r| {
+            format!("{} {}", r.problem, r.instruction)
+        });
+    let found = if found.is_empty() {
+        String::new()
+    } else {
+        format!(" Found: {found}.")
+    };
+    CliError::refuse(format!("{code}: {text}{found} See docs/rules/{code}.md"))
+}
+
+/// Refuse a study whose log holds a `done` record (E-DON-001).
+pub fn refuse_if_done(id: &str, all: &[crate::records::Record]) -> Result<(), CliError> {
+    match crate::derived::first_done(all) {
+        Some(r) => Err(refusal(
+            "E-DON-001",
+            &format!("study {id} has a done record, seq {}", r.seq),
+        )),
+        None => Ok(()),
+    }
 }
 
 /// Refuse a study that has a stop record.

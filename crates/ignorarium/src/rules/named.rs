@@ -3,12 +3,12 @@
 //! selects its nodes with it, and reports only at those nodes. A check skips what
 //! is missing or mistyped: the generic rules report that.
 use super::generic::{applies, diagnostic, join, join_key, plain_key, safe_key, select};
-use super::{BoxRecords, Check, NoRecords, Rule, has_format, is_study_id};
+use super::{BoxRecords, Check, NoRecords, REPLICATES, Rule, has_format, is_study_id};
 use crate::analysis::Source;
 use crate::backend::PINNED_LEVEL;
 use crate::derived::{
     ANALYSIS, Alpha, Analysis, Carried, Estimate, GatePrediction, Inputs, Instrument,
-    PredictedGroup, Selection, StudyState, contrast_key,
+    PredictedGroup, Selection, StudyState, Verdict, contrast_key,
 };
 use crate::diag::{Diagnostic, printable};
 use crate::family::{self as fam, MemberSpec};
@@ -19,7 +19,7 @@ use crate::prior::{PriorUse, Seen, same_data};
 use crate::records;
 use crate::schedule::{self, ROW_CAP};
 use crate::seed::seed;
-use crate::spec::model::{Claim, Outcome, SELECTED, Scalar, Spec, StatisticSpec};
+use crate::spec::model::{Claim, Outcome, Replicates, SELECTED, Scalar, Spec, StatisticSpec};
 use crate::store::{Store, is_digest};
 use crate::stream::{self, LogName};
 use evidence::claim::{Bound, Statistic};
@@ -114,6 +114,9 @@ const NAMED: &[(&str, NamedFn)] = &[
     ("estimates-from-record", estimates_from_record),
     ("reference-finished", reference_finished),
     ("reference-not-self", reference_not_self),
+    ("replicates-done", replicates_done),
+    ("replicates-passed", replicates_passed),
+    ("replicates-confirmatory", replicates_confirmatory),
     ("estimates-same-code", estimates_same_code),
     ("deviation-borrowed", deviation_borrowed),
     ("confirmation-disjoint", confirmation_disjoint),
@@ -1674,20 +1677,26 @@ pub fn estimate_inputs(spec: &Value, h: usize, ctx: &CheckCtx) -> Lookup {
         .unwrap_or_else(|| Lookup::Missing("The hypothesis is not well formed.".into()))
 }
 
-/// What a condition param takes from the study it names.
+/// What a plan takes from the study it names.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Taken {
+pub enum Taken<T> {
     /// The study has not finished; the text says which way.
     Pending(String),
-    /// The study cannot give a condition; the text says why.
+    /// The study cannot give it; the text says why.
     Refused(String),
-    /// The condition the study selected, and the hash of the `selection` record it comes from.
-    Found { selected: String, record: String },
+    Found(T),
+}
+
+/// The condition a study selected, and the hash of the `selection` record it comes from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Picked {
+    pub selected: String,
+    pub record: String,
 }
 
 /// The condition that study `from` selected, from its `selection` record. The study must have
 /// finished.
-pub fn selected_by(ctx: &CheckCtx, from: &str) -> Taken {
+pub fn selected_by(ctx: &CheckCtx, from: &str) -> Taken<Picked> {
     let read = ctx.records.study(from).and_then(|all| {
         let state = StudyState::of(all.clone(), |log, slot| {
             ctx.records.stream_closed(log, from, slot)
@@ -1713,11 +1722,160 @@ pub fn selected_by(ctx: &CheckCtx, from: &str) -> Taken {
                 Some((s.selected, records::hash(&r)))
             });
             match found {
-                Some((selected, record)) => Taken::Found { selected, record },
+                Some((selected, record)) => Taken::Found(Picked { selected, record }),
                 None => Taken::Refused(format!("Study {from} recorded no selection.")),
             }
         }
     }
+}
+
+/// The original a replication repeats, once it is done: the hashes of its `done` record and of
+/// its verdict record for the hypothesis.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Original {
+    pub done: String,
+    pub verdict: String,
+}
+
+/// The original `r` names, for a plan in the test log when `test_log`. Pending while it is not
+/// registered here or its log holds no `done` record. Refused when that record is not the one
+/// `r` pins, when the original is in the test log and the plan is not, or when its first
+/// verdict for the hypothesis is not `pass` on a `test`.
+pub fn replicated(ctx: &CheckCtx, r: &Replicates, test_log: bool) -> Taken<Original> {
+    let e = match ended(ctx, r) {
+        Ok(found) => found,
+        Err(taken) => return taken,
+    };
+    if e.done != r.done {
+        return Taken::Refused(other_done(r, &e.done));
+    }
+    let done = e.done.clone();
+    match backs(r, e, test_log) {
+        Ok(verdict) => Taken::Found(Original { done, verdict }),
+        Err(why) => Taken::Refused(why),
+    }
+}
+
+/// An original whose log holds `done`: the hash of that record, whether its register record
+/// names the test log, and its first verdict record for the hypothesis, with that record's hash.
+struct Ended {
+    done: String,
+    test_log: bool,
+    verdict: Option<(String, Verdict)>,
+}
+
+/// The original of `r` once its log holds `done`. `Err` is pending, or refused when the log
+/// cannot be read.
+fn ended(ctx: &CheckCtx, r: &Replicates) -> Result<Ended, Taken<Original>> {
+    let id = r.study.as_str();
+    let all = match ctx.records.study(id) {
+        Err(e) => {
+            let why = format!("The box cannot read the records of study {id}: {e}.");
+            return Err(Taken::Refused(why));
+        }
+        Ok(None) => return Err(Taken::Pending(waits(id, "not registered"))),
+        Ok(Some(all)) => all,
+    };
+    let done =
+        crate::derived::first_done(&all).ok_or_else(|| Taken::Pending(waits(id, "not done")))?;
+    let verdict = all.iter().find_map(|x| {
+        let v = Verdict::of(x).filter(|v| v.hypothesis == r.hypothesis)?;
+        Some((records::hash(x), v))
+    });
+    let log = all
+        .iter()
+        .find_map(crate::derived::Register::of)
+        .map(|g| g.log);
+    Ok(Ended {
+        done: records::hash(done),
+        test_log: log.as_deref() == Some(LogName::Test.as_str()),
+        verdict,
+    })
+}
+
+fn other_done(r: &Replicates, done: &str) -> String {
+    format!("The done record of study {} has hash {done}.", r.study)
+}
+
+/// The hash of the verdict record of the original `e` when it can back a plan in the test log
+/// (`test_log`) or not; else why not. A test-log original backs only a test-log plan.
+fn backs(r: &Replicates, e: Ended, test_log: bool) -> Result<String, String> {
+    if e.test_log && !test_log {
+        return Err(format!(
+            "Study {} is registered in the test log, which never counts, and this study is not.",
+            r.study
+        ));
+    }
+    passed(r, e.verdict)
+}
+
+/// The hash of the original's verdict record `v` for the hypothesis of `r` when it is `pass`
+/// on a `test`; else why not.
+fn passed(r: &Replicates, v: Option<(String, Verdict)>) -> Result<String, String> {
+    let (s, h) = (&r.study, &r.hypothesis);
+    match v {
+        None => Err(format!("Study {s} holds no verdict for {h}.")),
+        Some((hash, v)) if v.verdict == "pass" && v.basis == "test" => Ok(hash),
+        Some((_, v)) => Err(format!(
+            "Study {s}'s verdict for {h} is {}, on basis {}.",
+            printable(&v.verdict),
+            printable(&v.basis)
+        )),
+    }
+}
+
+/// The plan's `study.replicates`; `None` when it has none, or one that a generic rule or
+/// E-REF-002 reports. Its ids have their formats, so a diagnostic may print them.
+fn link(spec: &Value) -> Option<Replicates> {
+    let r: Replicates = serde_json::from_value(val(spec, REPLICATES)?.clone()).ok()?;
+    let formed = is_study_id(&r.study) && has_format("study.replicates.hypothesis", &r.hypothesis);
+    (formed && Some(r.study.as_str()) != text(spec, "study.id")).then_some(r)
+}
+
+/// The plan registers into the test log.
+pub fn in_test_log(spec: &Value) -> bool {
+    val(spec, "study.test_log") == Some(&Value::Bool(true))
+}
+
+/// E-RPL-001, at `study.replicates`: the original is done, and its `done` record is not the
+/// one the plan pins.
+fn replicates_done(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let Some(r) = link(spec) else { return vec![] };
+    match ended(ctx, &r) {
+        Ok(e) if e.done != r.done => vec![at(pat, other_done(&r, &e.done))],
+        _ => vec![],
+    }
+}
+
+/// E-RPL-002, at `study.replicates`: the original is done, and its verdict for the hypothesis
+/// is not `pass` on a `test`; or its log cannot be read.
+fn replicates_passed(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let Some(r) = link(spec) else { return vec![] };
+    let why = match ended(ctx, &r) {
+        Ok(e) => backs(&r, e, in_test_log(spec)).err(),
+        Err(Taken::Refused(why)) => Some(why),
+        Err(_) => None,
+    };
+    why.map(|why| at(pat, why)).into_iter().collect()
+}
+
+/// E-RPL-003, at `study.replicates`: this study is not confirmatory, or has no hypothesis of
+/// the original's hypothesis id with a claim. It reads no record.
+fn replicates_confirmatory(spec: &Value, _: &CheckCtx, pat: &str) -> Vec<Hit> {
+    let Some(r) = link(spec) else { return vec![] };
+    let claimed = (nodes(spec, "question.hypotheses[*]").into_iter())
+        .any(|(_, h)| h.get("id").and_then(Value::as_str) == Some(&r.hypothesis) && has_claim(h));
+    let why = if !confirmatory(spec) {
+        "This study is exploratory.".to_string()
+    } else if !claimed {
+        format!(
+            "This study has no hypothesis {} with a claim.",
+            r.hypothesis
+        )
+    } else {
+        return vec![];
+    };
+    vec![at(pat, why)]
 }
 
 /// A contrast a hypothesis stands for: the candidate it takes as the pick, and its key hash.
@@ -2026,7 +2184,7 @@ fn params_of(spec: &Value, ctx: &CheckCtx, id: &str) -> Option<Value> {
     let taken = params.as_object()?.iter().map(|(k, v)| {
         let value = match reference_of(v) {
             Some(from) => match selected_by(ctx, from) {
-                Taken::Found { selected, .. } => json!(selected),
+                Taken::Found(p) => json!(p.selected),
                 _ => return None,
             },
             None => is_scalar(v).then(|| v.clone())?,
@@ -2046,8 +2204,14 @@ fn estimates_from_record(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
 }
 
 /// W-REF-001, at `<h>.estimates` of a hypothesis with a claim: the study it names has not
-/// finished.
+/// finished. At `study.replicates`: the original is not done.
 fn reference_finished(spec: &Value, ctx: &CheckCtx, pat: &str) -> Vec<Hit> {
+    if pat == REPLICATES {
+        return match link(spec).map(|r| ended(ctx, &r)) {
+            Some(Err(Taken::Pending(why))) => vec![at(pat, why)],
+            _ => vec![],
+        };
+    }
     if pat.ends_with(".estimates") {
         return looked_up(spec, ctx, pat, |l| match l {
             Lookup::Pending(why) => Some(why),

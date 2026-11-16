@@ -6,13 +6,16 @@ use super::sidecar::DataList;
 use crate::analysis::{IntervalResult, claim_strata};
 use crate::canon::sha256_file;
 use crate::derived::{
-    Analysis, Estimate, GroupClip, Instrument, Register, Resolved, Selection, Trigger, Verdict,
+    Analysis, DONE, DoneRecord, End, Estimate, GroupClip, Instrument, Register, Resolved, STAMP,
+    Selection, Stamp, Trigger, Verdict, criterion_state, first_done, stamp_flag,
 };
 use crate::files::optional;
 use crate::records::{Log, Record};
 use crate::rules::{Curve, CurvePoint};
 use crate::runner::Tally;
-use crate::spec::model::{Budget, Claim, Mode, Paired, SelectionRule, Spec, StatisticSpec};
+use crate::spec::model::{
+    Budget, Claim, Criterion, Mode, Paired, SelectionRule, Spec, StatisticSpec,
+};
 use crate::telemetry::Totals;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -52,7 +55,6 @@ pub const NO_STUDY_FOLDER: &str = "no study folder given";
 pub const LINK_NOT_FOLLOWED: &str = "link not followed";
 /// The run log, which no key signs.
 pub const EVENTS: &str = "events.jsonl";
-const PENDING: &str = "pending";
 
 /// A file of the study folder, by its path in the folder and its SHA-256. Never parsed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -287,27 +289,170 @@ pub struct Header {
     pub spec_hash: String,
     /// The time on the register record, from the box's clock.
     pub registered_at: String,
-    /// An outside time stamp of the registration; a confirmatory plan waits for one.
-    pub timestamp: Field<String>,
+    /// Each outside time stamp of the log, in record order. Empty in a card written before
+    /// stamps existed.
+    #[serde(default)]
+    pub stamps: Vec<StampLine>,
+    /// How the study ended; missing for a log with no `done` record. A stopped study has no
+    /// card, so the end here is `rows` or `resize-stop`.
+    #[serde(default = "missing")]
+    pub ended: Field<Ended>,
     /// The plan's `question.population`: the frame every claim covers. Missing when the plan
     /// leaves it empty.
     #[serde(default = "missing")]
     pub population: Field<String>,
 }
 
-/// The header of a study whose register record `own` was written at `registered_at`.
-pub fn header(own: &Register, registered_at: &str, spec: &Spec) -> Header {
-    Header {
+/// The `done` record: how the study ended, when, and the record's seq and hash.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Ended {
+    pub end: End,
+    pub ended_at: String,
+    pub seq: u64,
+    pub hash: String,
+}
+
+/// One `stamp` record. `head_seq` is the last record the stamp covers, `None` when the file
+/// held no head line: the registration alone. `results` is true when it covers the `done`
+/// record. `signatures` is true when the file held the register signature line and, with a
+/// head, the head signature line. `flag` is set when the stamp is dated before a record it
+/// covers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StampLine {
+    pub seq: u64,
+    pub stamped_at: String,
+    pub authority: Option<String>,
+    pub head_seq: Option<u64>,
+    pub results: bool,
+    pub key: bool,
+    pub signatures: bool,
+    pub file_sha256: String,
+    pub reply_sha256: String,
+    pub flag: Option<String>,
+}
+
+/// Why record `r` of `kind` cannot be read.
+fn unreadable(r: &Record, kind: &str) -> String {
+    format!("record {}: the {kind} record is not readable", r.seq)
+}
+
+/// The `stamp` records of `all`, in order. A body that does not parse is refused.
+pub fn stamps(all: &[Record]) -> Result<Vec<StampLine>, String> {
+    let done = first_done(all).map(|r| r.seq);
+    (all.iter().filter(|r| r.kind == STAMP))
+        .map(|r| {
+            let s = Stamp::of(r).ok_or_else(|| unreadable(r, STAMP))?;
+            let head = s.lines.head.as_ref().map(|h| h.seq);
+            Ok(StampLine {
+                seq: r.seq,
+                flag: stamp_flag(all, &s),
+                results: matches!((head, done), (Some(h), Some(d)) if h >= d),
+                key: s.lines.key,
+                signatures: s.lines.register_signature
+                    && (head.is_none() || s.lines.head_signature),
+                head_seq: head,
+                stamped_at: s.stamped_at,
+                authority: s.authority,
+                file_sha256: s.file_sha256,
+                reply_sha256: s.reply_sha256,
+            })
+        })
+        .collect()
+}
+
+/// The first `done` record of `all`. A body that does not parse is refused.
+pub fn ended(all: &[Record]) -> Result<Field<Ended>, String> {
+    let ended = first_done(all)
+        .map(|r| {
+            let d = DoneRecord::of(r).ok_or_else(|| unreadable(r, DONE))?;
+            Ok::<_, String>(Ended {
+                end: d.end,
+                ended_at: d.ended_at,
+                seq: r.seq,
+                hash: crate::records::hash(r),
+            })
+        })
+        .transpose()?;
+    Ok(Field::of(ended, None))
+}
+
+/// The header of a study whose register record `own` was written at `registered_at`; `all` is
+/// its verified log. An unreadable `stamp` or `done` record is refused.
+pub fn header(
+    own: &Register,
+    registered_at: &str,
+    spec: &Spec,
+    all: &[Record],
+) -> Result<Header, String> {
+    Ok(Header {
         mode: spec.study.mode,
         blind: spec.access.blind,
         spec_hash: own.spec_hash.clone(),
         registered_at: registered_at.into(),
-        timestamp: Field::of(own.timestamp.clone().filter(|t| t != PENDING), None),
+        stamps: stamps(all)?,
+        ended: ended(all)?,
         population: Field::of(
             Some(spec.question.population.clone()).filter(|p| !p.is_empty()),
             None,
         ),
-    }
+    })
+}
+
+/// The pair a replication's card prints: the original, its `done` hash, the hypothesis, the
+/// original's verdict, the criterion and its result, and whether the two studies hold the same
+/// estimates of the hypothesis (by `Estimate::identity`) and registered the same payload. A
+/// difference is printed, not refused.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Replication {
+    pub study: String,
+    pub done: String,
+    pub hypothesis: String,
+    pub original_verdict: String,
+    pub criterion: Criterion,
+    pub result: String,
+    pub same_estimate_key: bool,
+    pub same_payload: bool,
+}
+
+/// The pair of a study whose register record is `own` and whose log is `all`; `original` is the
+/// log of the study it replicates. Not applicable for a study that replicates none. Refuses an
+/// original that no longer holds its register record or the verdict record `register` froze.
+pub fn replication(
+    own: &Register,
+    all: &[Record],
+    original: Option<&[Record]>,
+) -> Result<Field<Replication>, String> {
+    let Some(r) = &own.replicates else {
+        return Ok(Field::NotApplicable);
+    };
+    let lost = |what: &str| format!("study {} holds no {what}", r.study);
+    let original = original.ok_or_else(|| lost("records"))?;
+    let theirs = original
+        .iter()
+        .find_map(Register::of)
+        .ok_or_else(|| lost("register record"))?;
+    let verdict = (original.iter())
+        .find(|x| crate::records::hash(x) == r.verdict)
+        .and_then(Verdict::of)
+        .ok_or_else(|| lost("verdict record with the hash this study froze"))?;
+    let keys = |log: &[Record]| -> BTreeSet<(String, String, String)> {
+        (log.iter().filter_map(Estimate::of))
+            .filter(|e| e.hypothesis == r.hypothesis)
+            .map(|e| e.identity())
+            .collect()
+    };
+    Ok(Field::Recorded {
+        value: Replication {
+            study: r.study.clone(),
+            done: r.done.clone(),
+            hypothesis: r.hypothesis.clone(),
+            original_verdict: verdict.verdict,
+            criterion: r.criterion,
+            result: criterion_state(all, r).into(),
+            same_estimate_key: keys(all) == keys(original),
+            same_payload: own.payload == theirs.payload,
+        },
+    })
 }
 
 /// One registered hypothesis: its claim, and the e-value its test must reach.

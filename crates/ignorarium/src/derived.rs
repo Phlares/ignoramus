@@ -1,7 +1,7 @@
 //! Typed bodies of the records that carry derived values. One parser per record kind.
 use crate::canon::{sha256_hex, to_canonical};
 use crate::records::Record;
-use crate::spec::model::{Direction, Outcome, SelectionRule};
+use crate::spec::model::{Criterion, Direction, Outcome, SelectionRule};
 use crate::telemetry::Reading;
 use crate::units::Cluster;
 use ed25519_dalek::SigningKey;
@@ -14,6 +14,7 @@ use std::path::Path;
 
 pub const ANALYSIS: &str = "analysis";
 pub const CHILD_ESTIMATE: &str = "child-estimate";
+pub const DONE: &str = "done";
 pub const ESTIMATE: &str = "estimate";
 pub const INPUTS: &str = "inputs";
 pub const OPENED: &str = "opened";
@@ -23,6 +24,7 @@ pub const SELECTION: &str = "selection";
 pub const SESSION_END: &str = "session.end";
 pub const SESSION_START: &str = "session.start";
 pub const SPAWN_STOP: &str = "spawn-stop";
+pub const STAMP: &str = "stamp";
 pub const TRIGGER: &str = "trigger";
 pub const VERDICT: &str = "verdict";
 
@@ -96,7 +98,7 @@ impl ChildEstimate {
     }
 }
 
-/// What `register` records about a plan. A confirmatory plan carries `timestamp = "pending"`.
+/// What `register` records about a plan.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Register {
@@ -129,6 +131,8 @@ pub struct Register {
     /// `null`, never left out.
     #[serde(deserialize_with = "Option::deserialize")]
     pub alpha: Option<Alpha>,
+    /// A slot nothing fills: a confirmatory plan carries `"pending"`. Outside time stamps are
+    /// `stamp` records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
     /// What the power gate predicted for each hypothesis it simulates, as `register` read it.
@@ -141,6 +145,39 @@ pub struct Register {
     /// register (`deny_unknown_fields`), as for `gate`.
     #[serde(rename = "box", default, skip_serializing_if = "Option::is_none")]
     pub box_identity: Option<crate::identity::BoxIdentity>,
+    /// For a replication, the original it repeats; `None` for any other study, and left out
+    /// then. An older box reads a record that holds it as no register, as for `gate`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicates: Option<Replicated>,
+}
+
+/// The original a replication repeats, as `register` froze it: the plan's four values and the
+/// hash of the original's verdict record for the hypothesis.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Replicated {
+    pub study: String,
+    pub done: String,
+    pub hypothesis: String,
+    pub criterion: Criterion,
+    pub verdict: String,
+}
+
+/// The state of `r`'s criterion in the replication's own log `own`: `met` when its verdict for
+/// the hypothesis is `pass`, `not met` when `fail`, `no result` when the log holds `done` and
+/// no such verdict, else `pending`.
+pub fn criterion_state(own: &[Record], r: &Replicated) -> &'static str {
+    let verdict = match r.criterion {
+        Criterion::Verdict => (own.iter().filter_map(Verdict::of))
+            .find(|v| v.hypothesis == r.hypothesis)
+            .map(|v| v.verdict),
+    };
+    match verdict.as_deref() {
+        Some("pass") => "met",
+        Some("fail") => "not met",
+        _ if first_done(own).is_some() => "no result",
+        _ => "pending",
+    }
 }
 
 /// The power gate's finding for one hypothesis, and what it simulated with.
@@ -623,6 +660,103 @@ pub struct BoundResult {
     pub clusters: u64,
     #[serde(deserialize_with = "Option::deserialize")]
     pub value: Option<f64>,
+}
+
+/// How a study ended: it finished (`rows`), it finished after a re-size that did not
+/// continue (`resize-stop`), or a `stop` record ended it (`stop`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum End {
+    Rows,
+    ResizeStop,
+    Stop,
+}
+
+/// A record of the study's log, by its sequence number and stored hash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct By {
+    pub seq: u64,
+    pub hash: String,
+}
+
+/// The study is over: how it ended, when the end was met, and the record that met it. The
+/// record's own `ts` is when it was written, which can be much later than `ended_at`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DoneRecord {
+    pub end: End,
+    pub ended_at: String,
+    pub by: By,
+}
+
+impl DoneRecord {
+    /// `None` for another kind of record, or a body that does not parse.
+    pub fn of(r: &Record) -> Option<DoneRecord> {
+        body_of(r, DONE)
+    }
+}
+
+/// The first record of kind `done` in `all`, whether its body parses or not; `DoneRecord::of`
+/// reads the body.
+pub fn first_done(all: &[Record]) -> Option<&Record> {
+    all.iter().find(|r| r.kind == DONE)
+}
+
+/// What a `stamp` record says the box checked. The authority's signature is not in it.
+pub const STAMP_CHECKED: &str = "digest and lines; signature checked by the reader";
+
+/// Which of the box's lines the stamped file holds. `head` is the record the head line names,
+/// `None` when the file has no head line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StampLines {
+    pub register: bool,
+    pub register_signature: bool,
+    pub key: bool,
+    pub head: Option<By>,
+    pub head_signature: bool,
+}
+
+/// An outside time stamp of a file of the box's lines. `authority` and `stamped_at` are as
+/// the reply states them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Stamp {
+    pub file_sha256: String,
+    pub reply_sha256: String,
+    pub authority: Option<String>,
+    pub stamped_at: String,
+    pub serial: String,
+    pub policy: String,
+    pub lines: StampLines,
+    pub checked: String,
+}
+
+impl Stamp {
+    /// `None` for another kind of record, or a body that does not parse.
+    pub fn of(r: &Record) -> Option<Stamp> {
+        body_of(r, STAMP)
+    }
+}
+
+/// The flag for `s` when it is dated before the second of the newest record it covers: the
+/// head record, else the register record. Many authorities give whole seconds, and a record's
+/// `ts` has milliseconds, so the two are compared at whole seconds: a reply in the same second
+/// as its head is not flagged. A head the log does not hold also falls back to
+/// the register record; `verify` fails on such a head. `ts` and `stamped_at` share one UTC
+/// format, so comparing the strings compares the times.
+pub fn stamp_flag(all: &[Record], s: &Stamp) -> Option<String> {
+    let head = s.lines.head.as_ref().map(|h| h.seq);
+    let covered = head
+        .and_then(|h| all.iter().find(|r| r.seq == h))
+        .or(all.first())?;
+    /// `YYYY-MM-DDTHH:MM:SS`: the time to the second.
+    fn second(t: &str) -> &str {
+        t.get(..19).unwrap_or(t)
+    }
+    (second(&s.stamped_at) < second(&covered.ts))
+        .then(|| format!("dated before record {}, which it covers", covered.seq))
 }
 
 /// What a study's records allow a later study to read.

@@ -4,11 +4,11 @@ Severity: error
 
 ## Problem
 
-An input hash is not a SHA-256 digest.
+An input hash or a record hash is not a SHA-256 digest.
 
 ## Fix
 
-Use 64 lowercase hex characters, or leave it empty until the input is pinned.
+Use 64 lowercase hex characters, with no sha256: prefix. An input hash may stay empty until the input is pinned; study.replicates.done may not.
 
 ## Why
 
@@ -21,3 +21,4 @@ The run compares this hash with the file it reads. Any other form can never matc
 ## Applies to
 
 - `inputs[*].sha256` (format)
+- `study.replicates.done` (format)

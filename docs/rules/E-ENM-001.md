@@ -23,6 +23,7 @@ A value outside the set has no defined meaning in the checker or the run.
 - `study.template` (enum)
 - `study.mode` (enum)
 - `study.label` (enum)
+- `study.replicates.criterion` (enum)
 - `scope.stop_rule` (enum)
 - `scope.end_of_run.route` (enum)
 - `design.pick` (enum)

@@ -51,10 +51,6 @@
     "blind": false,
     "spec_hash": "sha256:0a8dd75d8ea12c0b0fa61d8181b7f4644ba0e99710894279075edc760f1ad0df",
     "registered_at": "2026-11-14T20:21:09.221Z",
-    "timestamp": {
-      "state": "missing",
-      "link": null
-    },
     "population": {
       "state": "recorded",
       "value": "every text file of the four strata"

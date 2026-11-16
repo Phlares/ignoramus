@@ -375,6 +375,10 @@ fn fat_templates() -> Vec<Value> {
             s["design"]["row_memory_mib"] = json!(1024);
             s["design"]["resize"] = json!({ "rule": "blinded-once" });
             s["family"] = json!({ "members": ["spec/b.toml", "spec/c.toml"] });
+            s["study"]["replicates"] = json!({
+                "study": "original", "done": "ab".repeat(32), "hypothesis": "H1",
+                "criterion": "verdict",
+            });
             s["pins"]["deviations"] = json!([
                 { "from": "pilot", "reason": "r", "timing": "before-collection" },
                 { "from": "early", "reason": "r", "timing": "after-results" },
@@ -1333,14 +1337,20 @@ fn the_documented_codes_are_exactly_those_the_cli_raises() {
         .map(|r| r.code.as_str())
         .collect();
     codes.sort_unstable();
-    // The register refusals, a family member's wait as its root's check reports it, and the
-    // derivative set's cost against the budget, which needs the machine and the schedule.
+    // A verb on a done study, the register refusals, the stamp refusals, a family member's
+    // wait as its root's check reports it, and the derivative set's cost against the budget,
+    // which needs the machine and the schedule.
     assert_eq!(
         codes,
         [
+            "E-DON-001",
             "E-REG-001",
             "E-REG-002",
             "E-REG-003",
+            "E-STP-001",
+            "E-STP-002",
+            "E-STP-003",
+            "E-STP-004",
             "W-FAM-001",
             "W-MUT-002"
         ]

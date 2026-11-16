@@ -10,6 +10,7 @@
 - Registered: 2026-11-14T20:35:31.345Z (plan hash sha256:0a8dd75d8ea12c0b0fa61d8181b7f4644ba0e99710894279075edc760f1ad0df)
 - Outside time stamp: not in the records
 - Finished: 2026-11-14T20:35:31.509Z
+- Study ended: no done record
 - Records verified: 87
 
 ## Claim
