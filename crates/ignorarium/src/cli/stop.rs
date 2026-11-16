@@ -39,7 +39,7 @@ pub fn run(ctx: &Ctx, id: &str, reason: &str) -> Run {
         Ok(None) => out("stop requested; the live run records it\n")?,
         // A run wrote `done` after the log was read; the request is written by then.
         Err(ControlError::Done) => {
-            return Err(CliError::usage(
+            return Err(CliError::refuse(
                 "the stop request is sent, but the study ended first; the request is cleared",
             ));
         }

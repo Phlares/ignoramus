@@ -8,7 +8,7 @@ The reply is not a granted RFC 3161 time-stamp reply over a SHA-256 digest, or i
 
 ## Fix
 
-Pass the `.tsr` file the authority sent back, not the stamped file or an error page. When the authority refused, ask it again, or ask another, with `-sha256`.
+Pass the `.tsr` file the authority sent back, not the stamped file or an error page. When the authority refused, ask it again, or ask another, with `-sha256`. A reply whose time has fractional seconds reads as "not a time-stamp reply"; ask an authority that signs whole seconds.
 
 ## Why
 

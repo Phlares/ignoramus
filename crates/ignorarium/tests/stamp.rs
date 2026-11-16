@@ -122,6 +122,24 @@ fn with_appends_the_authors_lines() {
 }
 
 #[test]
+fn a_with_file_that_holds_another_box_line_is_refused_at_request() {
+    let lab = common::lab();
+    common::plain(&lab, "s6");
+    let older = requested(&lab, "s6");
+    // A later record moves the head: the older file's head line is not the box's now.
+    stop(&lab, "s6");
+    let study = lab.home.study_dir("s6");
+    let before = common::files_under(&study);
+    let a = common::bin(&lab)
+        .args(["stamp", "s6", "--request", "--with"])
+        .arg(&older)
+        .assert()
+        .code(1);
+    assert!(err(&a).contains("E-STP-003"), "{}", err(&a));
+    assert_eq!(common::files_under(&study), before);
+}
+
+#[test]
 fn a_request_appends_no_record() {
     let lab = common::lab();
     common::plain(&lab, "s5");

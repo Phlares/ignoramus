@@ -1517,7 +1517,7 @@ fn done_never_precedes_the_session_end_of_a_racing_run() {
             assert!(
                 out.status.success()
                     || (out.status.code() == Some(1) && read_first)
-                    || (out.status.code() == Some(2) && overtaken && !err.contains("E-DON")),
+                    || (out.status.code() == Some(1) && overtaken && !err.contains("E-DON")),
                 "{err}"
             );
         });
@@ -1636,7 +1636,7 @@ fn a_stop_overtaken_by_done_after_its_read_says_the_study_ended_first() {
     drop(held);
     let out = stop.join().unwrap();
     let err = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert_eq!(out.status.code(), Some(1), "{err}");
     assert!(
         err.contains("the stop request is sent, but the study ended first; the request is cleared"),
         "{err}"

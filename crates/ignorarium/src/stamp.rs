@@ -341,7 +341,8 @@ pub fn record(
 }
 
 /// Write the file to stamp, `lines` then the bytes of `with`, to `<study>/stamps/<sha256>.txt`.
-/// The same log gives the same path.
+/// The same log gives the same path. A file that `record` would refuse (`found`) is refused
+/// here, before the write.
 pub fn request(
     home: &Home,
     id: &str,
@@ -351,6 +352,8 @@ pub fn request(
     let mut bytes = lines(home, id, key)?.into_bytes();
     if let Some(extra) = with {
         bytes.extend(fs::read(extra)?);
+        let seals = records::seals(&home.study_dir(id).join("records.jsonl"), key)?;
+        found(&bytes, id, &seals, &hex::encode(key.to_bytes()))?;
     }
     let dir = stamps_dir(&home.study_dir(id))?;
     let file = dir.join(format!("{}.txt", sha256_hex(&bytes)));
