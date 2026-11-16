@@ -279,6 +279,31 @@ fn open_read(path: &Path) -> Result<Option<std::fs::File>, VerifyError> {
     }
 }
 
+/// The hash and signature a stored line holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Seal {
+    pub seq: u64,
+    pub hash: String,
+    pub sig: String,
+}
+
+/// The seal of each line of the log at `path`, in order, checked as `read_all` checks it. The
+/// hash is the stored one, so a row that shares `data_hashes` has its true hash. A missing file
+/// holds none.
+pub fn seals(path: &Path, key: &VerifyingKey) -> Result<Vec<Seal>, VerifyError> {
+    let mut out = Vec::new();
+    if let Some(f) = open_read(path)? {
+        checked(io::BufReader::new(f), key, |s| {
+            out.push(Seal {
+                seq: s.record.seq,
+                hash: s.hash,
+                sig: s.sig,
+            });
+        })?;
+    }
+    Ok(out)
+}
+
 /// The first record of the log at `path`, checked as `read_all` checks it, without reading
 /// the rest of the file; `None` for a missing or empty log.
 pub fn first(path: &Path, key: &VerifyingKey) -> Result<Option<Record>, VerifyError> {

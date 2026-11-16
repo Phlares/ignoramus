@@ -24,6 +24,7 @@ pub const SELECTION: &str = "selection";
 pub const SESSION_END: &str = "session.end";
 pub const SESSION_START: &str = "session.start";
 pub const SPAWN_STOP: &str = "spawn-stop";
+pub const STAMP: &str = "stamp";
 pub const TRIGGER: &str = "trigger";
 pub const VERDICT: &str = "verdict";
 

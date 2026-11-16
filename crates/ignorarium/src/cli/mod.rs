@@ -15,6 +15,7 @@ mod docs;
 mod guide;
 mod history;
 mod import;
+mod key;
 mod new;
 mod pause;
 mod probe;
@@ -175,7 +176,17 @@ enum Verb {
         /// Study id.
         #[arg(long)]
         study: Option<String>,
+        /// A file holding the box's public key as hex. Checks the log in `--records` with it,
+        /// and opens no box home.
+        #[arg(long, requires = "records", conflicts_with = "study")]
+        public_key: Option<PathBuf>,
+        /// A copy of a study's records.jsonl, to check with `--public-key`.
+        #[arg(long, requires = "public_key", conflicts_with = "study")]
+        records: Option<PathBuf>,
     },
+    /// Work with the box's signing key.
+    #[command(subcommand)]
+    Key(KeyVerb),
     /// Measure this machine and write machine.toml. Run it before `check`.
     Probe,
     /// Run a registered study. Rows with a signed record are skipped.
@@ -250,6 +261,12 @@ enum Verb {
 }
 
 #[derive(Subcommand)]
+enum KeyVerb {
+    /// Print the public key as hex, for `verify --public-key`.
+    Export,
+}
+
+#[derive(Subcommand)]
 enum Dev {
     /// Write docs/rules/<code>.md from the built-in rules.
     GenRuleDocs {
@@ -271,9 +288,20 @@ impl Verb {
             | Verb::Pause { study }
             | Verb::Resume { study, .. }
             | Verb::Stop { study, .. } => Some(study),
-            Verb::Verify { study } => study.as_deref(),
+            Verb::Verify { study, .. } => study.as_deref(),
             _ => None,
         }
+    }
+
+    /// True for a verb that must not open or write a box home.
+    fn homeless(&self) -> bool {
+        matches!(
+            self,
+            Verb::Verify {
+                public_key: Some(_),
+                ..
+            }
+        )
     }
 
     fn name(&self) -> &'static str {
@@ -286,6 +314,7 @@ impl Verb {
             Verb::ImportHistory { .. } => "import-history",
             Verb::Import { .. } => "import",
             Verb::Verify { .. } => "verify",
+            Verb::Key(KeyVerb::Export) => "key.export",
             Verb::Probe => "probe",
             Verb::Run { .. } => "run",
             Verb::Status { .. } => "status",
@@ -307,7 +336,13 @@ impl Verb {
             Verb::Register { spec } => register::run_stdio(ctx, &spec),
             Verb::ImportHistory { phase, files } => history::run(ctx, &phase, &files),
             Verb::Import { source, files } => import::run(ctx, &source, &files),
-            Verb::Verify { study } => verify::run(ctx, study.as_deref()),
+            Verb::Verify {
+                public_key: Some(key),
+                records: Some(records),
+                ..
+            } => verify::run_public(&key, &records),
+            Verb::Verify { study, .. } => verify::run(ctx, study.as_deref()),
+            Verb::Key(KeyVerb::Export) => key::export(ctx),
             Verb::Probe => probe::run(ctx),
             Verb::Run {
                 study,
@@ -360,13 +395,19 @@ where
     let started = Instant::now();
     let trace_id = events::new_trace_id();
     let span_id = events::new_span_id();
+    let homeless = cli.verb.homeless();
     let ctx = Ctx {
-        home: Home::open().map_err(|e| e.to_string()),
+        home: if homeless {
+            Err("this call opens no box home".into())
+        } else {
+            Home::open().map_err(|e| e.to_string())
+        },
     };
-    // The selftest runs in a sandbox where the event log is out of reach. A box home that
+    // The selftest runs in a sandbox where the event log is out of reach. A homeless call writes
+    // nothing on the machine it runs on. A box home that
     // cannot be opened warns once, for the call, not for each event.
     let log = match &ctx.home {
-        _ if name == "dev.selftest" => None,
+        _ if name == "dev.selftest" || homeless => None,
         Ok(home) => Some(home.root.join("events.jsonl")),
         Err(e) => {
             let _ = writeln!(

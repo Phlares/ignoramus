@@ -2574,3 +2574,256 @@ fn status_shows_the_end() {
     let line = format!("ended: rows at {}\n", body.ended_at);
     assert!(common::text(&a).contains(&line), "{}", common::text(&a));
 }
+
+/// The lab's public key as the box prints it.
+fn public_hex(lab: &common::Lab) -> String {
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    hex::encode(key.verifying_key().to_bytes())
+}
+
+/// A study `id` run to its `done` record, and a folder away from the box home that holds its
+/// log as `records.jsonl` and the lab's public key as `key.txt`.
+fn carried(lab: &common::Lab, id: &str) -> PathBuf {
+    let dir = common::plain(lab, id);
+    common::bin(lab)
+        .current_dir(common::work(lab, id))
+        .args(["run", id])
+        .assert()
+        .code(0);
+    let away = lab.root.join("away");
+    std::fs::create_dir_all(&away).unwrap();
+    std::fs::copy(dir.join("records.jsonl"), away.join("records.jsonl")).unwrap();
+    std::fs::write(away.join("key.txt"), format!("{}\n", public_hex(lab))).unwrap();
+    away
+}
+
+/// `verify --public-key --records` over `away`, with a box home that does not exist.
+fn verify_away(away: &Path, key: &str) -> assert_cmd::assert::Assert {
+    let mut c = Command::cargo_bin("ignorarium").unwrap();
+    c.env("IGNORARIUM_HOME", away.join("absent"))
+        .args(["verify", "--public-key"])
+        .arg(away.join(key))
+        .arg("--records")
+        .arg(away.join("records.jsonl"))
+        .assert()
+}
+
+#[test]
+fn key_export_prints_the_public_key() {
+    let lab = common::lab();
+    common::plain(&lab, "k1");
+    let a = common::bin(&lab).args(["key", "export"]).assert().code(0);
+    assert_eq!(common::text(&a), format!("{}\n", public_hex(&lab)));
+    assert_eq!(common::text(&a).len(), 65);
+}
+
+#[test]
+fn key_export_without_a_key_refuses_and_makes_none() {
+    let lab = common::lab();
+    common::bin(&lab).args(["key", "export"]).assert().code(1);
+    assert!(!lab.home.root.join("keys/box.ed25519").exists());
+}
+
+#[test]
+fn verify_with_a_public_key_needs_no_home() {
+    let lab = common::lab();
+    let away = carried(&lab, "v1");
+    let count = common::records_of(&lab, "v1").len();
+    let a = verify_away(&away, "key.txt").code(0);
+    let out = common::text(&a);
+    assert!(
+        out.contains(&format!("study v1: {count} records\n")),
+        "{out}"
+    );
+    assert!(out.contains("done: rows at "), "{out}");
+    assert!(!out.contains("planlog"), "{out}");
+    assert!(!away.join("absent").exists());
+}
+
+#[test]
+fn verify_with_a_public_key_fails_on_a_changed_record() {
+    let lab = common::lab();
+    let away = carried(&lab, "v2");
+    let log = away.join("records.jsonl");
+    let text = std::fs::read_to_string(&log).unwrap();
+    std::fs::write(&log, text.replacen("register", "regista", 1)).unwrap();
+    let a = verify_away(&away, "key.txt").code(1);
+    assert!(stderr(&a).contains("record 0"), "{}", stderr(&a));
+    assert!(!away.join("absent").exists());
+}
+
+#[test]
+fn verify_with_another_labs_key_names_the_signature() {
+    let lab = common::lab();
+    let away = carried(&lab, "v3");
+    let other = common::lab();
+    common::plain(&other, "o1");
+    std::fs::write(away.join("other.txt"), public_hex(&other)).unwrap();
+    let a = verify_away(&away, "other.txt").code(1);
+    assert!(stderr(&a).contains("signature"), "{}", stderr(&a));
+}
+
+#[test]
+fn verify_flags_misuse() {
+    for args in [
+        &["verify", "--public-key", "k"][..],
+        &["verify", "--records", "r"],
+        &[
+            "verify",
+            "--public-key",
+            "k",
+            "--records",
+            "r",
+            "--study",
+            "s",
+        ],
+        &["verify", "--records", "r", "--study", "s"],
+    ] {
+        Command::cargo_bin("ignorarium")
+            .unwrap()
+            .env("IGNORARIUM_HOME", "/nonexistent/home")
+            .args(args)
+            .assert()
+            .code(2);
+    }
+}
+
+#[test]
+fn a_key_file_that_is_not_a_public_key_is_refused_without_echo() {
+    let lab = common::lab();
+    let away = carried(&lab, "v4");
+    let private = std::fs::read(lab.home.root.join("keys/box.ed25519")).unwrap();
+    assert_eq!(private.len(), 32);
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        ("raw", private.clone()),
+        ("short", b"abcd".to_vec()),
+        ("long", b"ab".repeat(40)),
+        ("not-hex", b"zq".repeat(32)),
+        ("empty", Vec::new()),
+    ];
+    for (name, bytes) in cases {
+        std::fs::write(away.join(name), &bytes).unwrap();
+        let a = verify_away(&away, name).code(2);
+        let err = stderr(&a);
+        assert!(err.contains("public key"), "{name}: {err}");
+        assert!(!err.contains(&hex::encode(&private)), "{name}: {err}");
+        assert!(!err.contains(&hex::encode(&private[..4])), "{name}: {err}");
+        assert!(
+            !err.contains("zqzq") && !err.contains("abab"),
+            "{name}: {err}"
+        );
+    }
+    assert!(!away.join("absent").exists());
+}
+
+#[test]
+fn a_public_key_with_white_space_around_it_is_read() {
+    let lab = common::lab();
+    let away = carried(&lab, "v5");
+    std::fs::write(away.join("pad"), format!(" \n{}\r\n\n", public_hex(&lab))).unwrap();
+    verify_away(&away, "pad").code(0);
+}
+
+/// The records of a finished study, a `done` record, then `tail`, planted as `id`.
+fn plant_done(lab: &common::Lab, id: &str, tail: &[(&str, Value)]) {
+    let mut bodies = common::finished(vec![common::arm_a()]);
+    let done = json!({"end": "rows", "ended_at": "2026-11-15T00:00:00Z",
+        "by": {"seq": 2, "hash": "ab".repeat(32)}});
+    bodies.push(("done", done));
+    bodies.extend(tail.iter().map(|(k, b)| (*k, b.clone())));
+    common::plant(&lab.home, id, &bodies);
+}
+
+fn verify_study(lab: &common::Lab, id: &str) -> assert_cmd::assert::Assert {
+    common::bin(lab).args(["verify", "--study", id]).assert()
+}
+
+#[test]
+fn verify_fails_on_a_row_after_done() {
+    let lab = common::lab();
+    plant_done(&lab, "a1", &[("estimate", common::arm_a())]);
+    let a = verify_study(&lab, "a1").code(1);
+    assert!(
+        stderr(&a).contains("follows the done record"),
+        "{}",
+        stderr(&a)
+    );
+}
+
+#[test]
+fn verify_fails_on_a_second_done() {
+    let lab = common::lab();
+    let again = json!({"end": "stop", "ended_at": "2026-11-15T00:00:01Z",
+        "by": {"seq": 2, "hash": "ab".repeat(32)}});
+    plant_done(&lab, "a2", &[("done", again)]);
+    let a = verify_study(&lab, "a2").code(1);
+    assert!(stderr(&a).contains("second done"), "{}", stderr(&a));
+}
+
+#[test]
+fn verify_allows_stamp_and_opened_after_done() {
+    let lab = common::lab();
+    plant_done(
+        &lab,
+        "a3",
+        &[("stamp", json!({"x": 1})), ("opened", json!({}))],
+    );
+    let a = verify_study(&lab, "a3").code(0);
+    let out = common::text(&a);
+    assert!(
+        out.contains("done: rows at 2026-11-15T00:00:00Z (record "),
+        "{out}"
+    );
+}
+
+#[test]
+fn verify_says_when_a_study_has_no_done_record() {
+    let lab = common::lab();
+    common::plain(&lab, "a4");
+    let a = verify_study(&lab, "a4").code(0);
+    assert!(
+        common::text(&a).contains("no done record\n"),
+        "{}",
+        common::text(&a)
+    );
+}
+
+#[test]
+fn report_after_done_still_verifies() {
+    let lab = common::lab();
+    let away = carried(&lab, "a5");
+    common::bin(&lab).args(["report", "a5"]).assert().code(0);
+    assert_eq!(common::records_of(&lab, "a5").pop().unwrap().kind, "opened");
+    verify_study(&lab, "a5").code(0);
+    std::fs::copy(
+        lab.home.study_dir("a5").join("records.jsonl"),
+        away.join("records.jsonl"),
+    )
+    .unwrap();
+    verify_away(&away, "key.txt").code(0);
+}
+
+#[test]
+fn seals_hold_the_stored_hash_and_signature_of_each_line() {
+    let lab = common::lab();
+    let dir = common::plain(&lab, "s9");
+    common::bin(&lab)
+        .current_dir(common::work(&lab, "s9"))
+        .args(["run", "s9"])
+        .assert()
+        .code(0);
+    let log = dir.join("records.jsonl");
+    let key = keys::load(&lab.home).unwrap().unwrap().verifying_key();
+    let seals = ignorarium::records::seals(&log, &key).unwrap();
+    let stored: Vec<Value> = (std::fs::read_to_string(&log).unwrap().lines())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(seals.len(), stored.len());
+    for (i, (s, l)) in seals.iter().zip(&stored).enumerate() {
+        assert_eq!(s.seq, i as u64);
+        assert_eq!(l["hash"], s.hash);
+        assert_eq!(l["sig"], s.sig);
+    }
+    let none = ignorarium::records::seals(&dir.join("none"), &key);
+    assert!(none.unwrap().is_empty());
+}
