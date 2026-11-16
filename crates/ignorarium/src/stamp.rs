@@ -117,7 +117,7 @@ pub fn lines(home: &Home, id: &str, key: &VerifyingKey) -> Result<String, StampE
     push(Line::Register, &first.hash);
     push(Line::RegisterSignature, &first.sig);
     push(Line::Key, &hex::encode(key.to_bytes()));
-    push(Line::Head, &format!("seq {}, hash {}", head.seq, head.hash));
+    push(Line::Head, &head_value(head));
     push(Line::HeadSignature, &head.sig);
     // `PlanLog::open` makes a missing folder and its lock file; a request must make neither.
     let folder = home.root.join(&register.log);
@@ -239,7 +239,12 @@ fn head_seal<'a>(value: &[u8], seals: &'a [Seal]) -> Option<&'a Seal> {
         .parse()
         .ok()?;
     let seal = seals.get(seq)?;
-    (format!("seq {}, hash {}", seal.seq, seal.hash) == value).then_some(seal)
+    (head_value(seal) == value).then_some(seal)
+}
+
+/// The value of the head line for the record `seal` seals.
+fn head_value(seal: &Seal) -> String {
+    format!("seq {}, hash {}", seal.seq, seal.hash)
 }
 
 /// What `record` did.

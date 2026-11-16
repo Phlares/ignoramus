@@ -1153,7 +1153,10 @@ fn a_later_stop_fills_in_what_an_earlier_one_could_not_write() {
     let spec = std::fs::read(dir.join("spec.toml")).unwrap();
     std::fs::write(dir.join("spec.toml"), "{").unwrap();
     let err = try_stop(&lab.home, "repair", "late").unwrap_err();
-    assert!(err.to_string().contains("spec"), "{err}");
+    assert!(
+        (err.to_string()).starts_with("I/O failed: cannot load the spec: "),
+        "{err}"
+    );
     assert_eq!(kind_of(&lab, "repair", "stop").len(), 1);
     assert_eq!(
         state_of(&lab, "repair"),

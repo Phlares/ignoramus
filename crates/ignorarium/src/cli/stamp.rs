@@ -1,19 +1,8 @@
 //! `stamp`: write the file to stamp and print the commands that stamp it, or record a reply.
-use super::{CliError, Ctx, Done, Run, located, not_registered, out, refusal};
-use crate::home::Home;
+use super::{CliError, Ctx, Done, Run, keyed, not_registered, out, refusal};
+use crate::config;
 use crate::stamp::{self, StampError, Stamped};
-use crate::{config, keys};
-use ed25519_dalek::SigningKey;
 use std::path::Path;
-
-/// The box home and key of a study with a log.
-fn home_and_key<'a>(ctx: &'a Ctx, id: &str) -> Result<(&'a Home, SigningKey), CliError> {
-    let (home, _) = located(ctx, id)?;
-    let key = keys::load(home)
-        .map_err(|e| CliError::usage(format!("box key: {e}")))?
-        .ok_or_else(|| not_registered(id))?;
-    Ok((home, key))
-}
 
 fn failed(id: &str, what: &str, e: StampError) -> CliError {
     match e {
@@ -24,7 +13,7 @@ fn failed(id: &str, what: &str, e: StampError) -> CliError {
 }
 
 pub fn request(ctx: &Ctx, id: &str, with: Option<&Path>) -> Run {
-    let (home, key) = home_and_key(ctx, id)?;
+    let (home, _, key) = keyed(ctx, id)?;
     let cfg = config::load(&home.root).map_err(CliError::usage)?;
     let file = stamp::request(home, id, &key.verifying_key(), with)
         .map_err(|e| failed(id, "request a stamp", e))?;
@@ -49,7 +38,7 @@ pub fn request(ctx: &Ctx, id: &str, with: Option<&Path>) -> Run {
 }
 
 pub fn reply(ctx: &Ctx, id: &str, reply: &Path, file: Option<&Path>) -> Run {
-    let (home, key) = home_and_key(ctx, id)?;
+    let (home, _, key) = keyed(ctx, id)?;
     match stamp::record(home, id, &key, reply, file).map_err(|e| failed(id, "record a stamp", e))? {
         Stamped::New(r) => out(&format!("stamp record: {}\n", r.seq))?,
         Stamped::Already => out("already recorded\n")?,

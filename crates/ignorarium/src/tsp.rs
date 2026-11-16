@@ -130,8 +130,10 @@ fn signer_subject(signed: &SignedData) -> Option<String> {
         })
 }
 
-/// A granted reply over `digest` (SHA-256 imprint; any length, to build a bad reply) at `unix` seconds, with no signer and no
-/// certificate. `authority`, a name such as `CN=T`, goes in the `tsa` field.
+/// A granted reply over `digest` at `unix` seconds, with no signer and no certificate. The
+/// imprint says SHA-256 at any length of `digest`, so a test can build a bad reply.
+/// `authority`, a name such as `CN=T`, goes in the `tsa` field; a name that does not parse
+/// panics.
 #[doc(hidden)]
 pub fn fixture(digest: &[u8], unix: u64, authority: Option<&str>) -> Vec<u8> {
     let tst = TstInfo {

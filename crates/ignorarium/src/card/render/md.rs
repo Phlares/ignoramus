@@ -51,9 +51,12 @@ fn names(v: &[String]) -> String {
     v.join(", ")
 }
 
+fn yes(b: bool) -> &'static str {
+    if b { "yes" } else { "no" }
+}
+
 /// One line per stamp, then the command that checks the first one.
 fn stamp_lines(stamps: &[StampLine]) -> Vec<String> {
-    let yes = |b: bool| if b { "yes" } else { "no" };
     let Some(first) = stamps.first() else {
         return vec!["Outside time stamp: not in the records".into()];
     };
@@ -101,7 +104,7 @@ fn header_section(c: &Card) -> String {
         format!("Study: {}", c.study),
         format!("Family: {family}"),
         format!("Mode: {}", word(&h.mode)),
-        format!("Blind: {}", if h.blind { "yes" } else { "no" }),
+        format!("Blind: {}", yes(h.blind)),
         format!(
             "Isolation level: {}",
             field(&c.setup.stack.isolation, levels)
@@ -205,7 +208,6 @@ fn verdict_section(c: &Card) -> String {
 }
 
 fn replication_section(r: &Replication) -> String {
-    let yes = |b: bool| if b { "yes" } else { "no" };
     list(vec![
         format!("Original study: {}", r.study),
         format!("Original done record: {}", r.done),

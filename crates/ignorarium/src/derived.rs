@@ -735,8 +735,10 @@ impl Stamp {
 }
 
 /// The flag for `s` when it is dated before the newest record it covers: the head record,
-/// else the register record. `ts` and `stamped_at` share one UTC format, so comparing the
-/// strings compares the times.
+/// else the register record. A head the log does not hold also falls back to the register
+/// record; `stamp` checks the head against the log before it writes the record, so a verified
+/// log never has one. `ts` and `stamped_at` share one UTC format, so comparing the strings
+/// compares the times.
 pub fn stamp_flag(all: &[Record], s: &Stamp) -> Option<String> {
     let head = s.lines.head.as_ref().map(|h| h.seq);
     let covered = head

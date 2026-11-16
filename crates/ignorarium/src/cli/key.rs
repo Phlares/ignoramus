@@ -26,9 +26,7 @@ pub fn read_public(path: &Path) -> Result<VerifyingKey, CliError> {
     if text.len() != 64 {
         return Err(bad("must hold 64 hex characters and nothing else"));
     }
-    let raw: [u8; 32] = hex::decode(text)
-        .map_err(|_| bad("holds characters that are not hex"))?
-        .try_into()
-        .map_err(|_| bad("must hold 64 hex characters and nothing else"))?;
+    let mut raw = [0u8; 32];
+    hex::decode_to_slice(text, &mut raw).map_err(|_| bad("holds characters that are not hex"))?;
     VerifyingKey::from_bytes(&raw).map_err(|_| bad("does not hold a valid ed25519 public key"))
 }

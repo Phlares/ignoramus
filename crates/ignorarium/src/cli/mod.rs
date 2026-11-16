@@ -431,8 +431,7 @@ where
             Home::open().map_err(|e| e.to_string())
         },
     };
-    // The selftest runs in a sandbox where the event log is out of reach. A homeless call writes
-    // nothing on the machine it runs on. A box home that
+    // The selftest runs in a sandbox where the event log is out of reach. A box home that
     // cannot be opened warns once, for the call, not for each event.
     let log = match &ctx.home {
         _ if name == "dev.selftest" || homeless => None,
@@ -537,8 +536,21 @@ pub(crate) fn not_registered(id: &str) -> CliError {
     CliError::refuse(format!("study {id} is not registered"))
 }
 
+/// A study with a record log and a box key, before the log is read: the box home, the path of
+/// the log and the key. Refuses what `located` refuses, and a box with no key.
+fn keyed<'a>(
+    ctx: &'a Ctx,
+    id: &str,
+) -> Result<(&'a Home, PathBuf, ed25519_dalek::SigningKey), CliError> {
+    let (home, log) = located(ctx, id)?;
+    let key = crate::keys::load(home)
+        .map_err(|e| CliError::usage(format!("box key: {e}")))?
+        .ok_or_else(|| not_registered(id))?;
+    Ok((home, log, key))
+}
+
 /// A registered study: the box key and the study's verified records.
-/// Refuses what `located` refuses, and a study with no `register` record.
+/// Refuses what `keyed` refuses, and a study with no `register` record.
 fn registered<'a>(
     ctx: &'a Ctx,
     id: &str,
@@ -550,10 +562,7 @@ fn registered<'a>(
     ),
     CliError,
 > {
-    let (home, log) = located(ctx, id)?;
-    let key = crate::keys::load(home)
-        .map_err(|e| CliError::usage(format!("box key: {e}")))?
-        .ok_or_else(|| not_registered(id))?;
+    let (home, log, key) = keyed(ctx, id)?;
     let all = crate::records::read_all(&log, &key.verifying_key())
         .map_err(|e| CliError::usage(format!("records of {id}: {e}")))?;
     if !all

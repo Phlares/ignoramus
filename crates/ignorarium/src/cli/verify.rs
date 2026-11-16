@@ -25,9 +25,7 @@ pub fn run_public(public_key: &Path, records: &Path) -> Run {
     if !records.is_file() {
         return Err(CliError::usage("cannot read the records file"));
     }
-    let mut failed = Vec::new();
-    finish(check_study(None, records, &key), &mut failed)?;
-    fail_or_pass(failed)
+    fail_or_pass(finish(check_study(None, records, &key))?)
 }
 
 pub fn run(ctx: &Ctx, study: Option<&str>) -> Run {
@@ -72,19 +70,18 @@ pub fn run(ctx: &Ctx, study: Option<&str>) -> Run {
             failed.push(format!("no study named {id:?} in the box"));
         } else if let Some(k) = &key {
             let check = check_study(Some(id), &dir.join("records.jsonl"), &k.verifying_key());
-            finish(check, &mut failed)?;
+            failed.extend(finish(check)?);
         }
     }
     fail_or_pass(failed)
 }
 
-/// Print what a study check found; its failures join `failed`.
-fn finish(check: StudyCheck, failed: &mut Vec<String>) -> Result<(), CliError> {
+/// Print what a study check found, and return its failures.
+fn finish(check: StudyCheck) -> Result<Vec<String>, CliError> {
     for line in &check.lines {
         out(&format!("{line}\n"))?;
     }
-    failed.extend(check.failed);
-    Ok(())
+    Ok(check.failed)
 }
 
 /// Exit 0 when nothing failed; otherwise a refusal that lists every failure.
@@ -100,35 +97,34 @@ fn fail_or_pass(failed: Vec<String>) -> Run {
 }
 
 /// What one study's log shows: the lines to print and the failures found.
-pub(crate) struct StudyCheck {
-    pub lines: Vec<String>,
-    pub failed: Vec<String>,
+struct StudyCheck {
+    lines: Vec<String>,
+    failed: Vec<String>,
 }
 
 /// Check the chain of the log at `log` with `key`, and what it holds. `id` names the study in
 /// the lines; without it the study is the one the first record names.
-pub(crate) fn check_study(id: Option<&str>, log: &Path, key: &VerifyingKey) -> StudyCheck {
+fn check_study(id: Option<&str>, log: &Path, key: &VerifyingKey) -> StudyCheck {
     let mut c = StudyCheck {
         lines: Vec::new(),
         failed: Vec::new(),
     };
+    let prefix = id.map_or(String::new(), |id| format!("study {id}: "));
     let all = match records::read_all(log, key) {
         Ok(all) => all,
         Err(e) => {
-            c.failed
-                .push(format!("{}{e}", id.map_or(String::new(), study_prefix)));
+            c.failed.push(format!("{prefix}{e}"));
             return c;
         }
     };
     let Some(first) = all.first() else {
-        let name = id.map_or(String::new(), study_prefix);
-        c.failed.push(format!("{name}no register record"));
+        c.failed.push(format!("{prefix}no register record"));
         return c;
     };
     let id = id.unwrap_or(&first.study);
     c.lines.push(format!("study {id}: {} records", all.len()));
     // The register is the first record of the log.
-    let registered = (all.first().and_then(Register::of)).and_then(|r| r.box_identity);
+    let registered = Register::of(first).and_then(|r| r.box_identity);
     c.lines
         .push(format!("registered box: {}", box_text(registered.as_ref())));
     let starts: Vec<SessionStart> = all.iter().filter_map(SessionStart::of).collect();
@@ -217,10 +213,6 @@ fn done_lines(id: &str, all: &[records::Record], c: &mut StudyCheck) {
             )),
         }
     }
-}
-
-fn study_prefix(id: &str) -> String {
-    format!("study {id}: ")
 }
 
 /// Each binary change between consecutive session starts, or between the `registered` binary
