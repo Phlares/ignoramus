@@ -31,6 +31,20 @@ Why:
 
 Cost: a deviation is free text, and the box cannot tell a harmless change from one that breaks the estimate. A plan that changes its code after the pilot must pin the pilot's code again or say why it does not.
 
+Case against:
+
+- E-REF-003 records and does not gate. One declared deviation ends the refusal. Its reason must only be a string that is not empty, and the box judges neither the reason nor the timing (Cost, and the Deviations bullet).
+- The record's evidence is a change of data: Recht and co-authors rebuilt test sets, and models lost accuracy. The instrument leaves data out. Every borrower's confirmation data is new (E-CNF-005), so every borrower changes the part that the cited case changed.
+- The borrowed sd and icc size a study and do not enter its test (0023), and the re-size replaces a wrong outside value from the study's own first batch (0020). In the first confirmatory study the lender had 5 clusters per stratum, and in one stratum the 95% interval of its icc ran from 0 to 0.66 (0030). A pin on the code does nothing for that.
+- A lender that ran at level 0 names no image, so no pin matches it, and each of its borrowers must declare a deviation. The box's own litmus always declares one, and `register` records that it differs in nothing (0027).
+- The box now holds a deviation table for a whole study (#70), and `pins.deviations` is a second way into it for one case. The code holds the five timings as two types. No key signs the table's other rows, which the box or a person writes (#112).
+
+(written 2026-11-15)
+
+What failure this prevents: a confirmatory study sized from an sd and an icc that other code measured, with no record that the code changed. Expected, not observed: before this record nothing compared the two (#28). (written 2026-11-15)
+
+Constants: none. The record fixes what is compared and what `register` records. It sets no number. (written 2026-11-15)
+
 Sources:
 
 - Allen and Mehler (2019), "Open science challenges, benefits and tips in early career and beyond", PLOS Biology 17(5), https://journals.plos.org/plosbiology/article?id=10.1371/journal.pbio.3000246
