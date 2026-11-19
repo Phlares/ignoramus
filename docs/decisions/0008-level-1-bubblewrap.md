@@ -44,6 +44,30 @@ Limits:
 
 Why: bubblewrap gives a working level 1 now, from a small and audited program, without root. The self-test checks on every row that the sandbox still holds on this host, so a broken sandbox costs a paused run, not an unisolated row. Every image byte passes through one parser and one budget, so a crafted image cannot write outside its tree or exhaust the disk or the memory.
 
+Case against:
+
+- The record names bubblewrap the first launcher, to be weighed against one of our own (#2). The record itself names two gaps that a launcher of our own would close: Landlock (Limits) and a self-test in the payload's own sandbox (Self-test).
+- The box stays a child subreaper for life, so every orphan of its descendants stays a zombie until it exits, in a library embedder too (Subreaper). Issue #2 names a second route to a killed row's CPU, a cgroup's `cpu.stat`.
+- Levels 1 and 2 give one row two behaviours, against #23's one output hash at every level (0010, Case against).
+- No record names the adversary that level 1 holds off (#94). The seccomp filter denies four native calls and allows every other native call, since "v0 payloads are our own" (Seccomp filter). The payload writes its own outcome values at every level, so a payload that wants another verdict needs no escape (#94).
+
+(written 2026-11-19)
+
+What failure this prevents: a row whose payload reaches the network, writes outside `/out`, or leaves a process running past its row; and a crafted image that writes outside its tree or fills the disk or the memory. Level 0 isolates neither the network nor the file system, and a payload that detaches from its group is out of reach there (0006). Expected, not observed in a study. (written 2026-11-19)
+
+Constants:
+
+- bubblewrap 0.8 or later (`FLOOR`). Basis: 0.8 added `--disable-userns` (Launcher). Rule for change: none stated.
+- Linux 5.11 or later. Basis: 5.11 added `CLOSE_RANGE_CLOEXEC` (Descriptors). Rule for change: none stated.
+- self-test connect limit = 1 s (`CONNECT_TIMEOUT`). Basis: none on file. Rule for change: none stated.
+- extraction budget = 32 GiB per extraction (`WRITE_CAP`), with 4 KiB for each entry written (`ENTRY`). Basis: one count bounds the data, the decoding work and the entry count (Budget); the per-entry charge estimates an entry's inode and metadata (code comment, `rootfs.rs`); for 32 GiB and 4 KiB, none on file. Rule for change: none stated.
+- layer limit = 256 per manifest (`MAX_LAYERS`). Basis: each layer costs two passes over its data (code comment, `rootfs.rs`); for 256, none on file. Rule for change: none stated.
+- path memory = 256 MiB per extraction (`RECORD_CAP`). Basis: none on file. Rule for change: none stated.
+- header fence = 1 MiB past an entry's stored data (`EXTENSION`). Basis: it bounds the memory that long names, long link names and PAX records hold (Header fence); for 1 MiB, none on file. Rule for change: none stated.
+- reap limit = 5 s (`REAP_LIMIT`). Basis: a payload stuck in uninterruptible sleep must not hold the box (Reap limit); for 5 s, none on file. Rule for change: none stated.
+
+(written 2026-11-19)
+
 Sources:
 
 - https://github.com/containers/bubblewrap and its manual page, https://github.com/containers/bubblewrap/blob/main/bwrap.xml
