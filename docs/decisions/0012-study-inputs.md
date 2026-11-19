@@ -22,3 +22,24 @@ Why:
 - The code that measures is part of the plan, so the whole folder is pinned, not one entry file.
 
 Cost: a declared unit count can be wrong. Rows past the end of a file then fail as payload results, so the payload must refuse a unit index the file does not hold.
+
+Case against:
+
+- The box takes the unit count from the author and trusts the payload to refuse an index past the end (Cost). #11 proposed that the checker count units from the file.
+- #20 offered a second way to pin the code that measures: the payload writes raw numbers and the box computes the outcomes. The record pins the whole payload folder instead, so the payload still writes its own outcome values (0008, Case against).
+- One input file is one cluster, and a spec cannot name a source that clusters share. When clusters share one, the level breaks: in #111's simulation, 16 groups that share half the variance pass 13.7% of null runs at level 0.005. #111 proposes a group above the cluster.
+- The root identity hashes the box key's secret bytes and the root's canonical path. A new key or a moved study root gives another identity, and `run` then refuses any study with an input absent at registration (Study root).
+- An input absent at registration is fixed only at the first `prepare`, after the plan is in the plan log (Frozen at the first run). So its bytes can be chosen after the plan, and only an outside stamp taken after that `prepare` dates them on a clock other than the box's (0033).
+
+(written 2026-11-19)
+
+What failure this prevents: a study that pools rows from two versions of one input; two inputs that hold the same data counted as two clusters; a change to a payload file other than its entry file that no pin catches; and a signed record that publishes a home path. #20 observed the payload case in a repro. The rest is expected, not observed in a study. (written 2026-11-19)
+
+Constants:
+
+- most rows in a plan = 100,000 (`ROW_CAP`). Basis: `check` builds the whole schedule to count its rows, so a mistyped unit count must stop there before it fills the memory (E-UNT-002); for 100,000, none on file. Rule for change: none stated.
+- units per input = 1 up to 4,294,967,295. Basis: a value outside the range is meaningless (E-RNG-001). Rule for change: none stated.
+
+(written 2026-11-19)
+
+Sources: none. The record rests on 0002 and 0009 and cites no outside work. (written 2026-11-19)

@@ -66,3 +66,37 @@ Not in this release:
 - Deposits to the real archive.
 
 Why: the bundle is a pure function of the study, so a reader can rebuild and compare it. The deposit is a thin adapter that cannot reach the real archive or publish by mistake.
+
+Case against:
+
+- No verb calls `bundle` or `deposit`, and the `ignorarium` crate depends on neither (#89; `crates/ignorarium/Cargo.toml`). Their checks, the SPDX header check and the licence rules included, run for no study.
+- The token split is a type in our code, and the sandbox did not enforce it (Deposit). The second token adds a secret to guard and no server check. One token behind the two types gives the same guard.
+- The sandbox does not behave as the documents say. It reserves a 10.5281 DOI and publishes under the 10.5072 test prefix (#24). The Zenodo documents say a `deposit:write` token cannot publish (Sources); the sandbox let one publish (#24). A pass on the sandbox says little about the real archive, which this release never reaches (Not in this release).
+- The bundle's study folder is not the folder a re-run reads. The bundle allows `README.md`, `citation.toml`, `spec.toml` and six folders (Study folder). A re-run reads `spec.json`, `spec.hash`, `salt`, `schedule.json`, `in/` and `payload/` as well (`card/recipe.rs`), and the bundle refuses each of these names.
+- The Process Run Crate profile gives each run action a random version 4 UUID (Sources). The bundle derives version 8 UUIDs instead (RO-Crate), so it departs from the profile it claims.
+
+(written 2026-11-19)
+
+What failure this prevents: a bundle that differs between two builds of one study, so a reader cannot rebuild and compare it; a deposit that reaches the real archive or publishes by mistake; a study file swapped for a link between the walk and the copy; and a token that shows in the process list. Expected, not observed in a study. (written 2026-11-19)
+
+Constants:
+
+- SPDX header check = the first 64 KiB and the first 10 lines of a `src/` file (`HEADER_BYTES`, `HEADER_LINES`). Basis: none on file. Rule for change: none stated.
+- zip file size = under 4 GiB (`LIMIT`); zip file count = at most 65,534 (`MAX_FILES`). Basis: the zip has no Zip64, and a count of 0xFFFF tells a reader to look for a Zip64 record (Manifest and zip). Rule for change: none stated.
+- curl stall limits = slower than 1 KiB/s for 2 minutes, or no connection in 30 s (`LIMITS`). Basis: a long upload that keeps moving is never cut (Deposit); for the values, none on file. Rule for change: none stated.
+
+(written 2026-11-19)
+
+Sources:
+
+- https://curl.se/docs/manpage.html
+- https://citation-file-format.github.io/
+- https://schema.datacite.org/meta/kernel-4/
+- https://www.researchobject.org/ro-crate/specification/1.3/
+- https://www.researchobject.org/workflow-run-crate/profiles/process_run_crate/
+- https://www.rfc-editor.org/rfc/rfc9562
+- https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT
+- https://reuse.software/spec-3.3/
+- https://developers.zenodo.org/
+
+(written 2026-11-19)

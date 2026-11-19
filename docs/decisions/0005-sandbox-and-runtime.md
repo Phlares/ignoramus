@@ -28,3 +28,29 @@ Input view (amended):
 - Before, a row saw the study's `data/` folder. A file the plan did not declare, such as a model kept beside the data, was then either visible without a pin or not visible at all.
 
 Why: each part has one job, and the unsafe system calls stay in one module behind safe functions.
+
+Case against:
+
+- Level 0 has no isolation, and no rule keeps a confirmatory study off it: `scope.min_isolation` takes 0 to 3 in every mode (`rules/v0.toml`). At level 0 the payload can read the box home (#94).
+- bubblewrap is a host program found on `PATH`. Each row record names its version, but no study pins it (0008, Launcher). A launcher of our own is the alternative (0008, Case against).
+- A built environment needs a file named `env/uv.lock` (`environ.rs`). The box only hashes it. A payload in another language carries a lockfile that pins nothing, or pins a saved image instead (0008, Environment).
+- A view entry is a hard link to the stored blob, not a copy. At level 0 the payload runs as the user who owns the store (Input view). So it can make a link writable and change the one blob that every study shares; a copy per study would confine the change. The next `prepare` then refuses every study that holds the blob (0006).
+
+(written 2026-11-19)
+
+What failure this prevents: an unsafe system call made from many places, where one misuse breaks memory safety; and a row that reads a file the plan did not declare, so a result rests on bytes no pin names. The second was the design before #31 (Input view). Both are expected, not observed in a study. (written 2026-11-19)
+
+Constants:
+
+- bubblewrap 0.8 or later. Basis: set in 0008. Rule for change: as in 0008.
+
+(written 2026-11-19)
+
+Sources:
+
+- https://docs.rs/rustix
+- https://docs.rs/libc
+- https://github.com/containers/bubblewrap
+- https://docs.astral.sh/uv/
+
+(written 2026-11-19)
