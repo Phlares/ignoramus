@@ -54,6 +54,12 @@ Limits:
 
 Case against: a scope ties the run's life to the systemd user manager, which a run from a plain shell does not depend on.
 
+Why: the readings are raw data for later study (the opening paragraph). They give host memory and the rows a host can run at once (What `memory.peak` measures) and the host's share of a row's time (CPU ticks). Observation only keeps the readings out of every result, so a reading that cannot be had changes no row. (written 2026-11-19)
+
+What failure this prevents: a study that cannot tell how much of a row's time the host took, through `steal`, or how much memory the row held; and CPU that the kernel reaps at a kill with no count of it (0008, Limits). Expected, not observed in a study. (written 2026-11-19)
+
+Constants: none. The record fixes what each row records and that nothing reads it, not a value. (written 2026-11-19)
+
 Sources:
 
 - https://docs.kernel.org/admin-guide/cgroup-v2.html (`memory.peak`, `memory.events`, `cpu.stat`, moving a process through `cgroup.procs`, the no-internal-process rule, delegation)

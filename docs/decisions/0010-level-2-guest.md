@@ -53,6 +53,30 @@ Why:
 - The guest connects once and the host then closes the door, so the payload cannot open a second channel. The payload also runs without privileges, so it cannot reach the agent's channel or disks through `/proc`.
 - A fresh boot per row gives each row a clean state. Snapshots and forks are later work.
 
+Case against:
+
+- Snapshots and forks stay later work (Why). In one study of 5,319 level 2 rows, machine start, load and teardown took 26% of row wall time (#97).
+- The record rejects a container because it shares the host kernel (Why). No record names an attacker of that kernel, and a payload needs no escape to change its verdict (0008, Case against). Level 1 already gives the payload its own network and PID namespaces and a read-only root (0008).
+- The machine changes what a payload can do, so the level becomes part of the result. That works against #23's one output hash at every level and the record's own aim that level 1 match the guest's view (The payload's view). The levels differ in five ways:
+  - `/tmp` exists only at level 2, and outputs are capped only there (0015, Limits).
+  - `/dev` has no `shm` (Limits).
+  - Shared writable memory can bring the guest's out-of-memory killer onto a payload that levels 0 and 1 run to the end (0019, Limits).
+  - A payload that uses OpenBLAS sees the host's CPUs at levels 0 and 1 (0019, What counts).
+  - A thread's stack size comes from the agent's 8 MiB default at level 2 and from the box's shell below it (0019, What counts).
+
+(written 2026-11-19)
+
+What failure this prevents: a payload that escapes its row through a bug in the host kernel, which a level 1 sandbox shares (0008, Limits); a guest that crafts the bytes of its output disk to make the host write outside the output folder; and a row that sees what an earlier row left. Expected, not observed in a study. (written 2026-11-19)
+
+Constants:
+
+- `/out` cap = half the output disk in bytes, and that half over the most one pack entry costs in entries (`out_caps`). Basis: a full `/out` then always fits the pack (The payload's view). Rule for change: none stated.
+- `/tmp` cap = the output disk size. Basis: none on file. Rule for change: none stated.
+- pack entry charge = 4 KiB (`ENTRY_COST`). Basis: one charge per entry lets the size limit bound the entry count too (Outputs); an entry costs the host an inode and a directory block (code comment, `pack.rs`); for 4 KiB, none on file. Rule for change: none stated.
+- frame limit = 1 MiB (`MAX_FRAME`). Basis: none on file. Rule for change: none stated.
+
+(written 2026-11-19)
+
 Sources:
 
 - https://github.com/cloud-hypervisor/cloud-hypervisor/blob/main/docs/vsock.md

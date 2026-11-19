@@ -66,6 +66,29 @@ Why:
 - The box records only checks that ran: the guest calls `io_uring_setup` itself instead of the box assuming the call is blocked.
 - Choosing the level at prepare time keeps it a function of the study and the machine, fixed before any row and named in an event. Building the rootfs disk there finds an image that cannot become a disk once, not on every row.
 
+Case against:
+
+- The agent the rows boot is whatever file `IGNORARIUM_VM_AGENT` names. The probe checks only that it is static, and its hash goes into the records, but no pin holds it (Probe, Launcher). Issue #22 planned the kernel, the initramfs and the rootfs disk in the content store under their SHA-256 (Limits).
+- An image with a file of mode 0000 runs at level 1 or is refused (Limits). A comment on #32, two hours before this record's PR opened, describes a disk written from the layer stream that takes each file's mode from its tar entry.
+- The CPU rule charges a row the guest's CPU and adds the VMM's. The VMM's host CPU already holds the vCPU threads that ran the guest, so the guest's work counts twice. One study of 5,319 level 2 rows used 16.4 hours of guest CPU and 18.1 hours of VMM CPU, and was charged 34.5 hours (#83).
+- The level is chosen at prepare time from what the host and the study allow, and no rule asks a confirmatory study for a level. One plan can run at level 2 on one host and at level 1 on another; only `min_isolation` refuses that. The record rejects only a fallback after a failure (No environment, no level 2).
+- Level 2 fills level 1's record keys with other meanings. `connect_blocked` means loopback only and no route, `vsock` changed from `denied` to `blocked` (#116), and the row cgroup holds the whole machine, so the card and `status --telemetry` print level 2 rows apart (0026). Level 2 keys of its own would keep one meaning per key.
+
+(written 2026-11-19)
+
+What failure this prevents: a level 2 row that no budget, stop, resume or signed row record covers; before this record only the guest crate's tests and examples started a machine (#21, #22). It also prevents three faults: a machine that outlives a box that died mid-row; a host path in a signed record; and an output link that hashes as its path and kind alone, so links to two targets match. #23 found the last fault in the code at levels 0 and 1. The rest is expected, not observed in a study. (written 2026-11-19)
+
+Constants:
+
+- vCPUs per machine = 1 (`cpus`). Basis: none on file. Rule for change: none stated.
+- output disk = 256 MiB (`out_mib`). Basis: none on file. Rule for change: none stated.
+- machine memory for a row with no cap = 1024 MiB (`mem_mib`). Basis: the size level 2 ran before 0019, kept so that a plan without the field runs as before (0019, Absent). Rule for change: none stated.
+- boot limit = 30 s from the VMM start to the guest's first message (`boot_timeout`); exit limit = 10 s for the VMM to exit after the report (`exit_timeout`). Basis: none on file. Rule for change: none stated.
+- report slack = 30 s (`REPORT_SLACK`), added to the host's deadline (Wall time). Basis: none on file. Rule for change: none stated.
+- `/out` at half the output disk and `/tmp` at all of it. Basis: set in 0010. Rule for change: as in 0010.
+
+(written 2026-11-19)
+
 Sources:
 
 - https://github.com/cloud-hypervisor/cloud-hypervisor/blob/main/docs/vsock.md

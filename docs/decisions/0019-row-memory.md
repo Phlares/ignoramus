@@ -47,6 +47,8 @@ What counts:
 - OpenBLAS starts one thread per visible CPU, about 40 MiB of data each (its buffer and the thread's stack), unless `OPENBLAS_NUM_THREADS=1`. At levels 0 and 1 a payload sees the host's CPUs, and a 1-vCPU level 2 machine shows one. Measured on a 6-CPU host: `import numpy` needs about 48 MiB with one thread and about 248 MiB with six. A payload that uses OpenBLAS sets the thread count, or one cap passes at level 2 and fails at level 1.
 - glibc sizes each new thread's stack from the inherited `RLIMIT_STACK`. At levels 0 and 1 that is the limit the box was started with, from its shell. At level 2 it is the kernel's default for the agent, 8 MiB. A box started under another stack limit gives a threaded payload another need at levels 0 and 1.
 
+Why: one cap at every level gives a row that keeps its data in private memory one result at every level (the opening paragraph). What counts names two exceptions, OpenBLAS threads and the thread stack. The echo and the boot check turn a cap that did not apply, and a size model that falls short, into named faults (The echo, The boot check). Shared memory and several large processes can still meet the guest's out-of-memory killer (Limits). (written 2026-11-19)
+
 Why `RLIMIT_DATA`, not `RLIMIT_AS`: `RLIMIT_AS` counts all address space, a read-only model map, glibc's 64 MiB reservation per malloc arena and stack guard space included. Under it the same row would need another cap after a library update.
 
 Limits:
@@ -58,6 +60,19 @@ Limits:
 - `MemTotal` is a static bound, checked once at prepare. Memory that other processes hold when a row starts is not checked: a machine that cannot start is an infrastructure fault, retried.
 
 Case against: memory a payload reserves writable and never touches counts against it.
+
+What failure this prevents: a row that keeps its data in private memory and gets one result at one level and another at the next; before this record levels 0 and 1 set no cap and level 2 always ran a 1024 MiB machine (Absent). Also a level 2 machine too small for its row, which would end in an out-of-memory kill. Expected, not observed in a study. (written 2026-11-19)
+
+Constants:
+
+- `design.row_memory_mib` from 1 to 1,048,576 MiB (E-RNG-001). Basis: the one reason E-RNG-001 gives for all its ranges (E-RNG-001, Why); for these two ends, none on file. Rule for change: none stated.
+- guest share = 320 MiB (`GUEST_MIB`). Basis: what it holds (The level 2 machine), with 25 to 60 MiB to spare above the floor (Measured). Rule for change: none stated.
+- growth factor = 32/31. Basis: about 1/32 of the machine grows with it, as measured (The level 2 machine). Rule for change: none stated.
+- boot floor = 128 MiB (`FLOOR`). Basis: room for the payload's page tables and processes and the page cache (code comment, `agent/steps.rs`); for 128 MiB, none on file. Rule for change: none stated.
+- machine memory for a row with no cap = 1024 MiB. Basis: set in 0015. Rule for change: as in 0015.
+- `/out` at half the output disk and `/tmp` at all of it. Basis: set in 0010. Rule for change: as in 0010.
+
+(written 2026-11-19)
 
 Sources:
 

@@ -41,6 +41,17 @@ Limits:
 
 Cost: the copies cost one row per condition, unless the plan carries a check.
 
+Case against:
+
+- Issue #29 proposed the sample in a smoke or pilot study. The record runs the copies in every study that declares the field. There a mismatch stops a confirmatory study for good (Stop or flag), even for a log line with a time that no verdict reads (Limits).
+- The comparison leaves out a pair that ran at two levels (The comparison), yet the carry ignores the level (The carry). The two levels can give one payload two results (0010, Case against).
+
+(written 2026-11-19)
+
+What failure this prevents: a confirmatory verdict that rests on outputs the payload does not give again for the same job, with nothing that tests the claim. Before this record the claim was assumed, not checked (#29). Expected, not observed in a study. (written 2026-11-19)
+
+Constants: none. The record fixes which rows are copied and when two rows count as the same, not a value. (written 2026-11-19)
+
 Sources:
 
 - https://reproducible-builds.org/docs/definition/
