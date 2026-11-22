@@ -318,6 +318,22 @@ impl HomeRecords {
         HomeRecords::new(home.clone(), Ok(Some(key.verifying_key())))
     }
 
+    /// Refuses when a study of the box states a record format this box does not read (0036),
+    /// and names the study. A plan is checked against every study of the box, so one that
+    /// cannot be read stops the check even when no rule asks about it. Any other fault of a
+    /// log stays with the rule that needs the log.
+    fn newer_format(&self) -> Result<(), String> {
+        for (id, log) in records::logs(&self.home).map_err(|e| e.to_string())? {
+            let Ok(Some(key)) = self.key_for(&log) else {
+                continue;
+            };
+            if let Err(e @ records::VerifyError::Format { .. }) = records::first(&log, key) {
+                return Err(format!("study {id}: {e}"));
+            }
+        }
+        Ok(())
+    }
+
     /// `read_registers`, read the first time it is asked for.
     fn registers(&self) -> Result<&[(String, Register)], String> {
         let read = self.registers.get_or_init(|| self.read_registers());
@@ -382,6 +398,8 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
     let key = keys::load(home)
         .map(|k| k.map(|k| k.verifying_key()))
         .map_err(|e| e.to_string());
+    let records = HomeRecords::new(home.clone(), key);
+    records.newer_format().map_err(CliError::usage)?;
     // Not opened: a check writes nothing, and `meta` reads a missing folder as empty.
     let store = Store {
         root: home.root.join("store"),
@@ -393,7 +411,7 @@ pub fn assess(ctx: &Ctx, spec_path: &Path) -> Result<Assessed, CliError> {
         prior,
         machine_max_level: machine.max_level,
         spec_text: raw.text,
-        records: Box::new(ReadOnce::new(HomeRecords::new(home.clone(), key))),
+        records: Box::new(ReadOnce::new(records)),
         store,
         spec_hash: spec::hash_bytes(&raw.hash)
             .ok_or_else(|| CliError::usage(format!("{shown}: the spec hash is malformed")))?,

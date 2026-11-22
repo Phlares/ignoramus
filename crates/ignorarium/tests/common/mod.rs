@@ -256,6 +256,29 @@ pub fn edited(lab: &Lab, id: &str, edit: impl Fn(String) -> String, payload: &st
     )
 }
 
+/// Replace the log of `id` by its register record alone, with `format` set or, for `None`,
+/// left out. Returns the bytes of the new log.
+pub fn reformat(lab: &Lab, id: &str, format: Option<u64>) -> Vec<u8> {
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let dir = lab.home.study_dir(id);
+    let log = dir.join("records.jsonl");
+    let mut body = kind_of(lab, id, "register")[0].body.clone();
+    let fields = body.as_object_mut().unwrap();
+    match format {
+        Some(n) => fields.insert("format".into(), n.into()),
+        None => fields.remove("format"),
+    };
+    std::fs::rename(&log, dir.join("records.old")).unwrap();
+    let draft = records::RecordDraft {
+        study: id.into(),
+        row: None,
+        kind: "register".into(),
+        body,
+    };
+    records::append(&log, &key, draft).unwrap();
+    std::fs::read(&log).unwrap()
+}
+
 /// Every verified record of the study, in order.
 pub fn records_of(lab: &Lab, id: &str) -> Vec<records::Record> {
     let key = keys::load(&lab.home).unwrap().unwrap();

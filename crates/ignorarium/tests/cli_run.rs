@@ -3,7 +3,7 @@
 mod common;
 use assert_cmd::Command;
 use common::{
-    Lab, bin, edited, fake_binary, kind_of, lab, no_level1, plain, register_study,
+    Lab, bin, edited, fake_binary, kind_of, lab, no_level1, plain, reformat, register_study,
     sign_session_start, status, text, with_payload,
 };
 use ignorarium::backend::level2::Level2;
@@ -2580,29 +2580,6 @@ fn a_new_study_registers_format_1() {
     assert!(text(&a).contains("record format: 1\n"), "{}", text(&a));
 }
 
-/// Replace the log of `id` by its register record alone, with `format` set or, for `None`,
-/// left out. Returns the bytes of the new log.
-fn reformat(lab: &Lab, id: &str, format: Option<u64>) -> Vec<u8> {
-    let key = keys::load(&lab.home).unwrap().unwrap();
-    let dir = lab.home.study_dir(id);
-    let log = dir.join("records.jsonl");
-    let mut body = kind_of(lab, id, "register")[0].body.clone();
-    let fields = body.as_object_mut().unwrap();
-    match format {
-        Some(n) => fields.insert("format".into(), n.into()),
-        None => fields.remove("format"),
-    };
-    std::fs::rename(&log, dir.join("records.old")).unwrap();
-    let draft = ignorarium::records::RecordDraft {
-        study: id.into(),
-        row: None,
-        kind: "register".into(),
-        body,
-    };
-    ignorarium::records::append(&log, &key, draft).unwrap();
-    std::fs::read(&log).unwrap()
-}
-
 #[test]
 fn verify_says_format_0_for_an_old_register() {
     let lab = lab();
@@ -2616,6 +2593,84 @@ fn verify_says_format_0_for_an_old_register() {
         text(&a).contains("record format: 0 (not recorded)\n"),
         "{}",
         text(&a)
+    );
+}
+
+/// Everything a finished command printed, on both streams.
+fn said(a: &assert_cmd::assert::Assert) -> String {
+    let out = a.get_output();
+    String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr)
+}
+
+#[test]
+fn a_study_verb_refuses_a_newer_format() {
+    let lab = lab();
+    plain(&lab, "newer");
+    let log = lab.home.study_dir("newer").join("records.jsonl");
+    let before = reformat(&lab, "newer", Some(2));
+    let verbs: [&[&str]; 8] = [
+        &["status", "newer"],
+        &["report", "newer"],
+        &["run", "newer"],
+        &["resume", "newer"],
+        &["stop", "newer", "--reason", "x"],
+        &["pause", "newer"],
+        &["verify", "--study", "newer"],
+        &["stamp", "newer", "--request"],
+    ];
+    for verb in verbs {
+        let a = bin(&lab).args(verb).assert();
+        let said = said(&a);
+        assert_ne!(a.get_output().status.code(), Some(0), "{verb:?}: {said}");
+        assert!(said.contains("format 2"), "{verb:?}: {said}");
+        assert_eq!(std::fs::read(&log).unwrap(), before, "{verb:?} wrote");
+    }
+}
+
+#[test]
+fn verify_by_public_key_refuses_a_newer_format() {
+    let lab = lab();
+    plain(&lab, "newer");
+    let log = lab.home.study_dir("newer").join("records.jsonl");
+    reformat(&lab, "newer", Some(2));
+    let public = lab.root.join("public.hex");
+    let exported = bin(&lab).args(["key", "export"]).assert().success();
+    std::fs::write(&public, text(&exported)).unwrap();
+    let a = bin(&lab)
+        .args(["verify", "--public-key"])
+        .arg(&public)
+        .arg("--records")
+        .arg(&log)
+        .assert();
+    assert_ne!(a.get_output().status.code(), Some(0));
+    assert!(said(&a).contains("format 2"), "{}", said(&a));
+}
+
+#[test]
+fn a_newer_study_in_the_home_stops_the_verbs_that_read_every_study() {
+    let lab = lab();
+    plain(&lab, "old");
+    plain(&lab, "other");
+    reformat(&lab, "old", Some(2));
+    let spec = common::work(&lab, "other").join("spec.toml");
+    for verb in ["check", "review"] {
+        let a = bin(&lab).arg(verb).arg(&spec).assert();
+        let said = said(&a);
+        assert_ne!(a.get_output().status.code(), Some(0), "{verb}: {said}");
+        assert!(
+            said.contains("old") && said.contains("format 2"),
+            "{verb}: {said}"
+        );
+    }
+    // `register` needs a terminal, so it is called as the tests of `common` call it.
+    let mut out = Vec::new();
+    let mut typed = std::io::Cursor::new(Vec::new());
+    let refused = ignorarium::cli::register::run(&spec, &lab.home, &mut typed, &mut out, true)
+        .expect_err("register refuses");
+    assert!(
+        refused.msg.contains("old") && refused.msg.contains("format 2"),
+        "{}",
+        refused.msg
     );
 }
 
