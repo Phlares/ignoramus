@@ -320,10 +320,10 @@ impl HomeRecords {
 
     /// Refuses when a study of the box states a record format this box does not read (0036),
     /// and names the study. A plan is checked against every study of the box, so one that
-    /// cannot be read stops the check even when no rule asks about it. Any other fault of a
-    /// log stays with the rule that needs the log.
+    /// cannot be read stops the check even when no rule asks about it. Any other fault, of a
+    /// log or of the folder that lists them, stays with the rule that needs the log.
     pub(crate) fn newer_format(&self) -> Result<(), String> {
-        for (id, log) in records::logs(&self.home).map_err(|e| e.to_string())? {
+        for (id, log) in records::logs(&self.home).unwrap_or_default() {
             let Ok(Some(key)) = self.key_for(&log) else {
                 continue;
             };

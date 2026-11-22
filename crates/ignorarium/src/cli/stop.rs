@@ -11,10 +11,11 @@ use std::time::Duration;
 /// How long `stop` waits for a live run to write the record.
 const STOP_WAIT: Duration = Duration::from_secs(30);
 
-/// A log that reads and holds `done` refuses before anything is written, and so does a log of
-/// a newer record format. Any other log that cannot be read still gets the request, so a torn
-/// log cannot keep a live run from seeing it. "The first
-/// stop's reason stands" is printed only when the log held a stop record before this call.
+/// A log that reads and holds `done` refuses before anything is written, and so does a log
+/// whose first record, checked with the box key, states a newer record format. Any other log
+/// that cannot be read still gets the request, so a torn log cannot keep a live run from
+/// seeing it. "The first stop's reason stands" is printed only when the log held a stop
+/// record before this call.
 pub fn run(ctx: &Ctx, id: &str, reason: &str) -> Run {
     let (home, log) = located(ctx, id)?;
     let fault = |e: &dyn std::fmt::Display| CliError::usage(format!("cannot stop {id}: {e}"));
@@ -23,7 +24,8 @@ pub fn run(ctx: &Ctx, id: &str, reason: &str) -> Run {
         refuse_if_done(id, all)?;
     }
     // A study of a newer record format is not this box's to stop: no request is sent (0036).
-    if let Ok((_, _, key)) = keyed(ctx, id)
+    if read.is_err()
+        && let Ok((_, _, key)) = keyed(ctx, id)
         && let Err(e @ records::VerifyError::Format { .. }) =
             records::first(&log, &key.verifying_key())
     {

@@ -1275,6 +1275,21 @@ fn a_broken_newer_log_reports_the_break() {
 }
 
 #[test]
+fn a_format_that_is_no_count_is_not_called_newer() {
+    assert_eq!(
+        VerifyError::Format {
+            found: "\"1\"".into()
+        }
+        .to_string(),
+        "the records state the format \"1\", which is no format number"
+    );
+    assert_eq!(
+        VerifyError::Format { found: "-1".into() }.to_string(),
+        "the records state the format -1, which is no format number"
+    );
+}
+
+#[test]
 fn the_format_error_names_both_numbers() {
     assert_eq!(
         VerifyError::Format { found: "2".into() }.to_string(),

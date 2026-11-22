@@ -2601,7 +2601,7 @@ fn a_study_verb_refuses_a_newer_format() {
     let lab = lab();
     plain(&lab, "newer");
     reformat(&lab, "newer", Some(2));
-    let before = files_under(&lab.home.study_dir("newer"));
+    let before = common::files_under(&lab.home.study_dir("newer"));
     let verbs: [&[&str]; 8] = [
         &["status", "newer"],
         &["report", "newer"],
@@ -2617,26 +2617,9 @@ fn a_study_verb_refuses_a_newer_format() {
         let said = err(&a);
         assert_ne!(a.get_output().status.code(), Some(0), "{verb:?}: {said}");
         assert!(said.contains("format 2"), "{verb:?}: {said}");
-        let after = files_under(&lab.home.study_dir("newer"));
+        let after = common::files_under(&lab.home.study_dir("newer"));
         assert_eq!(after, before, "{verb:?} wrote");
     }
-}
-
-/// Every file under `dir`, by path, with its bytes.
-fn files_under(dir: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
-    let mut found = std::collections::BTreeMap::new();
-    let mut open = vec![dir.to_path_buf()];
-    while let Some(d) = open.pop() {
-        for e in std::fs::read_dir(d).unwrap() {
-            let p = e.unwrap().path();
-            if p.is_dir() {
-                open.push(p);
-            } else {
-                found.insert(p.clone(), std::fs::read(&p).unwrap());
-            }
-        }
-    }
-    found
 }
 
 #[test]
@@ -2689,7 +2672,7 @@ fn a_newer_study_in_the_home_stops_the_verbs_that_read_every_study() {
         let said = err(&a);
         assert_ne!(a.get_output().status.code(), Some(0), "{verb}: {said}");
         assert!(
-            said.contains("old") && said.contains("format 2"),
+            said.contains("study old: ") && said.contains("format 2"),
             "{verb}: {said}"
         );
     }
@@ -2699,7 +2682,7 @@ fn a_newer_study_in_the_home_stops_the_verbs_that_read_every_study() {
     let refused = ignorarium::cli::register::run(&spec, &lab.home, &mut typed, &mut out, true)
         .expect_err("register refuses");
     assert!(
-        refused.msg.contains("old") && refused.msg.contains("format 2"),
+        refused.msg.contains("study old: ") && refused.msg.contains("format 2"),
         "{}",
         refused.msg
     );

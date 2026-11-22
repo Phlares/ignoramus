@@ -121,10 +121,14 @@ impl std::fmt::Display for VerifyError {
             VerifyError::BadSig { seq } => write!(f, "record {seq}: signature does not match"),
             VerifyError::BrokenChain { seq } => write!(f, "record {seq}: chain is broken"),
             VerifyError::Io(e) => write!(f, "I/O failed: {e}"),
-            VerifyError::Format { found } => write!(
+            VerifyError::Format { found } if found.parse::<u64>().is_ok() => write!(
                 f,
                 "the records are format {found}; this box reads format {FORMAT} and older; \
                  use a newer box"
+            ),
+            VerifyError::Format { found } => write!(
+                f,
+                "the records state the format {found}, which is no format number"
             ),
             VerifyError::In { study, cause } => write!(f, "study {study}: {cause}"),
         }
