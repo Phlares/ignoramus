@@ -172,10 +172,6 @@ fn records_in(dir: &Path) -> BTreeMap<String, String> {
     records
 }
 
-fn records() -> BTreeMap<String, String> {
-    records_in(Path::new("../../docs/decisions"))
-}
-
 fn template() -> String {
     let guide = std::fs::read_to_string("../../CONTRIBUTING.md").unwrap();
     let (_, section) = guide
@@ -308,7 +304,7 @@ fn problems_name_the_record_and_the_fault() {
 
 #[test]
 fn every_record_holds_its_parts() {
-    let faults: Vec<String> = records()
+    let faults: Vec<String> = records_in(Path::new("../../docs/decisions"))
         .iter()
         .flat_map(|(number, text)| problems(number, text))
         .collect();
