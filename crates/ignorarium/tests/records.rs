@@ -1174,3 +1174,112 @@ fn seals_hold_the_stored_hash_of_a_row_that_shares_data_hashes() {
         "a later row drops shared data_hashes, so its recomputed hash differs"
     );
 }
+
+/// A log of one `register` record with `body`.
+fn register_log(dir: &Path, k: &SigningKey, kind: &str, body: Value) -> std::path::PathBuf {
+    let p = dir.join("log.jsonl");
+    let d = RecordDraft {
+        study: "s1".into(),
+        row: None,
+        kind: kind.into(),
+        body,
+    };
+    records::append(&p, k, d).unwrap();
+    p
+}
+
+/// The format a read of `p` refuses, as the error names it.
+fn refused_format(read: Result<(), VerifyError>) -> Option<String> {
+    match read {
+        Err(VerifyError::Format { found }) => Some(found),
+        _ => None,
+    }
+}
+
+#[test]
+fn a_log_of_a_newer_format_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let k = key(1);
+    let v = k.verifying_key();
+    let p = register_log(dir.path(), &k, "register", json!({ "format": 2 }));
+    let two = Some("2".to_string());
+    assert_eq!(refused_format(records::read_all(&p, &v).map(|_| ())), two);
+    assert_eq!(refused_format(records::read_log(&p, &v).map(|_| ())), two);
+    assert_eq!(refused_format(records::first(&p, &v).map(|_| ())), two);
+    assert_eq!(refused_format(records::seals(&p, &v).map(|_| ())), two);
+    assert_eq!(refused_format(records::verify(&p, &v).map(|_| ())), two);
+}
+
+#[test]
+fn a_log_without_a_format_is_format_0() {
+    let dir = tempfile::tempdir().unwrap();
+    let k = key(1);
+    let p = register_log(dir.path(), &k, "register", json!({}));
+    let all = records::read_all(&p, &k.verifying_key()).unwrap();
+    assert_eq!(records::format_of(&all[0]).unwrap(), 0);
+}
+
+#[test]
+fn a_log_of_this_format_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let k = key(1);
+    let body = json!({ "format": records::FORMAT });
+    let p = register_log(dir.path(), &k, "register", body);
+    let all = records::read_all(&p, &k.verifying_key()).unwrap();
+    assert_eq!(records::format_of(&all[0]).unwrap(), records::FORMAT);
+    assert_eq!(records::FORMAT, 1);
+}
+
+#[test]
+fn a_format_that_is_no_count_is_refused() {
+    let k = key(1);
+    for (bad, text) in [
+        (json!("1"), "\"1\""),
+        (json!(1.5), "1.5"),
+        (json!(-1), "-1"),
+        (json!(4294967296u64), "4294967296"),
+        (json!(null), "null"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let p = register_log(dir.path(), &k, "register", json!({ "format": bad }));
+        let read = records::read_all(&p, &k.verifying_key()).map(|_| ());
+        assert_eq!(refused_format(read), Some(text.to_string()));
+    }
+}
+
+#[test]
+fn only_a_register_record_sets_the_format() {
+    let dir = tempfile::tempdir().unwrap();
+    let k = key(1);
+    let p = register_log(dir.path(), &k, "note", json!({ "format": 9 }));
+    let all = records::read_all(&p, &k.verifying_key()).unwrap();
+    assert_eq!(records::format_of(&all[0]).unwrap(), 0);
+}
+
+#[test]
+fn only_the_first_record_sets_the_format() {
+    let dir = tempfile::tempdir().unwrap();
+    let k = key(1);
+    let p = register_log(dir.path(), &k, "register", json!({}));
+    register_log(dir.path(), &k, "register", json!({ "format": 9 }));
+    assert_eq!(records::read_all(&p, &k.verifying_key()).unwrap().len(), 2);
+}
+
+#[test]
+fn a_broken_newer_log_reports_the_break() {
+    let dir = tempfile::tempdir().unwrap();
+    let k = key(1);
+    let p = register_log(dir.path(), &k, "register", json!({ "format": 2 }));
+    assert!(matches!(
+        records::read_all(&p, &key(2).verifying_key()),
+        Err(VerifyError::BadSig { seq: 0 })
+    ));
+}
+
+#[test]
+fn the_format_error_names_both_numbers() {
+    let said = VerifyError::Format { found: "2".into() }.to_string();
+    assert!(said.contains("format 2"), "{said}");
+    assert!(said.contains("format 1 and older"), "{said}");
+    assert!(said.contains("newer box"), "{said}");
+}

@@ -13,6 +13,10 @@ use std::path::Path;
 const LF: u8 = b'\n';
 const GENESIS_PREV: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
+/// The record format this box writes, and the newest it reads (0036). A log states its format
+/// in its `register` record; a log without one is format 0.
+pub const FORMAT: u32 = 1;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Record {
@@ -98,6 +102,10 @@ pub enum VerifyError {
         seq: u64,
     },
     Io(io::Error),
+    /// The log states a format this box does not read. `found` is the stated value as JSON.
+    Format {
+        found: String,
+    },
     /// The failure is in the log of this study.
     In {
         study: String,
@@ -113,6 +121,10 @@ impl std::fmt::Display for VerifyError {
             VerifyError::BadSig { seq } => write!(f, "record {seq}: signature does not match"),
             VerifyError::BrokenChain { seq } => write!(f, "record {seq}: chain is broken"),
             VerifyError::Io(e) => write!(f, "I/O failed: {e}"),
+            VerifyError::Format { found } => write!(
+                f,
+                "the records are format {found}; this box reads format {FORMAT} and older;                  use a newer box"
+            ),
             VerifyError::In { study, cause } => write!(f, "study {study}: {cause}"),
         }
     }
@@ -351,10 +363,30 @@ fn checked(
         if seq != n || s.record.prev != prev {
             return Err(VerifyError::BrokenChain { seq });
         }
+        if n == 0 {
+            format_of(&s.record)?;
+        }
         prev = s.hash.clone();
         each(s);
     }
     Ok(prev)
+}
+
+/// The format of the log that `first` opens: what its `register` record states, and 0 when
+/// it states none or `first` is another kind of record. The value is read from the raw body,
+/// so a format whose `register` record this box cannot parse is still named. Refuses a format
+/// above `FORMAT` and a value that is no count.
+pub fn format_of(first: &Record) -> Result<u32, VerifyError> {
+    let stated = match first.body.get("format") {
+        Some(v) if first.kind == "register" => v,
+        _ => return Ok(0),
+    };
+    (stated.as_u64())
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|n| *n <= FORMAT)
+        .ok_or_else(|| VerifyError::Format {
+            found: stated.to_string(),
+        })
 }
 
 /// Hex SHA-256 of the record's canonical bytes: the `hash` that `append` stores.
