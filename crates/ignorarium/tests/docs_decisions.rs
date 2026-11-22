@@ -160,16 +160,10 @@ fn problems(number: &str, text: &str, debt: &[&str]) -> Vec<String> {
 const DEBT: &[(&str, &[&str])] = &[
     ("Decision", &["0001"]),
     ("Why", &["0001", "0028", "0029"]),
-    ("Case against", &[
-        "0001", "0002", "0003", "0004", "0005", "0006", "0007", "0011", "0012", "0028", "0029",
-    ]),
-    ("What failure this prevents", &[
-        "0001", "0002", "0003", "0004", "0005", "0006", "0007", "0011", "0012", "0028", "0029",
-    ]),
-    ("Constants", &[
-        "0001", "0002", "0003", "0004", "0005", "0006", "0007", "0011", "0012", "0028", "0029",
-    ]),
-    ("Sources", &["0001", "0003", "0005", "0011", "0012"]),
+    ("Case against", &["0001", "0002", "0003", "0028", "0029"]),
+    ("What failure this prevents", &["0001", "0002", "0003", "0028", "0029"]),
+    ("Constants", &["0001", "0002", "0003", "0028", "0029"]),
+    ("Sources", &["0001", "0003"]),
 ];
 
 fn debt(number: &str) -> Vec<&'static str> {
@@ -376,7 +370,7 @@ fn debt_names_only_records_and_parts_that_exist() {
         }
     }
     let entries: usize = DEBT.iter().map(|(_, numbers)| numbers.len()).sum();
-    assert_eq!(entries, 42);
+    assert_eq!(entries, 21);
 }
 
 #[test]

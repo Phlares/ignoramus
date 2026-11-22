@@ -33,4 +33,25 @@ Decision:
 
 Why: a failure that spends money is worse than a run that stops early. Records, not memory, hold the state, so a crash costs at most one row of work.
 
+Case against:
+
+- A run that reaches its cap cannot go on: `resume` meets the same cap, and no command raises it. So an author sets a cap that never binds: the first confirmatory study set a CPU cap of 2,640 CPU hours and used 1.3% of it (#93).
+- At level 2 the CPU charge counts the guest's work twice (0015, Case against). A level 2 CPU cap then trips at about half the CPU it names (#83).
+- `check` admits a budget on the row estimate, and the charge can sit above it: in a capped rehearsal the charge ran 1.5 times that estimate (#83). The run takes the larger of the estimate and the mean charge so far (`runner.rs`), so the first row runs on the estimate alone. The safety margin of 1.0 adds no room for the gap (Constants). #83 proposes an estimate from the charge a probe row measured.
+- The CPU bound charges a row the box ended for every CPU the backend allows (CPU bound). #26 named a per-row cgroup count as its replacement. Each level 1 row's cgroup now records that CPU time, but only as an observation (0008, Limits).
+
+(written 2026-11-19)
+
+What failure this prevents: a run that spends past its declared budget; a row the box ended that is charged less CPU than it used; a crash that loses a row's spend or counts it twice; and a row record that names a payload or an input that changed before the row started. #26 observed the undercount in a repro: a killed row was charged a few CPU seconds. The rest is expected, not observed in a study. (written 2026-11-19)
+
+Constants:
+
+- infrastructure retries per row = 3 (`MAX_RETRIES`). Basis: none on file. Rule for change: none stated.
+- alert fractions = 50%, 80% and 95% of each dimension (`ALERT_FRACTIONS`). Basis: none on file. Rule for change: none stated.
+- safety margin = 1.0 (`SAFETY_MARGIN`): a row does not start when (spent + the next row's estimate) × the margin reaches a cap. Basis: none on file. Rule for change: none stated.
+- heartbeat = every 15 s (`HEARTBEAT`). Basis: none on file. Rule for change: none stated.
+- row wall timeout = 10 × `row_seconds`, at least 60 s (`TIMEOUT_FACTOR`, `MIN_TIMEOUT`). Basis: none on file. Rule for change: none stated.
+
+(written 2026-11-19)
+
 Sources: https://man7.org/linux/man-pages/man2/wait4.2.html, https://man7.org/linux/man-pages/man7/pid_namespaces.7.html and https://man7.org/linux/man-pages/man7/signal.7.html
