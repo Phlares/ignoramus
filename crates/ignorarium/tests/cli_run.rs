@@ -2567,6 +2567,59 @@ fn verify_prints_the_registered_box() {
 }
 
 #[test]
+fn a_new_study_registers_format_1() {
+    let lab = lab();
+    plain(&lab, "formatted");
+    let register = &kind_of(&lab, "formatted", "register")[0];
+    assert_eq!(register.body["format"], 1);
+    assert_eq!(Register::of(register).unwrap().format, 1);
+    let a = bin(&lab)
+        .args(["verify", "--study", "formatted"])
+        .assert()
+        .code(0);
+    assert!(text(&a).contains("record format: 1\n"), "{}", text(&a));
+}
+
+/// Replace the log of `id` by its register record alone, with `format` set or, for `None`,
+/// left out. Returns the bytes of the new log.
+fn reformat(lab: &Lab, id: &str, format: Option<u64>) -> Vec<u8> {
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let dir = lab.home.study_dir(id);
+    let log = dir.join("records.jsonl");
+    let mut body = kind_of(lab, id, "register")[0].body.clone();
+    let fields = body.as_object_mut().unwrap();
+    match format {
+        Some(n) => fields.insert("format".into(), n.into()),
+        None => fields.remove("format"),
+    };
+    std::fs::rename(&log, dir.join("records.old")).unwrap();
+    let draft = ignorarium::records::RecordDraft {
+        study: id.into(),
+        row: None,
+        kind: "register".into(),
+        body,
+    };
+    ignorarium::records::append(&log, &key, draft).unwrap();
+    std::fs::read(&log).unwrap()
+}
+
+#[test]
+fn verify_says_format_0_for_an_old_register() {
+    let lab = lab();
+    plain(&lab, "unformatted");
+    reformat(&lab, "unformatted", None);
+    let a = bin(&lab)
+        .args(["verify", "--study", "unformatted"])
+        .assert()
+        .code(0);
+    assert!(
+        text(&a).contains("record format: 0 (not recorded)\n"),
+        "{}",
+        text(&a)
+    );
+}
+
+#[test]
 fn verify_says_not_recorded_for_an_old_register() {
     let lab = lab();
     plain(&lab, "oldbox");

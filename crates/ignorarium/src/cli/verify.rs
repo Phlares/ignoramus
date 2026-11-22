@@ -130,6 +130,8 @@ fn check_study(id: Option<&str>, log: &Path, key: &VerifyingKey) -> StudyCheck {
     c.lines.push(format!("study {id}: {} records", all.len()));
     c.lines
         .push(format!("register record hash: {}", sealed.hash));
+    c.lines
+        .push(format!("record format: {}", format_text(first)));
     // The register is the first record of the log.
     let registered = Register::of(first).and_then(|r| r.box_identity);
     c.lines
@@ -271,6 +273,16 @@ fn binary_changes(
             ))
         })
         .collect()
+}
+
+/// The record format the register record `first` states, as text. A log that was read has a
+/// format this box reads, so the error text is for a caller that skipped the read.
+fn format_text(first: &records::Record) -> String {
+    match records::format_of(first) {
+        Ok(0) => "0 (not recorded)".into(),
+        Ok(n) => n.to_string(),
+        Err(e) => e.to_string(),
+    }
 }
 
 /// The box identity a register record holds, as text; `not recorded` for a record written

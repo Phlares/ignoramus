@@ -714,6 +714,7 @@ pub fn finished_with(
         gate: vec![],
         box_identity: None,
         replicates: None,
+        format: 0,
     };
     let analysis = derived::Analysis {
         commit: "ef".repeat(32),

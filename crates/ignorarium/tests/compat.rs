@@ -295,6 +295,12 @@ fn a_register_record_written_before_the_field_still_reads() {
     assert_eq!(serde_json::to_value(&r).unwrap(), old_register().body);
 }
 
+#[test]
+fn a_register_record_without_a_format_is_format_0() {
+    assert_eq!(Register::of(&old_register()).unwrap().format, 0);
+    assert_eq!(records::format_of(&old_register()).unwrap(), 0);
+}
+
 /// A card file written before the header held `stamps` and `ended`; it holds `timestamp`.
 #[test]
 fn a_card_file_written_before_stamps_still_reads() {
