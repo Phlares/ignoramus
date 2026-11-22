@@ -2,7 +2,8 @@
 
 ## Supported versions
 
-Only the latest release tag gets fixes.
+Until the first release, fixes land on `main`. After it, only the latest release tag
+gets fixes.
 
 ## Report a vulnerability
 
