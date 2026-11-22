@@ -27,7 +27,7 @@ Case against:
 
 - The box takes the unit count from the author and trusts the payload to refuse an index past the end (Cost). #11 proposed that the checker count units from the file.
 - #20 offered a second way to pin the code that measures: the payload writes raw numbers and the box computes the outcomes. The record pins the whole payload folder instead, so the payload still writes its own outcome values (0008, Case against).
-- One input file is one cluster, and a spec cannot name a source that clusters share. When clusters share one, the level breaks: in #111's simulation, 16 groups that share half the variance pass 13.7% of null runs at level 0.005. #111 proposes a group above the cluster.
+- One input file is one cluster, and a spec cannot name a source that clusters share. When clusters share one, the false-positive rate breaks: in #111's simulation, 16 groups that share half the variance pass 13.7% of null runs at a significance level of 0.005. #111 proposes a group above the cluster.
 - The root identity hashes the box key's secret bytes and the root's canonical path. A new key or a moved study root gives another identity, and `run` then refuses any study with an input absent at registration (Study root).
 - An input absent at registration is fixed only at the first `prepare`, after the plan is in the plan log (Frozen at the first run). So its bytes can be chosen after the plan, and only an outside stamp taken after that `prepare` dates them on a clock other than the box's (0033).
 

@@ -38,7 +38,7 @@ What failure this prevents: a plan written after its data and passed off as writ
 Constants:
 
 - salt = 32 random bytes per plan. Basis: it keeps a private plan private (Why); for 32 bytes, none on file. Rule for change: none stated.
-- family id = the first 16 hex characters of the SHA-256. Basis: none on file. Rule for change: none stated.
+- family id = the first 16 hex characters of the SHA-256 (Decision). Basis: none on file. Rule for change: none stated.
 
 (written 2026-11-19)
 

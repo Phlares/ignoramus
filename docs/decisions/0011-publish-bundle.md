@@ -82,7 +82,7 @@ What failure this prevents: a bundle that differs between two builds of one stud
 Constants:
 
 - SPDX header check = the first 64 KiB and the first 10 lines of a `src/` file (`HEADER_BYTES`, `HEADER_LINES`). Basis: none on file. Rule for change: none stated.
-- zip file size = under 4 GiB (`LIMIT`); zip file count = at most 65,534 (`MAX_FILES`). Basis: the zip has no Zip64, and a count of 0xFFFF tells a reader to look for a Zip64 record (Manifest and zip). Rule for change: none stated.
+- size of one file in the zip = under 4 GiB (`LIMIT`); files in the zip = at most 65,534 (`MAX_FILES`). Basis: the zip has no Zip64, and a count of 0xFFFF tells a reader to look for a Zip64 record (Manifest and zip). Rule for change: none stated.
 - curl stall limits = slower than 1 KiB/s for 2 minutes, or no connection in 30 s (`LIMITS`). Basis: a long upload that keeps moving is never cut (Deposit); for the values, none on file. Rule for change: none stated.
 
 (written 2026-11-19)

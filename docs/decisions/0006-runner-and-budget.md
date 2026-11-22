@@ -42,7 +42,7 @@ Case against:
 
 (written 2026-11-19)
 
-What failure this prevents: a run that spends past its declared budget; a crash that loses a row's spend or counts it twice; and a row record that names a payload or an input that changed before the row started. A killed row charged a few CPU seconds was observed in a repro (#26). The rest is expected, not observed in a study. (written 2026-11-19)
+What failure this prevents: a run that spends past its declared budget; a row the box ended that is charged less CPU than it used; a crash that loses a row's spend or counts it twice; and a row record that names a payload or an input that changed before the row started. #26 observed the undercount in a repro: a killed row was charged a few CPU seconds. The rest is expected, not observed in a study. (written 2026-11-19)
 
 Constants:
 
