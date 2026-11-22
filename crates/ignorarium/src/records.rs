@@ -123,7 +123,8 @@ impl std::fmt::Display for VerifyError {
             VerifyError::Io(e) => write!(f, "I/O failed: {e}"),
             VerifyError::Format { found } => write!(
                 f,
-                "the records are format {found}; this box reads format {FORMAT} and older;                  use a newer box"
+                "the records are format {found}; this box reads format {FORMAT} and older; \
+                 use a newer box"
             ),
             VerifyError::In { study, cause } => write!(f, "study {study}: {cause}"),
         }

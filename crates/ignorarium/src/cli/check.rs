@@ -322,7 +322,7 @@ impl HomeRecords {
     /// and names the study. A plan is checked against every study of the box, so one that
     /// cannot be read stops the check even when no rule asks about it. Any other fault of a
     /// log stays with the rule that needs the log.
-    fn newer_format(&self) -> Result<(), String> {
+    pub(crate) fn newer_format(&self) -> Result<(), String> {
         for (id, log) in records::logs(&self.home).map_err(|e| e.to_string())? {
             let Ok(Some(key)) = self.key_for(&log) else {
                 continue;

@@ -61,8 +61,21 @@ fn report_refuses_while_the_home_holds_a_study_of_a_newer_format() {
     plain(&lab, "old");
     common::reformat(&lab, "old", Some(2));
     let a = bin(&lab).args(["report", "s1"]).assert().failure();
-    let out = a.get_output();
-    let said = String::from_utf8_lossy(&out.stdout) + String::from_utf8_lossy(&out.stderr);
+    let said = stderr_of(&a);
+    assert!(said.contains("old") && said.contains("format 2"), "{said}");
+}
+
+/// A family root reads its members, not every study, so it needs the scan of the box home.
+#[test]
+fn report_of_a_family_root_refuses_while_the_home_holds_a_study_of_a_newer_format() {
+    let lab = lab();
+    let mut bodies = finished_study(&three(), &[]);
+    bodies[0].1["family"] = json!({ "members": [] });
+    plant(&lab.home, "root", &bodies);
+    plain(&lab, "old");
+    common::reformat(&lab, "old", Some(2));
+    let a = bin(&lab).args(["report", "root"]).assert().failure();
+    let said = stderr_of(&a);
     assert!(said.contains("old") && said.contains("format 2"), "{said}");
 }
 

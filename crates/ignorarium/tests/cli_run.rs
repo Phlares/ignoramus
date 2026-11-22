@@ -4,7 +4,7 @@ mod common;
 use assert_cmd::Command;
 use common::{
     Lab, bin, edited, fake_binary, kind_of, lab, no_level1, plain, reformat, register_study,
-    sign_session_start, status, text, with_payload,
+    rewrite_register, sign_session_start, status, text, with_payload,
 };
 use ignorarium::backend::level2::Level2;
 use ignorarium::backend::{Backend, Probe};
@@ -2596,18 +2596,12 @@ fn verify_says_format_0_for_an_old_register() {
     );
 }
 
-/// Everything a finished command printed, on both streams.
-fn said(a: &assert_cmd::assert::Assert) -> String {
-    let out = a.get_output();
-    String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr)
-}
-
 #[test]
 fn a_study_verb_refuses_a_newer_format() {
     let lab = lab();
     plain(&lab, "newer");
-    let log = lab.home.study_dir("newer").join("records.jsonl");
-    let before = reformat(&lab, "newer", Some(2));
+    reformat(&lab, "newer", Some(2));
+    let before = files_under(&lab.home.study_dir("newer"));
     let verbs: [&[&str]; 8] = [
         &["status", "newer"],
         &["report", "newer"],
@@ -2620,11 +2614,48 @@ fn a_study_verb_refuses_a_newer_format() {
     ];
     for verb in verbs {
         let a = bin(&lab).args(verb).assert();
-        let said = said(&a);
+        let said = err(&a);
         assert_ne!(a.get_output().status.code(), Some(0), "{verb:?}: {said}");
         assert!(said.contains("format 2"), "{verb:?}: {said}");
-        assert_eq!(std::fs::read(&log).unwrap(), before, "{verb:?} wrote");
+        let after = files_under(&lab.home.study_dir("newer"));
+        assert_eq!(after, before, "{verb:?} wrote");
     }
+}
+
+/// Every file under `dir`, by path, with its bytes.
+fn files_under(dir: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let mut found = std::collections::BTreeMap::new();
+    let mut open = vec![dir.to_path_buf()];
+    while let Some(d) = open.pop() {
+        for e in std::fs::read_dir(d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                open.push(p);
+            } else {
+                found.insert(p.clone(), std::fs::read(&p).unwrap());
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn verify_prints_the_format_of_a_register_it_cannot_parse() {
+    let lab = lab();
+    plain(&lab, "bare");
+    rewrite_register(&lab, "bare", |body| {
+        body.clear();
+        body.insert("format".into(), 1.into())
+    });
+    let a = bin(&lab).args(["verify", "--study", "bare"]).assert();
+    assert!(
+        text(&a).contains(
+            "record format: 1
+"
+        ),
+        "{}",
+        text(&a)
+    );
 }
 
 #[test]
@@ -2643,7 +2674,7 @@ fn verify_by_public_key_refuses_a_newer_format() {
         .arg(&log)
         .assert();
     assert_ne!(a.get_output().status.code(), Some(0));
-    assert!(said(&a).contains("format 2"), "{}", said(&a));
+    assert!(err(&a).contains("format 2"), "{}", err(&a));
 }
 
 #[test]
@@ -2655,7 +2686,7 @@ fn a_newer_study_in_the_home_stops_the_verbs_that_read_every_study() {
     let spec = common::work(&lab, "other").join("spec.toml");
     for verb in ["check", "review"] {
         let a = bin(&lab).arg(verb).arg(&spec).assert();
-        let said = said(&a);
+        let said = err(&a);
         assert_ne!(a.get_output().status.code(), Some(0), "{verb}: {said}");
         assert!(
             said.contains("old") && said.contains("format 2"),
@@ -2678,19 +2709,7 @@ fn a_newer_study_in_the_home_stops_the_verbs_that_read_every_study() {
 fn verify_says_not_recorded_for_an_old_register() {
     let lab = lab();
     plain(&lab, "oldbox");
-    let key = keys::load(&lab.home).unwrap().unwrap();
-    let dir = lab.home.study_dir("oldbox");
-    let log = dir.join("records.jsonl");
-    let mut body = kind_of(&lab, "oldbox", "register")[0].body.clone();
-    body.as_object_mut().unwrap().remove("box");
-    std::fs::rename(&log, dir.join("records.old")).unwrap();
-    let draft = ignorarium::records::RecordDraft {
-        study: "oldbox".into(),
-        row: None,
-        kind: "register".into(),
-        body,
-    };
-    ignorarium::records::append(&log, &key, draft).unwrap();
+    rewrite_register(&lab, "oldbox", |body| body.remove("box"));
     let a = bin(&lab)
         .args(["verify", "--study", "oldbox"])
         .assert()

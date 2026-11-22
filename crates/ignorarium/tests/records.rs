@@ -1175,20 +1175,14 @@ fn seals_hold_the_stored_hash_of_a_row_that_shares_data_hashes() {
     );
 }
 
-/// A log of one `register` record with `body`.
+/// Append a record of `kind` with `body` to the log in `dir`, and return the log's path.
 fn register_log(dir: &Path, k: &SigningKey, kind: &str, body: Value) -> std::path::PathBuf {
     let p = dir.join("log.jsonl");
-    let d = RecordDraft {
-        study: "s1".into(),
-        row: None,
-        kind: kind.into(),
-        body,
-    };
-    records::append(&p, k, d).unwrap();
+    records::append(&p, k, RecordDraft::new("s1", kind, body)).unwrap();
     p
 }
 
-/// The format a read of `p` refuses, as the error names it.
+/// The format a read refused, as the error names it; `None` for any other outcome.
 fn refused_format(read: Result<(), VerifyError>) -> Option<String> {
     match read {
         Err(VerifyError::Format { found }) => Some(found),
@@ -1239,6 +1233,10 @@ fn a_format_that_is_no_count_is_refused() {
         (json!(-1), "-1"),
         (json!(4294967296u64), "4294967296"),
         (json!(null), "null"),
+        (json!(1.0), "1.0"),
+        (json!(true), "true"),
+        (json!([1]), "[1]"),
+        (json!({ "n": 1 }), "{\"n\":1}"),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let p = register_log(dir.path(), &k, "register", json!({ "format": bad }));
@@ -1278,8 +1276,8 @@ fn a_broken_newer_log_reports_the_break() {
 
 #[test]
 fn the_format_error_names_both_numbers() {
-    let said = VerifyError::Format { found: "2".into() }.to_string();
-    assert!(said.contains("format 2"), "{said}");
-    assert!(said.contains("format 1 and older"), "{said}");
-    assert!(said.contains("newer box"), "{said}");
+    assert_eq!(
+        VerifyError::Format { found: "2".into() }.to_string(),
+        "the records are format 2; this box reads format 1 and older; use a newer box"
+    );
 }

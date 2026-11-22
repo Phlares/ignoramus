@@ -256,27 +256,30 @@ pub fn edited(lab: &Lab, id: &str, edit: impl Fn(String) -> String, payload: &st
     )
 }
 
-/// Replace the log of `id` by its register record alone, with `format` set or, for `None`,
-/// left out. Returns the bytes of the new log.
-pub fn reformat(lab: &Lab, id: &str, format: Option<u64>) -> Vec<u8> {
+/// Replace the log of `id` by its register record alone, its body changed by `edit`. Returns
+/// the bytes of the new log.
+pub fn rewrite_register<R>(
+    lab: &Lab,
+    id: &str,
+    edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> R,
+) -> Vec<u8> {
     let key = keys::load(&lab.home).unwrap().unwrap();
     let dir = lab.home.study_dir(id);
     let log = dir.join("records.jsonl");
     let mut body = kind_of(lab, id, "register")[0].body.clone();
-    let fields = body.as_object_mut().unwrap();
-    match format {
-        Some(n) => fields.insert("format".into(), n.into()),
-        None => fields.remove("format"),
-    };
+    edit(body.as_object_mut().unwrap());
     std::fs::rename(&log, dir.join("records.old")).unwrap();
-    let draft = records::RecordDraft {
-        study: id.into(),
-        row: None,
-        kind: "register".into(),
-        body,
-    };
+    let draft = records::RecordDraft::new(id, "register", body);
     records::append(&log, &key, draft).unwrap();
     std::fs::read(&log).unwrap()
+}
+
+/// `rewrite_register` with `format` set or, for `None`, left out.
+pub fn reformat(lab: &Lab, id: &str, format: Option<u64>) -> Vec<u8> {
+    rewrite_register(lab, id, |body| match format {
+        Some(n) => body.insert("format".into(), n.into()),
+        None => body.remove("format"),
+    })
 }
 
 /// Every verified record of the study, in order.
