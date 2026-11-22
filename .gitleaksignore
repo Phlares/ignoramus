@@ -1,0 +1,6 @@
+# Line 11 of each stored log is an estimate record. Its key_hash is the SHA-256 of the
+# contrast key the same record prints as key (contrast_key in
+# crates/ignorarium/src/derived.rs). It is no secret. A signed log cannot carry an inline
+# allow mark. A new stored log adds its own line here, after the same check.
+crates/ignorarium/tests/fixtures/logs/format-0/records.jsonl:generic-api-key:11
+crates/ignorarium/tests/fixtures/logs/format-1/records.jsonl:generic-api-key:11
