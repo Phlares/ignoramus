@@ -2623,6 +2623,60 @@ fn a_study_verb_refuses_a_newer_format() {
 }
 
 #[test]
+fn a_done_study_of_a_newer_format_gets_the_format_message() {
+    let lab = lab();
+    let dir = plain(&lab, "ended");
+    reformat(&lab, "ended", Some(2));
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let done = records::RecordDraft::new("ended", "done", serde_json::json!({"end": "rows"}));
+    records::append(&dir.join("records.jsonl"), &key, done).unwrap();
+    let before = common::files_under(&dir);
+    for args in [
+        &["run", "ended"][..],
+        &["resume", "ended"],
+        &["stop", "ended", "--reason", "x"],
+        &["pause", "ended"],
+    ] {
+        let a = bin_at(&lab, "ended").args(args).assert();
+        let said = err(&a);
+        assert_ne!(a.get_output().status.code(), Some(0), "{args:?}: {said}");
+        assert!(said.contains("format 2"), "{args:?}: {said}");
+        assert!(!said.contains("E-DON-001"), "{args:?}: {said}");
+        assert_eq!(common::files_under(&dir), before, "{args:?} wrote");
+    }
+}
+
+#[test]
+fn stop_without_a_box_key_still_sends_its_request_to_a_newer_format() {
+    let lab = lab();
+    plain(&lab, "keyless");
+    reformat(&lab, "keyless", Some(2));
+    let key = lab.home.root.join("keys").join("box.ed25519");
+    std::fs::rename(&key, lab.root.join("box.ed25519.away")).unwrap();
+    let a = bin(&lab)
+        .args(["stop", "keyless", "--reason", "x"])
+        .assert();
+    let said = err(&a);
+    assert_ne!(a.get_output().status.code(), Some(0), "{said}");
+    assert!(said.contains("the stop request is sent, but"), "{said}");
+    let sent = ControlFile::of(&lab.home, "keyless").peek().unwrap();
+    assert_eq!(sent, Some(Signal::Stop("x".into())));
+}
+
+#[test]
+fn stop_sends_nothing_to_a_format_that_is_no_count() {
+    let lab = lab();
+    let dir = plain(&lab, "odd");
+    rewrite_register(&lab, "odd", |body| body.insert("format".into(), "1".into()));
+    let before = common::files_under(&dir);
+    let a = bin(&lab).args(["stop", "odd", "--reason", "x"]).assert();
+    let said = err(&a);
+    assert_ne!(a.get_output().status.code(), Some(0), "{said}");
+    assert!(said.contains("which is no format number"), "{said}");
+    assert_eq!(common::files_under(&dir), before, "stop wrote");
+}
+
+#[test]
 fn verify_prints_the_format_of_a_register_it_cannot_parse() {
     let lab = lab();
     plain(&lab, "bare");

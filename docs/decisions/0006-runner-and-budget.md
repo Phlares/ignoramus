@@ -8,6 +8,8 @@ Amended: 2026-10-31. Rows run the registered payload copy and read inputs throug
 
 Amended: 2026-11-01. The estimate charges each row a wall time equal to its CPU time (#34).
 
+Amended: 2026-11-22. `stop` reads the record log before it sends its request, as 0034 set it (#122), and two kinds of log get no request (0034, 0036); the text held the earlier order until now (#90).
+
 `run` executes a registered plan row by row and meters cost against the declared budget. Pausing is the safe default.
 
 Decision:
@@ -26,7 +28,7 @@ Decision:
 - Alerts fire once each at 50%, 80% and 95% of every declared dimension. The fractions and the safety margin are constants in `budget.rs`.
 - Wall time uses a monotonic clock, so a system clock change does not move the total.
 - `CostMeter` is a trait. The host meter reads CPU from `wait4` and wall from a monotonic timer. A fake meter plays back planted readings and faults, so tests can force an overspend or a meter failure.
-- `stop` always works. It sends its request before it reads the record log, kills the row in flight, writes one stop record and one deviation row, and lowers the earnable label to `signal`. A stop cannot be undone by `resume`.
+- `stop` reads the record log, then sends its request. A study that holds `done` gets none (0034), nor does one whose first record, checked with the box key, states a record format this box does not read (0036). A log that cannot be read for another reason still gets it. `stop` kills the row in flight, writes one stop record and one deviation row, and lowers the earnable label to `signal`. A stop cannot be undone by `resume`.
 - SIGINT, SIGTERM or SIGHUP ends the row in flight as a stop does: the box kills its process group, records its spend, and pauses the run. A second SIGINT ends the box the default way. A signal the box was started with ignored stays ignored. The command line installs these handlers; the library leaves signal handling to its caller.
 - When SIGCHLD is ignored, the kernel reaps each row before the box can see it end, so the run pauses before the next attempt. The command line sets SIGCHLD back to its default first.
 - A heartbeat event every 15 seconds shows the run is alive.
