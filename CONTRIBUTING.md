@@ -101,9 +101,7 @@ Sources:
   stop reads as a label. It ends the part above it.
 - **Records 0001 to 0029** are older than this template. Their Date and
   Amended lines were added on 2026-11-15 from the git history. 0001 has no
-  Amended line: each dependency is a list entry, and git holds its date. The
-  test lists the parts each old record still lacks, and that list only
-  shrinks.
+  Amended line: each dependency is a list entry, and git holds its date.
 
 ## License of contributions
 

@@ -2,6 +2,8 @@
 
 Date: 2026-10-28.
 
+Decision:
+
 Each dependency has one job. Add a line here with its reason when you add a crate.
 
 Runtime:
@@ -12,6 +14,7 @@ Runtime:
 - `toml`: reads study specs, which use TOML.
 - `sha2`: computes SHA-256 hashes.
 - `hex`: writes hashes as text.
+- `digest-io` (from RustCrypto): gives a `sha2` hasher the `io::Write` interface, which `sha2` 0.11 dropped. The box uses it where it streams a hash from a reader: the guest's `tree.rs` and the deposit's `zenodo.rs` (#44), and `canon.rs` (#70).
 - `ed25519-dalek`: signs records with a local key.
 - `getrandom`: draws random bytes for seeds and keys from the operating system.
 - `regex`: matches text patterns in checks.
@@ -31,3 +34,36 @@ Development:
 - `tempfile`: makes scratch folders in tests.
 
 Minimum Rust version: 1.89, for `std::fs::File::lock`.
+
+Why:
+
+- The reason for the rule is not on file. The PR that added the record (#1) gives none.
+- The lines show how the rule is used. Several name what a crate keeps out of the build: a C library (`flate2`), a second version of any crate (`der`), dependencies of its own (`evidence`). The `tar` line names functions the box never calls.
+
+(written 2026-11-21)
+
+Case against:
+
+- A list kept by hand drifts from the manifests, and no test compares them. `digest-io` entered two manifests in #44 and a third in #70, and had no line here until 2026-11-21. In that time 0011 said its two crates use only dependencies listed here, and one of them, `deposit`, used `digest-io`. A reason comment beside each dependency in its manifest would sit where a crate is added. The root manifest already keeps such a comment beside each profile override.
+- The list repeats what Cargo holds and adds only the reason. Six manifests and the CI matrix already state the minimum Rust version. Git alone holds the date of each line (`CONTRIBUTING.md`, Decision records).
+- "One job" sets no bound on how wide a job is. The `rustix` job is "safe system calls", and its line runs from process control to power-off. The `libc` job is "the system calls rustix lacks".
+- The rule states a job for the direct dependencies only. The lock file holds 102 packages. Dependabot's security updates are the only watch on them (`.github/dependabot.yml`); no CI job audits them, and #94 asks for `cargo audit` or `cargo deny` in CI.
+
+(written 2026-11-21)
+
+What failure this prevents: a crate in the build whose job no one has stated, and a crate that stays after its one use is gone. The first happened with `digest-io`, and the rule did not stop it (Case against). The second is expected, not observed in a study. (written 2026-11-21)
+
+Constants:
+
+- minimum Rust version = 1.89 (`rust-version` in each manifest; CI tests 1.89 and stable). Basis: the box uses `std::fs::File::lock` (Minimum Rust version). Rule for change: none stated.
+
+(written 2026-11-21)
+
+Sources:
+
+- `seccompiler`: https://github.com/rust-vmm/seccompiler
+- `tar`: https://github.com/alexcrichton/tar-rs
+- `flate2`: https://github.com/rust-lang/flate2-rs
+- `der`: https://github.com/RustCrypto/formats/tree/master/der
+
+(written 2026-11-21)

@@ -108,16 +108,13 @@ fn amended_in_order(date: &str, below: &mut std::str::Lines) -> bool {
     dates.is_sorted() && !below.any(|line| line.starts_with("Amended"))
 }
 
-fn problems(number: &str, text: &str, debt: &[&str]) -> Vec<String> {
-    let mut faults = Vec::new();
+fn problems(number: &str, text: &str) -> Vec<String> {
     let held = held(text);
-    for part in PARTS {
-        match (debt.contains(&part), held.contains(part)) {
-            (true, true) => faults.push(format!("{number}: holds {part}; remove it from DEBT")),
-            (false, false) => faults.push(format!("{number}: lacks {part}")),
-            _ => {}
-        }
-    }
+    let mut faults: Vec<String> = PARTS
+        .iter()
+        .filter(|part| !held.contains(*part))
+        .map(|part| format!("{number}: lacks {part}"))
+        .collect();
     let mut below = text.lines();
     if below
         .next()
@@ -152,25 +149,6 @@ fn problems(number: &str, text: &str, debt: &[&str]) -> Vec<String> {
         _ => {}
     }
     faults
-}
-
-// The parts that records written before the template still lack, by part. A record leaves a
-// list in the change that writes the part. No list grows, and no record from 0030 on may enter.
-#[rustfmt::skip]
-const DEBT: &[(&str, &[&str])] = &[
-    ("Decision", &["0001"]),
-    ("Why", &["0001", "0028", "0029"]),
-    ("Case against", &["0001", "0002", "0003", "0028", "0029"]),
-    ("What failure this prevents", &["0001", "0002", "0003", "0028", "0029"]),
-    ("Constants", &["0001", "0002", "0003", "0028", "0029"]),
-    ("Sources", &["0001", "0003"]),
-];
-
-fn debt(number: &str) -> Vec<&'static str> {
-    DEBT.iter()
-        .filter(|(_, records)| records.contains(&number))
-        .map(|(part, _)| *part)
-        .collect()
 }
 
 fn records_in(dir: &Path) -> BTreeMap<String, String> {
@@ -270,21 +248,9 @@ const FULL: &str = "# 0099 T\n\nDate: 2026-11-15. On file.\n\nAmended: 2026-11-1
 #[test]
 fn problems_name_the_record_and_the_fault() {
     let none: Vec<String> = Vec::new();
-    assert_eq!(problems("0099", FULL, &[]), none);
-    let cut = |old: &str, new: &str| problems("0099", &FULL.replace(old, new), &[]);
+    assert_eq!(problems("0099", FULL), none);
+    let cut = |old: &str, new: &str| problems("0099", &FULL.replace(old, new));
     assert_eq!(cut("Why: b\n\n", ""), ["0099: lacks Why"]);
-    assert_eq!(
-        problems("0099", FULL, &["Why"]),
-        ["0099: holds Why; remove it from DEBT"]
-    );
-    assert_eq!(
-        problems("0099", &FULL.replace("Why: b\n\n", ""), &["Why"]),
-        none
-    );
-    assert_eq!(
-        problems("0099", FULL, &["Date"]),
-        ["0099: holds Date; remove it from DEBT"]
-    );
     let date = "0099: the first line under the title must read \"Date: YYYY-MM-DD.\"";
     assert_eq!(
         cut("Date: 2026-11-15. On file.", "Date: 2026-13-15. On file."),
@@ -344,33 +310,9 @@ fn problems_name_the_record_and_the_fault() {
 fn every_record_holds_its_parts() {
     let faults: Vec<String> = records()
         .iter()
-        .flat_map(|(number, text)| problems(number, text, &debt(number)))
+        .flat_map(|(number, text)| problems(number, text))
         .collect();
     assert!(faults.is_empty(), "\n{}", faults.join("\n"));
-}
-
-#[test]
-fn debt_names_only_records_and_parts_that_exist() {
-    let records = records();
-    for (part, numbers) in DEBT {
-        assert!(PARTS.contains(part), "DEBT: {part} is no part");
-        for (at, number) in numbers.iter().enumerate() {
-            assert!(
-                records.contains_key(*number),
-                "DEBT {part}: {number} is no record"
-            );
-            assert!(
-                !numbers[..at].contains(number),
-                "DEBT {part} lists {number} twice"
-            );
-            assert!(
-                *number < "0030",
-                "DEBT {part}: {number}; records from 0030 on hold every part"
-            );
-        }
-    }
-    let entries: usize = DEBT.iter().map(|(_, numbers)| numbers.len()).sum();
-    assert_eq!(entries, 21);
 }
 
 #[test]
