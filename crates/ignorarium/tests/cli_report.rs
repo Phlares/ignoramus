@@ -63,10 +63,7 @@ fn report_refuses_while_the_home_holds_a_study_of_a_newer_format() {
     let a = bin(&lab).args(["report", "s1"]).assert().failure();
     let out = a.get_output();
     let said = String::from_utf8_lossy(&out.stdout) + String::from_utf8_lossy(&out.stderr);
-    assert!(
-        said.contains("old") && said.contains("format 2"),
-        "{said}"
-    );
+    assert!(said.contains("old") && said.contains("format 2"), "{said}");
 }
 
 #[test]
