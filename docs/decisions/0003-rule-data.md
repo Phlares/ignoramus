@@ -29,6 +29,8 @@ Why:
 - A new generic rule is a data edit with no new code.
 - Docs from the same data are never out of date.
 
+Sources are public: an entry cites each standard or paper by URL. An entry may cite none.
+
 Case against:
 
 - Most rules are code. Of the 75 rules, 12 use only generic checks; 49 use only named functions, 4 use both, and 10 are `documented`. Only the 12 are "a data edit with no new code" (Why). #66 says the named rules "are code, not data".
@@ -41,7 +43,5 @@ Case against:
 What failure this prevents: a diagnostic whose text and guarded field drift apart (Why); a rule page that describes a check the binary no longer runs (Why); and a plan that passes because a value its check needs is missing or unreadable (Fail closed). Expected, not observed in a study. (written 2026-11-21)
 
 Constants: none. This record fixes where the rules live and how they are read. Each rule's own values sit in its entry in `rules/v0.toml`. (written 2026-11-21)
-
-Sources are public: an entry cites each standard or paper by URL. An entry may cite none.
 
 Sources: none. The record cites no outside work. (written 2026-11-21)

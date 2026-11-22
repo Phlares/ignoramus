@@ -36,7 +36,7 @@ Case against:
 - No record names the source commit of the binary, and the crate version in the records is `0.0.1` at every commit (#90). A reader cannot match a binary to its source, so each hash stays the binary's report on itself (Decision).
 - The rules hash is a second identity that the binary hash already covers (Gate). It does not cover the code of the named rules (Decision), which 53 of the 75 rules call (0003, Case against). `pins.rule_base`, the one field a rule compares with it, is empty in both templates.
 
-(written 2026-11-21; the first bullet moved from Gate, #104)
+(written 2026-11-21; the first bullet is from Gate, where #104 wrote it)
 
 Limits:
 
@@ -48,6 +48,10 @@ Limits:
 What failure this prevents: a study that continues under a wrong or rebuilt binary with no trace in its records; and a plan whose `pins.rule_base` no code compares with the rules. The first gap was observed in the acceptance run: the binary's hash was written and compared by hand (Evidence; #67). No wrong binary was observed. (written 2026-11-21)
 
 Constants: none. This record fixes what each hash covers and when the gate refuses. SHA-256, the `u64` length prefix and the exit codes are parts of a format, not tuned values. (written 2026-11-21)
+
+Sources:
+
+- Reproducible Builds, "Definition": https://reproducible-builds.org/docs/definition/
 
 ## Gate
 
@@ -63,7 +67,3 @@ Constants: none. This record fixes what each hash covers and when the gate refus
 - **Not gated.** `report`, `verify`, `status` and every other verb. A card rebuild with `report --card` stays free.
 - **Old studies.** A register record without `box`, and no session, gives the gate nothing to compare. The first run under this box passes, ignores `--box-changed`, and writes `session.start` with its binary. That session is the baseline from then on. `verify` prints `not recorded` for the register hashes.
 - **`verify`.** `verify --study` prints one line per binary change between consecutive session starts, or between the register record and the first start, where `k` counts session starts from 1: `binary changed at session <k>: declared (<reason>)`, or `binary changed at session <k>: undeclared`. A change is declared only when the start's `changed_from` is the binary before it. An undeclared change cannot occur through the box. `verify` also lists it as a failure, `undeclared binary change at session <k>`, and exits 1.
-
-Sources:
-
-- Reproducible Builds, "Definition": https://reproducible-builds.org/docs/definition/

@@ -99,9 +99,10 @@ Sources:
 - **Other parts** are free: Evidence, Limits, Cost, Open. The order is free.
   A line that starts with a capital letter and has a colon before any full
   stop reads as a label. It ends the part above it.
-- **Records 0001 to 0029** are older than this template. Their Date and
-  Amended lines were added on 2026-11-15 from the git history. 0001 has no
-  Amended line: each dependency is a list entry, and git holds its date.
+- **Records 0001 to 0029** are older than this template. Their Date lines,
+  and their Amended lines dated up to that day, were added on 2026-11-15
+  from the git history. 0001 has no Amended line: each dependency is a list
+  entry, and git holds its date.
 
 ## License of contributions
 
