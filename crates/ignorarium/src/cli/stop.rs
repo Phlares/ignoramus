@@ -1,5 +1,7 @@
 //! `stop`: end a study for good. A live run writes the stop record; an idle study gets it here.
-use super::{CliError, Ctx, Done, Run, located, out, refuse_if_done, registered, stopped_why};
+use super::{
+    CliError, Ctx, Done, Run, keyed, located, out, refuse_if_done, registered, stopped_why,
+};
 use crate::control::{ControlError, ControlFile, await_stop};
 use crate::derived::first_done;
 use crate::records;
@@ -9,15 +11,25 @@ use std::time::Duration;
 /// How long `stop` waits for a live run to write the record.
 const STOP_WAIT: Duration = Duration::from_secs(30);
 
-/// A log that reads and holds `done` refuses before anything is written. A log that cannot be
-/// read still gets the request, so a torn log cannot keep a live run from seeing it. "The first
-/// stop's reason stands" is printed only when the log held a stop record before this call.
+/// A log that reads and holds `done` refuses before anything is written, and so does a log
+/// whose first record, checked with the box key, states a newer record format. Any other log
+/// that cannot be read still gets the request, so a torn log cannot keep a live run from
+/// seeing it. "The first stop's reason stands" is printed only when the log held a stop
+/// record before this call.
 pub fn run(ctx: &Ctx, id: &str, reason: &str) -> Run {
     let (home, log) = located(ctx, id)?;
     let fault = |e: &dyn std::fmt::Display| CliError::usage(format!("cannot stop {id}: {e}"));
     let read = registered(ctx, id);
     if let Ok((_, _, all)) = &read {
         refuse_if_done(id, all)?;
+    }
+    // A study of a newer record format is not this box's to stop: no request is sent (0036).
+    if read.is_err()
+        && let Ok((_, _, key)) = keyed(ctx, id)
+        && let Err(e @ records::VerifyError::Format { .. }) =
+            records::first(&log, &key.verifying_key())
+    {
+        return Err(fault(&e));
     }
     ControlFile::of(home, id)
         .request_stop(reason)

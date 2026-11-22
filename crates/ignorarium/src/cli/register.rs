@@ -100,6 +100,7 @@ fn record_body(
         gate: frozen.gate.clone(),
         box_identity: Some(frozen.box_identity.clone()),
         replicates: frozen.replicates.clone(),
+        format: records::FORMAT,
     })
     .map_err(|e| io("register record", e))
 }
@@ -810,7 +811,8 @@ mod tests {
                                     "differs": ["environment"] }],
                    "carries": { "study": "pilot", "record": "ab".repeat(32) },
                    "alpha": null,
-                   "box": {"rules_sha256": "sha256:aa", "binary_sha256": {"unavailable": "no exe"}}})
+                   "box": {"rules_sha256": "sha256:aa", "binary_sha256": {"unavailable": "no exe"}},
+                   "format": 1})
         );
         let slot = Alpha {
             log: "testlog".into(),

@@ -149,6 +149,15 @@ pub struct Register {
     /// then. An older box reads a record that holds it as no register, as for `gate`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicates: Option<Replicated>,
+    /// The record format of the study's log (`records::FORMAT`, 0036); 0, and left out, in a
+    /// record written before the field existed. An older box reads a record that holds it as
+    /// no register, as for `gate`.
+    #[serde(default, skip_serializing_if = "is_format_0")]
+    pub format: u32,
+}
+
+fn is_format_0(format: &u32) -> bool {
+    *format == 0
 }
 
 /// The original a replication repeats, as `register` froze it: the plan's four values and the

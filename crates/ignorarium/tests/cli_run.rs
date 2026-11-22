@@ -3,8 +3,8 @@
 mod common;
 use assert_cmd::Command;
 use common::{
-    Lab, bin, edited, fake_binary, kind_of, lab, no_level1, plain, register_study,
-    sign_session_start, status, text, with_payload,
+    Lab, bin, edited, fake_binary, kind_of, lab, no_level1, plain, reformat, register_study,
+    rewrite_register, sign_session_start, status, text, with_payload,
 };
 use ignorarium::backend::level2::Level2;
 use ignorarium::backend::{Backend, Probe};
@@ -2567,22 +2567,186 @@ fn verify_prints_the_registered_box() {
 }
 
 #[test]
+fn a_new_study_registers_format_1() {
+    let lab = lab();
+    plain(&lab, "formatted");
+    let register = &kind_of(&lab, "formatted", "register")[0];
+    assert_eq!(register.body["format"], 1);
+    assert_eq!(Register::of(register).unwrap().format, 1);
+    let a = bin(&lab)
+        .args(["verify", "--study", "formatted"])
+        .assert()
+        .code(0);
+    assert!(text(&a).contains("record format: 1\n"), "{}", text(&a));
+}
+
+#[test]
+fn verify_says_format_0_for_an_old_register() {
+    let lab = lab();
+    plain(&lab, "unformatted");
+    reformat(&lab, "unformatted", None);
+    let a = bin(&lab)
+        .args(["verify", "--study", "unformatted"])
+        .assert()
+        .code(0);
+    assert!(
+        text(&a).contains("record format: 0 (not recorded)\n"),
+        "{}",
+        text(&a)
+    );
+}
+
+#[test]
+fn a_study_verb_refuses_a_newer_format() {
+    let lab = lab();
+    plain(&lab, "newer");
+    reformat(&lab, "newer", Some(2));
+    let before = common::files_under(&lab.home.study_dir("newer"));
+    let verbs: [&[&str]; 8] = [
+        &["status", "newer"],
+        &["report", "newer"],
+        &["run", "newer"],
+        &["resume", "newer"],
+        &["stop", "newer", "--reason", "x"],
+        &["pause", "newer"],
+        &["verify", "--study", "newer"],
+        &["stamp", "newer", "--request"],
+    ];
+    for verb in verbs {
+        let a = bin(&lab).args(verb).assert();
+        let said = err(&a);
+        assert_ne!(a.get_output().status.code(), Some(0), "{verb:?}: {said}");
+        assert!(said.contains("format 2"), "{verb:?}: {said}");
+        let after = common::files_under(&lab.home.study_dir("newer"));
+        assert_eq!(after, before, "{verb:?} wrote");
+    }
+}
+
+#[test]
+fn a_done_study_of_a_newer_format_gets_the_format_message() {
+    let lab = lab();
+    let dir = plain(&lab, "ended");
+    reformat(&lab, "ended", Some(2));
+    let key = keys::load(&lab.home).unwrap().unwrap();
+    let done = records::RecordDraft::new("ended", "done", serde_json::json!({"end": "rows"}));
+    records::append(&dir.join("records.jsonl"), &key, done).unwrap();
+    let before = common::files_under(&dir);
+    for args in [
+        &["run", "ended"][..],
+        &["resume", "ended"],
+        &["stop", "ended", "--reason", "x"],
+        &["pause", "ended"],
+    ] {
+        let a = bin_at(&lab, "ended").args(args).assert();
+        let said = err(&a);
+        assert_ne!(a.get_output().status.code(), Some(0), "{args:?}: {said}");
+        assert!(said.contains("format 2"), "{args:?}: {said}");
+        assert!(!said.contains("E-DON-001"), "{args:?}: {said}");
+        assert_eq!(common::files_under(&dir), before, "{args:?} wrote");
+    }
+}
+
+#[test]
+fn stop_without_a_box_key_still_sends_its_request_to_a_newer_format() {
+    let lab = lab();
+    plain(&lab, "keyless");
+    reformat(&lab, "keyless", Some(2));
+    let key = lab.home.root.join("keys").join("box.ed25519");
+    std::fs::rename(&key, lab.root.join("box.ed25519.away")).unwrap();
+    let a = bin(&lab)
+        .args(["stop", "keyless", "--reason", "x"])
+        .assert();
+    let said = err(&a);
+    assert_ne!(a.get_output().status.code(), Some(0), "{said}");
+    assert!(said.contains("the stop request is sent, but"), "{said}");
+    let sent = ControlFile::of(&lab.home, "keyless").peek().unwrap();
+    assert_eq!(sent, Some(Signal::Stop("x".into())));
+}
+
+#[test]
+fn stop_sends_nothing_to_a_format_that_is_no_count() {
+    let lab = lab();
+    let dir = plain(&lab, "odd");
+    rewrite_register(&lab, "odd", |body| body.insert("format".into(), "1".into()));
+    let before = common::files_under(&dir);
+    let a = bin(&lab).args(["stop", "odd", "--reason", "x"]).assert();
+    let said = err(&a);
+    assert_ne!(a.get_output().status.code(), Some(0), "{said}");
+    assert!(said.contains("which is no format number"), "{said}");
+    assert_eq!(common::files_under(&dir), before, "stop wrote");
+}
+
+#[test]
+fn verify_prints_the_format_of_a_register_it_cannot_parse() {
+    let lab = lab();
+    plain(&lab, "bare");
+    rewrite_register(&lab, "bare", |body| {
+        body.clear();
+        body.insert("format".into(), 1.into())
+    });
+    let a = bin(&lab).args(["verify", "--study", "bare"]).assert();
+    assert!(
+        text(&a).contains(
+            "record format: 1
+"
+        ),
+        "{}",
+        text(&a)
+    );
+}
+
+#[test]
+fn verify_by_public_key_refuses_a_newer_format() {
+    let lab = lab();
+    plain(&lab, "newer");
+    let log = lab.home.study_dir("newer").join("records.jsonl");
+    reformat(&lab, "newer", Some(2));
+    let public = lab.root.join("public.hex");
+    let exported = bin(&lab).args(["key", "export"]).assert().success();
+    std::fs::write(&public, text(&exported)).unwrap();
+    let a = bin(&lab)
+        .args(["verify", "--public-key"])
+        .arg(&public)
+        .arg("--records")
+        .arg(&log)
+        .assert();
+    assert_ne!(a.get_output().status.code(), Some(0));
+    assert!(err(&a).contains("format 2"), "{}", err(&a));
+}
+
+#[test]
+fn a_newer_study_in_the_home_stops_the_verbs_that_read_every_study() {
+    let lab = lab();
+    plain(&lab, "old");
+    plain(&lab, "other");
+    reformat(&lab, "old", Some(2));
+    let spec = common::work(&lab, "other").join("spec.toml");
+    for verb in ["check", "review"] {
+        let a = bin(&lab).arg(verb).arg(&spec).assert();
+        let said = err(&a);
+        assert_ne!(a.get_output().status.code(), Some(0), "{verb}: {said}");
+        assert!(
+            said.contains("study old: ") && said.contains("format 2"),
+            "{verb}: {said}"
+        );
+    }
+    // `register` needs a terminal, so it is called as the tests of `common` call it.
+    let mut out = Vec::new();
+    let mut typed = std::io::Cursor::new(Vec::new());
+    let refused = ignorarium::cli::register::run(&spec, &lab.home, &mut typed, &mut out, true)
+        .expect_err("register refuses");
+    assert!(
+        refused.msg.contains("study old: ") && refused.msg.contains("format 2"),
+        "{}",
+        refused.msg
+    );
+}
+
+#[test]
 fn verify_says_not_recorded_for_an_old_register() {
     let lab = lab();
     plain(&lab, "oldbox");
-    let key = keys::load(&lab.home).unwrap().unwrap();
-    let dir = lab.home.study_dir("oldbox");
-    let log = dir.join("records.jsonl");
-    let mut body = kind_of(&lab, "oldbox", "register")[0].body.clone();
-    body.as_object_mut().unwrap().remove("box");
-    std::fs::rename(&log, dir.join("records.old")).unwrap();
-    let draft = ignorarium::records::RecordDraft {
-        study: "oldbox".into(),
-        row: None,
-        kind: "register".into(),
-        body,
-    };
-    ignorarium::records::append(&log, &key, draft).unwrap();
+    rewrite_register(&lab, "oldbox", |body| body.remove("box"));
     let a = bin(&lab)
         .args(["verify", "--study", "oldbox"])
         .assert()

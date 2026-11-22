@@ -1766,6 +1766,16 @@ fn a_resized_design_moves_the_truth_not_the_sizing() {
     assert!(stop(points[0][1]) > stop(points[1][1]), "{v}");
 }
 
+/// The scan for a newer record format stops a check only on that fault (0036).
+#[test]
+fn a_studies_folder_that_cannot_be_listed_fails_only_the_checks_that_need_a_record() {
+    let (_d, home, spec) = setup(|t| t);
+    // A `studies` entry that is not a folder cannot be listed. This home holds no study yet.
+    std::fs::write(home.join("studies"), "x").unwrap();
+    // An exploratory plan reads no record.
+    assert!(!check_out(&home, &spec, 0).contains("E-CNF-003"));
+}
+
 #[test]
 fn a_broken_key_fails_only_the_checks_that_need_a_record() {
     let (_d, home, spec) = setup(|t| t);

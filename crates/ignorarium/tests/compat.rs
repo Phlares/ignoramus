@@ -295,6 +295,35 @@ fn a_register_record_written_before_the_field_still_reads() {
     assert_eq!(serde_json::to_value(&r).unwrap(), old_register().body);
 }
 
+#[test]
+fn a_register_record_without_a_format_is_format_0() {
+    assert_eq!(Register::of(&old_register()).unwrap().format, 0);
+    assert_eq!(records::format_of(&old_register()).unwrap(), 0);
+}
+
+/// A `resize` record with the body the box wrote before a log stated its format (0036). The
+/// stored logs under `fixtures/logs/` hold no record of this kind.
+const OLD_RESIZE_LINE: &str = "{\"hash\":\"341a2593bb9ef4a0c8a88dc7146257d1027480e924d4c47321890f7cb296d124\",\"record\":{\"body\":{\"decision\":\"continue\",\"reason\":null,\"strata\":[{\"appended\":21,\"first\":12,\"needed\":33,\"reserve\":60,\"stratum\":\"\"}]},\"kind\":\"resize\",\"prev\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"row\":null,\"seq\":0,\"study\":\"compat\",\"ts\":\"2026-11-06T00:00:00.000Z\"},\"sig\":\"87052ee796cb5a99be52725f2e8d5094d0226b6de7e1042adaaacb75b45cc26cb5a0cc061d181c970bfd52f6c145948cd2559b74a9eeb2464e8c5924c6fcdf0d\"}\n";
+
+fn old_resize() -> Record {
+    Record {
+        row: None,
+        kind: "resize".into(),
+        body: json!({
+            "decision": "continue", "reason": null,
+            "strata": [{ "appended": 21, "first": 12, "needed": 33, "reserve": 60, "stratum": "" }],
+        }),
+        ..old_record()
+    }
+}
+
+#[test]
+fn a_resize_record_written_before_still_reads() {
+    assert_eq!(stored_line(&old_resize()), OLD_RESIZE_LINE);
+    let read = ignorarium::derived::Resize::of(&read_back(OLD_RESIZE_LINE)[0]).unwrap();
+    assert_eq!(serde_json::to_value(&read).unwrap(), old_resize().body);
+}
+
 /// A card file written before the header held `stamps` and `ended`; it holds `timestamp`.
 #[test]
 fn a_card_file_written_before_stamps_still_reads() {

@@ -417,6 +417,7 @@ pub fn build(
         .ok_or_else(|| not_registered(id))?;
     let box_records = HomeRecords::signed(home, &key);
     let refuse = |e: String| CliError::refuse(format!("cannot report {id}: {e}"));
+    box_records.newer_format().map_err(refuse)?;
     let Some(Finish {
         analysed,
         after,

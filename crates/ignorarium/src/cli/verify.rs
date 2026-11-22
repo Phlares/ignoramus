@@ -131,6 +131,13 @@ fn check_study(id: Option<&str>, log: &Path, key: &VerifyingKey) -> StudyCheck {
     c.lines
         .push(format!("register record hash: {}", sealed.hash));
     // The register is the first record of the log.
+    // Read from the raw body, so a register this box cannot parse still shows its format.
+    let format = match records::format_of(first) {
+        Ok(0) => "0 (not recorded)".to_string(),
+        Ok(n) => n.to_string(),
+        Err(e) => e.to_string(),
+    };
+    c.lines.push(format!("record format: {format}"));
     let registered = Register::of(first).and_then(|r| r.box_identity);
     c.lines
         .push(format!("registered box: {}", box_text(registered.as_ref())));
