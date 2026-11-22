@@ -115,19 +115,6 @@ fn litmus_run(seed: &str, environment: &str) -> Result<Litmus, String> {
         "{id}"
     );
 
-    // LITMUS_KEEP_LOG=<folder>: copy the finished study's record log and the box's public key
-    // there. It writes the stored logs under `crates/ignorarium/tests/fixtures/logs/`. Set it
-    // for one test at a time: two tests run the same study id and would share the folder.
-    if let Some(keep) = std::env::var_os("LITMUS_KEEP_LOG") {
-        let keep = PathBuf::from(keep);
-        std::fs::create_dir_all(&keep).unwrap();
-        let log = home.study_dir(&id).join("records.jsonl");
-        std::fs::copy(log, keep.join("records.jsonl")).unwrap();
-        let public = keys::load(&home).unwrap().unwrap().verifying_key();
-        let public = hex::encode(public.to_bytes());
-        std::fs::write(keep.join("public-key.hex"), public + "\n").unwrap();
-    }
-
     Ok(Litmus {
         released: released.len() as u64,
         resize: group.clone(),
