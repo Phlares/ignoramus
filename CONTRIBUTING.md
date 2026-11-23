@@ -38,7 +38,8 @@ comment. Every comment emails everyone on the issue.
    ```
    uvx --from git+https://github.com/Phlares/workflows@v1.11.0 gate
    ```
-   The last line it prints is the result. Paste it into the pull request.
+   A run ends with one result line that starts with `gate: PASS` or
+   `gate: FAIL`. Paste that line into the pull request.
 5. Fill in the pull request template. Pull requests are not the place to
    design a feature; that happens on the issue.
 
