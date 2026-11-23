@@ -108,29 +108,49 @@ impl ControlFile {
             return Ok(None);
         }
         real_dir(dir, true)?;
-        let mut file = open_log(&self.path)?;
-        if wait {
-            file.lock()?;
-        } else {
-            match file.try_lock() {
-                Ok(()) => {}
-                Err(TryLockError::WouldBlock) => return Ok(None),
-                Err(TryLockError::Error(e)) => return Err(e),
-            }
-        }
+        let file = open_log(&self.path)?;
+        let Some(_held) = hold(&file, wait)? else {
+            return Ok(None);
+        };
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
+        (&file).read_to_end(&mut bytes)?;
         let old = (!bytes.trim_ascii().is_empty())
             .then(|| serde_json::from_slice(&bytes).unwrap_or(Signal::Pause));
         let new = f(old.clone());
         if new != old {
             file.set_len(0)?;
             if let Some(s) = &new {
-                file.write_all(&canonical_line(s)?)?;
+                (&file).write_all(&canonical_line(s)?)?;
             }
             file.sync_all()?;
         }
         Ok(old)
+    }
+}
+
+/// Lock `file` exclusively until the guard drops. With `wait`, block until the lock is
+/// free; without it, return `None` while another open file holds the lock.
+fn hold(file: &File, wait: bool) -> io::Result<Option<Held<'_>>> {
+    if wait {
+        file.lock()?;
+    } else {
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => return Ok(None),
+            Err(TryLockError::Error(e)) => return Err(e),
+        }
+    }
+    Ok(Some(Held(file)))
+}
+
+struct Held<'a>(&'a File);
+
+impl Drop for Held<'_> {
+    // Closing the file is not enough: a child forked by another thread shares this open
+    // file until it execs. Unlock frees the lock for every copy; close frees it only at
+    // the last copy.
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
     }
 }
 
@@ -694,7 +714,21 @@ pub fn user_of(passwd: &str, uid: u32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::stat_fields;
+    use super::{hold, open_log, stat_fields};
+
+    #[test]
+    fn a_held_lock_ends_with_its_guard_while_a_copy_of_the_file_lives() {
+        let d = tempfile::TempDir::new().unwrap();
+        let path = d.path().join("control");
+        let file = open_log(&path).unwrap();
+        // `try_clone` stands in for a forked child: both copies share one open file, so
+        // they share one lock.
+        let child = file.try_clone().unwrap();
+        drop(hold(&file, true).unwrap());
+        drop(file);
+        assert!(open_log(&path).unwrap().try_lock().is_ok());
+        drop(child);
+    }
 
     #[test]
     fn stat_fields_count_from_the_last_parenthesis() {
