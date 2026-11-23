@@ -6,5 +6,6 @@ run = "pre-commit run --all-files --hook-stage manual --show-diff-on-failure"
 [[check]]
 name = "test"
 run = "cargo test --locked"
-# Every test target that starts must print a result line.
-count = ['^\s+(Running|Doc-tests) ', '^test result: ']
+# Every harness run that starts must print a result line. Cargo's target
+# lines do not pair up: one Doc-tests line can hold two runs.
+count = ['^running \d+ tests?$', '^test result: ']
