@@ -23,8 +23,9 @@ jobs:
           toolchain: stable
           components: clippy, rustfmt
       - run: pipx install pre-commit==4.7.0
-      # The manual stage adds gitleaks-history, which scans the checkout.
-      - run: pre-commit run --all-files --hook-stage manual --show-diff-on-failure
+      - uses: Phlares/workflows/.github/actions/gate@6c97c1ba53681b3f07d3f59e3006450a52cbcebb # v1.11.0
+        with:
+          checks: lint
 
   test:
     runs-on: ubuntu-latest
@@ -33,6 +34,8 @@ jobs:
       fail-fast: false
       matrix:
         toolchain: ["1.89", stable]
+    env:
+      IGNORARIUM_REQUIRE_LEVEL1: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -41,6 +44,6 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y bubblewrap
       # Ubuntu 24.04 blocks unprivileged user namespaces; the runner is thrown away.
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - run: cargo test --locked
-        env:
-          IGNORARIUM_REQUIRE_LEVEL1: "1"
+      - uses: Phlares/workflows/.github/actions/gate@6c97c1ba53681b3f07d3f59e3006450a52cbcebb # v1.11.0
+        with:
+          checks: test
