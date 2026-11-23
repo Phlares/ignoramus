@@ -19,7 +19,7 @@ Decision:
 
 Why:
 
-- One list, because two lists drift apart. Before this record `CONTRIBUTING.md` named `pre-commit run --all-files`, and CI ran that command with `--hook-stage manual`, which adds the `gitleaks-history` hook.
+- One list, because two lists drift apart. Before #133 `CONTRIBUTING.md` named `pre-commit run --all-files`, and CI ran that command with `--hook-stage manual`, which adds the `gitleaks-history` hook.
 - The exit code is not enough. In the exit trial (Evidence) a test binary ended with exit code 0 after its `running` line, and the `cargo test` call exited 0. The pair read 102 against 101, and the check failed.
 - Langfuse states the rule for the cases of an experiment: "A missing case is not a passing case" (Sources). We apply it to a test run without a `test result:` line.
 - A check that fails a passing call is a false alert. In an interview study of 18 machine-learning engineers, false-positive alerts were the most commonly discussed pain point, and a surplus of them led to silenced alerts (Sources). We expect the same of a CI check. So the pair must hold on every passing call under the toolchains CI runs. The doc-test trial (Evidence) rules out cargo's target lines.
