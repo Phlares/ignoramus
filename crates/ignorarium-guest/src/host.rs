@@ -52,10 +52,14 @@ pub trait Watch {
     /// Called between the steps that build the disks and every `POLL` while the host waits
     /// on the VMM or the guest. `false` stops the row.
     fn tick(&self) -> bool;
-    /// The VMM now runs as the leader of its own process group, `pid`. Called once per row.
+    /// A process now runs as the leader of its own process group, `pid`.
+    /// Called once for each such group. `run_row` here starts one, the VMM. The box's level 1
+    /// backend starts up to two for one attempt at a row: the self-test's bubblewrap, then
+    /// the payload's.
     fn started(&self, _pid: u32) {}
     /// The VMM's group is killed and its leader reaped, after `cpu_seconds` of user and system
-    /// time: its threads and the children it reaped. Called once for each `started`.
+    /// time: its threads and the children it reaped. `run_row` here calls it once for each
+    /// `started`; the box's level 0 and level 1 backends never call it.
     fn reaped(&self, _cpu_seconds: f64) {}
 }
 
