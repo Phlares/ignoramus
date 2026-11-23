@@ -31,13 +31,14 @@ comment. Every comment emails everyone on the issue.
 ## If I invite you to send a pull request
 
 1. Work against the accepted issue. One issue per pull request; keep it small.
-2. Install Rust (stable, and 1.89 for the minimum version) and `pre-commit`.
+2. Install Rust (stable, and 1.89 for the minimum version), `pre-commit` and
+   `uv`.
 3. Write a failing test first, then the code that makes it pass.
-4. Run the checks before you push:
+4. Run the checks before you push. CI runs the same list, `gate.toml`:
    ```
-   cargo test --locked
-   pre-commit run --all-files
+   uvx --from git+https://github.com/Phlares/workflows@v1.11.0 gate
    ```
+   The last line it prints is the result. Paste it into the pull request.
 5. Fill in the pull request template. Pull requests are not the place to
    design a feature; that happens on the issue.
 
