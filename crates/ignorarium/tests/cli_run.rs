@@ -4,7 +4,7 @@ mod common;
 use assert_cmd::Command;
 use common::{
     Lab, bin, edited, fake_binary, kind_of, lab, no_level1, plain, reformat, register_study,
-    rewrite_register, sign_session_start, status, text, with_payload,
+    rewrite_register, sign_session_start, status, text, wait_for_row_file, with_payload,
 };
 use ignorarium::backend::level2::Level2;
 use ignorarium::backend::{Backend, Probe};
@@ -524,22 +524,6 @@ fn start_run(lab: &Lab, id: &str, env_args: &[&str]) -> std::process::Child {
         .unwrap()
 }
 
-/// The box's row file, once row 0 of the study at `dir` runs.
-fn row_0_file(dir: &std::path::Path) -> Value {
-    let t = std::time::Instant::now();
-    loop {
-        let row = std::fs::read(dir.join("run/row.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-            .filter(|_| dir.join("run/rows/0/out/started").exists());
-        if let Some(row) = row {
-            return row;
-        }
-        assert!(t.elapsed() < Duration::from_secs(20), "row 0 never started");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
 /// The box's exit status and stderr, or a panic when it runs on past 10 s.
 fn ended(mut child: std::process::Child) -> (std::process::ExitStatus, String) {
     let t = std::time::Instant::now();
@@ -588,7 +572,7 @@ fn a_signal_pauses_the_run(sig: &str, times: usize) {
     let id = "sig";
     let dir = with_payload(&lab, id, SLEEPY_ROW_0);
     let child = start_run(&lab, id, &[]);
-    let row = row_0_file(&dir);
+    let row = wait_for_row_file(&dir, 0);
     for _ in 0..times {
         send(sig, child.id());
     }
@@ -640,7 +624,7 @@ fn sighup_kills_the_row_records_its_spend_and_pauses() {
 fn killed_in_row_0(lab: &Lab, id: &str) {
     let dir = with_payload(lab, id, SLEEPY_ROW_0);
     let mut child = start_run(lab, id, &[]);
-    let row = row_0_file(&dir);
+    let row = wait_for_row_file(&dir, 0);
     child.kill().unwrap();
     child.wait().unwrap();
     // The row's group outlives its parent; end it.
@@ -912,7 +896,7 @@ fn stop_sends_its_request_before_it_reads_a_torn_log() {
     let id = "torn";
     let dir = with_payload(&lab, id, SLEEPY_ROW_0);
     let child = start_run(&lab, id, &[]);
-    let row = row_0_file(&dir);
+    let row = wait_for_row_file(&dir, 0);
     // A torn last line, as a crash in mid-write leaves it.
     let log = dir.join("records.jsonl");
     let bytes = std::fs::read(&log).unwrap();
@@ -963,7 +947,13 @@ fn a_box_started_with_sighup_ignored_runs_on_through_a_sighup() {
     let dir = with_payload(&lab, id, SLOW_ROW_0);
     // As `nohup` starts it.
     let child = start_run(&lab, id, &["--ignore-signal=HUP"]);
-    row_0_file(&dir);
+    // Only the mark matters here. Row 0 ends a second after it, and a wait for the row
+    // file of row 0 would fail once the row is over.
+    let t = std::time::Instant::now();
+    while !dir.join("run/rows/0/out/started").exists() {
+        assert!(t.elapsed() < Duration::from_secs(20), "row 0 never started");
+        std::thread::sleep(Duration::from_millis(5));
+    }
     send("HUP", child.id());
     let (code, stderr) = ended(child);
     assert_eq!(code.code(), Some(0), "{code:?} {stderr}");
@@ -1450,7 +1440,7 @@ fn status_telemetry_works_while_a_run_holds_the_lock() {
     let id = "tl";
     let dir = with_payload(&lab, id, SLEEPY_ROW_0);
     let mut child = start_run(&lab, id, &[]);
-    row_0_file(&dir);
+    wait_for_row_file(&dir, 0);
     let a = bin(&lab).args(["status", id, "--telemetry"]).assert();
     child.kill().unwrap();
     child.wait().unwrap();

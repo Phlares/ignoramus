@@ -700,9 +700,16 @@ fn a_killed_box_takes_its_sandbox_with_it() {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+    // For the failure message: the row file as the dead box left it, and the stat of the
+    // pid this test took from its own read of the file.
+    let left = std::fs::read_to_string(lab.home.study_dir("dead1").join("run/row.json"));
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"));
     let o = control::end_orphan(&lab.home, "dead1").unwrap().unwrap();
     assert_eq!(o.row, 0);
-    assert_eq!(o.note, "row leader gone; group not killed");
+    assert_eq!(
+        o.note, "row leader gone; group not killed",
+        "the test read pid {pid}, now with stat {stat:?}; the box left {left:?}"
+    );
 }
 
 #[test]

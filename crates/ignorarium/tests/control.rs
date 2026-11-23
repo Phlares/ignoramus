@@ -2,7 +2,7 @@ mod common;
 
 use common::{
     Lab, PAYLOAD, boxed_study, events_of, indices, kill_box_at, kind_of, lab, lines_of, named,
-    plain, proc_state, register_study, rows_of, with_payload,
+    plain, proc_state, register_study, rows_of, wait_for_row_file, with_payload,
 };
 use ignorarium::backend::level0::Level0;
 use ignorarium::backend::{Backend, Exit, Probe, RowJob, RowOutcome, Watch};
@@ -852,6 +852,30 @@ fn kill_the_box_at(lab: &Lab, id: &str, row: u64) -> Value {
         proc_state(pid)
     );
     file
+}
+
+#[test]
+fn the_wait_for_a_row_file_skips_one_whose_leader_is_reaped() {
+    let d = tempfile::TempDir::new().unwrap();
+    // A shell stands in for the box. It writes a row file that names a reaped process, then
+    // marks row 0 started. After 0.2 s it puts a row file in place that names the shell
+    // itself, which lives on as `sleep`.
+    let script = r#"cd "$1" && mkdir -p run/rows/0/out && cd run || exit 1
+true & wait $!
+printf '{"row":0,"pid":%s}' $! > row.json
+: > rows/0/out/started
+sleep 0.2
+printf '{"row":0,"pid":%s}' $$ > row.new && mv row.new row.json
+exec sleep 60"#;
+    let mut boxed = Command::new("sh")
+        .args(["-c", script, "sh"])
+        .arg(d.path())
+        .spawn()
+        .unwrap();
+    let file = wait_for_row_file(d.path(), 0);
+    boxed.kill().unwrap();
+    boxed.wait().unwrap();
+    assert_eq!(file["pid"], boxed.id());
 }
 
 #[test]

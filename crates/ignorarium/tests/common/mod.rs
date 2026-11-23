@@ -360,22 +360,30 @@ pub fn proc_state(pid: u64) -> Option<char> {
     stat.rsplit_once(')')?.1.trim_start().chars().next()
 }
 
-/// Wait until the box's row file names row `row` and that row has written `started` to its
-/// output, then return the file.
+/// Wait until row `row` has `started` in its output and the box's row file names that row
+/// with a leader the box has not reaped, then return the file. For rows at levels 0 and 1.
+///
+/// The box replaces the file for each process group an attempt at the row starts, after
+/// that group is running. At level 1 an attempt starts the self-test's bubblewrap, reaps it,
+/// then starts the payload's bubblewrap. So the file can name a reaped leader while the
+/// payload already runs. `started` is checked first: once it is there, the one leader of
+/// the attempt that is not reaped is the leader of the group that runs the payload.
 pub fn wait_for_row_file(dir: &Path, row: u64) -> serde_json::Value {
     let t = std::time::Instant::now();
     loop {
-        let file = std::fs::read(dir.join("run/row.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
-        if let Some(f) = file.filter(|f| f["row"] == row)
-            && dir.join(format!("run/rows/{row}/out/started")).exists()
+        let file = || -> Option<serde_json::Value> {
+            let bytes = std::fs::read(dir.join("run/row.json")).ok()?;
+            let f: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+            (f["row"] == row && proc_state(f["pid"].as_u64()?).is_some()).then_some(f)
+        };
+        if dir.join(format!("run/rows/{row}/out/started")).exists()
+            && let Some(f) = file()
         {
             return f;
         }
         assert!(
             t.elapsed() < std::time::Duration::from_secs(20),
-            "row {row} never started"
+            "row {row}: no `started` mark, or no row file whose leader is in /proc"
         );
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
@@ -392,7 +400,7 @@ pub fn boxed_study() -> Option<(Home, String)> {
 }
 
 /// Run study `id` in a child box, this binary's test `child`, kill the box with SIGKILL once
-/// row `row` runs, and return the row file it left.
+/// row `row` runs, and return that row's row file.
 pub fn kill_box_at(lab: &Lab, child: &str, id: &str, row: u64) -> serde_json::Value {
     use std::process::Stdio;
     let mut boxed = std::process::Command::new(std::env::current_exe().unwrap())
