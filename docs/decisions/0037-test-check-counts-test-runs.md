@@ -22,13 +22,13 @@ Why:
 - One list, because two lists drift apart. Before this record `CONTRIBUTING.md` named `pre-commit run --all-files`, and CI ran that command with `--hook-stage manual`, which adds the `gitleaks-history` hook.
 - The exit code is not enough. In the exit trial (Evidence) a test binary ended with exit code 0 after its `running` line, and the `cargo test` call exited 0. The pair read 102 against 101, and the check failed.
 - Langfuse states the rule for the cases of an experiment: "A missing case is not a passing case" (Sources). We apply it to a test run without a `test result:` line.
-- A check that fails a passing call is a false alert. In an interview study of 18 machine-learning engineers, false-positive alerts were the most commonly discussed pain point, and a surplus of them led to silenced alerts (Sources). We expect the same of a CI check. So the pair must hold on every passing call. The doc-test trial (Evidence) rules out cargo's target lines.
+- A check that fails a passing call is a false alert. In an interview study of 18 machine-learning engineers, false-positive alerts were the most commonly discussed pain point, and a surplus of them led to silenced alerts (Sources). We expect the same of a CI check. So the pair must hold on every passing call under the toolchains CI runs. The doc-test trial (Evidence) rules out cargo's target lines.
 - The counts in the result line come from the output. The alternative, a test count typed into the pull request, can be wrong or stale.
 
 Case against:
 
 - Cargo's target lines were the first choice. They count what cargo started, so a target that starts and prints nothing would show. We rejected them after the doc-test trial: a passing call printed 101 target lines and 102 `test result:` lines. From the 2024 edition rustdoc combines compatible doc-tests into one binary and leaves a `compile_fail` test out of it (Sources). The trial showed one test run for the combined group and one for the `compile_fail` test. Every crate here is edition 2024.
-- The exit code already fails a `cargo test` call in which a test fails. The pair adds two cases with exit code 0: a test run that starts and does not report, and a call that prints no test run at all. Neither case is known in this repo.
+- The exit code already fails a `cargo test` call in which a test fails. With exit code 0 the pair fails when the counts differ or both are 0. The cases we expect are two: a test run that starts and does not report, and a call that prints no test run at all. Neither case is known in this repo.
 - The counts invite a wrong reading. A reader can take `101=101` as proof that every test ran, so the result line can make a pull request look better tested than it is (Limits).
 - The pair matches text that the toolchain prints. A toolchain that changes either line fails the check on a passing call until the pair changes, and the `test (stable)` job moves to a new toolchain with no commit here. We accept that one case: it fails every pull request from that day on, whatever the pull request changes.
 
@@ -47,7 +47,7 @@ What failure this prevents: a `cargo test` call that exits 0 after a test binary
 
 Constants:
 
-- `count` = `['^running \d+ tests?$', '^test result: ']` (`gate.toml`, check `test`). Basis: the two lines one test run prints. In the CI run of #133 a full call printed 101 of each under rustc 1.89.0 and under rustc 1.100.0, and the doc-test trial printed 102 of each. Rule for change: when a toolchain changes either line. The new pair must hold on a full passing call and on the doc-test trial, and must fail on the exit trial. This record then gets an Amended line.
+- `count` = `['^running \d+ tests?$', '^test result: ']` (`gate.toml`, check `test`). Basis: the two lines one test run prints. A full call printed 101 of each in the CI run of #133, under rustc 1.89.0 and under rustc 1.100.0. The doc-test trial, run on a PC, printed 102 of each. Rule for change: when a toolchain changes either line. The new pair must hold on a full passing call and on the doc-test trial, and must fail on the exit trial. This record then gets an Amended line.
 
 Sources:
 
