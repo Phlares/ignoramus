@@ -128,8 +128,8 @@ impl ControlFile {
     }
 }
 
-/// An exclusive lock on `file` until the guard drops; `None` when `wait` is false and
-/// another handle holds it.
+/// Lock `file` exclusively until the guard drops. With `wait`, block until the lock is
+/// free; without it, return `None` while another open file holds the lock.
 fn hold(file: &File, wait: bool) -> io::Result<Option<Held<'_>>> {
     if wait {
         file.lock()?;
@@ -147,7 +147,8 @@ struct Held<'a>(&'a File);
 
 impl Drop for Held<'_> {
     // Closing the file is not enough: a child forked by another thread shares this open
-    // file until it execs, and its copy keeps the lock until then.
+    // file until it execs. Unlock frees the lock for every copy; close frees it only at
+    // the last copy.
     fn drop(&mut self) {
         let _ = self.0.unlock();
     }
@@ -720,7 +721,8 @@ mod tests {
         let d = tempfile::TempDir::new().unwrap();
         let path = d.path().join("control");
         let file = open_log(&path).unwrap();
-        // A child that another thread forks shares the open file until it execs.
+        // `try_clone` stands in for a forked child: both copies share one open file, so
+        // they share one lock.
         let child = file.try_clone().unwrap();
         drop(hold(&file, true).unwrap());
         drop(file);
