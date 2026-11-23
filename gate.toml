@@ -1,0 +1,11 @@
+[[check]]
+name = "lint"
+# The manual stage adds gitleaks-history, which scans the checkout.
+run = "pre-commit run --all-files --hook-stage manual --show-diff-on-failure"
+
+[[check]]
+name = "test"
+run = "cargo test --locked"
+# Every harness run that starts must print a result line. Cargo's target
+# lines do not pair up: one Doc-tests line can hold two runs.
+count = ['^running \d+ tests?$', '^test result: ']
