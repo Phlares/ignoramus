@@ -383,7 +383,7 @@ pub fn wait_for_row_file(dir: &Path, row: u64) -> serde_json::Value {
         }
         assert!(
             t.elapsed() < std::time::Duration::from_secs(20),
-            "row {row} never started"
+            "no row file for a running row {row}"
         );
         std::thread::sleep(std::time::Duration::from_millis(5));
     }

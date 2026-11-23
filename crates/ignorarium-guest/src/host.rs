@@ -59,7 +59,7 @@ pub trait Watch {
     fn started(&self, _pid: u32) {}
     /// The VMM's group is killed and its leader reaped, after `cpu_seconds` of user and system
     /// time: its threads and the children it reaped. `run_row` here calls it once for each
-    /// `started`; the box's level 0 and level 1 backends never call it.
+    /// `started`, unless the reap fails; the box's level 0 and level 1 backends never call it.
     fn reaped(&self, _cpu_seconds: f64) {}
 }
 

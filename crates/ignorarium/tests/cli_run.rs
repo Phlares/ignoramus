@@ -947,7 +947,13 @@ fn a_box_started_with_sighup_ignored_runs_on_through_a_sighup() {
     let dir = with_payload(&lab, id, SLOW_ROW_0);
     // As `nohup` starts it.
     let child = start_run(&lab, id, &["--ignore-signal=HUP"]);
-    wait_for_row_file(&dir, 0);
+    // Only the mark matters here. Row 0 ends a second after it, and a wait for the row
+    // file of row 0 would fail once the row is over.
+    let t = std::time::Instant::now();
+    while !dir.join("run/rows/0/out/started").exists() {
+        assert!(t.elapsed() < Duration::from_secs(20), "row 0 never started");
+        std::thread::sleep(Duration::from_millis(5));
+    }
     send("HUP", child.id());
     let (code, stderr) = ended(child);
     assert_eq!(code.code(), Some(0), "{code:?} {stderr}");
