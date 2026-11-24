@@ -50,7 +50,7 @@ impl Code {
                 "The box did the work and the answer is no. Examples: `check` found an error in the plan; the study is not registered, not finished, paused or stopped; `verify` found a fault."
             }
             Code::Fault => {
-                "The box could not do the work. Examples: a command line it cannot parse; a file or key it cannot read or write. The notes below name one exception."
+                "The box could not do the work. Examples: a command line it cannot parse; a file or key it cannot read or write. The notes below name the exceptions."
             }
             Code::Pending => {
                 "Only `check` and `review`: the plan has no error, and at least one value waits on a study that has not finished."
@@ -81,9 +81,12 @@ pub fn page() -> String {
          | Code | Name | Meaning |\n|---|---|---|\n{rows}\n\
          ## Notes\n\n\
          - `--help` and `--version` exit 0.\n\
-         - A study's record log that fails verification (a torn line, a bad hash, signature or \
-         chain, a newer format), or that the box cannot read to its end, ends `report` and `verify --study` with 1, and `status`, `run`, \
-         `resume`, `pause`, `stop` and `stamp --request` with 2.\n"
+         - A study's record log that fails verification (a torn line, a bad hash, a newer \
+         format; by the same code path a bad signature or chain), or that the box opens but \
+         cannot read to its end, ends `report` and `verify --study` with 1, and `status`, `run`, \
+         `resume`, `pause`, `stop` and `stamp --request` with 2. A log that `report` cannot \
+         open ends it with 2.\n\
+         - `verify` exits 1 when it cannot read or verify the plan log or the test log.\n"
     )
 }
 

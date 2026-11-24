@@ -2594,17 +2594,31 @@ fn a_study_verb_refuses_a_newer_format() {
 }
 
 #[test]
-fn a_study_verb_has_these_codes_on_a_torn_log() {
-    // A torn log in one study refuses the next registration, so each verb gets its own lab.
-    for (verb, code) in study_verbs("torn") {
-        let lab = lab();
-        let log = plain(&lab, "torn").join("records.jsonl");
-        let bytes = std::fs::read(&log).unwrap();
-        std::fs::write(&log, &bytes[..bytes.len() - 10]).unwrap();
-        let a = bin_at(&lab, "torn").args(&verb).assert();
-        let said = err(&a);
-        assert_eq!(a.get_output().status.code(), Some(code), "{verb:?}: {said}");
-        assert!(said.contains("not a whole record"), "{verb:?}: {said}");
+fn a_study_verb_has_these_codes_on_a_torn_log_and_on_a_bad_hash() {
+    let torn = |b: Vec<u8>| b[..b.len() - 10].to_vec();
+    // The first record's stored hash with its first hex digit changed.
+    let bad_hash = |b: Vec<u8>| {
+        let at = br#"{"hash":""#.len();
+        let mut b = b;
+        b[at] = if b[at] == b'0' { b'1' } else { b'0' };
+        b
+    };
+    let damages: [(&str, &dyn Fn(Vec<u8>) -> Vec<u8>); 2] = [
+        ("not a whole record", &torn),
+        ("hash does not match", &bad_hash),
+    ];
+    for (said_then, damage) in damages {
+        // A damaged log in one study refuses the next registration, so each verb gets its
+        // own lab.
+        for (verb, code) in study_verbs("torn") {
+            let lab = lab();
+            let log = plain(&lab, "torn").join("records.jsonl");
+            std::fs::write(&log, damage(std::fs::read(&log).unwrap())).unwrap();
+            let a = bin_at(&lab, "torn").args(&verb).assert();
+            let said = err(&a);
+            assert_eq!(a.get_output().status.code(), Some(code), "{verb:?}: {said}");
+            assert!(said.contains(said_then), "{verb:?}: {said}");
+        }
     }
 }
 
