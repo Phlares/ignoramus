@@ -99,6 +99,7 @@ fn card_merges_signed_and_file_rows() {
         .assert()
         .success();
     let r: Value = serde_json::from_str(&text(&a)).unwrap();
+    common::schema::valid("report", &r);
     let hash = ignorarium::canon::sha256_hex(FILE.as_bytes());
     assert_eq!(
         r["deviations"],
@@ -126,6 +127,7 @@ fn card_without_a_file_has_only_signed_rows() {
         .assert()
         .success();
     let r: Value = serde_json::from_str(&text(&a)).unwrap();
+    common::schema::valid("report", &r);
     assert_eq!(r["deviations"].as_array().unwrap().len(), 1);
     assert_eq!(r["deviations"][0]["mark"], "signed");
 }
@@ -186,6 +188,7 @@ fn card_includes_recorded_rows() {
         .assert()
         .success();
     let r: Value = serde_json::from_str(&text(&a)).unwrap();
+    common::schema::valid("report", &r);
     let marks: Vec<&str> = (r["deviations"].as_array().unwrap().iter())
         .map(|d| d["mark"].as_str().unwrap())
         .collect();

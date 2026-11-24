@@ -3,6 +3,7 @@ mod common;
 
 use ignorarium::cli::schema;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 
 fn guide() -> Value {
     let a = common::bin(&common::lab())
@@ -119,4 +120,33 @@ fn status_telemetry_json_fits_its_schema_before_and_after_the_rows() {
         .assert()
         .success();
     assert_ne!(common::telemetry(&lab, "s")["telemetry"]["rows"], 0);
+}
+
+#[test]
+fn every_output_has_its_file_and_every_file_has_its_output() {
+    let want: BTreeSet<String> = (schema::OUTPUTS.iter())
+        .map(|(name, n)| format!("{name}.v{n}.schema.json"))
+        .chain(["README.md".to_string()])
+        .collect();
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/schemas");
+    let have: BTreeSet<String> = (std::fs::read_dir(dir).unwrap())
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(have, want);
+    assert_eq!(schema::OUTPUTS.len(), 5);
+}
+
+#[test]
+fn report_json_fits_its_schema() {
+    let lab = common::lab();
+    common::plain(&lab, "s");
+    (common::bin_at(&lab, "s").args(["run", "s"]))
+        .assert()
+        .code(0);
+    let a = (common::bin(&lab).args(["report", "s", "--json"]))
+        .assert()
+        .success();
+    let v: Value = serde_json::from_str(&common::text(&a)).unwrap();
+    assert_eq!(v["card_version"], ignorarium::card::CARD_VERSION);
+    common::schema::valid("report", &v);
 }

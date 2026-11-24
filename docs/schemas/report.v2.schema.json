@@ -1,0 +1,975 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ignorarium report <id> --json",
+  "description": "Card::json(): serde_json::to_string_pretty of struct Card (crates/ignorarium/src/card/mod.rs), card_version 2.",
+  "type": "object",
+  "properties": {
+    "card_version": { "const": 2 },
+    "study": { "type": "string" },
+    "finished_at": { "type": "string" },
+    "records": { "type": "integer", "minimum": 0 },
+    "opened": {
+      "type": "object",
+      "properties": {
+        "seq": { "type": "integer", "minimum": 0 },
+        "ts": { "type": "string" }
+      },
+      "required": ["seq", "ts"]
+    },
+    "hypotheses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "hypothesis": { "type": "string" },
+          "verdict": { "type": "string" },
+          "basis": { "type": "string" },
+          "e_value": { "type": ["number", "null"] },
+          "level": { "type": ["number", "null"] },
+          "reason": { "type": ["string", "null"] },
+          "clipped": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "stratum": { "type": "string" },
+                    "below": { "type": "integer", "minimum": 0 },
+                    "above": { "type": "integer", "minimum": 0 },
+                    "units": { "type": "integer", "minimum": 0 }
+                  },
+                  "required": ["stratum", "below", "above", "units"]
+                }
+              },
+              { "type": "null" }
+            ]
+          }
+        },
+        "required": ["hypothesis", "verdict", "basis", "e_value", "level", "reason", "clipped"]
+      }
+    },
+    "children": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "child": { "type": "string" },
+          "parent": { "type": "string" },
+          "operator": { "type": "string" },
+          "value": { "description": "Any JSON value: the operator's value as the child_estimate record holds it." },
+          "outcome": { "type": "string" },
+          "clusters": { "type": "integer", "minimum": 0 },
+          "units": { "type": "integer", "minimum": 0 },
+          "mean": { "type": "number" },
+          "repeats": { "type": "integer", "minimum": 0 },
+          "stopped": { "type": "boolean" }
+        },
+        "required": ["child", "parent", "operator", "value", "outcome", "clusters", "units", "mean", "repeats", "stopped"]
+      }
+    },
+    "family": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "properties": {
+            "root": { "type": "string" },
+            "members": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "study": { "type": "string" },
+                  "state": { "enum": ["not registered", "not finished", "finished"] },
+                  "finished_at": { "type": ["string", "null"] },
+                  "first_opened": { "type": ["string", "null"] },
+                  "before": { "type": ["boolean", "null"] }
+                },
+                "required": ["study", "state", "finished_at", "first_opened", "before"]
+              }
+            }
+          },
+          "required": ["root", "members"]
+        }
+      ]
+    },
+    "deviations": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "mark": { "const": "signed" },
+              "from": { "type": "string" },
+              "reason": { "type": "string" },
+              "timing": { "type": "string" },
+              "differs": { "type": "array", "items": { "type": "string" } }
+            },
+            "required": ["mark", "from", "reason", "timing", "differs"]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "mark": { "const": "recorded" },
+              "kind": { "type": "string" },
+              "reason": { "type": "string" },
+              "timing": { "$ref": "#/$defs/Timing" },
+              "original": { "type": "string" },
+              "justification": { "type": "string" },
+              "impact": { "type": "string" },
+              "sha256": { "type": "string" }
+            },
+            "required": ["mark", "kind", "reason", "timing", "original", "justification", "impact", "sha256"]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "mark": { "const": "unsigned" },
+              "entry": { "enum": ["deviation", "unregistered"] },
+              "subject": { "type": "string" },
+              "reason": { "type": "string" },
+              "timing": { "$ref": "#/$defs/Timing" },
+              "original": { "type": ["string", "null"] },
+              "justification": { "type": ["string", "null"] },
+              "impact": { "type": ["string", "null"] },
+              "source": { "type": "string" },
+              "sha256": { "type": "string" }
+            },
+            "required": ["mark", "entry", "subject", "reason", "timing", "original", "justification", "impact", "source", "sha256"]
+          }
+        ]
+      }
+    },
+    "header": {
+      "type": "object",
+      "properties": {
+        "mode": { "enum": ["exploratory", "confirmatory"] },
+        "blind": { "type": "boolean" },
+        "spec_hash": { "type": "string" },
+        "registered_at": { "type": "string" },
+        "stamps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "seq": { "type": "integer", "minimum": 0 },
+              "stamped_at": { "type": "string" },
+              "authority": { "type": ["string", "null"] },
+              "head_seq": { "type": ["integer", "null"], "minimum": 0 },
+              "results": { "type": "boolean" },
+              "key": { "type": "boolean" },
+              "signatures": { "type": "boolean" },
+              "file_sha256": { "type": "string" },
+              "reply_sha256": { "type": "string" },
+              "flag": { "type": ["string", "null"] }
+            },
+            "required": ["seq", "stamped_at", "authority", "head_seq", "results", "key", "signatures", "file_sha256", "reply_sha256", "flag"]
+          }
+        },
+        "ended": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "state": { "const": "recorded" },
+                "value": {
+                  "type": "object",
+                  "properties": {
+                    "end": { "enum": ["rows", "resize-stop", "stop"] },
+                    "ended_at": { "type": "string" },
+                    "seq": { "type": "integer", "minimum": 0 },
+                    "hash": { "type": "string" }
+                  },
+                  "required": ["end", "ended_at", "seq", "hash"]
+                }
+              },
+              "required": ["state", "value"]
+            },
+            { "$ref": "#/$defs/FieldMissing" },
+            { "$ref": "#/$defs/FieldNotApplicable" }
+          ]
+        },
+        "population": { "$ref": "#/$defs/FieldString" }
+      },
+      "required": ["mode", "blind", "spec_hash", "registered_at", "stamps", "ended", "population"]
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "hypothesis": { "type": "string" },
+          "statement": { "type": "string" },
+          "outcome": { "type": "string" },
+          "strata": { "type": "array", "items": { "type": "string" } },
+          "claim": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": { "below": { "type": "number" } },
+                "required": ["below"]
+              },
+              {
+                "type": "object",
+                "properties": { "above": { "type": "number" } },
+                "required": ["above"]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "within": {
+                    "type": "array",
+                    "prefixItems": [{ "type": "number" }, { "type": "number" }],
+                    "items": false,
+                    "minItems": 2
+                  }
+                },
+                "required": ["within"]
+              },
+              { "type": "null" }
+            ]
+          },
+          "statistic": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "mean": {
+                    "type": "array",
+                    "prefixItems": [{ "type": "number" }, { "type": "number" }],
+                    "items": false,
+                    "minItems": 2
+                  }
+                },
+                "required": ["mean"]
+              },
+              {
+                "type": "object",
+                "properties": { "quantile": { "type": "number" } },
+                "required": ["quantile"]
+              },
+              { "type": "null" }
+            ]
+          },
+          "level": { "type": ["number", "null"] },
+          "pass_e_value": {
+            "description": "1 / level; null when level is null, or when level is 0 and the quotient is infinite.",
+            "type": ["number", "null"]
+          }
+        },
+        "required": ["hypothesis", "statement", "outcome", "strata", "claim", "statistic", "level", "pass_e_value"]
+      }
+    },
+    "pick": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "properties": {
+            "selected": { "type": "string" },
+            "rule": { "enum": ["best-mean"] },
+            "metric": { "type": "string" },
+            "candidates": { "type": "array", "items": { "type": "string" } },
+            "complete_units": { "type": "integer", "minimum": 0 }
+          },
+          "required": ["selected", "rule", "metric", "candidates", "complete_units"]
+        }
+      ]
+    },
+    "verdicts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "hypothesis": { "type": "string" },
+          "display": { "type": "string" },
+          "label": { "type": "string" }
+        },
+        "required": ["hypothesis", "display", "label"]
+      }
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "hypothesis": { "type": "string" },
+          "stratum": { "type": "string" },
+          "outcome": { "type": "string" },
+          "estimate": { "type": "number" },
+          "clusters": { "type": "integer", "minimum": 0 },
+          "units": { "type": "integer", "minimum": 0 },
+          "percent_change": {
+            "description": "exp(estimate) - 1; null when the outcome is not a log ratio, or when the value overflows.",
+            "type": ["number", "null"]
+          },
+          "e_value": { "type": ["number", "null"] },
+          "intervals": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "stratum": { "type": "string" },
+                "side": { "type": "string" },
+                "margin": { "type": ["number", "null"] },
+                "estimate": {
+                  "description": "A mean of cluster observations; null if the division is not finite.",
+                  "type": ["number", "null"]
+                },
+                "bound": { "type": ["number", "null"] },
+                "method": { "type": "string" },
+                "grid": {
+                  "type": "object",
+                  "properties": {
+                    "from": {
+                      "description": "Computed from estimate; null if not finite.",
+                      "type": ["number", "null"]
+                    },
+                    "to": { "type": "number" },
+                    "step": { "type": "number" }
+                  },
+                  "required": ["from", "to", "step"]
+                },
+                "contiguous": { "type": "boolean" },
+                "registered": { "type": "boolean" }
+              },
+              "required": ["stratum", "side", "margin", "estimate", "bound", "method", "grid", "contiguous", "registered"]
+            }
+          },
+          "note": { "type": ["string", "null"] },
+          "registered": { "type": "boolean" },
+          "descriptive": { "type": "boolean" }
+        },
+        "required": ["hypothesis", "stratum", "outcome", "estimate", "clusters", "units", "percent_change", "e_value", "intervals", "note", "registered", "descriptive"]
+      }
+    },
+    "sensitivity": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "hypothesis": { "type": "string" },
+          "power": { "type": "number" },
+          "target": { "type": "number" },
+          "power_at": { "type": "number" },
+          "curve": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "margin": { "type": "number" },
+                "points": { "type": "array", "items": { "$ref": "#/$defs/CurvePoint" } }
+              },
+              "required": ["margin", "points"]
+            }
+          },
+          "placed": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "margin": { "type": "number" },
+                "stratum": { "type": "string" },
+                "estimate": { "type": "number" },
+                "lower": { "anyOf": [{ "$ref": "#/$defs/CurvePoint" }, { "type": "null" }] },
+                "upper": { "anyOf": [{ "$ref": "#/$defs/CurvePoint" }, { "type": "null" }] }
+              },
+              "required": ["margin", "stratum", "estimate", "lower", "upper"]
+            }
+          }
+        },
+        "required": ["hypothesis", "power", "target", "power_at", "curve", "placed"]
+      }
+    },
+    "setup": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "count": { "type": "integer", "minimum": 0 },
+            "absent": { "type": "integer", "minimum": 0 },
+            "list_sha256": { "type": "string" },
+            "file": { "type": "string" }
+          },
+          "required": ["count", "absent", "list_sha256", "file"]
+        },
+        "data_grade": { "$ref": "#/$defs/FieldString" },
+        "instrument": {
+          "type": "object",
+          "properties": {
+            "payload": { "type": "string" },
+            "environment": { "type": "string" },
+            "inputs": {
+              "description": "Each input as [path, role, store digest].",
+              "type": "array",
+              "items": {
+                "type": "array",
+                "prefixItems": [{ "type": "string" }, { "type": "string" }, { "type": "string" }],
+                "items": false,
+                "minItems": 3
+              }
+            }
+          },
+          "required": ["payload", "environment", "inputs"]
+        },
+        "defaults": { "description": "Any JSON value: the register record's defaults." },
+        "resolved": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": { "type": "string" },
+              "study": { "type": "string" },
+              "records": { "type": "array", "items": { "type": "string" } },
+              "value": { "description": "Any JSON value." }
+            },
+            "required": ["path", "study", "records", "value"]
+          }
+        },
+        "seeds": {
+          "type": "object",
+          "properties": {
+            "root": { "$ref": "#/$defs/FieldString" },
+            "rule": { "type": "string" },
+            "rows": { "type": "integer", "minimum": 0 },
+            "derived": { "type": "integer", "minimum": 0 }
+          },
+          "required": ["root", "rule", "rows", "derived"]
+        },
+        "stack": {
+          "type": "object",
+          "properties": {
+            "isolation": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "state": { "const": "recorded" },
+                    "value": {
+                      "type": "array",
+                      "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+                    }
+                  },
+                  "required": ["state", "value"]
+                },
+                { "$ref": "#/$defs/FieldMissing" },
+                { "$ref": "#/$defs/FieldNotApplicable" }
+              ]
+            },
+            "launcher": { "$ref": "#/$defs/FieldVecString" },
+            "agent_sha256": { "$ref": "#/$defs/FieldVecString" },
+            "vcpus": { "$ref": "#/$defs/FieldVecU32" },
+            "vm_mem_mib": { "$ref": "#/$defs/FieldVecU32" },
+            "memory_cap_mib": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "state": { "const": "recorded" },
+                    "value": { "type": "integer", "minimum": 0 }
+                  },
+                  "required": ["state", "value"]
+                },
+                { "$ref": "#/$defs/FieldMissing" },
+                { "$ref": "#/$defs/FieldNotApplicable" }
+              ]
+            },
+            "unreadable": {
+              "description": "Per row key, the row records whose value does not parse.",
+              "type": "object",
+              "additionalProperties": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "required": ["isolation", "launcher", "agent_sha256", "vcpus", "vm_mem_mib", "memory_cap_mib", "unreadable"]
+        }
+      },
+      "required": ["data", "data_grade", "instrument", "defaults", "resolved", "seeds", "stack"]
+    },
+    "observations": {
+      "type": "object",
+      "properties": {
+        "rows": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string" },
+        "file": { "type": "string" },
+        "forced": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "hypothesis": { "type": "string" },
+              "reason": { "type": "string" }
+            },
+            "required": ["hypothesis", "reason"]
+          }
+        }
+      },
+      "required": ["rows", "sha256", "file", "forced"]
+    },
+    "surprises": {
+      "type": "object",
+      "properties": {
+        "failed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "row": { "type": ["integer", "null"], "minimum": 0 },
+              "stage": { "type": "string" },
+              "exit": { "type": "string" },
+              "reason": { "type": ["string", "null"] }
+            },
+            "required": ["row", "stage", "exit", "reason"]
+          }
+        },
+        "retried": { "type": "integer", "minimum": 0 },
+        "clipped": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "hypothesis": { "type": "string" },
+              "stratum": { "type": "string" },
+              "below": { "type": "integer", "minimum": 0 },
+              "above": { "type": "integer", "minimum": 0 },
+              "units": { "type": "integer", "minimum": 0 }
+            },
+            "required": ["hypothesis", "stratum", "below", "above", "units"]
+          }
+        },
+        "triggers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "e_value": { "type": "number" },
+              "threshold": { "type": "number" },
+              "fired": { "type": "boolean" },
+              "reason": { "type": ["string", "null"] },
+              "admitted": { "type": "array", "items": { "type": "string" } },
+              "skipped": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "child": { "type": "string" },
+                    "reason": { "type": "string" }
+                  },
+                  "required": ["child", "reason"]
+                }
+              }
+            },
+            "required": ["id", "e_value", "threshold", "fired", "reason", "admitted", "skipped"]
+          }
+        },
+        "box_versions": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["failed", "retried", "clipped", "triggers", "box_versions"]
+    },
+    "cost": {
+      "type": "object",
+      "properties": {
+        "cpu_seconds": { "type": "number" },
+        "wall_seconds": { "type": "number" },
+        "rows": { "type": "integer", "minimum": 0 },
+        "unknown_cpu": { "type": "integer", "minimum": 0 },
+        "usd": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "state": { "const": "recorded" },
+                "value": { "type": "number" }
+              },
+              "required": ["state", "value"]
+            },
+            { "$ref": "#/$defs/FieldMissing" },
+            { "$ref": "#/$defs/FieldNotApplicable" }
+          ]
+        },
+        "budget": {
+          "type": "object",
+          "properties": {
+            "cpu_hours": { "type": "number" },
+            "wall_hours": { "type": "number" },
+            "money_usd": { "type": "number" }
+          },
+          "required": ["cpu_hours", "wall_hours", "money_usd"]
+        },
+        "telemetry": {
+          "description": "telemetry::Totals. The keys cgroup and memory_peak_max come from the flattened process totals.",
+          "type": "object",
+          "properties": {
+            "rows": { "type": "integer", "minimum": 0 },
+            "recorded": { "type": "integer", "minimum": 0 },
+            "host_cpu": {
+              "type": "object",
+              "properties": {
+                "read": { "type": "integer", "minimum": 0 },
+                "unavailable": { "type": "integer", "minimum": 0 },
+                "value": { "type": "array", "items": { "type": "string" } }
+              },
+              "required": ["read", "unavailable", "value"]
+            },
+            "cpu_ticks": { "$ref": "#/$defs/SummedNumberMap" },
+            "cgroup": { "$ref": "#/$defs/SummedNumberMap" },
+            "memory_peak_max": { "type": ["integer", "null"], "minimum": 0 },
+            "machine": {
+              "description": "Absent when no row ran at level 2.",
+              "type": "object",
+              "properties": {
+                "cgroup": { "$ref": "#/$defs/SummedNumberMap" },
+                "memory_peak_max": { "type": ["integer", "null"], "minimum": 0 }
+              },
+              "required": ["cgroup", "memory_peak_max"]
+            }
+          },
+          "required": ["rows", "recorded", "host_cpu", "cpu_ticks", "cgroup", "memory_peak_max"]
+        }
+      },
+      "required": ["cpu_seconds", "wall_seconds", "rows", "unknown_cpu", "usd", "budget", "telemetry"]
+    },
+    "runs": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "stage": { "type": "string" },
+              "rows": { "type": "integer", "minimum": 0 }
+            },
+            "required": ["stage", "rows"]
+          }
+        },
+        "attempts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "row": { "type": ["integer", "null"], "minimum": 0 },
+              "kind": { "type": "string" },
+              "exit": { "type": ["string", "null"] },
+              "reason": { "type": ["string", "null"] },
+              "cpu_seconds": { "type": ["number", "null"] }
+            },
+            "required": ["row", "kind", "exit", "reason", "cpu_seconds"]
+          }
+        },
+        "sessions": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "state": { "const": "recorded" },
+                "value": { "type": "integer", "minimum": 0 }
+              },
+              "required": ["state", "value"]
+            },
+            { "$ref": "#/$defs/FieldMissing" },
+            { "$ref": "#/$defs/FieldNotApplicable" }
+          ]
+        },
+        "sessions_without_end": {
+          "description": "Absent when the log holds no session records.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "sessions_unreadable": {
+          "description": "Absent when the log holds no session records.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "stopped": { "type": ["string", "null"] },
+        "selftest": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "state": { "const": "recorded" },
+                "value": {
+                  "type": "object",
+                  "properties": {
+                    "passed": { "type": "integer", "minimum": 0 },
+                    "failed_rows": { "type": "integer", "minimum": 0 },
+                    "failed": {
+                      "description": "Per check name, the rows where it failed.",
+                      "type": "object",
+                      "additionalProperties": { "type": "integer", "minimum": 0 }
+                    },
+                    "level0": { "type": "integer", "minimum": 0 },
+                    "not_recorded": { "type": "integer", "minimum": 0 }
+                  },
+                  "required": ["passed", "failed_rows", "failed", "level0", "not_recorded"]
+                }
+              },
+              "required": ["state", "value"]
+            },
+            { "$ref": "#/$defs/FieldMissing" },
+            { "$ref": "#/$defs/FieldNotApplicable" }
+          ]
+        }
+      },
+      "required": ["ok", "attempts", "sessions", "stopped", "selftest"]
+    },
+    "outside": {
+      "type": "object",
+      "properties": {
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": { "type": "string" },
+              "sha256": { "type": ["string", "null"] },
+              "note": { "type": ["string", "null"] }
+            },
+            "required": ["path", "sha256", "note"]
+          }
+        },
+        "readings": { "type": "string" }
+      },
+      "required": ["files", "readings"]
+    },
+    "outside_source": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string" },
+            "commit": { "type": "string" }
+          },
+          "required": ["path", "commit"]
+        }
+      ]
+    },
+    "recipe": {
+      "type": "object",
+      "properties": {
+        "command": { "type": "string" },
+        "isolation_levels": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+        },
+        "requires": { "type": "array", "items": { "type": "string" } },
+        "box_binary_sha256": { "$ref": "#/$defs/FieldString" },
+        "box_version": { "$ref": "#/$defs/FieldString" },
+        "bundle_doi": { "$ref": "#/$defs/FieldString" },
+        "manifest": {
+          "type": "object",
+          "properties": {
+            "roots": { "type": "array", "items": { "type": "string" } },
+            "missing": { "type": "array", "items": { "type": "string" } },
+            "files": { "type": "integer", "minimum": 0 },
+            "list_sha256": { "type": "string" },
+            "in_folder": {
+              "type": "object",
+              "properties": {
+                "agrees": { "type": "boolean" },
+                "missing": { "type": "integer", "minimum": 0 },
+                "extra": { "type": "integer", "minimum": 0 },
+                "differ": { "type": "integer", "minimum": 0 }
+              },
+              "required": ["agrees", "missing", "extra", "differ"]
+            }
+          },
+          "required": ["roots", "missing", "files", "list_sha256", "in_folder"]
+        }
+      },
+      "required": ["command", "isolation_levels", "requires", "box_binary_sha256", "box_version", "bundle_doi", "manifest"]
+    },
+    "citation": {
+      "type": "object",
+      "properties": {
+        "bibtex": { "$ref": "#/$defs/FieldString" },
+        "cff": { "$ref": "#/$defs/FieldString" }
+      },
+      "required": ["bibtex", "cff"]
+    },
+    "builder": {
+      "type": "object",
+      "properties": {
+        "version": { "$ref": "#/$defs/FieldString" },
+        "binary_sha256": { "$ref": "#/$defs/FieldString" }
+      },
+      "required": ["version", "binary_sha256"]
+    },
+    "registered_box": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": { "const": "recorded" },
+            "value": {
+              "type": "object",
+              "properties": {
+                "rules_sha256": { "type": "string" },
+                "binary_sha256": {
+                  "description": "telemetry::Reading<String>: the hash, or the reason it could not be read.",
+                  "oneOf": [
+                    { "type": "string" },
+                    {
+                      "type": "object",
+                      "properties": { "unavailable": { "type": "string" } },
+                      "required": ["unavailable"]
+                    }
+                  ]
+                }
+              },
+              "required": ["rules_sha256", "binary_sha256"]
+            }
+          },
+          "required": ["state", "value"]
+        },
+        { "$ref": "#/$defs/FieldMissing" },
+        { "$ref": "#/$defs/FieldNotApplicable" }
+      ]
+    },
+    "replication": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": { "const": "recorded" },
+            "value": {
+              "type": "object",
+              "properties": {
+                "study": { "type": "string" },
+                "done": { "type": "string" },
+                "hypothesis": { "type": "string" },
+                "original_verdict": { "type": "string" },
+                "criterion": { "enum": ["verdict"] },
+                "result": { "type": "string" },
+                "same_estimate_key": { "type": "boolean" },
+                "same_payload": { "type": "boolean" }
+              },
+              "required": ["study", "done", "hypothesis", "original_verdict", "criterion", "result", "same_estimate_key", "same_payload"]
+            }
+          },
+          "required": ["state", "value"]
+        },
+        { "$ref": "#/$defs/FieldMissing" },
+        { "$ref": "#/$defs/FieldNotApplicable" }
+      ]
+    }
+  },
+  "required": [
+    "card_version", "study", "finished_at", "records", "opened", "hypotheses", "children",
+    "family", "deviations", "header", "claims", "pick", "verdicts", "results", "sensitivity",
+    "setup", "observations", "surprises", "cost", "runs", "outside", "outside_source",
+    "recipe", "citation", "builder", "registered_box", "replication"
+  ],
+  "$defs": {
+    "FieldMissing": {
+      "description": "Field<T>::Missing: no record holds the value; link names the study-folder file that does, if any.",
+      "type": "object",
+      "properties": {
+        "state": { "const": "missing" },
+        "link": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "properties": {
+                "path": { "type": "string" },
+                "sha256": { "type": "string" }
+              },
+              "required": ["path", "sha256"]
+            }
+          ]
+        }
+      },
+      "required": ["state", "link"]
+    },
+    "FieldNotApplicable": {
+      "description": "Field<T>::NotApplicable: the value has no meaning in this study.",
+      "type": "object",
+      "properties": {
+        "state": { "const": "not-applicable" }
+      },
+      "required": ["state"]
+    },
+    "FieldString": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": { "const": "recorded" },
+            "value": { "type": "string" }
+          },
+          "required": ["state", "value"]
+        },
+        { "$ref": "#/$defs/FieldMissing" },
+        { "$ref": "#/$defs/FieldNotApplicable" }
+      ]
+    },
+    "FieldVecString": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": { "const": "recorded" },
+            "value": { "type": "array", "items": { "type": "string" } }
+          },
+          "required": ["state", "value"]
+        },
+        { "$ref": "#/$defs/FieldMissing" },
+        { "$ref": "#/$defs/FieldNotApplicable" }
+      ]
+    },
+    "FieldVecU32": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": { "const": "recorded" },
+            "value": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+            }
+          },
+          "required": ["state", "value"]
+        },
+        { "$ref": "#/$defs/FieldMissing" },
+        { "$ref": "#/$defs/FieldNotApplicable" }
+      ]
+    },
+    "Timing": {
+      "description": "control::Timing, kebab-case.",
+      "enum": [
+        "before-collection",
+        "during-collection",
+        "after-collection-before-access",
+        "after-access-before-results",
+        "after-results"
+      ]
+    },
+    "CurvePoint": {
+      "type": "object",
+      "properties": {
+        "fraction": { "type": "number" },
+        "mean": { "type": "number" },
+        "power": { "type": "number" }
+      },
+      "required": ["fraction", "mean", "power"]
+    },
+    "SummedNumberMap": {
+      "description": "telemetry::Summed<BTreeMap<String, f64>>: rows read, rows with a reason, and the summed figures by name.",
+      "type": "object",
+      "properties": {
+        "read": { "type": "integer", "minimum": 0 },
+        "unavailable": { "type": "integer", "minimum": 0 },
+        "value": {
+          "type": "object",
+          "additionalProperties": { "type": "number" }
+        }
+      },
+      "required": ["read", "unavailable", "value"]
+    }
+  }
+}

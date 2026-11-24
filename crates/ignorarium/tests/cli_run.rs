@@ -2066,6 +2066,7 @@ fn a_run_study_reports_its_recorded_verdict() {
         .assert()
         .success();
     let r: Value = serde_json::from_str(&text(&a)).unwrap();
+    common::schema::valid("report", &r);
     let v = verdict_of(&lab, "told");
     let h = &r["hypotheses"][0];
     assert_eq!(h["hypothesis"], v.hypothesis);

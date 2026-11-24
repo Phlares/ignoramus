@@ -1554,7 +1554,9 @@ fn the_guide_names_members_in_check_and_register() {
 
 fn reported(lab: &Lab, id: &str) -> Value {
     let a = bin(lab).args(["report", id, "--json"]).assert().success();
-    serde_json::from_slice(&a.get_output().stdout).unwrap()
+    let v = serde_json::from_slice(&a.get_output().stdout).unwrap();
+    common::schema::valid("report", &v);
+    v
 }
 
 fn reported_text(lab: &Lab, id: &str) -> String {
