@@ -4,6 +4,7 @@ use crate::home::Home;
 use crate::rules;
 use crate::sys;
 use clap::{Parser, Subcommand};
+use exit::Code;
 use serde_json::{Value, json};
 use std::ffi::OsString;
 use std::io::{IsTerminal, Write};
@@ -12,6 +13,7 @@ use std::time::Instant;
 
 pub mod check;
 mod docs;
+pub mod exit;
 mod guide;
 mod history;
 mod import;
@@ -31,24 +33,24 @@ pub mod status;
 pub mod stop;
 mod verify;
 
-/// A verb failed. `code` is the exit code: 1 for a refusal, 2 for a usage or I/O error.
+/// A verb failed: refused, or could not do its work.
 #[derive(Debug)]
 pub struct CliError {
-    pub code: i32,
+    pub code: Code,
     pub msg: String,
 }
 
 impl CliError {
     pub fn refuse(msg: impl Into<String>) -> Self {
         CliError {
-            code: 1,
+            code: Code::Refused,
             msg: msg.into(),
         }
     }
 
     pub fn usage(msg: impl Into<String>) -> Self {
         CliError {
-            code: 2,
+            code: Code::Fault,
             msg: msg.into(),
         }
     }
@@ -58,7 +60,7 @@ impl CliError {
 /// and the plan log leaf index when it added one.
 #[derive(Debug)]
 pub struct Done {
-    pub code: i32,
+    pub code: Code,
     pub spec_hash: Option<String>,
     pub leaf: Option<u64>,
     /// Extra attributes for the verb's event.
@@ -67,7 +69,7 @@ pub struct Done {
 
 impl Done {
     /// A verb that read no spec and added no leaf.
-    pub fn exit(code: i32) -> Self {
+    pub fn exit(code: Code) -> Self {
         Done {
             code,
             spec_hash: None,
@@ -417,7 +419,7 @@ where
         Ok(c) => c,
         Err(e) => {
             let _ = e.print();
-            return e.exit_code();
+            return Code::of_parse(&e).number();
         }
     };
     let name = cli.verb.name();
@@ -466,7 +468,7 @@ where
         let attrs = end_attrs(&done, started);
         warn_on_err(write_event(log, &trace_id, &span_id, name, attrs));
     }
-    done.code
+    done.code.number()
 }
 
 fn warn_on_err(r: Result<(), String>) {
@@ -480,7 +482,7 @@ fn warn_on_err(r: Result<(), String>) {
 
 fn end_attrs(done: &Done, started: Instant) -> Value {
     let mut attrs = json!({
-        "exit": done.code,
+        "exit": done.code.number(),
         "duration_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         "peak_rss_kib": sys::peak_rss_kib(),
     });

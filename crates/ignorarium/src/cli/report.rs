@@ -1,5 +1,6 @@
 //! `report`: the verdicts of a finished study, with the clip counts of its mean claims.
 //! Appends one `opened` record, so a reader of the log sees that the results were read.
+use super::exit::Code;
 use super::{CliError, Ctx, Done, Run, located, not_registered, out};
 use crate::canon::sha256_hex;
 use crate::card::sidecar::{DATA_FILE, OBSERVATIONS_FILE, Sidecars};
@@ -318,7 +319,7 @@ fn run_card(ctx: &Ctx, id: &str, dir: &Path, folder: Option<&Path>) -> Run {
         flag_readings(&old, &card);
     }
     out(&format!("wrote the card of {id} to {}\n", dir.display()))?;
-    Ok(Done::exit(0))
+    Ok(Done::exit(Code::Done))
 }
 
 pub fn run(
@@ -357,5 +358,5 @@ pub fn run(
         _ => text(&report(ctx, id, folder)?),
     };
     out(&shown)?;
-    Ok(Done::exit(0))
+    Ok(Done::exit(Code::Done))
 }

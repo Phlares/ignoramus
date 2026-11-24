@@ -1,5 +1,6 @@
 //! `verify`: check the plan logs and, for one study, its record chain; or check a copy of a
 //! study's log with a public key alone.
+use super::exit::Code;
 use super::{CliError, Ctx, Done, Run, key, out};
 use crate::derived::{
     By, DONE, DoneRecord, OPENED, Register, STAMP, SessionStart, Stamp, first_done, sessions,
@@ -37,7 +38,7 @@ pub fn run(ctx: &Ctx, study: Option<&str>) -> Run {
     match &key {
         None if study.is_none() && ["planlog", "testlog"].iter().all(|n| empty(home, n)) => {
             out("nothing to verify: no box key and no log entries\n")?;
-            return Ok(Done::exit(0));
+            return Ok(Done::exit(Code::Done));
         }
         None => failed.push("no box key".to_string()),
         Some(k) => {
@@ -90,7 +91,7 @@ fn finish(check: StudyCheck) -> Result<Vec<String>, CliError> {
 /// Exit 0 when nothing failed; otherwise a refusal that lists every failure, escaped.
 fn fail_or_pass(failed: Vec<String>) -> Run {
     if failed.is_empty() {
-        Ok(Done::exit(0))
+        Ok(Done::exit(Code::Done))
     } else {
         let failed: Vec<String> = failed.iter().map(|f| printable(f)).collect();
         Err(CliError::refuse(format!(

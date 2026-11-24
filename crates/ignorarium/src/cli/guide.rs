@@ -1,4 +1,5 @@
 //! `guide`: the steps of a study, from `guide/steps.toml`.
+use super::exit::Code;
 use super::{CliError, Done, Run, out};
 use serde::{Deserialize, Serialize};
 
@@ -47,5 +48,5 @@ pub fn run(json: bool) -> Run {
             ))?;
         }
     }
-    Ok(Done::exit(0))
+    Ok(Done::exit(Code::Done))
 }

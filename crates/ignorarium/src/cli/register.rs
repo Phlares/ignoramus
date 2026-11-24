@@ -1,6 +1,7 @@
 //! `register`: a person approves a checked plan; the box stores it, its payload and its
 //! inputs, and logs it.
 use super::check::{self, Assessed, HomeRecords};
+use super::exit::Code;
 use super::{CliError, Ctx, Done, refusal};
 use crate::backend::output::file_digest;
 use crate::canon::to_canonical;
@@ -175,7 +176,7 @@ pub fn run_as(
         ..Done::exit(code)
     };
     if a.has_errors() {
-        return Ok(done(1, None));
+        return Ok(done(Code::Refused, None));
     }
     // `check` compares a confirmatory plan alone; a locked id registers as locked in any mode.
     if let Some(d) = rules::differs_from_lock(&a.value, &a.ctx) {
@@ -269,7 +270,7 @@ pub fn run_as(
         format!(", stream slot {}, level {}", a.slot, stream::shown(a.level))
     });
     writeln!(output, "registered {id}: leaf {leaf}{slot}").map_err(say)?;
-    Ok(done(0, Some(leaf)))
+    Ok(done(Code::Done, Some(leaf)))
 }
 
 /// The values the plan takes from other studies: for each hypothesis with a claim in a

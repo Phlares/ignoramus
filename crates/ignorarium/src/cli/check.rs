@@ -1,4 +1,5 @@
 //! `check`: load a spec, run every rule, and report. Shared with `review`.
+use super::exit::Code;
 use super::{CliError, Ctx, Done, Run, out};
 use crate::derived::{Alpha, Carried, Register};
 use crate::diag::{Diagnostic, Severity, printable, render_human};
@@ -145,14 +146,14 @@ impl Assessed {
             .collect()
     }
 
-    /// 1 with an error, 3 with no error and a value pending, else 0.
-    pub fn exit_code(&self) -> i32 {
+    /// `Refused` with an error, `Pending` with no error and a value pending, else `Done`.
+    pub fn exit_code(&self) -> Code {
         if self.has_errors() {
-            1
+            Code::Refused
         } else if !self.pending().is_empty() {
-            3
+            Code::Pending
         } else {
-            0
+            Code::Done
         }
     }
 }

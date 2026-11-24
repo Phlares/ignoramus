@@ -1,4 +1,5 @@
 //! `probe`: measure this machine and write `machine.toml`.
+use super::exit::Code;
 use super::{CliError, Ctx, Done, Run, out};
 use crate::backend::{self, Probe};
 use crate::machine;
@@ -27,6 +28,6 @@ pub fn run(ctx: &Ctx) -> Run {
     ))?;
     Ok(Done {
         attrs: Some(json!({ "max_level": m.max_level, "kvm": kvm })),
-        ..Done::exit(0)
+        ..Done::exit(Code::Done)
     })
 }

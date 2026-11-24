@@ -1,4 +1,5 @@
 //! `stop`: end a study for good. A live run writes the stop record; an idle study gets it here.
+use super::exit::Code;
 use super::{
     CliError, Ctx, Done, Run, keyed, located, out, refuse_if_done, registered, stopped_why,
 };
@@ -64,5 +65,5 @@ pub fn run(ctx: &Ctx, id: &str, reason: &str) -> Run {
             out(&format!("done record: {}\n", done.seq))?;
         }
     }
-    Ok(Done::exit(0))
+    Ok(Done::exit(Code::Done))
 }

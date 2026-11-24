@@ -471,8 +471,8 @@ fn try_register(lab: &Lab, spec: &Path) -> (i32, String) {
     let printed = |out: &[u8]| String::from_utf8_lossy(out).into_owned();
     let as_box = common::box_identity();
     match register::run_as(spec, &lab.home, &mut answer, &mut out, true, as_box) {
-        Ok(done) => (done.code, printed(&out)),
-        Err(e) => (e.code, format!("{}\n{}", printed(&out), e.msg)),
+        Ok(done) => (done.code.number(), printed(&out)),
+        Err(e) => (e.code.number(), format!("{}\n{}", printed(&out), e.msg)),
     }
 }
 

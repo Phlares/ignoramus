@@ -1,5 +1,6 @@
 //! `status`: how far a study has run and what it has spent. Text and JSON carry the same fields.
 //! Reads only: it never creates the study's `run` folder.
+use super::exit::Code;
 use super::{CliError, Ctx, Done, Run, out, registered, stopped_why};
 use crate::canon::sha256_hex;
 use crate::control::{ControlFile, Signal, State, run_is_live};
@@ -437,7 +438,7 @@ pub fn run(ctx: &Ctx, id: &str, json: bool, telemetry: bool) -> Run {
         render(&r)
     };
     out(&text)?;
-    Ok(Done::exit(0))
+    Ok(Done::exit(Code::Done))
 }
 
 /// The host readings of the study's row records, from the typed row view alone: no value, hash

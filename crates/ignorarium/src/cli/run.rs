@@ -1,4 +1,5 @@
 //! `run`: prepare a registered study and run its rows.
+use super::exit::Code;
 use super::{CliError, Ctx, Done, Run, out, refuse_if_done, refuse_if_stopped, registered};
 use crate::control::{ControlFile, Signal, run_is_live};
 use crate::runner::{self, RunError, RunStatus};
@@ -29,7 +30,7 @@ pub fn go(
             .map_err(|e| CliError::usage(format!("cannot write the resume request: {e}")))?;
         out("the live run continues
 ")?;
-        return Ok(Done::exit(0));
+        return Ok(Done::exit(Code::Done));
     }
     let pending = control
         .peek()
@@ -65,7 +66,7 @@ pub fn go(
             out(&format!("done: {id}\n"))?;
             Ok(Done {
                 spec_hash: Some(format!("sha256:{}", hex::encode(plan.spec_hash))),
-                ..Done::exit(0)
+                ..Done::exit(Code::Done)
             })
         }
         RunStatus::Paused(why) => Err(CliError::refuse(format!("paused: {why}"))),

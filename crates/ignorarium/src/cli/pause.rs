@@ -1,4 +1,5 @@
 //! `pause`: ask a run to stop at the next row boundary.
+use super::exit::Code;
 use super::{CliError, Ctx, Done, Run, out, refuse_if_done, refuse_if_stopped, registered};
 use crate::control::ControlFile;
 
@@ -10,5 +11,5 @@ pub fn run(ctx: &Ctx, id: &str) -> Run {
         .request_pause()
         .map_err(|e| CliError::usage(format!("cannot write the pause request: {e}")))?;
     out(&format!("pause requested for {id}\n"))?;
-    Ok(Done::exit(0))
+    Ok(Done::exit(Code::Done))
 }
