@@ -1,4 +1,5 @@
 //! `import`: add files to the content store and sign one record per file.
+use super::exit::Code;
 use super::history::regular_file;
 use super::{CliError, Ctx, Done, Run, out};
 use crate::keys;
@@ -34,5 +35,5 @@ pub fn run(ctx: &Ctx, source: &str, files: &[PathBuf]) -> Run {
         let (digest, _) = store.import_recorded(f, &key, source).map_err(fault)?;
         out(&format!("{digest}  {shown}\n"))?;
     }
-    Ok(Done::exit(0))
+    Ok(Done::exit(Code::Done))
 }

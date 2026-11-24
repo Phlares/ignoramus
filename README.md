@@ -16,6 +16,8 @@ Status: v0 in development.
 Works today: check a plan, register it, run it, verify its records, and write a report
 with a card. `ignorarium guide` prints the steps in order.
 
+For scripts: the exit codes are in [docs/exit-codes.md](docs/exit-codes.md), and the schemas of the `--json` outputs are in [docs/schemas](docs/schemas/README.md).
+
 Planned: bundle, publish and replay.
 [#89](https://github.com/Phlares/ignoramus/issues/89) tracks them.
 

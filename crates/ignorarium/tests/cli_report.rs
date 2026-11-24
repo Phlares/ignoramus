@@ -51,7 +51,9 @@ fn three() -> Vec<Value> {
 
 fn report_json(lab: &Lab, id: &str) -> Value {
     let a = bin(lab).args(["report", id, "--json"]).assert().success();
-    serde_json::from_str(&text(&a)).unwrap()
+    let v = serde_json::from_str(&text(&a)).unwrap();
+    common::schema::valid("report", &v);
+    v
 }
 
 #[test]
@@ -563,6 +565,7 @@ fn report_json_has_card_version() {
         .assert()
         .success();
     let r: Value = serde_json::from_str(&text(&a)).unwrap();
+    common::schema::valid("report", &r);
     assert_eq!(r["card_version"], 2);
     assert_eq!(r["study"], "s1");
     assert_eq!(r["finished_at"], ts_of(&lab));
@@ -897,6 +900,7 @@ fn study_folder_applies_to_every_format_and_to_the_card() {
         c.arg(&folder).assert().success()
     };
     let json: Value = serde_json::from_str(&text(&with(&["--json"]))).unwrap();
+    common::schema::valid("report", &json);
     assert_eq!(
         json["outside_source"],
         json!({ "path": "sub/", "commit": commit })

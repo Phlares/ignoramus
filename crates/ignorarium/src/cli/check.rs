@@ -1,4 +1,5 @@
 //! `check`: load a spec, run every rule, and report. Shared with `review`.
+use super::exit::Code;
 use super::{CliError, Ctx, Done, Run, out};
 use crate::derived::{Alpha, Carried, Register};
 use crate::diag::{Diagnostic, Severity, printable, render_human};
@@ -145,14 +146,14 @@ impl Assessed {
             .collect()
     }
 
-    /// 1 with an error, 3 with no error and a value pending, else 0.
-    pub fn exit_code(&self) -> i32 {
+    /// `Refused` with an error, `Pending` with no error and a value pending, else `Done`.
+    pub fn exit_code(&self) -> Code {
         if self.has_errors() {
-            1
+            Code::Refused
         } else if !self.pending().is_empty() {
-            3
+            Code::Pending
         } else {
-            0
+            Code::Done
         }
     }
 }
@@ -655,6 +656,7 @@ fn render_json(a: &Assessed) -> Result<String, CliError> {
         "defaults": defaults_json(&a.filled),
         "hash": a.hash,
         "rules_sha256": identity::rules_sha256(),
+        "schema": super::schema::CHECK,
     });
     serde_json::to_string_pretty(&v).map_err(|e| CliError::usage(e.to_string()))
 }
@@ -662,7 +664,9 @@ fn render_json(a: &Assessed) -> Result<String, CliError> {
 pub fn run(ctx: &Ctx, spec_path: &Path, json: bool) -> Run {
     let a = match assess(ctx, spec_path) {
         Err(e) if json => {
-            let v = json!({ "diagnostics": [], "error": e.msg, "hash": null });
+            let v = json!({
+                "schema": super::schema::CHECK, "diagnostics": [], "error": e.msg, "hash": null,
+            });
             let text =
                 serde_json::to_string_pretty(&v).map_err(|e| CliError::usage(e.to_string()))?;
             out(&format!("{text}\n"))?;

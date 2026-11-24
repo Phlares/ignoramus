@@ -23,10 +23,9 @@ fn printed(lab: &Lab, command: &str, spec: &Path) -> String {
 fn check_json(lab: &Lab, spec: &Path) -> (i32, Value) {
     let a = bin(lab).arg("check").arg(spec).arg("--json").assert();
     let out = a.get_output();
-    (
-        out.status.code().unwrap(),
-        serde_json::from_slice(&out.stdout).unwrap(),
-    )
+    let v = serde_json::from_slice(&out.stdout).unwrap();
+    common::schema::valid("check", &v);
+    (out.status.code().unwrap(), v)
 }
 
 /// (code, path) of each diagnostic that concerns the plan's values, not its licences or pins.
@@ -472,8 +471,8 @@ fn try_register(lab: &Lab, spec: &Path) -> (i32, String) {
     let printed = |out: &[u8]| String::from_utf8_lossy(out).into_owned();
     let as_box = common::box_identity();
     match register::run_as(spec, &lab.home, &mut answer, &mut out, true, as_box) {
-        Ok(done) => (done.code, printed(&out)),
-        Err(e) => (e.code, format!("{}\n{}", printed(&out), e.msg)),
+        Ok(done) => (done.code.number(), printed(&out)),
+        Err(e) => (e.code.number(), format!("{}\n{}", printed(&out), e.msg)),
     }
 }
 
@@ -1543,15 +1542,9 @@ fn e_cnf_005_lists_the_ways_forward() {
 
 #[test]
 fn the_guide_names_members_in_check_and_register() {
-    let a = bin(&lab()).args(["guide", "--json"]).assert().success();
-    let steps: Value = serde_json::from_slice(&a.get_output().stdout).unwrap();
+    let steps = common::guide_steps();
     for id in ["check", "register"] {
-        let s = steps
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|s| s["id"] == id)
-            .unwrap();
+        let s = steps.iter().find(|s| s["id"] == id).unwrap();
         let text = format!("{} {}", s["does"], s["produces"]);
         assert!(text.contains("member"), "{id}: {text}");
     }
@@ -1561,7 +1554,9 @@ fn the_guide_names_members_in_check_and_register() {
 
 fn reported(lab: &Lab, id: &str) -> Value {
     let a = bin(lab).args(["report", id, "--json"]).assert().success();
-    serde_json::from_slice(&a.get_output().stdout).unwrap()
+    let v = serde_json::from_slice(&a.get_output().stdout).unwrap();
+    common::schema::valid("report", &v);
+    v
 }
 
 fn reported_text(lab: &Lab, id: &str) -> String {

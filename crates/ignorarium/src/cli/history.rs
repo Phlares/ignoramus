@@ -1,4 +1,5 @@
 //! `import-history`: record earlier data files as one `legacy` plan log leaf.
+use super::exit::Code;
 use super::{CliError, Ctx, Done, Run, out};
 use crate::keys;
 use crate::planlog::store::PlanLog;
@@ -44,6 +45,6 @@ pub fn run(ctx: &Ctx, phase: &str, files: &[PathBuf]) -> Run {
     out(&format!("leaf {index}\n"))?;
     Ok(Done {
         leaf: Some(index),
-        ..Done::exit(0)
+        ..Done::exit(Code::Done)
     })
 }

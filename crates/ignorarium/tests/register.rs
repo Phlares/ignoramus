@@ -1417,7 +1417,9 @@ fn checked(f: &Fixture, spec: &Path) -> Value {
         .arg("--json")
         .output()
         .unwrap();
-    serde_json::from_slice(&out.stdout).unwrap()
+    let v = serde_json::from_slice(&out.stdout).unwrap();
+    common::schema::valid("check", &v);
+    v
 }
 
 #[test]

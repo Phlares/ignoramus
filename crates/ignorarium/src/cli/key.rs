@@ -1,4 +1,5 @@
 //! `key export`: print the box's public key. Also reads a public key file for `verify`.
+use super::exit::Code;
 use super::{CliError, Ctx, Done, Run, out};
 use crate::keys;
 use ed25519_dalek::VerifyingKey;
@@ -13,7 +14,7 @@ pub fn export(ctx: &Ctx) -> Run {
         "{}\n",
         hex::encode(key.verifying_key().to_bytes())
     ))?;
-    Ok(Done::exit(0))
+    Ok(Done::exit(Code::Done))
 }
 
 /// The public key a file holds: 64 hex characters, white space around them ignored. A refusal

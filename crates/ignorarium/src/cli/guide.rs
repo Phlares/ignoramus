@@ -1,4 +1,5 @@
 //! `guide`: the steps of a study, from `guide/steps.toml`.
+use super::exit::Code;
 use super::{CliError, Done, Run, out};
 use serde::{Deserialize, Serialize};
 
@@ -12,6 +13,12 @@ struct Step {
     command: String,
 }
 
+#[derive(Serialize)]
+struct Printed<'a> {
+    schema: u32,
+    steps: &'a [Step],
+}
+
 #[derive(Deserialize)]
 struct File {
     step: Vec<Step>,
@@ -21,8 +28,12 @@ pub fn run(json: bool) -> Run {
     let file: File = toml::from_str(include_str!("../../../../guide/steps.toml"))
         .map_err(|e| CliError::usage(format!("guide steps are not valid: {e}")))?;
     if json {
+        let printed = Printed {
+            schema: super::schema::GUIDE,
+            steps: &file.step,
+        };
         let text =
-            serde_json::to_string_pretty(&file.step).map_err(|e| CliError::usage(e.to_string()))?;
+            serde_json::to_string_pretty(&printed).map_err(|e| CliError::usage(e.to_string()))?;
         out(&format!("{text}\n"))?;
     } else {
         for (i, s) in file.step.iter().enumerate() {
@@ -37,5 +48,5 @@ pub fn run(json: bool) -> Run {
             ))?;
         }
     }
-    Ok(Done::exit(0))
+    Ok(Done::exit(Code::Done))
 }

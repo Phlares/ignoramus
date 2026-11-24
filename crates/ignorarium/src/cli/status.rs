@@ -1,5 +1,6 @@
 //! `status`: how far a study has run and what it has spent. Text and JSON carry the same fields.
 //! Reads only: it never creates the study's `run` folder.
+use super::exit::Code;
 use super::{CliError, Ctx, Done, Run, out, registered, stopped_why};
 use crate::canon::sha256_hex;
 use crate::control::{ControlFile, Signal, State, run_is_live};
@@ -420,19 +421,24 @@ fn num(v: &Value) -> String {
 type Build = fn(&Ctx, &str) -> Result<Value, CliError>;
 
 pub fn run(ctx: &Ctx, id: &str, json: bool, telemetry: bool) -> Run {
-    let (build, render): (Build, fn(&Value) -> String) = if telemetry {
-        (telemetry_report, render_telemetry)
+    let (build, render, schema): (Build, fn(&Value) -> String, u32) = if telemetry {
+        (
+            telemetry_report,
+            render_telemetry,
+            super::schema::STATUS_TELEMETRY,
+        )
     } else {
-        (report, render)
+        (report, render, super::schema::STATUS)
     };
-    let r = build(ctx, id)?;
+    let mut r = build(ctx, id)?;
     let text = if json {
+        r["schema"] = json!(schema);
         serde_json::to_string_pretty(&r).map_err(|e| CliError::usage(e.to_string()))? + "\n"
     } else {
         render(&r)
     };
     out(&text)?;
-    Ok(Done::exit(0))
+    Ok(Done::exit(Code::Done))
 }
 
 /// The host readings of the study's row records, from the typed row view alone: no value, hash

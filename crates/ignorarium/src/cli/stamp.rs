@@ -1,4 +1,5 @@
 //! `stamp`: write the file to stamp and print the commands that stamp it, or record a reply.
+use super::exit::Code;
 use super::{CliError, Ctx, Done, Run, keyed, not_registered, out, refusal};
 use crate::config;
 use crate::stamp::{self, StampError, Stamped};
@@ -34,7 +35,7 @@ pub fn request(ctx: &Ctx, id: &str, with: Option<&Path>) -> Run {
         ));
     }
     out(&text)?;
-    Ok(Done::exit(0))
+    Ok(Done::exit(Code::Done))
 }
 
 pub fn reply(ctx: &Ctx, id: &str, reply: &Path, file: Option<&Path>) -> Run {
@@ -43,5 +44,5 @@ pub fn reply(ctx: &Ctx, id: &str, reply: &Path, file: Option<&Path>) -> Run {
         Stamped::New(r) => out(&format!("stamp record: {}\n", r.seq))?,
         Stamped::Already => out("already recorded\n")?,
     }
-    Ok(Done::exit(0))
+    Ok(Done::exit(Code::Done))
 }

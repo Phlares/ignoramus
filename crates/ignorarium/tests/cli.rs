@@ -28,8 +28,11 @@ fn stderr(a: &assert_cmd::assert::Assert) -> String {
     String::from_utf8_lossy(&a.get_output().stderr).into_owned()
 }
 
+/// The `check --json` output of `a`, checked against its schema.
 fn json_out(a: &assert_cmd::assert::Assert) -> Value {
-    serde_json::from_str(&stdout(a)).unwrap()
+    let v = serde_json::from_str(&stdout(a)).unwrap();
+    common::schema::valid("check", &v);
+    v
 }
 
 /// A box home with `max_level = 1`, and a spec file made from the template.
@@ -55,10 +58,7 @@ fn no_power(t: String) -> String {
 
 #[test]
 fn guide_json_lists_every_step_with_its_output() {
-    let dir = TempDir::new().unwrap();
-    let a = bin(dir.path()).args(["guide", "--json"]).assert().success();
-    let steps = json_out(&a);
-    let steps = steps.as_array().unwrap();
+    let steps = common::guide_steps();
     let ids: Vec<&str> = steps.iter().map(|s| s["id"].as_str().unwrap()).collect();
     assert_eq!(
         ids,
@@ -67,7 +67,7 @@ fn guide_json_lists_every_step_with_its_output() {
             "status", "report", "stamp", "verify"
         ]
     );
-    for s in steps {
+    for s in &steps {
         for key in ["title", "does", "produces", "command"] {
             assert!(!s[key].as_str().unwrap().is_empty(), "{s}");
         }
@@ -2466,21 +2466,17 @@ fn a_resize_shortfall_states_no_needed_count() {
 
 #[test]
 fn the_fill_step_explains_the_family_table() {
-    let dir = TempDir::new().unwrap();
-    let a = bin(dir.path()).args(["guide", "--json"]).assert().success();
-    let steps = json_out(&a);
-    let fill = steps.as_array().unwrap().iter().find(|s| s["id"] == "fill");
+    let steps = common::guide_steps();
+    let fill = steps.iter().find(|s| s["id"] == "fill");
     let does = fill.unwrap()["does"].as_str().unwrap();
     assert!(does.contains("[family]") && does.contains("stream slot"));
 }
 
 #[test]
 fn the_guide_names_done_stamp_and_the_public_key_check() {
-    let dir = TempDir::new().unwrap();
-    let a = bin(dir.path()).args(["guide", "--json"]).assert().success();
-    let steps = json_out(&a);
+    let steps = common::guide_steps();
     let step = |id: &str| {
-        let s = steps.as_array().unwrap().iter().find(|s| s["id"] == id);
+        let s = steps.iter().find(|s| s["id"] == id);
         s.unwrap_or_else(|| panic!("{id}")).to_string()
     };
     let run = step("run");
@@ -2500,11 +2496,9 @@ fn the_guide_names_done_stamp_and_the_public_key_check() {
 
 #[test]
 fn the_check_run_and_status_steps_explain_triggers_and_children() {
-    let dir = TempDir::new().unwrap();
-    let a = bin(dir.path()).args(["guide", "--json"]).assert().success();
-    let steps = json_out(&a);
+    let steps = common::guide_steps();
     let does = |id: &str| {
-        let s = steps.as_array().unwrap().iter().find(|s| s["id"] == id);
+        let s = steps.iter().find(|s| s["id"] == id);
         s.unwrap()["does"].as_str().unwrap().to_string()
     };
     let check = does("check");

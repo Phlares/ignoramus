@@ -32,6 +32,7 @@ Development:
 - `assert_cmd`: runs the built binary in tests.
 - `predicates`: states what the binary output must contain.
 - `tempfile`: makes scratch folders in tests.
+- `jsonschema` (no default features, so no network crate): checks each `--json` output against its file in `docs/schemas/`.
 
 Minimum Rust version: 1.89, for `std::fs::File::lock`.
 
@@ -47,7 +48,7 @@ Case against:
 - A list kept by hand drifts from the manifests, and no test compares them. `digest-io` entered two manifests in #44 and a third in #70, and had no line here until 2026-11-21. In that time 0011 said its two crates use only dependencies listed here, and one of them, `deposit`, used `digest-io`. A reason comment beside each dependency in its manifest would sit where a crate is added. The root manifest already keeps such a comment beside each profile override.
 - The list repeats what Cargo holds and adds only the reason. Six manifests and the CI matrix already state the minimum Rust version. Git alone holds the date of each line (`CONTRIBUTING.md`, Decision records).
 - "One job" sets no bound on how wide a job is. The `rustix` job is "safe system calls", and its line runs from process control to power-off. The `libc` job is "the system calls rustix lacks".
-- The rule states a job for the direct dependencies only. The lock file holds 102 packages. Dependabot's security updates are the only watch on them (`.github/dependabot.yml`); no CI job audits them, and #94 asks for `cargo audit` or `cargo deny` in CI.
+- The rule states a job for the direct dependencies only. The lock file holds 155 packages. Dependabot's security updates are the only watch on them (`.github/dependabot.yml`); no CI job audits them, and #94 asks for `cargo audit` or `cargo deny` in CI.
 
 (written 2026-11-21)
 

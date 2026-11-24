@@ -1,4 +1,5 @@
 //! `new`: copy a template into `studies/<id>/spec.toml`.
+use super::exit::Code;
 use super::{CliError, Done, Run, out};
 use crate::files::{WriteOnceError, write_once};
 use crate::rules::{self, Check};
@@ -85,7 +86,7 @@ pub fn run(template: &str, id: &str) -> Run {
         other => CliError::usage(format!("cannot write {}: {other}", file.display())),
     })?;
     out(&format!("created {}\n", file.display()))?;
-    Ok(Done::exit(0))
+    Ok(Done::exit(Code::Done))
 }
 
 #[cfg(test)]

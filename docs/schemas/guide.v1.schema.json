@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ignorarium guide --json",
+  "type": "object",
+  "required": ["schema", "steps"],
+  "properties": {
+    "schema": { "const": 1 },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "does", "produces", "command"],
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "does": { "type": "string" },
+          "produces": { "type": "string" },
+          "command": { "type": "string" }
+        }
+      }
+    }
+  }
+}

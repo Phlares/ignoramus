@@ -1,5 +1,7 @@
 //! A registered study in a temp home, shared by the run tests.
 #![allow(dead_code)]
+pub mod schema;
+
 use ignorarium::canon::sha256_file;
 use ignorarium::cli::register;
 use ignorarium::derived;
@@ -121,10 +123,37 @@ pub fn text(a: &assert_cmd::assert::Assert) -> String {
     String::from_utf8_lossy(&a.get_output().stdout).into_owned()
 }
 
-/// `status <id> --json`, parsed.
+/// `guide --json` in a new lab, checked against its schema; its steps.
+pub fn guide_steps() -> Vec<serde_json::Value> {
+    let a = bin(&lab()).args(["guide", "--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_str(&text(&a)).unwrap();
+    schema::valid("guide", &v);
+    v["steps"].as_array().unwrap().clone()
+}
+
+/// The box binary, run from study `id`'s root.
+pub fn bin_at(lab: &Lab, id: &str) -> assert_cmd::Command {
+    let mut c = bin(lab);
+    c.current_dir(work(lab, id));
+    c
+}
+
+/// `status <id> --json`, checked against its schema, parsed.
 pub fn status(lab: &Lab, id: &str) -> serde_json::Value {
     let a = bin(lab).args(["status", id, "--json"]).assert().success();
-    serde_json::from_str(&text(&a)).unwrap()
+    let v = serde_json::from_str(&text(&a)).unwrap();
+    schema::valid("status", &v);
+    v
+}
+
+/// `status <id> --telemetry --json`, checked against its schema, parsed.
+pub fn telemetry(lab: &Lab, id: &str) -> serde_json::Value {
+    let a = (bin(lab).args(["status", id, "--telemetry", "--json"]))
+        .assert()
+        .success();
+    let v = serde_json::from_str(&text(&a)).unwrap();
+    schema::valid("status-telemetry", &v);
+    v
 }
 
 /// The shell line that writes the template's one measure.

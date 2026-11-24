@@ -1,10 +1,10 @@
 //! The run verbs, driven through the real binary. The test machine file reaches level 1,
 //! so rows run in bubblewrap.
 mod common;
-use assert_cmd::Command;
 use common::{
-    Lab, bin, edited, fake_binary, kind_of, lab, no_level1, plain, reformat, register_study,
-    rewrite_register, sign_session_start, status, text, wait_for_row_file, with_payload,
+    Lab, bin, bin_at, edited, fake_binary, kind_of, lab, no_level1, plain, reformat,
+    register_study, rewrite_register, sign_session_start, status, text, wait_for_row_file,
+    with_payload,
 };
 use ignorarium::backend::level2::Level2;
 use ignorarium::backend::{Backend, Probe};
@@ -21,12 +21,6 @@ use std::path::Path;
 use std::time::Duration;
 
 /// `bin` in the root of study `id`, where `run` and `resume` read a late input from.
-fn bin_at(lab: &Lab, id: &str) -> Command {
-    let mut c = bin(lab);
-    c.current_dir(common::work(lab, id));
-    c
-}
-
 fn err(a: &assert_cmd::assert::Assert) -> String {
     String::from_utf8_lossy(&a.get_output().stderr).into_owned()
 }
@@ -1318,6 +1312,7 @@ fn status_blinds_condition_ids_when_blind_is_set() {
     let raw = text(&a);
     assert!(!raw.contains("arm-a") && !raw.contains("exact"), "{raw}");
     let s: Value = serde_json::from_str(&raw).unwrap();
+    common::schema::valid("status", &s);
     assert_eq!(s["blind"], true);
     let labels: Vec<&str> = s["conditions"]
         .as_array()
@@ -1376,13 +1371,8 @@ fn status_telemetry_never_prints_values() {
     let t = text(&a);
     assert!(!t.contains(SENTINEL), "{t}");
     assert!(t.contains("steal per row"), "{t}");
-    let a = bin(&lab)
-        .args(["status", "tv", "--telemetry", "--json"])
-        .assert()
-        .success();
-    let raw = text(&a);
-    assert!(!raw.contains(SENTINEL), "{raw}");
-    let s: Value = serde_json::from_str(&raw).unwrap();
+    let s = common::telemetry(&lab, "tv");
+    assert!(!s.to_string().contains(SENTINEL), "{s}");
     assert_eq!(s["study"], "tv");
     assert_eq!(s["blind"], false);
     assert_eq!(s["telemetry"]["rows"], 3);
@@ -1398,13 +1388,8 @@ fn status_telemetry_in_a_blind_study_has_no_block_times() {
         common::PAYLOAD,
     );
     plant_sentinel_rows(&lab, "tb", 3);
-    let a = bin(&lab)
-        .args(["status", "tb", "--telemetry", "--json"])
-        .assert()
-        .success();
-    let raw = text(&a);
-    assert!(!raw.contains(SENTINEL), "{raw}");
-    let s: Value = serde_json::from_str(&raw).unwrap();
+    let s = common::telemetry(&lab, "tb");
+    assert!(!s.to_string().contains(SENTINEL), "{s}");
     assert_eq!(s["blind"], true);
     let blocks = s["telemetry"]["blocks"].as_array().unwrap();
     assert!(!blocks.is_empty());
@@ -1463,13 +1448,9 @@ fn the_blind_order_is_seeded_by_the_spec_hash() {
 
 #[test]
 fn guide_lists_run_and_status_with_real_commands() {
-    let lab = lab();
-    let a = bin(&lab).args(["guide", "--json"]).assert().success();
-    let steps: Value = serde_json::from_str(&text(&a)).unwrap();
+    let steps = common::guide_steps();
     let find = |id: &str| {
         steps
-            .as_array()
-            .unwrap()
             .iter()
             .find(|s| s["id"] == id)
             .unwrap_or_else(|| panic!("{id}"))
@@ -1494,15 +1475,10 @@ fn guide_lists_run_and_status_with_real_commands() {
     let status = find("status");
     assert_eq!(status["command"], "ignorarium status <id>");
     assert!(!status.to_string().contains("not available yet"));
-    let ids: Vec<&str> = steps
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|s| s["id"].as_str().unwrap())
-        .collect();
+    let ids: Vec<&str> = steps.iter().map(|s| s["id"].as_str().unwrap()).collect();
     let at = |id: &str| ids.iter().position(|i| *i == id).unwrap();
     assert!(at("register") < at("run") && at("run") < at("status") && at("status") < at("report"));
-    assert!(!text(&a).contains("Plan "));
+    assert!(!Value::from(steps.clone()).to_string().contains("Plan "));
 }
 
 #[test]
@@ -1569,10 +1545,9 @@ fn pilot_run(lab: &Lab, id: &str, payload: &str) {
 fn check_json(lab: &Lab, spec: &std::path::Path) -> (i32, Value) {
     let a = bin(lab).arg("check").arg(spec).arg("--json").assert();
     let out = a.get_output();
-    (
-        out.status.code().unwrap(),
-        serde_json::from_slice(&out.stdout).unwrap(),
-    )
+    let v = serde_json::from_slice(&out.stdout).unwrap();
+    common::schema::valid("check", &v);
+    (out.status.code().unwrap(), v)
 }
 
 /// The codes of the diagnostics that concern the plan's values, not its licences or pins.
@@ -2091,6 +2066,7 @@ fn a_run_study_reports_its_recorded_verdict() {
         .assert()
         .success();
     let r: Value = serde_json::from_str(&text(&a)).unwrap();
+    common::schema::valid("report", &r);
     let v = verdict_of(&lab, "told");
     let h = &r["hypotheses"][0];
     assert_eq!(h["hypothesis"], v.hypothesis);
@@ -2586,29 +2562,64 @@ fn verify_says_format_0_for_an_old_register() {
     );
 }
 
+/// Each verb that reads study `id`'s log, and the code it exits with when the log fails
+/// verification: `docs/exit-codes.md` states these.
+fn study_verbs(id: &str) -> [(Vec<&str>, i32); 8] {
+    [
+        (vec!["status", id], 2),
+        (vec!["report", id], 1),
+        (vec!["run", id], 2),
+        (vec!["resume", id], 2),
+        (vec!["stop", id, "--reason", "x"], 2),
+        (vec!["pause", id], 2),
+        (vec!["verify", "--study", id], 1),
+        (vec!["stamp", id, "--request"], 2),
+    ]
+}
+
 #[test]
 fn a_study_verb_refuses_a_newer_format() {
     let lab = lab();
     plain(&lab, "newer");
     reformat(&lab, "newer", Some(2));
     let before = common::files_under(&lab.home.study_dir("newer"));
-    let verbs: [&[&str]; 8] = [
-        &["status", "newer"],
-        &["report", "newer"],
-        &["run", "newer"],
-        &["resume", "newer"],
-        &["stop", "newer", "--reason", "x"],
-        &["pause", "newer"],
-        &["verify", "--study", "newer"],
-        &["stamp", "newer", "--request"],
-    ];
-    for verb in verbs {
-        let a = bin(&lab).args(verb).assert();
+    for (verb, code) in study_verbs("newer") {
+        let a = bin(&lab).args(&verb).assert();
         let said = err(&a);
-        assert_ne!(a.get_output().status.code(), Some(0), "{verb:?}: {said}");
+        assert_eq!(a.get_output().status.code(), Some(code), "{verb:?}: {said}");
         assert!(said.contains("format 2"), "{verb:?}: {said}");
         let after = common::files_under(&lab.home.study_dir("newer"));
         assert_eq!(after, before, "{verb:?} wrote");
+    }
+}
+
+#[test]
+fn a_study_verb_has_these_codes_on_a_torn_log_and_on_a_bad_hash() {
+    let torn = |b: Vec<u8>| b[..b.len() - 10].to_vec();
+    // The first record's stored hash with its first hex digit changed.
+    let bad_hash = |b: Vec<u8>| {
+        let at = br#"{"hash":""#.len();
+        let mut b = b;
+        b[at] = if b[at] == b'0' { b'1' } else { b'0' };
+        b
+    };
+    type Damage = fn(Vec<u8>) -> Vec<u8>;
+    let damages: [(&str, Damage); 2] = [
+        ("not a whole record", torn),
+        ("hash does not match", bad_hash),
+    ];
+    for (said_then, damage) in damages {
+        // A damaged log in one study refuses the next registration, so each verb gets its
+        // own lab.
+        for (verb, code) in study_verbs("torn") {
+            let lab = lab();
+            let log = plain(&lab, "torn").join("records.jsonl");
+            std::fs::write(&log, damage(std::fs::read(&log).unwrap())).unwrap();
+            let a = bin_at(&lab, "torn").args(&verb).assert();
+            let said = err(&a);
+            assert_eq!(a.get_output().status.code(), Some(code), "{verb:?}: {said}");
+            assert!(said.contains(said_then), "{verb:?}: {said}");
+        }
     }
 }
 
