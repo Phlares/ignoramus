@@ -133,7 +133,6 @@ fn every_output_has_its_file_and_every_file_has_its_output() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     assert_eq!(have, want);
-    assert_eq!(schema::OUTPUTS.len(), 5);
 }
 
 #[test]

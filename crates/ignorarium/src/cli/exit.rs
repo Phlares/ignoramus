@@ -44,7 +44,7 @@ impl Code {
     pub const fn meaning(self) -> &'static str {
         match self {
             Code::Done => {
-                "The verb did its work. For `check` and `review`: the plan has no error and no value is pending. For `verify`: every check passed."
+                "The verb did its work. For `check` and `review`: the plan has no error and no value is pending. For `verify`: every check passed, or the home holds no key and no log entry to check."
             }
             Code::Refused => {
                 "The box did the work and the answer is no. Examples: `check` found an error in the plan; the study is not registered, not finished, paused or stopped; `verify` found a fault."

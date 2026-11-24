@@ -4,7 +4,7 @@
 
 | Code | Name | Meaning |
 |---|---|---|
-| 0 | done | The verb did its work. For `check` and `review`: the plan has no error and no value is pending. For `verify`: every check passed. |
+| 0 | done | The verb did its work. For `check` and `review`: the plan has no error and no value is pending. For `verify`: every check passed, or the home holds no key and no log entry to check. |
 | 1 | refused | The box did the work and the answer is no. Examples: `check` found an error in the plan; the study is not registered, not finished, paused or stopped; `verify` found a fault. |
 | 2 | fault | The box could not do the work. Examples: a command line it cannot parse; a file or key it cannot read or write. |
 | 3 | pending | Only `check` and `review`: the plan has no error, and at least one value waits on a study that has not finished. |
