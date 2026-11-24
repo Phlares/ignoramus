@@ -2603,9 +2603,10 @@ fn a_study_verb_has_these_codes_on_a_torn_log_and_on_a_bad_hash() {
         b[at] = if b[at] == b'0' { b'1' } else { b'0' };
         b
     };
-    let damages: [(&str, &dyn Fn(Vec<u8>) -> Vec<u8>); 2] = [
-        ("not a whole record", &torn),
-        ("hash does not match", &bad_hash),
+    type Damage = fn(Vec<u8>) -> Vec<u8>;
+    let damages: [(&str, Damage); 2] = [
+        ("not a whole record", torn),
+        ("hash does not match", bad_hash),
     ];
     for (said_then, damage) in damages {
         // A damaged log in one study refuses the next registration, so each verb gets its
