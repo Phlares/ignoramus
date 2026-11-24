@@ -28,8 +28,11 @@ fn stderr(a: &assert_cmd::assert::Assert) -> String {
     String::from_utf8_lossy(&a.get_output().stderr).into_owned()
 }
 
+/// The `check --json` output of `a`, checked against its schema.
 fn json_out(a: &assert_cmd::assert::Assert) -> Value {
-    serde_json::from_str(&stdout(a)).unwrap()
+    let v = serde_json::from_str(&stdout(a)).unwrap();
+    common::schema::valid("check", &v);
+    v
 }
 
 /// A box home with `max_level = 1`, and a spec file made from the template.

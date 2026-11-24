@@ -95,6 +95,7 @@ fn checked_rows(edit: impl Fn(String) -> String) -> Value {
         .output()
         .unwrap();
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    common::schema::valid("check", &v);
     v["estimate"]["rows"].clone()
 }
 

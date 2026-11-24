@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ignorarium check <spec> --json",
+  "anyOf": [
+    { "$ref": "#/$defs/result" },
+    { "$ref": "#/$defs/error" }
+  ],
+  "$defs": {
+    "result": {
+      "type": "object",
+      "required": [
+        "schema", "diagnostics", "pending", "power", "stream", "plan_stream", "family",
+        "recheck", "estimate", "derivative_set", "defaults", "hash", "rules_sha256"
+      ],
+      "properties": {
+        "schema": { "const": 1 },
+        "diagnostics": { "$ref": "#/$defs/diagnostics" },
+        "pending": { "type": "array", "items": { "type": "string" } },
+        "power": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["hypothesis", "power", "target", "clusters", "needed", "curve"],
+            "properties": {
+              "hypothesis": { "type": "string" },
+              "power": { "type": "number" },
+              "target": { "type": "number" },
+              "clusters": {
+                "type": "object",
+                "additionalProperties": { "$ref": "#/$defs/count" }
+              },
+              "needed": {
+                "oneOf": [
+                  { "type": "null" },
+                  { "$ref": "#/$defs/count" },
+                  { "type": "string", "pattern": "^>[0-9]+$" }
+                ]
+              },
+              "curve": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["margin", "points"],
+                  "properties": {
+                    "margin": { "type": "number" },
+                    "points": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": ["fraction", "mean", "power"],
+                        "properties": {
+                          "fraction": { "type": "number" },
+                          "mean": { "type": "number" },
+                          "power": { "type": "number" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "stream": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "required": ["log", "slot", "level"],
+              "properties": {
+                "log": { "type": "string" },
+                "slot": { "$ref": "#/$defs/count" },
+                "level": { "type": "number" }
+              }
+            }
+          ]
+        },
+        "plan_stream": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "required": ["slots_left", "reserved"],
+              "properties": {
+                "slots_left": { "$ref": "#/$defs/count" },
+                "reserved": { "$ref": "#/$defs/count" }
+              }
+            }
+          ]
+        },
+        "family": { "type": ["string", "null"] },
+        "recheck": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "required": ["carried_from", "rows"],
+              "properties": {
+                "carried_from": { "type": ["string", "null"] },
+                "rows": { "$ref": "#/$defs/count" }
+              }
+            }
+          ]
+        },
+        "estimate": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "required": [
+                "rows", "rows_per_condition", "cpu_hours", "wall_hours", "money_usd", "label",
+                "long_job"
+              ],
+              "properties": {
+                "rows": { "$ref": "#/$defs/count" },
+                "rows_per_condition": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["id", "rows"],
+                    "properties": {
+                      "id": { "type": "string" },
+                      "rows": { "$ref": "#/$defs/count" }
+                    }
+                  }
+                },
+                "cpu_hours": { "type": "number" },
+                "wall_hours": { "type": "number" },
+                "money_usd": { "type": "number" },
+                "label": { "type": "string" },
+                "long_job": { "type": "boolean" }
+              }
+            }
+          ]
+        },
+        "derivative_set": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "required": ["children", "rows", "cpu_hours", "wall_hours", "money_usd"],
+              "properties": {
+                "children": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["id", "parent", "operator", "value", "triggers", "rows"],
+                    "properties": {
+                      "id": { "type": "string" },
+                      "parent": { "type": "string" },
+                      "operator": { "type": "string" },
+                      "value": { "type": ["number", "string"] },
+                      "triggers": { "type": "array", "items": { "type": "string" } },
+                      "rows": { "$ref": "#/$defs/count" }
+                    }
+                  }
+                },
+                "rows": { "$ref": "#/$defs/count" },
+                "cpu_hours": { "type": "number" },
+                "wall_hours": { "type": "number" },
+                "money_usd": { "type": "number" }
+              }
+            }
+          ]
+        },
+        "defaults": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "value"],
+            "properties": {
+              "path": { "type": "string" },
+              "value": true
+            }
+          }
+        },
+        "hash": { "type": "string" },
+        "rules_sha256": { "type": "string" }
+      }
+    },
+    "error": {
+      "type": "object",
+      "required": ["schema", "diagnostics", "error", "hash"],
+      "properties": {
+        "schema": { "const": 1 },
+        "diagnostics": { "$ref": "#/$defs/diagnostics" },
+        "error": { "type": "string" },
+        "hash": { "type": "null" }
+      }
+    },
+    "count": { "type": "integer", "minimum": 0 },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "severity", "path", "problem", "instruction", "doc", "sources"],
+        "properties": {
+          "code": { "type": "string" },
+          "severity": { "enum": ["error", "warning"] },
+          "path": { "type": "string" },
+          "problem": { "type": "string" },
+          "instruction": { "type": "string" },
+          "doc": { "type": "string" },
+          "sources": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  }
+}

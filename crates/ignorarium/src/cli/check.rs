@@ -655,6 +655,7 @@ fn render_json(a: &Assessed) -> Result<String, CliError> {
         "defaults": defaults_json(&a.filled),
         "hash": a.hash,
         "rules_sha256": identity::rules_sha256(),
+        "schema": super::schema::CHECK,
     });
     serde_json::to_string_pretty(&v).map_err(|e| CliError::usage(e.to_string()))
 }
@@ -662,7 +663,9 @@ fn render_json(a: &Assessed) -> Result<String, CliError> {
 pub fn run(ctx: &Ctx, spec_path: &Path, json: bool) -> Run {
     let a = match assess(ctx, spec_path) {
         Err(e) if json => {
-            let v = json!({ "diagnostics": [], "error": e.msg, "hash": null });
+            let v = json!({
+                "schema": super::schema::CHECK, "diagnostics": [], "error": e.msg, "hash": null,
+            });
             let text =
                 serde_json::to_string_pretty(&v).map_err(|e| CliError::usage(e.to_string()))?;
             out(&format!("{text}\n"))?;

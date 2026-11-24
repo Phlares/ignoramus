@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ignorarium status <id> --json",
+  "type": "object",
+  "required": [
+    "schema", "study", "state", "detail", "request", "ended", "replicates", "done", "total",
+    "rows_per_hour", "elapsed_seconds", "eta_seconds", "cost", "budget", "used",
+    "cost_rate_usd_per_hour", "voided", "retried", "unknown_cpu", "triggers", "spawn_stopped",
+    "blind", "conditions", "resize"
+  ],
+  "properties": {
+    "schema": { "const": 1 },
+    "study": { "type": "string" },
+    "state": {
+      "enum": ["stopped", "running", "interrupted", "paused", "done", "not started"]
+    },
+    "detail": { "type": ["string", "null"] },
+    "request": { "enum": ["pause", "resume", "stop", null] },
+    "ended": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["end", "ended_at", "seq"],
+          "properties": {
+            "end": { "enum": ["rows", "resize-stop", "stop"] },
+            "ended_at": { "type": "string" },
+            "seq": { "$ref": "#/$defs/count" }
+          }
+        }
+      ]
+    },
+    "replicates": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["study", "done", "hypothesis", "criterion", "result"],
+          "properties": {
+            "study": { "type": "string" },
+            "done": { "type": "string" },
+            "hypothesis": { "type": "string" },
+            "criterion": { "enum": ["verdict"] },
+            "result": { "enum": ["met", "not met", "no result", "pending"] }
+          }
+        }
+      ]
+    },
+    "done": { "$ref": "#/$defs/count" },
+    "total": { "$ref": "#/$defs/count" },
+    "rows_per_hour": { "type": ["number", "null"] },
+    "elapsed_seconds": { "type": "number" },
+    "eta_seconds": { "type": ["number", "null"] },
+    "cost": { "$ref": "#/$defs/spend" },
+    "budget": { "$ref": "#/$defs/spend" },
+    "used": {
+      "type": "object",
+      "required": ["cpu_hours", "wall_hours", "money_usd"],
+      "properties": {
+        "cpu_hours": { "type": ["number", "null"] },
+        "wall_hours": { "type": ["number", "null"] },
+        "money_usd": { "type": ["number", "null"] }
+      }
+    },
+    "cost_rate_usd_per_hour": { "type": ["number", "null"] },
+    "voided": { "$ref": "#/$defs/count" },
+    "retried": { "$ref": "#/$defs/count" },
+    "unknown_cpu": { "$ref": "#/$defs/count" },
+    "triggers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "state", "e_value", "threshold", "reason", "admitted", "skipped"],
+        "properties": {
+          "id": { "type": "string" },
+          "state": { "enum": ["inert (old shape)", "pending", "fired", "not fired"] },
+          "e_value": { "type": ["number", "null"] },
+          "threshold": { "type": ["number", "null"] },
+          "reason": { "type": ["string", "null"] },
+          "admitted": { "type": "array", "items": { "type": "string" } },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["child", "reason"],
+              "properties": {
+                "child": { "type": "string" },
+                "reason": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "spawn_stopped": { "type": "array", "items": { "type": "string" } },
+    "blind": { "type": "boolean" },
+    "conditions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["label", "done", "total"],
+        "properties": {
+          "label": { "type": "string" },
+          "done": { "$ref": "#/$defs/count" },
+          "total": { "$ref": "#/$defs/count" }
+        }
+      }
+    },
+    "resize": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["decision", "strata"],
+          "properties": {
+            "decision": { "enum": ["continue", "stop"] },
+            "strata": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["stratum", "first", "needed", "appended"],
+                "properties": {
+                  "stratum": { "type": "string" },
+                  "first": { "$ref": "#/$defs/count" },
+                  "needed": { "type": ["integer", "null"], "minimum": 0 },
+                  "appended": { "$ref": "#/$defs/count" }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "count": { "type": "integer", "minimum": 0 },
+    "spend": {
+      "type": "object",
+      "required": ["cpu_hours", "wall_hours", "money_usd"],
+      "properties": {
+        "cpu_hours": { "type": "number" },
+        "wall_hours": { "type": "number" },
+        "money_usd": { "type": "number" }
+      }
+    }
+  }
+}

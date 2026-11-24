@@ -23,10 +23,9 @@ fn printed(lab: &Lab, command: &str, spec: &Path) -> String {
 fn check_json(lab: &Lab, spec: &Path) -> (i32, Value) {
     let a = bin(lab).arg("check").arg(spec).arg("--json").assert();
     let out = a.get_output();
-    (
-        out.status.code().unwrap(),
-        serde_json::from_slice(&out.stdout).unwrap(),
-    )
+    let v = serde_json::from_slice(&out.stdout).unwrap();
+    common::schema::valid("check", &v);
+    (out.status.code().unwrap(), v)
 }
 
 /// (code, path) of each diagnostic that concerns the plan's values, not its licences or pins.

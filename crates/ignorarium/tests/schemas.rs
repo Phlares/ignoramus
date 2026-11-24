@@ -49,3 +49,74 @@ fn a_missing_key_fails() {
     v["steps"][0].as_object_mut().unwrap().remove("command");
     common::schema::valid("guide", &v);
 }
+
+fn printed(a: &assert_cmd::assert::Assert) -> Value {
+    serde_json::from_slice(&a.get_output().stdout).unwrap()
+}
+
+#[test]
+fn check_json_fits_its_schema() {
+    let lab = common::lab();
+    common::plain(&lab, "s");
+    let spec = common::work(&lab, "s").join("spec.toml");
+    let v = printed(
+        &common::bin(&lab)
+            .arg("check")
+            .arg(&spec)
+            .arg("--json")
+            .assert(),
+    );
+    assert_eq!(v["schema"], schema::CHECK);
+    assert!(v["hash"].is_string(), "{v}");
+    common::schema::valid("check", &v);
+}
+
+#[test]
+fn the_check_error_shape_fits_its_schema() {
+    let lab = common::lab();
+    let spec = lab.root.join("bad.toml");
+    std::fs::write(&spec, "[study\n").unwrap();
+    let bad = common::bin(&lab)
+        .arg("check")
+        .arg(&spec)
+        .arg("--json")
+        .assert()
+        .code(1);
+    let missing = (common::bin(&lab).args(["check", "--json", "missing.toml"]))
+        .assert()
+        .code(2);
+    for v in [printed(&bad), printed(&missing)] {
+        assert_eq!(v["schema"], schema::CHECK);
+        assert!(v["error"].is_string() && v["hash"].is_null(), "{v}");
+        common::schema::valid("check", &v);
+    }
+}
+
+#[test]
+fn status_json_fits_its_schema_before_and_after_the_rows() {
+    let lab = common::lab();
+    common::plain(&lab, "s");
+    let v = common::status(&lab, "s");
+    assert_eq!(v["schema"], schema::STATUS);
+    assert!(v["rows_per_hour"].is_null(), "{v}");
+    (common::bin_at(&lab, "s").args(["run", "s"]))
+        .assert()
+        .success();
+    common::status(&lab, "s");
+}
+
+#[test]
+fn status_telemetry_json_fits_its_schema_before_and_after_the_rows() {
+    let lab = common::lab();
+    common::plain(&lab, "s");
+    let v = common::telemetry(&lab, "s");
+    assert_eq!(v["schema"], schema::STATUS_TELEMETRY);
+    assert_eq!(v["telemetry"]["rows"], 0);
+    let blocks = v["telemetry"]["blocks"].as_array().unwrap();
+    assert!(!blocks.is_empty());
+    assert!(blocks.iter().all(|b| b["rows"] == 0), "{v}");
+    (common::bin_at(&lab, "s").args(["run", "s"]))
+        .assert()
+        .success();
+    assert_ne!(common::telemetry(&lab, "s")["telemetry"]["rows"], 0);
+}

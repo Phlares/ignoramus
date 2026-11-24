@@ -1,10 +1,10 @@
 //! The run verbs, driven through the real binary. The test machine file reaches level 1,
 //! so rows run in bubblewrap.
 mod common;
-use assert_cmd::Command;
 use common::{
-    Lab, bin, edited, fake_binary, kind_of, lab, no_level1, plain, reformat, register_study,
-    rewrite_register, sign_session_start, status, text, wait_for_row_file, with_payload,
+    Lab, bin, bin_at, edited, fake_binary, kind_of, lab, no_level1, plain, reformat,
+    register_study, rewrite_register, sign_session_start, status, text, wait_for_row_file,
+    with_payload,
 };
 use ignorarium::backend::level2::Level2;
 use ignorarium::backend::{Backend, Probe};
@@ -21,12 +21,6 @@ use std::path::Path;
 use std::time::Duration;
 
 /// `bin` in the root of study `id`, where `run` and `resume` read a late input from.
-fn bin_at(lab: &Lab, id: &str) -> Command {
-    let mut c = bin(lab);
-    c.current_dir(common::work(lab, id));
-    c
-}
-
 fn err(a: &assert_cmd::assert::Assert) -> String {
     String::from_utf8_lossy(&a.get_output().stderr).into_owned()
 }
@@ -1318,6 +1312,7 @@ fn status_blinds_condition_ids_when_blind_is_set() {
     let raw = text(&a);
     assert!(!raw.contains("arm-a") && !raw.contains("exact"), "{raw}");
     let s: Value = serde_json::from_str(&raw).unwrap();
+    common::schema::valid("status", &s);
     assert_eq!(s["blind"], true);
     let labels: Vec<&str> = s["conditions"]
         .as_array()
@@ -1376,13 +1371,8 @@ fn status_telemetry_never_prints_values() {
     let t = text(&a);
     assert!(!t.contains(SENTINEL), "{t}");
     assert!(t.contains("steal per row"), "{t}");
-    let a = bin(&lab)
-        .args(["status", "tv", "--telemetry", "--json"])
-        .assert()
-        .success();
-    let raw = text(&a);
-    assert!(!raw.contains(SENTINEL), "{raw}");
-    let s: Value = serde_json::from_str(&raw).unwrap();
+    let s = common::telemetry(&lab, "tv");
+    assert!(!s.to_string().contains(SENTINEL), "{s}");
     assert_eq!(s["study"], "tv");
     assert_eq!(s["blind"], false);
     assert_eq!(s["telemetry"]["rows"], 3);
@@ -1398,13 +1388,8 @@ fn status_telemetry_in_a_blind_study_has_no_block_times() {
         common::PAYLOAD,
     );
     plant_sentinel_rows(&lab, "tb", 3);
-    let a = bin(&lab)
-        .args(["status", "tb", "--telemetry", "--json"])
-        .assert()
-        .success();
-    let raw = text(&a);
-    assert!(!raw.contains(SENTINEL), "{raw}");
-    let s: Value = serde_json::from_str(&raw).unwrap();
+    let s = common::telemetry(&lab, "tb");
+    assert!(!s.to_string().contains(SENTINEL), "{s}");
     assert_eq!(s["blind"], true);
     let blocks = s["telemetry"]["blocks"].as_array().unwrap();
     assert!(!blocks.is_empty());
@@ -1560,10 +1545,9 @@ fn pilot_run(lab: &Lab, id: &str, payload: &str) {
 fn check_json(lab: &Lab, spec: &std::path::Path) -> (i32, Value) {
     let a = bin(lab).arg("check").arg(spec).arg("--json").assert();
     let out = a.get_output();
-    (
-        out.status.code().unwrap(),
-        serde_json::from_slice(&out.stdout).unwrap(),
-    )
+    let v = serde_json::from_slice(&out.stdout).unwrap();
+    common::schema::valid("check", &v);
+    (out.status.code().unwrap(), v)
 }
 
 /// The codes of the diagnostics that concern the plan's values, not its licences or pins.

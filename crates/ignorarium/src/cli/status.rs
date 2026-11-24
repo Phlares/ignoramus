@@ -420,13 +420,18 @@ fn num(v: &Value) -> String {
 type Build = fn(&Ctx, &str) -> Result<Value, CliError>;
 
 pub fn run(ctx: &Ctx, id: &str, json: bool, telemetry: bool) -> Run {
-    let (build, render): (Build, fn(&Value) -> String) = if telemetry {
-        (telemetry_report, render_telemetry)
+    let (build, render, schema): (Build, fn(&Value) -> String, u32) = if telemetry {
+        (
+            telemetry_report,
+            render_telemetry,
+            super::schema::STATUS_TELEMETRY,
+        )
     } else {
-        (report, render)
+        (report, render, super::schema::STATUS)
     };
-    let r = build(ctx, id)?;
+    let mut r = build(ctx, id)?;
     let text = if json {
+        r["schema"] = json!(schema);
         serde_json::to_string_pretty(&r).map_err(|e| CliError::usage(e.to_string()))? + "\n"
     } else {
         render(&r)

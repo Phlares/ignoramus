@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ignorarium status <id> --telemetry --json",
+  "type": "object",
+  "required": ["schema", "study", "blind", "telemetry"],
+  "properties": {
+    "schema": { "const": 1 },
+    "study": { "type": "string" },
+    "blind": { "type": "boolean" },
+    "telemetry": {
+      "type": "object",
+      "required": [
+        "rows", "cgroup", "host_cpu", "host_cpu_missing", "steal_s", "iowait_s",
+        "ticks_missing", "wall_s", "cpu_s", "blocks"
+      ],
+      "properties": {
+        "rows": { "$ref": "#/$defs/count" },
+        "cgroup": { "$ref": "#/$defs/rows_by_state" },
+        "cgroup_machine": { "$ref": "#/$defs/rows_by_state" },
+        "host_cpu": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["model", "flags_sha256", "rows"],
+            "properties": {
+              "model": { "type": "string" },
+              "flags_sha256": { "type": "string" },
+              "rows": { "$ref": "#/$defs/count" }
+            }
+          }
+        },
+        "host_cpu_missing": { "$ref": "#/$defs/missing" },
+        "steal_s": { "$ref": "#/$defs/spread" },
+        "iowait_s": { "$ref": "#/$defs/spread" },
+        "ticks_missing": { "$ref": "#/$defs/missing" },
+        "wall_s": { "$ref": "#/$defs/spread" },
+        "cpu_s": { "$ref": "#/$defs/spread" },
+        "blocks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["first_row", "last_row", "rows", "steal_share", "iowait_share"],
+            "properties": {
+              "first_row": { "$ref": "#/$defs/count" },
+              "last_row": { "$ref": "#/$defs/count" },
+              "rows": { "$ref": "#/$defs/count" },
+              "steal_share": { "$ref": "#/$defs/spread" },
+              "iowait_share": { "$ref": "#/$defs/spread" },
+              "wall_s": { "$ref": "#/$defs/spread" },
+              "cpu_s": { "$ref": "#/$defs/spread" }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "count": { "type": "integer", "minimum": 0 },
+    "rows_by_state": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/count" }
+    },
+    "missing": {
+      "type": "object",
+      "required": ["unavailable", "not_recorded"],
+      "properties": {
+        "unavailable": { "$ref": "#/$defs/count" },
+        "not_recorded": { "$ref": "#/$defs/count" }
+      }
+    },
+    "spread": {
+      "type": "object",
+      "required": ["rows", "max", "mean"],
+      "properties": {
+        "rows": { "$ref": "#/$defs/count" },
+        "max": { "type": ["number", "null"] },
+        "mean": { "type": ["number", "null"] }
+      }
+    }
+  }
+}

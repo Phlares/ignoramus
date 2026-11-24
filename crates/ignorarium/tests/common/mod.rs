@@ -131,10 +131,29 @@ pub fn guide_steps() -> Vec<serde_json::Value> {
     v["steps"].as_array().unwrap().clone()
 }
 
-/// `status <id> --json`, parsed.
+/// The box binary, run from study `id`'s root.
+pub fn bin_at(lab: &Lab, id: &str) -> assert_cmd::Command {
+    let mut c = bin(lab);
+    c.current_dir(work(lab, id));
+    c
+}
+
+/// `status <id> --json`, checked against its schema, parsed.
 pub fn status(lab: &Lab, id: &str) -> serde_json::Value {
     let a = bin(lab).args(["status", id, "--json"]).assert().success();
-    serde_json::from_str(&text(&a)).unwrap()
+    let v = serde_json::from_str(&text(&a)).unwrap();
+    schema::valid("status", &v);
+    v
+}
+
+/// `status <id> --telemetry --json`, checked against its schema, parsed.
+pub fn telemetry(lab: &Lab, id: &str) -> serde_json::Value {
+    let a = (bin(lab).args(["status", id, "--telemetry", "--json"]))
+        .assert()
+        .success();
+    let v = serde_json::from_str(&text(&a)).unwrap();
+    schema::valid("status-telemetry", &v);
+    v
 }
 
 /// The shell line that writes the template's one measure.
