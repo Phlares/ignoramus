@@ -1463,13 +1463,9 @@ fn the_blind_order_is_seeded_by_the_spec_hash() {
 
 #[test]
 fn guide_lists_run_and_status_with_real_commands() {
-    let lab = lab();
-    let a = bin(&lab).args(["guide", "--json"]).assert().success();
-    let steps: Value = serde_json::from_str(&text(&a)).unwrap();
+    let steps = common::guide_steps();
     let find = |id: &str| {
         steps
-            .as_array()
-            .unwrap()
             .iter()
             .find(|s| s["id"] == id)
             .unwrap_or_else(|| panic!("{id}"))
@@ -1494,15 +1490,10 @@ fn guide_lists_run_and_status_with_real_commands() {
     let status = find("status");
     assert_eq!(status["command"], "ignorarium status <id>");
     assert!(!status.to_string().contains("not available yet"));
-    let ids: Vec<&str> = steps
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|s| s["id"].as_str().unwrap())
-        .collect();
+    let ids: Vec<&str> = steps.iter().map(|s| s["id"].as_str().unwrap()).collect();
     let at = |id: &str| ids.iter().position(|i| *i == id).unwrap();
     assert!(at("register") < at("run") && at("run") < at("status") && at("status") < at("report"));
-    assert!(!text(&a).contains("Plan "));
+    assert!(!Value::from(steps.clone()).to_string().contains("Plan "));
 }
 
 #[test]

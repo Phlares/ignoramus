@@ -32,6 +32,7 @@ Development:
 - `assert_cmd`: runs the built binary in tests.
 - `predicates`: states what the binary output must contain.
 - `tempfile`: makes scratch folders in tests.
+- `jsonschema` (no default features, so no network crate): checks each `--json` output against its file in `docs/schemas/`.
 
 Minimum Rust version: 1.89, for `std::fs::File::lock`.
 

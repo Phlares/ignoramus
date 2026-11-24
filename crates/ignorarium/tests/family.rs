@@ -1543,15 +1543,9 @@ fn e_cnf_005_lists_the_ways_forward() {
 
 #[test]
 fn the_guide_names_members_in_check_and_register() {
-    let a = bin(&lab()).args(["guide", "--json"]).assert().success();
-    let steps: Value = serde_json::from_slice(&a.get_output().stdout).unwrap();
+    let steps = common::guide_steps();
     for id in ["check", "register"] {
-        let s = steps
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|s| s["id"] == id)
-            .unwrap();
+        let s = steps.iter().find(|s| s["id"] == id).unwrap();
         let text = format!("{} {}", s["does"], s["produces"]);
         assert!(text.contains("member"), "{id}: {text}");
     }

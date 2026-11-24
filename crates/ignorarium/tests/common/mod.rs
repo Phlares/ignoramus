@@ -1,5 +1,7 @@
 //! A registered study in a temp home, shared by the run tests.
 #![allow(dead_code)]
+pub mod schema;
+
 use ignorarium::canon::sha256_file;
 use ignorarium::cli::register;
 use ignorarium::derived;
@@ -119,6 +121,14 @@ pub fn run(plan: &RunPlan) -> Result<RunStatus, RunError> {
 /// What the command of `a` printed.
 pub fn text(a: &assert_cmd::assert::Assert) -> String {
     String::from_utf8_lossy(&a.get_output().stdout).into_owned()
+}
+
+/// `guide --json` in a new lab, checked against its schema; its steps.
+pub fn guide_steps() -> Vec<serde_json::Value> {
+    let a = bin(&lab()).args(["guide", "--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_str(&text(&a)).unwrap();
+    schema::valid("guide", &v);
+    v["steps"].as_array().unwrap().clone()
 }
 
 /// `status <id> --json`, parsed.

@@ -24,6 +24,7 @@ mod report;
 mod resume;
 mod review;
 mod run;
+pub mod schema;
 mod selftest;
 mod stamp;
 pub mod status;
