@@ -44,13 +44,13 @@ impl Code {
     pub const fn meaning(self) -> &'static str {
         match self {
             Code::Done => {
-                "The verb did its work. For `check` and `review`: the plan has no error and no value is pending. For `verify`: every check passed, or the home holds no key and no log entry to check."
+                "The verb did its work. For `check` and `review`: the plan has no error and no value is pending. For `verify`: every check passed, or, without `--study`, the home holds no key and no plan or test log entry."
             }
             Code::Refused => {
                 "The box did the work and the answer is no. Examples: `check` found an error in the plan; the study is not registered, not finished, paused or stopped; `verify` found a fault."
             }
             Code::Fault => {
-                "The box could not do the work. Examples: a command line it cannot parse; a file or key it cannot read or write."
+                "The box could not do the work. Examples: a command line it cannot parse; a file or key it cannot read or write. The notes below name one exception."
             }
             Code::Pending => {
                 "Only `check` and `review`: the plan has no error, and at least one value waits on a study that has not finished."
@@ -82,7 +82,7 @@ pub fn page() -> String {
          ## Notes\n\n\
          - `--help` and `--version` exit 0.\n\
          - A study's record log that fails verification (a torn line, a bad hash, signature or \
-         chain, a newer format) ends `report` and `verify --study` with 1, and `status`, `run`, \
+         chain, a newer format), or that the box cannot read to its end, ends `report` and `verify --study` with 1, and `status`, `run`, \
          `resume`, `pause`, `stop` and `stamp --request` with 2.\n"
     )
 }
