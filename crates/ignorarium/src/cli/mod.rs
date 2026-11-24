@@ -296,6 +296,12 @@ enum Dev {
         #[arg(long, default_value = "docs/rules")]
         out: PathBuf,
     },
+    /// Write docs/exit-codes.md from the table of exit codes.
+    GenExitCodes {
+        /// File to write.
+        #[arg(long, default_value = "docs/exit-codes.md")]
+        out: PathBuf,
+    },
     /// Check the sandbox this runs in. Prints one JSON line; exits 102 when it fails.
     Selftest,
 }
@@ -347,6 +353,7 @@ impl Verb {
             Verb::Stop { .. } => "stop",
             Verb::Stamp { .. } => "stamp",
             Verb::Dev(Dev::GenRuleDocs { .. }) => "dev.gen-rule-docs",
+            Verb::Dev(Dev::GenExitCodes { .. }) => "dev.gen-exit-codes",
             Verb::Dev(Dev::Selftest) => "dev.selftest",
         }
     }
@@ -404,6 +411,7 @@ impl Verb {
             } => stamp::reply(ctx, &study, &reply, file.as_deref()),
             Verb::Stamp { study, with, .. } => stamp::request(ctx, &study, with.as_deref()),
             Verb::Dev(Dev::GenRuleDocs { out }) => docs::run(&out),
+            Verb::Dev(Dev::GenExitCodes { out }) => docs::exit_codes(&out),
             Verb::Dev(Dev::Selftest) => selftest::run(),
         }
     }

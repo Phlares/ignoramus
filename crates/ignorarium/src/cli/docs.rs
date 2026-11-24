@@ -1,4 +1,5 @@
 //! `dev gen-rule-docs`: one Markdown page per rule code, from the built-in rules.
+//! `dev gen-exit-codes`: the page of exit codes, from `exit::Code`.
 use super::exit::Code;
 use super::{CliError, Done, Run, out};
 use crate::rules::{self, Check, Rule};
@@ -52,6 +53,14 @@ pub fn run(dir: &Path) -> Run {
         std::fs::write(dir.join(format!("{code}.md")), page(code, rs)).map_err(io)?;
     }
     out(&format!("wrote {} rule pages\n", by_code.len()))?;
+    Ok(Done::exit(Code::Done))
+}
+
+/// Writes the exit-code page to `file`.
+pub fn exit_codes(file: &Path) -> Run {
+    let io = |e: std::io::Error| CliError::usage(format!("{}: {e}", file.display()));
+    std::fs::write(file, super::exit::page()).map_err(io)?;
+    out(&format!("wrote {}\n", file.display()))?;
     Ok(Done::exit(Code::Done))
 }
 

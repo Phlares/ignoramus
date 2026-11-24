@@ -69,6 +69,24 @@ impl Code {
     }
 }
 
+/// `docs/exit-codes.md`.
+pub fn page() -> String {
+    let rows: String = (Code::ALL.iter())
+        .map(|c| format!("| {} | {} | {} |\n", c.number(), c.name(), c.meaning()))
+        .collect();
+    format!(
+        "# Exit codes\n\n\
+         `ignorarium dev gen-exit-codes` writes this page from \
+         `crates/ignorarium/src/cli/exit.rs`. Do not edit it by hand.\n\n\
+         | Code | Name | Meaning |\n|---|---|---|\n{rows}\n\
+         ## Notes\n\n\
+         - `--help` and `--version` exit 0.\n\
+         - A study's record log that fails verification (a torn line, a bad hash, signature or \
+         chain, a newer format) ends `report` and `verify --study` with 1, and `status`, `run`, \
+         `resume`, `pause`, `stop` and `stamp --request` with 2.\n"
+    )
+}
+
 /// Lets a test compare a code with its number.
 impl PartialEq<i32> for Code {
     fn eq(&self, n: &i32) -> bool {

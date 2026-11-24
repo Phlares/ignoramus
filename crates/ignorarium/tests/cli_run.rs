@@ -2562,29 +2562,49 @@ fn verify_says_format_0_for_an_old_register() {
     );
 }
 
+/// Each verb that reads study `id`'s log, and the code it exits with when the log fails
+/// verification: `docs/exit-codes.md` states these.
+fn study_verbs(id: &str) -> [(Vec<&str>, i32); 8] {
+    [
+        (vec!["status", id], 2),
+        (vec!["report", id], 1),
+        (vec!["run", id], 2),
+        (vec!["resume", id], 2),
+        (vec!["stop", id, "--reason", "x"], 2),
+        (vec!["pause", id], 2),
+        (vec!["verify", "--study", id], 1),
+        (vec!["stamp", id, "--request"], 2),
+    ]
+}
+
 #[test]
 fn a_study_verb_refuses_a_newer_format() {
     let lab = lab();
     plain(&lab, "newer");
     reformat(&lab, "newer", Some(2));
     let before = common::files_under(&lab.home.study_dir("newer"));
-    let verbs: [&[&str]; 8] = [
-        &["status", "newer"],
-        &["report", "newer"],
-        &["run", "newer"],
-        &["resume", "newer"],
-        &["stop", "newer", "--reason", "x"],
-        &["pause", "newer"],
-        &["verify", "--study", "newer"],
-        &["stamp", "newer", "--request"],
-    ];
-    for verb in verbs {
-        let a = bin(&lab).args(verb).assert();
+    for (verb, code) in study_verbs("newer") {
+        let a = bin(&lab).args(&verb).assert();
         let said = err(&a);
-        assert_ne!(a.get_output().status.code(), Some(0), "{verb:?}: {said}");
+        assert_eq!(a.get_output().status.code(), Some(code), "{verb:?}: {said}");
         assert!(said.contains("format 2"), "{verb:?}: {said}");
         let after = common::files_under(&lab.home.study_dir("newer"));
         assert_eq!(after, before, "{verb:?} wrote");
+    }
+}
+
+#[test]
+fn a_study_verb_has_these_codes_on_a_torn_log() {
+    // A torn log in one study refuses the next registration, so each verb gets its own lab.
+    for (verb, code) in study_verbs("torn") {
+        let lab = lab();
+        let log = plain(&lab, "torn").join("records.jsonl");
+        let bytes = std::fs::read(&log).unwrap();
+        std::fs::write(&log, &bytes[..bytes.len() - 10]).unwrap();
+        let a = bin_at(&lab, "torn").args(&verb).assert();
+        let said = err(&a);
+        assert_eq!(a.get_output().status.code(), Some(code), "{verb:?}: {said}");
+        assert!(said.contains("not a whole record"), "{verb:?}: {said}");
     }
 }
 
